@@ -249,7 +249,7 @@ enum RuntimeHostEffectsScenario {
         check("the workflow host's observability flush is confirmed", report.allConfirmed)
         // The typed events are read back from the owned file after the flush, so the checks see what was written.
         do {
-            let typed = try configurationEvents(in: environment.eventsFile)
+            let typed = try typedEvents(in: environment.eventsFile)
             check("the invalid runtime file is a refused observation",
                   typed.contains(.configWorkflow(.observed(ConfigurationWorkflowObserved(
                       phase: .reload, observation: .refused(.invalidContent))))))
@@ -498,7 +498,10 @@ enum RuntimeHostEffectsScenario {
         config.pacRoutingEnabled = false
         config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
         let host: RuntimeHost
+        // The earlier hosts' events share the owned file, so only the events after this count are this host's.
+        let earlier: Int
         do {
+            earlier = try typedEvents(in: environment.eventsFile).count
             try ProxyConfigPersistence.save(config, in: environment)
             try PlatformConfigPersistence.save(
                 PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true, manageSystemDNS: true), in: environment
@@ -571,6 +574,14 @@ enum RuntimeHostEffectsScenario {
             let flush = await host.flushEvents()
             check("the module host's observability flush is confirmed", flush.allConfirmed)
             quiesced = settled == .settled && flush.allConfirmed
+
+            // Each companion writes its own record beside its proxy member's; the refused Starts settle nothing.
+            let written = settlements(Array(try typedEvents(in: environment.eventsFile).dropFirst(earlier))).map(\.settlement)
+            check("each member and each companion records its own settlement once", written == [
+                .explicit(.proxy, .started), .conditionalDNS(.started),
+                .explicit(.proxy, .started), .conditionalDNS(.fenced),
+                .explicit(.dns, .started),
+            ])
         } catch {
             notes.append("module exercise error: \(error.localizedDescription)")
             await host.shutdown()
@@ -680,7 +691,7 @@ enum RuntimeHostEffectsScenario {
         // The earlier hosts' events share the owned file, so only the events after this count are this host's.
         let earlier: Int
         do {
-            earlier = try configurationEvents(in: environment.eventsFile).count
+            earlier = try typedEvents(in: environment.eventsFile).count
             try ProxyConfigPersistence.save(config, in: environment)
             try FileManager.default.removeItem(at: environment.platformConfigFile)
             host = try await RuntimeHost.open(
@@ -731,7 +742,7 @@ enum RuntimeHostEffectsScenario {
             check("the source host's observability flush is confirmed", flush.allConfirmed)
             quiesced = settled == .settled && flush.allConfirmed
 
-            let typed = Array(try configurationEvents(in: environment.eventsFile).dropFirst(earlier))
+            let typed = Array(try typedEvents(in: environment.eventsFile).dropFirst(earlier))
             check("the platform's first write is held for its changed source",
                   typed.contains(.configWorkflow(.committed(ConfigurationWorkflowCommitted(file: .platform, write: .notAttempted(.sourceChanged))))))
             check("the runtime write is held behind the platform",
@@ -756,11 +767,19 @@ enum RuntimeHostEffectsScenario {
 
     /// The typed payloads in the owned events file, decoded through the canonical decoder (decision 0033). A line that does not decode
     /// is an error, not a skipped record, so the caller reports it.
-    private static func configurationEvents(in file: URL) throws -> [RuntimeEventPayload] {
+    private static func typedEvents(in file: URL) throws -> [RuntimeEventPayload] {
         let text = try String(contentsOf: file, encoding: .utf8)
         let decoder = CanonicalJSON.decoder()
         return try text.split(separator: "\n").compactMap { line in
             try decoder.decode(RuntimeEvent.self, from: Data(line.utf8)).typed
+        }
+    }
+
+    /// The `lifecycle.module_settled` values among `typed`, in file order.
+    private static func settlements(_ typed: [RuntimeEventPayload]) -> [LifecycleModuleSettled] {
+        typed.compactMap { payload -> LifecycleModuleSettled? in
+            guard case .lifecycle(.moduleSettled(let settled)) = payload else { return nil }
+            return settled
         }
     }
 
@@ -871,6 +890,17 @@ enum RuntimeHostEffectsScenario {
             check("the host's final flush is confirmed", flush.allConfirmed)
             let eventsText = try String(contentsOf: environment.eventsFile, encoding: .utf8)
             check("the events file records the ready event", eventsText.contains("daemon.ready"))
+            // The written settlements: the held port is the proxy member's own typed failure, the members it left unfinished are
+            // superseded rather than failed, and the restart's members settle once each under its newer group.
+            let written = settlements(try typedEvents(in: environment.eventsFile))
+            notes.append("settlements: \(written.map { "\($0.settlement.module.rawValue)=\($0.settlement.outcome)@\($0.group)" })")
+            check("the failed bind is the proxy member's typed failure, and its unfinished members are superseded",
+                  written.prefix(3).map(\.settlement) == [.explicit(.proxy, .failed), .explicit(.dns, .superseded), .explicit(.tunnels, .superseded)])
+            check("the restart's members each settle once",
+                  written.dropFirst(3).map(\.settlement) == [.explicit(.proxy, .started), .explicit(.dns, .notConfigured), .explicit(.tunnels, .notConfigured)])
+            check("each Start's settlements share its group, and the restart's is newer",
+                  Set(written.prefix(3).map(\.group)).count == 1 && Set(written.dropFirst(3).map(\.group)).count == 1
+                    && (written.first?.group ?? .max) < (written.last?.group ?? .min))
             check("a non-terminal stop does not call the terminal exit", terminalExits == 0)
 
             // The fake refuses a command the scenario did not plan, and the refusal is a failure, not a success.

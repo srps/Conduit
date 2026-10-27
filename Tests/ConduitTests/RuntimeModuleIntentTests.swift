@@ -56,7 +56,8 @@ final class RuntimeModuleIntentTests: XCTestCase {
             intents.retire(held)
             XCTAssertEqual(intents.modules.dns.enabled, before.enabled, "held: \(dnsEnabled) \(stopFirst)")
             XCTAssertEqual(intents.modules.dns.fenced, before.fenced, "held: \(dnsEnabled) \(stopFirst)")
-            XCTAssertNil(intents.modules.dns.pending)
+            XCTAssertEqual(intents.modules.dns.pending, stopFirst ? .stopSave(revision: held.dnsIntentRevision) : nil,
+                           "held: a disable save the Start displaced is owed again")
 
             let failed = try admitted(&intents, request(dns: .start))
             XCTAssertEqual(intents.authorize(failed), [.dns])
@@ -68,6 +69,94 @@ final class RuntimeModuleIntentTests: XCTestCase {
             XCTAssertEqual(intents.modules.dns.enabled, before.enabled, "failed: the chain restores the pre-Start state")
             XCTAssertEqual(intents.modules.dns.fenced, before.fenced, "failed: \(dnsEnabled) \(stopFirst)")
             XCTAssertFalse(intents.conditionalActivationAllowed(replacing))
+        }
+    }
+
+    /// An explicit DNS Start admitted over the disable save a session Stop still owes takes the obligation over, never ends it (decision
+    /// 0015). Ended without its own verified write, it gives the save back keyed to the current DNS intent, so a reload adopts no stale enable,
+    /// a facade still waits, and a later group's verified disable fulfils it. Its own verified enable is a newer saved fact that no retire
+    /// undoes. A newer DNS Start carries the obligation on, and a facade Stop or a group-ending proxy Start leaves it owed.
+    func testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies() throws {
+        var held = RuntimeModuleIntents(dnsEnabled: true)
+        held.stop([.dns], reason: .session)
+        let start = try admitted(&held, request(dns: .start))
+        XCTAssertEqual(held.modules.dns.pending, .start(RuntimeModuleStart(
+            group: start.group, priorEnabled: false, priorFenced: true, displacesOwedSave: true
+        )))
+        held.retire(start)
+        XCTAssertTrue(held.stopSaveIsCurrent(revision: start.dnsIntentRevision), "the displaced disable save is owed again")
+        held.observeDurableDNS(true)
+        XCTAssertFalse(held.dnsConfigured, "a reload adopts no stale enable while it is owed")
+        XCTAssertEqual(held.admit(request(proxy: .start, dns: .configuredStart, tunnels: .start)), .failure(.busy(.dns)))
+        let proxy = try captured(&held, admitted(&held, request(proxy: .start)))
+        XCTAssertEqual(proxy.dnsStaged, false)
+        held.recordVerifiedDNSWrite(false, for: proxy)
+        XCTAssertNil(held.modules.dns.pending, "a later group's verified disable fulfils it")
+
+        // A facade's configured Start may not displace it from the explicit Start that carries it either.
+        var carried = RuntimeModuleIntents(dnsEnabled: true)
+        carried.stop([.dns], reason: .session)
+        let carrier = try admitted(&carried, request(dns: .start))
+        let before = carried
+        XCTAssertEqual(carried.admit(request(proxy: .start, dns: .configuredStart, tunnels: .start)), .failure(.busy(.dns)))
+        XCTAssertEqual(carried, before, "the refusal changes nothing")
+        // A verified disable staged by another group under the same DNS intent, while the carrier is still pending, is the owed disable.
+        let beside = try captured(&carried, admitted(&carried, request(proxy: .start)))
+        XCTAssertEqual(beside.dnsStaged, false)
+        carried.recordVerifiedDNSWrite(false, for: beside)
+        carried.retire(carrier)
+        XCTAssertNil(carried.modules.dns.pending, "that write fulfilled it, so the retired carrier gives nothing back")
+
+        var own = RuntimeModuleIntents(dnsEnabled: true)
+        own.stop([.dns], reason: .session)
+        let enable = try captured(&own, admitted(&own, request(dns: .start)))
+        own.recordVerifiedDNSWrite(true, for: enable)
+        own.retire(enable)
+        XCTAssertNil(own.modules.dns.pending, "its own verified enable resolves the obligation, and the obsolete disable is not restored")
+        XCTAssertTrue(own.dnsConfigured)
+
+        // Its own enable verifying late, after a facade Stop or the Quit ended it and gave the save back, is still the newer fact.
+        for reason in [RuntimeStopReason.facade, .processQuit] {
+            var late = RuntimeModuleIntents(dnsEnabled: true)
+            late.stop([.dns], reason: .session)
+            let staged = try captured(&late, admitted(&late, request(dns: .start)))
+            late.stop(Set(ControlModule.allCases), reason: reason)
+            XCTAssertTrue(late.stopSaveIsCurrent(revision: staged.dnsIntentRevision), "\(reason): the Stop gave the save back")
+            late.recordVerifiedDNSWrite(true, for: staged)
+            XCTAssertNil(late.modules.dns.pending, "\(reason): its own late enable ends the obligation")
+            XCTAssertTrue(late.dnsConfigured, "\(reason)")
+        }
+        // A newer session Stop still wins over that late enable.
+        var overtaken = RuntimeModuleIntents(dnsEnabled: true)
+        overtaken.stop([.dns], reason: .session)
+        let staged = try captured(&overtaken, admitted(&overtaken, request(dns: .start)))
+        let newer = overtaken.stop([.dns], reason: .session)
+        overtaken.recordVerifiedDNSWrite(true, for: staged)
+        XCTAssertTrue(overtaken.stopSaveIsCurrent(revision: newer))
+        XCTAssertFalse(overtaken.dnsConfigured)
+
+        let endings: [(String, (inout RuntimeModuleIntents, RuntimeLifecycleTicket) throws -> Int)] = [
+            ("a newer DNS Start, retired", { intents, _ in
+                let newer = try intents.admit(self.request(dns: .start)).get()
+                intents.retire(newer)
+                return newer.dnsIntentRevision
+            }),
+            ("a facade Stop", { intents, ticket in
+                intents.stop(Set(ControlModule.allCases), reason: .facade)
+                return ticket.dnsIntentRevision
+            }),
+            ("a proxy Start that ends the group", { intents, ticket in
+                _ = try intents.admit(self.request(proxy: .start)).get()
+                return ticket.dnsIntentRevision
+            }),
+        ]
+        for (label, end) in endings {
+            var intents = RuntimeModuleIntents(dnsEnabled: true)
+            intents.stop([.dns], reason: .session)
+            let grouped = try admitted(&intents, request(proxy: .start, dns: .start))
+            let keyed = try end(&intents, grouped)
+            XCTAssertTrue(intents.stopSaveIsCurrent(revision: keyed), "\(label): the disable save is still owed")
+            XCTAssertFalse(intents.dnsConfigured, label)
         }
     }
 
@@ -547,7 +636,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
     /// group helpers, then checks properties stated from the decisions. Every sequence of up to four steps from both DNS starting values:
     /// within this alphabet only an authorization raises a permission or clears a fence; a companion's admission changes no DNS control; a
     /// held or failed Start restores the prior its chain began from; a refusal changes nothing; the counter never goes back; a pending explicit DNS
-    /// Start stages the enable. The alphabet has no companion settlement: its one runtime grant, never a fence or configured change, is
+    /// Start stages the enable; an owed disable save is dropped by no step but the authorization of the Start that carries it. The alphabet has no companion settlement: its one runtime grant, never a fence or configured change, is
     /// covered by `testAConditionalActivationNeverEnablesAndADNSStopCancelsOnlyIt`. The independent workflow reference adapter is still due
     /// with the workflow integration.
     func testEveryBoundedSequenceKeepsTheIntentInvariants() {
@@ -569,7 +658,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
         }
         for key in ["authorize.clearedFence", "retire.restored", "fail.restored", "refusal.unchanged", "stale.refused",
                     "terminal.refused", "group.endedByMember", "observe.lowered", "projection.pendingTarget",
-                    "quit.lateStopPersistedNothing"] {
+                    "quit.lateStopPersistedNothing", "owedSave.givenBack"] {
             XCTAssertGreaterThan(coverage[key] ?? 0, 0, "never reached \(key)")
         }
     }
@@ -664,6 +753,15 @@ final class RuntimeModuleIntentTests: XCTestCase {
                 if (raised || cleared) && step != .authorize { return "\(step) raised \(module)'s permission or cleared its fence" }
                 if case .stopSave = intents.modules[module].pending, module != .dns { return "a save on \(module)" }
             }
+            // An owed disable save leaves DNS's slot only with the authorization of the Start that carries it, which follows that Start's
+            // own verified write (decision 0015). A held Start gives it back.
+            if owesStopSave(before), !owesStopSave(intents), step != .authorize {
+                return "\(step) dropped the disable save a session Stop owed"
+            }
+            if step == .retire, case .start(let start) = before.modules.dns.pending, start.displacesOwedSave,
+               case .stopSave = intents.modules.dns.pending {
+                coverage["owedSave.givenBack", default: 0] += 1
+            }
             if case .start(let pending) = intents.modules.dns.pending, !pending.configured {
                 if !intents.stagedDNSForwarderEnabled(for: pending.group) { return "a pending explicit DNS Start staged no enable" }
                 // No other request's write stages that unverified enable.
@@ -677,6 +775,15 @@ final class RuntimeModuleIntentTests: XCTestCase {
             }
         }
         return nil
+    }
+
+    /// Whether DNS's slot owes a session Stop's disable save: the save itself, or a Start that displaced it unresolved.
+    private func owesStopSave(_ intents: RuntimeModuleIntents) -> Bool {
+        switch intents.modules.dns.pending {
+        case .stopSave: true
+        case .start(let start): start.displacesOwedSave
+        case nil: false
+        }
     }
 
     // MARK: - The runtime-only DNS lifecycle commit

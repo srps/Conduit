@@ -180,7 +180,8 @@ package final class RuntimeHost {
     private var dnsReconcileWanted = false
     let vpnStatusMonitor: VPNStatusObserving
     private let vpnFlapWindowBox: NIOLockedValueBox<RuntimeVPNFlapWindowConfig>
-    private var dnsHealthTimer: DispatchSourceTimer?
+    /// Internal for the host's tests: whether the health probe runs beside the DNS module it watches.
+    private(set) var dnsHealthTimer: DispatchSourceTimer?
     /// Whether the proxy module's surfaces are up: a proxy Start completed them, and no teardown of the proxy has begun since. Its
     /// split-DNS entry files exist only in that window, so VPN transitions and repairs must not apply them outside it.
     var runtimeStarted = false
@@ -847,9 +848,9 @@ package final class RuntimeHost {
     }
 
     /// Event first, log line derived from it.
-    func recordLifecycle(_ event: RuntimeEvent) {
+    func recordLifecycle(_ event: RuntimeEvent, level: LogLevel = .notice) {
         orchestrator.eventLog.append(event)
-        logger.log(.notice, "Lifecycle: \(event.event) \(event.detail ?? "")", category: .general)
+        logger.log(level, "Lifecycle: \(event.event) \(event.detail ?? "")", category: .general)
     }
 
     func testUpstream(named name: String) async -> ProbeResult? {

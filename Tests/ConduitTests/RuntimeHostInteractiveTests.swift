@@ -187,11 +187,12 @@ private func makeHarness(
     platform: PlatformIntegrationConfig,
     dnsForwarderEnabled: Bool,
     dnsForwarderPort: Int = 0,
+    localPort: Int = 0,
     tunnels: [TunnelDefinition] = [],
     heldPAC: HeldPACFetch? = nil
 ) throws -> Harness {
     var config = GenericDefaults.shared.makeConfig()
-    config.localPort = 0
+    config.localPort = localPort
     config.dnsForwarderPort = dnsForwarderPort
     config.dnsForwarderEnabled = dnsForwarderEnabled
     config.localPACEnabled = false
@@ -244,6 +245,36 @@ private final class ParkedReadStateFiles: StateFileAccessing, @unchecked Sendabl
 
     func entryPresence(_ file: StateRootFile) -> Result<Bool, ConfigurationPresenceError> {
         inner.entryPresence(file)
+    }
+}
+
+/// Parks one physical effect in a kernel lifecycle's slot until `open()`, so the next start of that module queues behind it before its
+/// claim: a Start then waits inside the module's kernel start, with its earlier members already settled.
+@MainActor
+private final class SlotHold {
+    private var parked: CheckedContinuation<Void, Never>?
+    private var opened = false
+    private var held: Task<Bool, Error>?
+
+    /// Returns once the parked effect holds the slot, bounded.
+    func hold(_ lifecycle: PhysicalLifecycle) async {
+        let epoch = lifecycle.epoch
+        held = Task { try await lifecycle.run(epoch: epoch) { await self.park() } }
+        for _ in 0..<10_000 where parked == nil { await Task.yield() }
+        XCTAssertNotNil(parked, "the slot is held")
+    }
+
+    private func park() async {
+        guard !opened else { return }
+        await withCheckedContinuation { parked = $0 }
+    }
+
+    /// Lets the parked effect end and joins it. Idempotent.
+    func open() async throws {
+        opened = true
+        parked?.resume()
+        parked = nil
+        _ = try await held?.value
     }
 }
 
@@ -304,11 +335,12 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         platform: PlatformIntegrationConfig,
         dnsForwarderEnabled: Bool,
         dnsForwarderPort: Int = 0,
+        localPort: Int = 0,
         tunnels: [TunnelDefinition] = [],
         heldPAC: HeldPACFetch? = nil
     ) async throws -> (RuntimeHost, Harness) {
         let harness = try makeHarness(platform: platform, dnsForwarderEnabled: dnsForwarderEnabled,
-                                      dnsForwarderPort: dnsForwarderPort, tunnels: tunnels, heldPAC: heldPAC)
+                                      dnsForwarderPort: dnsForwarderPort, localPort: localPort, tunnels: tunnels, heldPAC: heldPAC)
         self.harness = harness
         return (try await harness.makeHost(), harness)
     }
@@ -426,6 +458,22 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         XCTAssertEqual(host.workflow.dnsIntent.configured, true, "the failed companion keeps DNS's configured intent")
         XCTAssertEqual(host.workflow.dnsIntent.fenced, false, "and sets no fence")
         XCTAssertEqual(harness.savedDNSEnabled, true)
+        let proxyStart = host.orchestrator.eventLog.events.settledValues
+        XCTAssertEqual(proxyStart.map(\.settlement), [.explicit(.proxy, .started), .conditionalDNS(.failed)],
+                       "the member and its companion each record their own result once")
+        XCTAssertEqual(Set(proxyStart.map(\.group)).count, 1, "under the Start's one group")
+
+        // An explicit DNS Start on the same held port fails alone, with its own typed record: the proxy stays up, and DNS's prior
+        // permission and fence are back.
+        let dns = try await host.startDNS()
+        XCTAssertEqual(dns.modules, PrivateModuleSlots(proxy: nil, dns: .failed, tunnels: nil))
+        let settled = host.orchestrator.eventLog.events.settledValues
+        XCTAssertEqual(settled.count, 3, "one more record, for the one member")
+        XCTAssertEqual(settled.last?.settlement, .explicit(.dns, .failed))
+        XCTAssertGreaterThan(try XCTUnwrap(settled.last?.group), try XCTUnwrap(proxyStart.first?.group), "under its own newer group")
+        XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running, "the proxy stays up")
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertEqual(host.workflow.dnsIntent.fenced, false)
         withExtendedLifetime(held) {}
     }
 
@@ -534,6 +582,10 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         XCTAssertTrue(host.orchestrator.snapshot.bindings.tunnels.isEmpty)
         XCTAssertFalse(harness.machine.service("Wi-Fi").routesThroughAProxy)
         XCTAssertFalse(harness.machine.dnsRelayRunning)
+        // Every member it did not finish records `superseded`, once and in module order, and none reads as a failure.
+        XCTAssertEqual(host.orchestrator.eventLog.events.settledValues, ControlModule.allCases.map {
+            LifecycleModuleSettled(settlement: .explicit(LifecycleModule($0), .superseded), group: ticket.generation)
+        })
         // No grant is left for a companion: a later proxy-only Start finds DNS unstarted and configured, and starts it itself.
         let next = try await host.startProxy(conditionalDNS: true)
         XCTAssertEqual(next.conditionalDNS, .started)
@@ -576,6 +628,301 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         XCTAssertFalse(harness.machine.dnsRelayRunning)
     }
 
+    /// An identical Start joins an effect only while none of its members has settled. Once one has, a failed DNS member above all, the
+    /// effect can no longer settle the joiner's grant for that member, so it adopts no joiner, which runs its own lanes. The interleaving
+    /// itself (a member failing while the effect is suspended in a tunnel bind) has no hold point among the fakes, so this pins the rule on
+    /// the actual effect held on its proxy surfaces, with its own verified pair as the joiner's.
+    func testAnEffectWithASettledMemberAdoptsNoJoiner() async throws {
+        let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true)
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let start = Task { try await host.startRuntime() }
+        await harness.hold.waitUntilReached()
+        let effect = try XCTUnwrap(host.laneEffects.proxy)
+        let pair = try XCTUnwrap(effect.prepared)
+        XCTAssertTrue(effect.adopt(pair), "an effect with no member settled takes an identical joiner")
+        effect.results.dns = .failed
+        XCTAssertFalse(effect.adopt(pair), "one with a settled member does not")
+        effect.results.dns = nil
+        harness.hold.release()
+        try await start.value
+        XCTAssertFalse(effect.adopt(pair), "nor does a completed one")
+    }
+
+    /// The behavior behind that rule: a whole-host Start whose DNS member failed alone, then waits inside its tunnel start, takes no
+    /// identical Start as a joiner. The new Start runs its own lanes and its own DNS attempt, so DNS's result, fence and permission are that
+    /// attempt's, not a cached failure beside a grant nothing settles, and no later companion can act on DNS.
+    func testAnIdenticalStartAfterAMemberFailedRunsItsOwnAttempt() async throws {
+        let heldDNS = try HeldUDPPort()
+        let (host, harness) = try await launch(
+            platform: proxyAndDNS, dnsForwarderEnabled: true, dnsForwarderPort: heldDNS.port,
+            tunnels: [TunnelDefinition(localPort: try freeTCPPort(), remoteHost: "127.0.0.1", remotePort: 9)]
+        )
+        await host.stopRuntime()
+        XCTAssertTrue(host.workflow.dnsIntent.fenced)
+        let slot = SlotHold()
+        addTeardownBlock { try await slot.open() }
+        await slot.hold(host.orchestrator.tunnelLifecycle)
+        func dnsFailures() -> [LifecycleModuleSettled] {
+            host.orchestrator.eventLog.events.settledValues.filter { $0.settlement == .explicit(.dns, .failed) }
+        }
+
+        let first = Task { try await host.startRuntime() }
+        for _ in 0..<5_000 where dnsFailures().isEmpty || host.orchestrator.snapshot.tunnelsRunState != .starting {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(dnsFailures().count, 1, "the first Start's DNS member failed alone")
+        XCTAssertEqual(host.orchestrator.snapshot.tunnelsRunState, .starting, "and the Start waits inside its tunnel start")
+        XCTAssertTrue(host.workflow.dnsIntent.fenced, "that failure restored DNS's fence")
+
+        let second = Task { try await host.startRuntime() }
+        for _ in 0..<5_000 where dnsFailures().count < 2 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(dnsFailures().count, 2, "the identical Start ran its own DNS attempt instead of joining")
+        try await slot.open()
+        do {
+            try await first.value
+            XCTFail("the first Start lost its lanes to the second")
+        } catch let refusal as RuntimeStartRefusal {
+            XCTAssertEqual(refusal, .superseded)
+        }
+        try await second.value
+
+        let failures = dnsFailures()
+        let group = try XCTUnwrap(failures.last?.group)
+        XCTAssertGreaterThan(group, try XCTUnwrap(failures.first?.group))
+        XCTAssertEqual(host.orchestrator.eventLog.events.settledValues.filter { $0.group == group }.map(\.settlement),
+                       [.explicit(.dns, .failed), .explicit(.proxy, .started), .explicit(.tunnels, .started)])
+        XCTAssertTrue(host.orchestrator.eventLog.events.coalescedValues.isEmpty, "nothing joined")
+        XCTAssertTrue(host.workflow.dnsIntent.fenced, "the second Start's own failed attempt restored the fence it found")
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertFalse(host.orchestrator.snapshot.bindings.tunnels.isEmpty)
+        let companion = try await host.startProxy(conditionalDNS: true)
+        XCTAssertEqual(companion.conditionalDNS, .fenced, "no grant was left for a companion to act on")
+        withExtendedLifetime(heldDNS) {}
+    }
+
+    /// A tunnels Stop whose kernel stop is admitted but queued behind a held effect still reads `running`. A tunnels Start that takes the
+    /// lane from it owns a module in motion, so it renews the kernel's start instead of trusting that snapshot: once the slot opens, the
+    /// superseded stop closes nothing and the listener is live.
+    func testATunnelsStartThatTakesOverAStopInFlightRenewsTheKernelStart() async throws {
+        let port = try freeTCPPort()
+        let (host, _) = try await launch(
+            platform: PlatformIntegrationConfig(manageSystemProxy: true), dnsForwarderEnabled: false,
+            tunnels: [TunnelDefinition(localPort: port, remoteHost: "127.0.0.1", remotePort: 9)]
+        )
+        _ = try await host.startTunnels()
+        XCTAssertEqual(host.orchestrator.snapshot.bindings.tunnels.map(\.localPort), [port])
+        let lifecycle = host.orchestrator.tunnelLifecycle
+        let slot = SlotHold()
+        addTeardownBlock { try await slot.open() }
+        await slot.hold(lifecycle)
+
+        let stop = Task { await host.stopTunnels() }
+        for _ in 0..<5_000 where lifecycle.admitsRunning {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertFalse(lifecycle.admitsRunning, "the kernel stop is admitted")
+        XCTAssertEqual(host.orchestrator.snapshot.tunnelsRunState, .running, "and still queued, so the snapshot reads running")
+        let start = Task { try await host.startTunnels() }
+        for _ in 0..<5_000 where !lifecycle.admitsRunning {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertTrue(lifecycle.admitsRunning, "the new owner renewed the kernel start")
+        try await slot.open()
+        let started = try await start.value
+        let stopped = await stop.value
+
+        XCTAssertEqual(started.modules.tunnels, .started)
+        XCTAssertEqual(stopped.stopped, [], "the Stop's teardown was taken over")
+        XCTAssertEqual(host.orchestrator.snapshot.tunnelsRunState, .running)
+        XCTAssertEqual(host.orchestrator.snapshot.bindings.tunnels.map(\.localPort), [port], "the listener is live")
+    }
+
+    // MARK: - Starts beside a kernel start in flight
+
+    /// A proxy Start of a different scope from the same pair, admitted while a whole-host Start is held on its PAC fetch before its bind,
+    /// joins the kernel's start in flight and reports its real bind. The port is held, so that bind fails: the proxy Start reports the
+    /// failure rather than `started`, applies no surface to a listener that never bound, and records the typed failure.
+    func testAProxyStartBesideAStartHeldOnItsPACReportsTheRealFailedBind() async throws {
+        let held = try HeldTCPListener()
+        let fetch = HeldPACFetch()
+        let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: false, localPort: held.port, heldPAC: fetch)
+        let whole = Task { try await host.startRuntime() }
+        for _ in 0..<5_000 where !fetch.isHeld {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertTrue(fetch.isHeld, "the whole-host Start is held on its PAC fetch, before its bind")
+        XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .starting)
+
+        let proxy = Task { try await host.startProxy(conditionalDNS: false) }
+        for _ in 0..<5_000 where host.laneEffects.proxy?.operation != .proxyStart {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        fetch.release()
+        do {
+            _ = try await proxy.value
+            XCTFail("the proxy Start does not report a bind that failed")
+        } catch is RuntimeStartRefusal {
+            XCTFail("the proxy Start owns its lane, so it reports the bind's own failure")
+        } catch {}
+        do {
+            try await whole.value
+            XCTFail("the whole-host Start lost its proxy lane")
+        } catch let refusal as RuntimeStartRefusal {
+            XCTAssertEqual(refusal, .superseded)
+        }
+        XCTAssertNotEqual(host.orchestrator.snapshot.runtimeStatus.state, .running)
+        XCTAssertFalse(harness.machine.service("Wi-Fi").routesThroughAProxy, "no surface points at a listener that never bound")
+        XCTAssertTrue(harness.machine.launchdEnvironment.isEmpty)
+        XCTAssertTrue(host.orchestrator.eventLog.events.settledValues.map(\.settlement).contains(.explicit(.proxy, .failed)))
+        XCTAssertFalse(host.orchestrator.eventLog.events.settledValues.map(\.settlement).contains(.explicit(.proxy, .started)))
+        withExtendedLifetime(held) {}
+    }
+
+    /// The same joiner with a free configured port: while the joined start is held before its bind, it has neither returned nor applied a
+    /// surface, and it returns `started` only once that start has published `running` on the configured port, which its surfaces name.
+    func testAProxyStartBesideAStartHeldOnItsPACReportsStartedOnlyAfterTheBind() async throws {
+        let configured = try freeTCPPort()
+        let fetch = HeldPACFetch()
+        let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: false, localPort: configured, heldPAC: fetch)
+        let whole = Task { try await host.startRuntime() }
+        for _ in 0..<5_000 where !fetch.isHeld {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let returned = LockedCount()
+        let proxy = Task {
+            let outcome = try await host.startProxy(conditionalDNS: false)
+            returned.set(1)
+            return (outcome, host.orchestrator.snapshot.runtimeStatus.state, host.orchestrator.snapshot.bindings.proxyPort)
+        }
+        for _ in 0..<5_000 where host.laneEffects.proxy?.operation != .proxyStart {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(returned.value, -1, "while the joined start is held before its bind, the proxy Start has not returned")
+        XCTAssertFalse(harness.machine.service("Wi-Fi").routesThroughAProxy, "and has applied no surface")
+        XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .starting)
+        fetch.release()
+        let (outcome, stateAtReturn, portAtReturn) = try await proxy.value
+        do {
+            try await whole.value
+            XCTFail("the whole-host Start lost its proxy lane")
+        } catch let refusal as RuntimeStartRefusal {
+            XCTAssertEqual(refusal, .superseded)
+        }
+        XCTAssertEqual(outcome.modules.proxy, .started)
+        XCTAssertEqual(stateAtReturn, .running, "it returned only once the start it joined published running")
+        XCTAssertEqual(portAtReturn, configured, "on the bound listener")
+        XCTAssertEqual(harness.machine.service("Wi-Fi").webProxy,
+                       FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: String(configured)))
+    }
+
+    /// A Stop admitted while a proxy Start waits on the joined kernel start does not wait for the held PAC preparation: it completes while
+    /// the fetch is still held, and still wins. Both Starts then report their supersession, and nothing listens or points anywhere.
+    func testAStopDuringAJoinedProxyStartCompletesWithoutWaitingForThePAC() async throws {
+        let fetch = HeldPACFetch()
+        let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: false, heldPAC: fetch)
+        let whole = Task { try await host.startRuntime() }
+        for _ in 0..<5_000 where !fetch.isHeld {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let proxy = Task { try await host.startProxy(conditionalDNS: false) }
+        for _ in 0..<5_000 where host.laneEffects.proxy?.operation != .proxyStart {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let done = LockedCount()
+        let stop = Task {
+            let stopped = await host.stopProxy()
+            done.set(1)
+            return stopped
+        }
+        for _ in 0..<5_000 where done.value != 1 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(done.value, 1, "the Stop completed while the PAC fetch was still held")
+        XCTAssertTrue(fetch.isHeld)
+        fetch.release()
+        let stopped = await stop.value
+        for (label, start) in [("proxy", Task { _ = try await proxy.value }), ("whole", Task { try await whole.value })] {
+            do {
+                try await start.value
+                XCTFail("\(label): a Start the Stop overtook does not report success")
+            } catch let refusal as RuntimeStartRefusal {
+                XCTAssertEqual(refusal, .superseded, label)
+            }
+        }
+        XCTAssertEqual(stopped.stopped, [.proxy])
+        XCTAssertNotEqual(host.orchestrator.snapshot.runtimeStatus.state, .running)
+        XCTAssertFalse(harness.machine.service("Wi-Fi").routesThroughAProxy)
+    }
+
+    // MARK: - Starts that take over a Stop in flight
+
+    /// The reverse of a Stop during a Start: a session DNS Stop is held while it restores system DNS, and an explicit DNS Start takes the
+    /// lane from it. The Start owns a module in motion, so it runs the physical start rather than trusting the forwarder the Stop was
+    /// taking away: it points system DNS back at the forwarder and restarts the health probe, after the Stop's restore.
+    func testAnExplicitDNSStartThatTakesOverAStopInFlightBringsDNSBackUp() async throws {
+        let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true)
+        _ = try await host.startDNS()
+        XCTAssertTrue(harness.machine.dnsRelayRunning)
+        XCTAssertNotNil(host.dnsHealthTimer)
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.setDNSServers.rawValue }
+        let stop = Task { await host.stopDNS() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+        XCTAssertFalse(harness.machine.dnsRelayRunning, "the Stop's restore has stopped the relay")
+
+        let start = Task { try await host.startDNS() }
+        for _ in 0..<5_000 where host.laneEffects.dns?.operation != .dnsStart {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(host.laneEffects.dns?.owned, [.dns], "the Start took the lane from the Stop in flight")
+        harness.hold.release()
+        let started = try await start.value
+        let stopped = await stop.value
+        XCTAssertEqual(started.modules, PrivateModuleSlots(proxy: nil, dns: .started, tunnels: nil))
+        XCTAssertEqual(stopped.stopped, [], "the Stop's teardown was taken over")
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running)
+        XCTAssertNotNil(host.orchestrator.snapshot.bindings.dnsPort, "a live forwarder")
+        XCTAssertTrue(harness.machine.dnsRelayRunning, "system DNS points at the forwarder again")
+        XCTAssertNotNil(host.dnsHealthTimer, "and its health probe runs")
+        XCTAssertEqual(harness.savedDNSEnabled, true)
+    }
+
+    /// The same takeover through the whole-host facade: a facade Stop held in its DNS restore, then a facade Start. Every module is in
+    /// motion, so each runs its physical start under the Start's tokens: the proxy surfaces, the forwarder with system DNS and its probe,
+    /// and the tunnel listener are all live afterwards.
+    func testAFacadeStartThatTakesOverAFacadeStopInFlightLeavesEveryModuleLive() async throws {
+        let (host, harness) = try await launch(
+            platform: proxyAndDNS, dnsForwarderEnabled: true,
+            tunnels: [TunnelDefinition(localPort: try freeTCPPort(), remoteHost: "127.0.0.1", remotePort: 9)]
+        )
+        try await host.startRuntime()
+        XCTAssertTrue(harness.machine.dnsRelayRunning)
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.setDNSServers.rawValue }
+        let stop = Task { await host.stopRuntime() }
+        await harness.hold.waitUntilReached()
+
+        let start = Task { try await host.startRuntime() }
+        for _ in 0..<5_000 where host.laneEffects.dns?.operation != .runtimeStart {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(host.laneEffects.dns?.owned, Set(ControlModule.allCases), "the Start took every lane from the Stop in flight")
+        harness.hold.release()
+        try await start.value
+        await stop.value
+        XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running)
+        XCTAssertTrue(harness.machine.service("Wi-Fi").routesThroughAProxy)
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running)
+        XCTAssertTrue(harness.machine.dnsRelayRunning, "system DNS points at the forwarder again")
+        XCTAssertNotNil(host.dnsHealthTimer)
+        XCTAssertFalse(host.orchestrator.snapshot.bindings.tunnels.isEmpty, "the tunnel listener is live")
+        XCTAssertEqual(host.orchestrator.eventLog.events.settledValues.suffix(3).map(\.settlement),
+                       [.explicit(.proxy, .started), .explicit(.dns, .started), .explicit(.tunnels, .started)])
+    }
+
     // MARK: - Tunnels results
 
     /// A tunnels Start whose saved input names no enabled tunnel starts nothing and says so, and one whose every bind fails reports its
@@ -602,6 +949,9 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         XCTAssertEqual(failed.modules.tunnels, .failed, "every bind failed, so the Start does not claim success")
         XCTAssertTrue(host.orchestrator.snapshot.bindings.tunnels.isEmpty)
         XCTAssertTrue(host.workflow.stopFenced, "the failed member's prior fence is restored")
+        XCTAssertEqual(host.orchestrator.eventLog.events.settledValues.map(\.settlement),
+                       [.explicit(.tunnels, .notConfigured), .explicit(.tunnels, .failed)],
+                       "each Start's one member records its own result, and the failure stands alone")
         withExtendedLifetime(held) {}
     }
 
@@ -792,6 +1142,70 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 
         let later = await workflow.saveOwedDNSStop()
         XCTAssertEqual(later.save, .saved, "the obligation was kept owed for the next attempt")
+        XCTAssertEqual(harness.savedDNSEnabled, false)
+        XCTAssertTrue(workflow.dnsIntent.fenced)
+    }
+
+    /// While an explicit DNS Start pending in DNS's slot carries a session Stop's owed disable, the save reports it owed and writes nothing;
+    /// that Start's own verified enable then settles it. Through the actual workflow and store.
+    func testAnOwedDisableCarriedByAPendingDNSStartIsReportedOwedAndNotWritten() async throws {
+        let harness = try makeHarness(platform: proxyAndDNS, dnsForwarderEnabled: true)
+        self.harness = harness
+        let store = ConfigurationStore(session: harness.session, access: StateFileAccess.operatingSystem(),
+                                       work: PlatformWork(label: "test.carried-disable"))
+        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        _ = try await workflow.open()
+        workflow.admitStop([.dns], reason: .session)
+        let start = try workflow.admitStart(PrivateModuleSlots(proxy: .none, dns: .start, tunnels: .none)).get()
+
+        let carried = await workflow.saveOwedDNSStop()
+        XCTAssertEqual(carried.save, .owed, "the pending Start carries the obligation")
+        XCTAssertEqual(carried.events, [])
+        XCTAssertEqual(harness.savedDNSEnabled, true, "and nothing was written")
+        guard case .ready(let prepared) = await workflow.prepareStart(start).preparation else {
+            return XCTFail("the DNS Start prepares")
+        }
+        XCTAssertEqual(harness.savedDNSEnabled, true)
+        let after = await workflow.saveOwedDNSStop()
+        XCTAssertEqual(after.save, .notOwed, "the Start's own verified enable settled it")
+        workflow.retire(prepared.ticket)
+    }
+
+    /// An explicit DNS Start admitted over that owed disable, then held at its preparation by the same busy slot and retired, gives the
+    /// obligation back (decision 0015): the parked reload and a later one adopt no stale enable from the file, a facade Start still waits for
+    /// the save, and the next save verifies it. Through the actual workflow and store.
+    func testAHeldExplicitDNSStartGivesBackTheDisableSaveItDisplaced() async throws {
+        let harness = try makeHarness(platform: proxyAndDNS, dnsForwarderEnabled: true)
+        self.harness = harness
+        let files = ParkedReadStateFiles()
+        let store = ConfigurationStore(session: harness.session, access: files, work: PlatformWork(label: "test.displaced-disable"))
+        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        _ = try await workflow.open()
+        workflow.admitStop([.dns], reason: .session)
+        files.arm()
+        let reload = Task { await workflow.reload(capturedAt: workflow.generation) }
+        for _ in 0..<5_000 where !files.isParked {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertTrue(files.isParked, "the reload holds the store's slot")
+        let busy = await workflow.saveOwedDNSStop()
+        XCTAssertEqual(busy.save, .owed)
+
+        let start = try workflow.admitStart(PrivateModuleSlots(proxy: .none, dns: .start, tunnels: .none)).get()
+        let preparation = await workflow.prepareStart(start)
+        guard case .held = preparation.preparation else { return XCTFail("the busy slot holds the DNS Start") }
+        XCTAssertEqual(preparation.events, [.held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .storeBusy))])
+        workflow.retire(start)
+        files.release()
+        _ = await reload.value
+        XCTAssertEqual(harness.savedDNSEnabled, true, "the file still holds the enable the Stop owes a disable for")
+        XCTAssertFalse(workflow.dnsIntent.configured, "the parked reload adopted no stale enable")
+
+        _ = await workflow.reload(capturedAt: workflow.generation)
+        XCTAssertFalse(workflow.dnsIntent.configured, "and neither does a later reload")
+        guard case .failure(.stopSaveOwed) = workflow.admitStart() else { return XCTFail("a facade Start still waits for the owed save") }
+        let later = await workflow.saveOwedDNSStop()
+        XCTAssertEqual(later.save, .saved, "the given-back obligation verifies at the next save")
         XCTAssertEqual(harness.savedDNSEnabled, false)
         XCTAssertTrue(workflow.dnsIntent.fenced)
     }

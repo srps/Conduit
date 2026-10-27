@@ -7,36 +7,13 @@ import RuntimeEvents
 
 // MARK: - Module lifecycle results
 
-/// What one explicit member of a module Start came to (decisions 0035 and 0036).
-package enum RuntimeModuleStartResult: Equatable, Sendable {
-    /// The module runs from the Start's verified pair, started by it or already running when the pair was pushed, and settled with the
-    /// permission its Start grants.
-    case started
-    /// The verified pair names nothing for the module to start: the facade's configured DNS Start with the forwarder off, or a tunnels
-    /// Start with no enabled definition. Nothing was started; the member settled as its Start grants, so its fence is cleared and no
-    /// listener runs.
-    case notConfigured
-    /// Its physical start failed. The module's prior permission and fence are restored, and so are the machine surfaces it touched.
-    case failed
-    /// A Stop or a newer Start of this module, or a replaced input, ended it first. Nothing it started is left authorized.
-    case superseded
-}
+/// What one explicit member of a module Start came to (decisions 0035 and 0036): the same closed value its `lifecycle.module_settled`
+/// record carries, so the returned result and the event cannot drift.
+package typealias RuntimeModuleStartResult = LifecycleModuleStartResult
 
-/// The separate closed result of a proxy Start's conditional DNS companion (decision 0036). Only `started` activates anything, and no
-/// result writes DNS's enabled intent or clears its fence.
-package enum RuntimeConditionalDNSResult: Equatable, Sendable {
-    case started
-    /// A DNS Stop fence is in force.
-    case fenced
-    /// DNS's configured intent is off.
-    case notConfigured
-    /// DNS is already running or starting, or another DNS operation holds its lane.
-    case alreadyActive
-    /// A newer DNS admission, or the end of its proxy Start, came first. A forwarder it had started is torn down and its surfaces restored.
-    case superseded
-    /// The forwarder did not come up. Its intent and fence stay, its machine DNS surfaces are restored, and the proxy stays up.
-    case failed
-}
+/// The separate closed result of a proxy Start's conditional DNS companion (decision 0036), the value its own `lifecycle.module_settled`
+/// record carries.
+package typealias RuntimeConditionalDNSResult = LifecycleConditionalDNSResult
 
 /// What a module Start that ran came to: each member's result, and the companion's when one was asked for. A Start refused at
 /// admission, held at preparation or ended before any member completed throws `RuntimeStartRefusal` instead.
@@ -51,7 +28,8 @@ package struct RuntimeModuleStartOutcome: Equatable, Sendable {
 package enum RuntimeDNSStopSave: Equatable, Sendable {
     /// The disable verified, and the obligation ended.
     case saved
-    /// The store's slot was taken or the write did not verify, so the disable stays owed. Nothing retries it.
+    /// The store's slot was taken, the write did not verify, or a pending explicit DNS Start carries the obligation, so the disable stays
+    /// owed. Nothing retries it.
     case owed
     /// Nothing is owed any more: a newer DNS Start replaced the obligation, or another save already verified it.
     case notOwed
@@ -155,9 +133,12 @@ final class RuntimeLifecycleEffect {
         RuntimeModuleStartOutcome(modules: results, conditionalDNS: conditionalDNS)
     }
 
-    /// A joining Start's authorized group takes this effect over when it captured the same pair, before the effect settled or withdrew.
+    /// A joining Start's authorized group takes this effect over when it captured the same pair, before the effect settled any member or
+    /// withdrew. A member already settled under the earlier group, a failed one above all, could never settle the joiner's grant for it, so
+    /// such a joiner runs its own lanes instead.
     func adopt(_ joining: RuntimeConfigurationWorkflow.PreparedStart) -> Bool {
-        guard !completed, !withdrawn, let current = prepared, joining.input.isSamePair(as: current.input) else { return false }
+        guard !completed, !withdrawn, ControlModule.allCases.allSatisfy({ results[$0] == nil }),
+              let current = prepared, joining.input.isSamePair(as: current.input) else { return false }
         prepared = joining
         return true
     }
@@ -246,6 +227,27 @@ extension RuntimeHost {
         return false
     }
 
+    /// Settles one explicit member, once, and records its `lifecycle.module_settled` before any log line about it; the log is derived from
+    /// the event, at warning for a failure. A joiner settles nothing itself: the effect it joined records each member once, under the group
+    /// that adopted it.
+    private func settle(_ start: RuntimeLifecycleEffect, _ module: ControlModule, _ result: RuntimeModuleStartResult) {
+        precondition(start.results[module] == nil, "a member settles once")
+        start.results[module] = result
+        recordSettlement(.explicit(LifecycleModule(module), result), of: start)
+    }
+
+    /// Records a settlement under the Start's current group. Only a failure is a warning.
+    private func recordSettlement(_ settlement: LifecycleModuleSettlement, of start: RuntimeLifecycleEffect) {
+        let level: LogLevel = switch settlement {
+        case .explicit(_, .failed), .conditionalDNS(.failed): .warning
+        case .explicit, .conditionalDNS: .notice
+        }
+        recordLifecycle(
+            RuntimeEvent(payload: .lifecycle(.moduleSettled(LifecycleModuleSettled(settlement: settlement, group: start.ticket.generation)))),
+            level: level
+        )
+    }
+
     /// The runtime's observers follow the modules that are up: started by any Start that brought one up, stopped once none is left.
     func startObservers() {
         startLocationObserver()
@@ -326,16 +328,16 @@ extension RuntimeHost {
     }
 
     /// The one finalization of a Start that cannot complete whole, every throw exit included (decision 0035). First its members not yet
-    /// settled end as failed under its own ticket, before anything suspends, which restores each one's prior permission and fence: no
-    /// grant is left for a module it did not finish, and a reload pass admitted under it stops. A member a newer Start or Stop already
-    /// took, or one that settled alone, has no record under this ticket and is untouched, and completed saves stay facts. Then the modules
-    /// it owns are torn down under its own tokens: a lane a newer owner took is skipped, and a module that was already running when it
-    /// took the lanes is never touched.
+    /// settled record their `superseded` settlement and end as failed under its own ticket, before anything suspends, which restores each
+    /// one's prior permission and fence: no grant is left for a module it did not finish, and a reload pass admitted under it stops. A
+    /// member a newer Start or Stop already took, or one that settled alone, has no record under this ticket and is untouched, and
+    /// completed saves stay facts. Then the modules it owns are torn down under its own tokens: a lane a newer owner took is skipped, and a
+    /// module that was already running when it took the lanes is never touched.
     private func holdRemaining(_ start: RuntimeLifecycleEffect) async {
         guard !start.completed else { return }
         start.withdrawn = true
-        for module in start.active where start.results[module] == nil {
-            start.results[module] = .superseded
+        for module in ControlModule.allCases where start.active.contains(module) && start.results[module] == nil {
+            settle(start, module, .superseded)
         }
         start.active = []
         workflow.endFailedStart(start.ticket)
@@ -356,7 +358,7 @@ extension RuntimeHost {
                 try continueStart(start)
             }
             do {
-                try await orchestrator.startProxy()
+                try await startProxyListener()
                 credentialWarmup = credentialManager.warmCacheInBackground(
                     eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
                 )
@@ -364,6 +366,8 @@ extension RuntimeHost {
                 // A start that a stop or a newer start superseded has nothing to revert: that owner cleaned up, and reverting here would
                 // undo its work.
                 guard holdsLane(start, .proxy) else { throw RuntimeStartRefusal.superseded }
+                // The typed failure comes first. The error text stays on the log line below and never enters the event.
+                settle(start, .proxy, .failed)
                 // Restore owned surfaces after bind failure: a dead PAC/proxy endpoint or resolver can break networking after this process
                 // exits.
                 logger.log(
@@ -388,23 +392,21 @@ extension RuntimeHost {
         let platform = platformConfig
         // A member whose verified pair names nothing to start settles as its Start grants and reports that it started nothing.
         var unconfigured: Set<ControlModule> = []
-        // A member already running settles without a second physical start: the push has already applied the verified pair to it, and the
-        // kernel's forwarder and tunnel starts would bind a second set of listeners beside the first.
+        // A member running on an idle lane when this Start took it settles without a second physical start: the push already applied the
+        // verified pair to it. One it owns, taken from a Stop or Start in flight, runs the physical start: a Stop may have restored its
+        // surfaces, and the kernel orders the bind after a Stop's close or joins the start in flight for its real completion.
         if start.active.contains(.dns) {
             if !config.dnsForwarderEnabled {
                 unconfigured.insert(.dns)
-            } else if orchestrator.snapshot.dnsRunState == .running {
+            } else if !start.owned.contains(.dns), orchestrator.snapshot.dnsRunState == .running {
                 // Running from the pushed pair already.
             } else if await startDNSModule(start, config: config, platform: platform, stands: {
                 workflow.holds(.dns, for: start.ticket) && start.prepared.map { workflow.holdsInput($0) } == true
             }) == .failed, holdsLane(start, .dns) {
-                // An explicit DNS member whose forwarder did not come up fails alone: its prior permission and fence come back, and the
-                // other members go on.
-                logger.log(.warning, "DNS forwarder did not start; system DNS restored and the other modules left as they started.",
-                           category: .system)
+                // A DNS member whose forwarder did not come up fails alone, with its prior permission and fence back; the others go on.
                 workflow.endFailedStart(start.ticket, modules: [.dns])
                 start.active.remove(.dns)
-                start.results.dns = .failed
+                settle(start, .dns, .failed)
             }
             // A member that failed alone has settled; only members still going on are checked.
             if !start.active.isEmpty { try continueStart(start) }
@@ -413,17 +415,16 @@ extension RuntimeHost {
             let tunnelsState = orchestrator.snapshot.tunnelsRunState
             if !config.tunnelDefinitions.contains(where: \.enabled) {
                 unconfigured.insert(.tunnels)
-            } else if tunnelsState == .running || tunnelsState == .warning {
+            } else if !start.owned.contains(.tunnels), tunnelsState == .running || tunnelsState == .warning {
                 // Running from the pushed pair already.
             } else {
                 await orchestrator.startTunnels()
                 // The kernel reports a start whose every bind failed, or that it refused, as `failed`; a partial bind still runs as
                 // `warning`. A failed member restores its prior permission and fence, and what it may have bound is closed.
                 if orchestrator.snapshot.tunnelsRunState == .failed, holdsLane(start, .tunnels) {
-                    logger.log(.warning, "Tunnels did not start; the other modules left as they started.", category: .system)
                     workflow.endFailedStart(start.ticket, modules: [.tunnels])
                     start.active.remove(.tunnels)
-                    start.results.tunnels = .failed
+                    settle(start, .tunnels, .failed)
                     if start.owned.contains(.tunnels) {
                         await tearDown([.tunnels], under: start, terminal: false)
                     }
@@ -434,7 +435,9 @@ extension RuntimeHost {
 
         startObservers()
         workflow.finishStart(start.ticket, modules: start.active, succeeded: true)
-        for module in start.active { start.results[module] = unconfigured.contains(module) ? .notConfigured : .started }
+        for module in ControlModule.allCases where start.active.contains(module) {
+            settle(start, module, unconfigured.contains(module) ? .notConfigured : .started)
+        }
         start.completed = true
         logger.log(.notice, "Daemon runtime started.", category: .general)
         // Submitted, not awaited: a diagnostic write never holds a lifecycle lane. Readiness and the terminal exit are the boundaries that
@@ -444,6 +447,14 @@ extension RuntimeHost {
             start.conditionalDNS = await runConditionalDNS(for: start)
         }
         return start.outcome
+    }
+
+    /// The kernel's proxy start, which returns once the start it ran or joined has completed. A proxy that is then not serving is no
+    /// start: it throws, so the caller's failure path settles the member failed and clears the surfaces it owns rather than applying them
+    /// to a listener that is not there.
+    private func startProxyListener() async throws {
+        try await orchestrator.startProxy()
+        guard runtimeState().proxyIsUp else { throw RuntimeStartRefusal.notRunning }
     }
 
     /// Whether an authorized Start's remaining effects may run after a suspension; it throws when they may not, and `runStart`'s one
@@ -559,6 +570,14 @@ extension RuntimeHost {
         return .running
     }
 
+    /// The companion's run and its own `lifecycle.module_settled`, separate from the members' and under the same group. Every result,
+    /// a failure included, is recorded once here, before any log line about it.
+    private func runConditionalDNS(for start: RuntimeLifecycleEffect) async -> RuntimeConditionalDNSResult {
+        let result = await activateConditionalDNS(for: start)
+        recordSettlement(.conditionalDNS(result), of: start)
+        return result
+    }
+
     /// A proxy Start's conditional DNS companion (decision 0036), once its members settled. It starts DNS only while DNS's configured
     /// intent is on and unfenced, nothing newer supersedes it, and DNS is neither running nor starting; otherwise it is a typed no-op. It
     /// takes the DNS lane only to act, so it never overtakes a DNS operation in flight, and it never writes intent or clears a fence. A
@@ -568,7 +587,7 @@ extension RuntimeHost {
     /// write that replaced it holds the companion, with the typed `input_replaced`, before its next machine effect; it is never rebound. A
     /// companion that lost its parent's permission or input while it ran tears down what it started under its own DNS lane. One whose lane a
     /// newer DNS operation took leaves the module and its cleanup to that owner. The completed proxy is a fact and stays up either way.
-    private func runConditionalDNS(for start: RuntimeLifecycleEffect) async -> RuntimeConditionalDNSResult {
+    private func activateConditionalDNS(for start: RuntimeLifecycleEffect) async -> RuntimeConditionalDNSResult {
         guard let prepared = start.prepared else { preconditionFailure("a companion rides a Start") }
         let ticket = prepared.ticket
         guard workflow.conditionalActivationAllowed(ticket) else {
@@ -601,11 +620,8 @@ extension RuntimeHost {
         }
         workflow.settleConditional(ticket, succeeded: started == .running)
         writeSnapshotFile(snapshot: orchestrator.snapshot)
-        guard started == .running else {
-            logger.log(.warning, "Conditional DNS did not start; system DNS restored, the proxy stays up.", category: .system)
-            return .failed
-        }
-        return .started
+        // A failure's system DNS is restored and the proxy stays up; its caller records the typed result before any log line.
+        return started == .running ? .started : .failed
     }
 
     // MARK: Teardown
@@ -939,5 +955,16 @@ extension RuntimeHost {
     /// A session Stop of tunnels. The proxy and DNS keep running.
     package func stopTunnels() async -> RuntimeModuleStopOutcome {
         await runStop([.tunnels], reason: .session)
+    }
+}
+
+extension LifecycleModule {
+    /// The event's spelling of a host module lane.
+    init(_ module: ControlModule) {
+        switch module {
+        case .proxy: self = .proxy
+        case .dns: self = .dns
+        case .tunnels: self = .tunnels
+        }
     }
 }

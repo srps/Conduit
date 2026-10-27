@@ -85,24 +85,27 @@ package enum ControlLifecycleEvent: Codable, Sendable, Equatable {
     case coalesced(operation: ControlLifecycleOperation, joined: Int)
     case terminationDrainExpired(deadlineMilliseconds: Int)
     case versionChanged(from: String, to: String)
+    case moduleSettled(settlement: ControlLifecycleSettlement, group: Int)
 
     private enum WireType: String, Codable, CaseIterable {
         case superseded
         case coalesced
         case terminationDrainExpired = "termination_drain_expired"
         case versionChanged = "version_changed"
+        case moduleSettled = "module_settled"
     }
 
-    /// The stable event names, spelled once here. The domain's `LifecycleEventName` pins the same four.
+    /// The stable event names, spelled once here. The domain's `LifecycleEventName` pins the same five.
     private enum EventName: String, CaseIterable {
         case superseded = "lifecycle.superseded"
         case coalesced = "lifecycle.coalesced"
         case terminationDrainExpired = "lifecycle.termination_drain_expired"
         case versionChanged = "lifecycle.version_changed"
+        case moduleSettled = "lifecycle.module_settled"
     }
 
     private enum CodingKeys: String, CodingKey {
-        case type, operation, generation, current, reason, joined, from, to
+        case type, operation, generation, current, reason, joined, from, to, module, source, outcome, group
         case deadlineMilliseconds = "deadline_ms"
     }
 
@@ -152,6 +155,27 @@ package enum ControlLifecycleEvent: Codable, Sendable, Equatable {
         isValidVersion(from) && !readsAsBearerCredential(from: from) && isValidVersion(to)
     }
 
+    /// The mirror of the domain's settlement rule: an admitted group, and a proxy member never `not_configured`.
+    package static func isValidModuleSettled(settlement: ControlLifecycleSettlement, group: Int) -> Bool {
+        group >= 1 && settlement != .explicit(.proxy, .notConfigured)
+    }
+
+    /// The source selects which closed result set `outcome` is read from, as the domain's decoder does.
+    private static func decodeSettlement(_ container: KeyedDecodingContainer<CodingKeys>) throws -> ControlLifecycleSettlement {
+        let module = try container.decode(ControlModule.self, forKey: .module)
+        switch try container.decode(String.self, forKey: .source) {
+        case "explicit":
+            return .explicit(module, try container.decode(ControlLifecycleModuleResult.self, forKey: .outcome))
+        case "conditional":
+            guard module == .dns else {
+                throw DecodingError.dataCorruptedError(forKey: .module, in: container, debugDescription: "a conditional companion settles DNS only")
+            }
+            return .conditionalDNS(try container.decode(ControlLifecycleConditionalDNSResult.self, forKey: .outcome))
+        default:
+            throw DecodingError.dataCorruptedError(forKey: .source, in: container, debugDescription: "a settlement is explicit or conditional")
+        }
+    }
+
     /// The stable event name, the same spelling the domain derives.
     package var name: String {
         switch self {
@@ -159,6 +183,7 @@ package enum ControlLifecycleEvent: Codable, Sendable, Equatable {
         case .coalesced: EventName.coalesced.rawValue
         case .terminationDrainExpired: EventName.terminationDrainExpired.rawValue
         case .versionChanged: EventName.versionChanged.rawValue
+        case .moduleSettled: EventName.moduleSettled.rawValue
         }
     }
 
@@ -173,6 +198,8 @@ package enum ControlLifecycleEvent: Codable, Sendable, Equatable {
             "deadline_ms=\(deadlineMilliseconds)"
         case .versionChanged(let from, let to):
             "from=\(from) to=\(to)"
+        case .moduleSettled(let settlement, let group):
+            "module=\(settlement.module.rawValue) source=\(settlement.source) outcome=\(settlement.outcome) group=\(group)"
         }
     }
 
@@ -220,6 +247,16 @@ package enum ControlLifecycleEvent: Codable, Sendable, Equatable {
                 )
             }
             self = .versionChanged(from: from, to: to)
+        case .moduleSettled:
+            let settlement = try Self.decodeSettlement(container)
+            let group = try container.decode(Int.self, forKey: .group)
+            guard Self.isValidModuleSettled(settlement: settlement, group: group) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .group, in: container,
+                    debugDescription: "a settled group is at least 1, and a proxy member is never not_configured"
+                )
+            }
+            self = .moduleSettled(settlement: settlement, group: group)
         }
     }
 
@@ -266,8 +303,66 @@ package enum ControlLifecycleEvent: Codable, Sendable, Equatable {
             try container.encode(WireType.versionChanged, forKey: .type)
             try container.encode(from, forKey: .from)
             try container.encode(to, forKey: .to)
+        case .moduleSettled(let settlement, let group):
+            guard Self.isValidModuleSettled(settlement: settlement, group: group) else {
+                throw EncodingError.invalidValue(self, .init(
+                    codingPath: encoder.codingPath,
+                    debugDescription: "a settled group is at least 1, and a proxy member is never not_configured"
+                ))
+            }
+            try container.encode(WireType.moduleSettled, forKey: .type)
+            try container.encode(settlement.module, forKey: .module)
+            try container.encode(settlement.source, forKey: .source)
+            try container.encode(settlement.outcome, forKey: .outcome)
+            try container.encode(group, forKey: .group)
         }
     }
+}
+
+/// Wire spelling of one module Start settlement: an explicit member with its result, or the conditional DNS companion with its own. The
+/// module reuses the control contract's `ControlModule`; the results are separate closed sets with the domain's raw values.
+package enum ControlLifecycleSettlement: Sendable, Equatable {
+    case explicit(ControlModule, ControlLifecycleModuleResult)
+    case conditionalDNS(ControlLifecycleConditionalDNSResult)
+
+    package var module: ControlModule {
+        switch self {
+        case .explicit(let module, _): module
+        case .conditionalDNS: .dns
+        }
+    }
+
+    package var source: String {
+        switch self {
+        case .explicit: "explicit"
+        case .conditionalDNS: "conditional"
+        }
+    }
+
+    package var outcome: String {
+        switch self {
+        case .explicit(_, let result): result.rawValue
+        case .conditionalDNS(let result): result.rawValue
+        }
+    }
+}
+
+/// Wire spelling of an explicit member's result.
+package enum ControlLifecycleModuleResult: String, Codable, Sendable, Equatable, CaseIterable {
+    case started
+    case notConfigured = "not_configured"
+    case failed
+    case superseded
+}
+
+/// Wire spelling of the conditional DNS companion's result.
+package enum ControlLifecycleConditionalDNSResult: String, Codable, Sendable, Equatable, CaseIterable {
+    case started
+    case fenced
+    case notConfigured = "not_configured"
+    case alreadyActive = "already_active"
+    case superseded
+    case failed
 }
 
 /// Wire spelling of a lifecycle operation: the same raw values as the domain's,

@@ -455,7 +455,95 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
         await assertDNSStopped(orchestrator, port: editedPort)
     }
 
+    /// A second start while the first is inside its bind joins that start's completion, the forwarder and what it publishes together. It
+    /// admits nothing, and returns only once the first published `running`, rather than reading the first's `starting` as done.
+    func testADNSStartBesideABindInFlightReturnsWithThatBindsCompletion() async throws {
+        let port = try await freePort()
+        let gate = BindGate()
+        let orchestrator = makeDNSOrchestrator(gate: gate, port: port)
+        addTeardownBlock {
+            await gate.open()
+            await orchestrator.stopDNS()
+        }
+        let first = Task { await orchestrator.startDNS() }
+        _ = try await arrival(at: gate)
+        let epoch = orchestrator.dnsLifecycle.epoch
+        let trace = Trace()
+        let second = Task {
+            await orchestrator.startDNS()
+            trace.steps.append("joined \(orchestrator.snapshot.dnsRunState.rawValue)")
+        }
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(trace.steps, [], "the joiner waits for the bind in flight")
+        XCTAssertEqual(orchestrator.dnsLifecycle.epoch, epoch, "and admits nothing")
+        await gate.open()
+        await first.value
+        await second.value
+
+        XCTAssertEqual(trace.steps, ["joined running"])
+        XCTAssertEqual(orchestrator.dnsForwarder.tcpListeningPort, port)
+        XCTAssertEqual(orchestrator.snapshot.bindings.dnsPort, port)
+    }
+
+    /// A stop admitted while a joiner waits on the start in flight still wins: it supersedes that start, and the joiner returns to the stop's
+    /// outcome having admitted and bound nothing of its own.
+    func testAStopDuringAJoinedDNSStartStillWins() async throws {
+        let port = try await freePort()
+        let gate = BindGate()
+        let orchestrator = makeDNSOrchestrator(gate: gate, port: port)
+        addTeardownBlock {
+            await gate.open()
+            await orchestrator.stopDNS()
+        }
+        let first = Task { await orchestrator.startDNS() }
+        _ = try await arrival(at: gate)
+        let epoch = orchestrator.dnsLifecycle.epoch
+        let second = Task { await orchestrator.startDNS() }
+        for _ in 0..<100 { await Task.yield() }
+        let stop = Task { await orchestrator.stopDNS() }
+        await waitUntil { orchestrator.dnsLifecycle.epoch == epoch + 1 }
+        await gate.open()
+        await first.value
+        await second.value
+        await stop.value
+
+        XCTAssertEqual(orchestrator.dnsLifecycle.epoch, epoch + 1, "the joiner admitted nothing")
+        await assertDNSStopped(orchestrator, port: port)
+    }
+
     // MARK: - Tunnels
+
+    /// A second tunnel start while the first is queued behind a held effect joins it: it admits nothing and returns with the first's
+    /// published `running`.
+    func testATunnelStartBesideAStartInFlightReturnsWithItsCompletion() async throws {
+        let port = try await freePort()
+        let orchestrator = makeTunnelOrchestrator(ports: [port])
+        let gate = BindGate()
+        addTeardownBlock {
+            await gate.open()
+            await orchestrator.stopTunnels()
+        }
+        let held = try await holdSlot(orchestrator.tunnelLifecycle, gate: gate)
+        let epoch = orchestrator.tunnelLifecycle.epoch
+        let first = Task { await orchestrator.startTunnels() }
+        await waitUntil { orchestrator.tunnelLifecycle.epoch == epoch + 1 }
+        XCTAssertEqual(orchestrator.snapshot.tunnelsRunState, .starting)
+        let trace = Trace()
+        let second = Task {
+            await orchestrator.startTunnels()
+            trace.steps.append("joined \(orchestrator.snapshot.tunnelsRunState.rawValue)")
+        }
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(trace.steps, [], "the joiner waits for the start in flight")
+        await gate.open()
+        _ = try await held.value
+        await first.value
+        await second.value
+
+        XCTAssertEqual(trace.steps, ["joined running"])
+        XCTAssertEqual(orchestrator.tunnelLifecycle.epoch, epoch + 1, "the joiner admitted nothing")
+        XCTAssertEqual(orchestrator.snapshot.bindings.tunnels.map(\.localPort), [port])
+    }
 
     /// The point tested is before the claim, not inside the bind: a start queued behind a held effect, then superseded by a stop, binds
     /// nothing and publishes nothing. (The real partial-bind case is the DNS tests' `willBindTCP` hold.) The old start never waited for
@@ -710,5 +798,48 @@ final class PhysicalLifecycleTests: XCTestCase {
         let ran = try await lifecycle.run(epoch: stop) { trace.steps.append("teardown") }
         XCTAssertTrue(ran)
         XCTAssertEqual(trace.steps, ["teardown"])
+    }
+
+    /// The one joinable start: a stop leaves none, a start admitted after it is the joinable one, and the older start's completion never
+    /// clears it. A start clears only its own, and a joiner gets the start's own error.
+    func testOnlyTheLatestStartIsJoinableAndAnOlderCompletionNeverClearsIt() async throws {
+        struct BindFailed: Error {}
+        let lifecycle = PhysicalLifecycle()
+        let olderGate = BindGate()
+        let newerGate = BindGate()
+        addTeardownBlock {
+            await olderGate.open()
+            await newerGate.open()
+        }
+        let older = lifecycle.admit(running: true)
+        let first = Task { try await lifecycle.runStart(epoch: older) { await olderGate.hold(1) } }
+        _ = try await arrival(at: olderGate)
+        XCTAssertNotNil(lifecycle.joinableStart(), "a start is joinable from its admission")
+        _ = lifecycle.admit(running: false)
+        XCTAssertNil(lifecycle.joinableStart(), "after a stop there is nothing to join")
+
+        let newer = lifecycle.admit(running: true)
+        let second = Task {
+            try await lifecycle.runStart(epoch: newer) {
+                await newerGate.hold(2)
+                throw BindFailed()
+            }
+        }
+        _ = try await arrival(at: newerGate)
+        let joinable = try XCTUnwrap(lifecycle.joinableStart())
+        await olderGate.open()
+        try await first.value
+        XCTAssertEqual(lifecycle.joinableStart(), joinable, "the older completion left the newer one in place")
+
+        await newerGate.open()
+        do {
+            try await joinable.value
+            XCTFail("a joiner gets the start's own failure")
+        } catch is BindFailed {}
+        do {
+            try await second.value
+            XCTFail("the start's caller gets it too")
+        } catch is BindFailed {}
+        XCTAssertNil(lifecycle.joinableStart(), "a finished start clears its own")
     }
 }

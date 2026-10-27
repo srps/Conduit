@@ -2,8 +2,8 @@
 import Foundation
 
 /// The typed `lifecycle.*` events (decision 0013; design in
-/// `docs/design-runtime-host-contract.md`). A value holds the closed operation
-/// and reason enums and the numeric generations and budgets its record needs.
+/// `docs/design-runtime-host-contract.md`). A value holds the closed operation,
+/// reason, module and result enums and the numeric generations, groups and budgets its record needs.
 /// No field takes free text, so a credential or a path has nowhere to go.
 ///
 /// Producers build these values. The kernel's `RuntimeEvent(payload:)` derives
@@ -28,6 +28,75 @@ package enum LifecycleSupersessionReason: String, Codable, Sendable, Equatable, 
     case runtimeDown = "runtime_down"
 }
 
+/// The module a settlement names: one of the host's three module lanes.
+package enum LifecycleModule: String, Codable, Sendable, Equatable, CaseIterable {
+    case proxy
+    case dns
+    case tunnels
+}
+
+/// What one explicit member of a module Start came to (decisions 0035 and 0036). The shared host returns this value and records it.
+package enum LifecycleModuleStartResult: String, Codable, Sendable, Equatable, CaseIterable {
+    /// The module runs from the Start's verified pair, started by it or already running when the pair was pushed, and settled with the
+    /// permission its Start grants.
+    case started
+    /// The verified pair names nothing for the module to start: the facade's configured DNS Start with the forwarder off, or a tunnels
+    /// Start with no enabled definition. Nothing was started; the member settled as its Start grants, so its fence is cleared and no
+    /// listener runs. A proxy member is never `notConfigured`.
+    case notConfigured = "not_configured"
+    /// Its physical start failed. The module's prior permission and fence are restored, and so are the machine surfaces it touched.
+    case failed
+    /// It did not finish: a Stop or a newer Start of a member, a replaced input, or a sibling's failed bind ended its Start first. Nothing it
+    /// started is left authorized.
+    case superseded
+}
+
+/// The separate closed result of a proxy Start's conditional DNS companion (decision 0036). Only `started` activates anything, and no
+/// result writes DNS's enabled intent or clears its fence.
+package enum LifecycleConditionalDNSResult: String, Codable, Sendable, Equatable, CaseIterable {
+    case started
+    /// A DNS Stop fence is in force.
+    case fenced
+    /// DNS's configured intent is off.
+    case notConfigured = "not_configured"
+    /// DNS is already running or starting, or another DNS operation holds its lane.
+    case alreadyActive = "already_active"
+    /// A newer DNS admission, or the end of its proxy Start, came first. A forwarder it had started is torn down and its surfaces restored.
+    case superseded
+    /// The forwarder did not come up. Its intent and fence stay, its machine DNS surfaces are restored, and the proxy stays up.
+    case failed
+}
+
+/// Which part of a module Start settled: one explicit member with its own result, or the proxy Start's conditional companion, which only
+/// ever acts on DNS. The two result sets stay separate, so a companion's no-op never reads as a member's result.
+package enum LifecycleModuleSettlement: Equatable, Sendable {
+    case explicit(LifecycleModule, LifecycleModuleStartResult)
+    case conditionalDNS(LifecycleConditionalDNSResult)
+
+    package var module: LifecycleModule {
+        switch self {
+        case .explicit(let module, _): module
+        case .conditionalDNS: .dns
+        }
+    }
+
+    /// The wire's `source` spelling.
+    package var source: String {
+        switch self {
+        case .explicit: "explicit"
+        case .conditionalDNS: "conditional"
+        }
+    }
+
+    /// The wire's `outcome` spelling.
+    package var outcome: String {
+        switch self {
+        case .explicit(_, let result): result.rawValue
+        case .conditionalDNS(let result): result.rawValue
+        }
+    }
+}
+
 /// The names the typed family emits. `scripts/check-event-catalogue.py` pins
 /// this list, so adding a typed name is a reviewed change to both places.
 package enum LifecycleEventName: String, Sendable, CaseIterable {
@@ -35,6 +104,7 @@ package enum LifecycleEventName: String, Sendable, CaseIterable {
     case coalesced = "lifecycle.coalesced"
     case terminationDrainExpired = "lifecycle.termination_drain_expired"
     case versionChanged = "lifecycle.version_changed"
+    case moduleSettled = "lifecycle.module_settled"
 }
 
 /// `lifecycle.superseded`: an operation stopped after its last suspension.
@@ -142,11 +212,32 @@ package struct LifecycleVersionChanged: Equatable, Sendable {
     }
 }
 
+/// `lifecycle.module_settled`: one explicit member of a module Start, or its conditional DNS companion, came to its closed result. One
+/// record per member and per companion; an identical Start that joined the effect records none of its own. It is the logical outcome
+/// decision, not physical quiescence: a failure or supersession can be recorded before the owned cleanup it triggers has run.
+package struct LifecycleModuleSettled: Equatable, Sendable {
+    package let settlement: LifecycleModuleSettlement
+    /// The workflow group the Start acts under, at least 1: its own admission, or the identical joiner's that adopted it.
+    package let group: Int
+
+    /// The group is an admitted one, and a proxy member always names something to start.
+    package static func isValid(settlement: LifecycleModuleSettlement, group: Int) -> Bool {
+        group >= 1 && settlement != .explicit(.proxy, .notConfigured)
+    }
+
+    package init(settlement: LifecycleModuleSettlement, group: Int) {
+        precondition(Self.isValid(settlement: settlement, group: group), "a settled group is at least 1, and a proxy member is never not_configured")
+        self.settlement = settlement
+        self.group = group
+    }
+}
+
 package enum LifecycleEvent: Equatable, Sendable {
     case superseded(LifecycleSuperseded)
     case coalesced(LifecycleCoalesced)
     case terminationDrainExpired(LifecycleTerminationDrainExpired)
     case versionChanged(LifecycleVersionChanged)
+    case moduleSettled(LifecycleModuleSettled)
 
     /// The stable event name.
     package var name: String {
@@ -155,6 +246,7 @@ package enum LifecycleEvent: Equatable, Sendable {
         case .coalesced: LifecycleEventName.coalesced.rawValue
         case .terminationDrainExpired: LifecycleEventName.terminationDrainExpired.rawValue
         case .versionChanged: LifecycleEventName.versionChanged.rawValue
+        case .moduleSettled: LifecycleEventName.moduleSettled.rawValue
         }
     }
 
@@ -169,6 +261,8 @@ package enum LifecycleEvent: Equatable, Sendable {
             "deadline_ms=\(event.deadlineMilliseconds)"
         case .versionChanged(let event):
             "from=\(event.from) to=\(event.to)"
+        case .moduleSettled(let event):
+            "module=\(event.settlement.module.rawValue) source=\(event.settlement.source) outcome=\(event.settlement.outcome) group=\(event.group)"
         }
     }
 }
@@ -183,11 +277,29 @@ extension LifecycleEvent: Codable {
         case coalesced
         case terminationDrainExpired = "termination_drain_expired"
         case versionChanged = "version_changed"
+        case moduleSettled = "module_settled"
     }
 
     private enum CodingKeys: String, CodingKey {
-        case type, operation, generation, current, reason, joined, from, to
+        case type, operation, generation, current, reason, joined, from, to, module, source, outcome, group
         case deadlineMilliseconds = "deadline_ms"
+    }
+
+    /// The source selects which closed result set `outcome` is read from, so an explicit member's `fenced` or a companion on another
+    /// module throws.
+    private static func decodeSettlement(_ container: KeyedDecodingContainer<CodingKeys>) throws -> LifecycleModuleSettlement {
+        let module = try container.decode(LifecycleModule.self, forKey: .module)
+        switch try container.decode(String.self, forKey: .source) {
+        case "explicit":
+            return .explicit(module, try container.decode(LifecycleModuleStartResult.self, forKey: .outcome))
+        case "conditional":
+            guard module == .dns else {
+                throw DecodingError.dataCorruptedError(forKey: .module, in: container, debugDescription: "a conditional companion settles DNS only")
+            }
+            return .conditionalDNS(try container.decode(LifecycleConditionalDNSResult.self, forKey: .outcome))
+        default:
+            throw DecodingError.dataCorruptedError(forKey: .source, in: container, debugDescription: "a settlement is explicit or conditional")
+        }
     }
 
     package init(from decoder: any Decoder) throws {
@@ -236,6 +348,16 @@ extension LifecycleEvent: Codable {
                 )
             }
             self = .versionChanged(LifecycleVersionChanged(from: from, to: to))
+        case .moduleSettled:
+            let settlement = try Self.decodeSettlement(container)
+            let group = try container.decode(Int.self, forKey: .group)
+            guard LifecycleModuleSettled.isValid(settlement: settlement, group: group) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .group, in: container,
+                    debugDescription: "a settled group is at least 1, and a proxy member is never not_configured"
+                )
+            }
+            self = .moduleSettled(LifecycleModuleSettled(settlement: settlement, group: group))
         }
     }
 
@@ -284,6 +406,18 @@ extension LifecycleEvent: Codable {
             try container.encode(WireType.versionChanged, forKey: .type)
             try container.encode(event.from, forKey: .from)
             try container.encode(event.to, forKey: .to)
+        case .moduleSettled(let event):
+            guard LifecycleModuleSettled.isValid(settlement: event.settlement, group: event.group) else {
+                throw EncodingError.invalidValue(self, .init(
+                    codingPath: encoder.codingPath,
+                    debugDescription: "a settled group is at least 1, and a proxy member is never not_configured"
+                ))
+            }
+            try container.encode(WireType.moduleSettled, forKey: .type)
+            try container.encode(event.settlement.module, forKey: .module)
+            try container.encode(event.settlement.source, forKey: .source)
+            try container.encode(event.settlement.outcome, forKey: .outcome)
+            try container.encode(event.group, forKey: .group)
         }
     }
 }

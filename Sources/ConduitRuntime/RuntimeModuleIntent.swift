@@ -92,6 +92,10 @@ struct RuntimeModuleStart: Equatable, Sendable {
     let priorFenced: Bool
     /// Admitted as `configuredStart`: it stages and grants DNS's configured intent rather than an enable.
     var configured = false
+    /// A DNS Start that took DNS's slot over the disable save a session Stop still owed (decision 0015), directly or from the unverified
+    /// Start it replaced. Its admission does not end that obligation: a verified write under the current DNS intent resolves it (a false
+    /// one is that disable, the only true one this Start's own enable), and an end without one puts the save back in the slot.
+    var displacesOwedSave = false
 }
 
 /// The one fixed pending slot of a module. A newer admission on the module replaces it, so the bound is the three modules.
@@ -160,12 +164,22 @@ struct RuntimeModuleIntents: Equatable, Sendable {
     /// activation does later and whichever member ended the group (decision 0015). Only a newer DNS Start or Stop since the staging wins, so
     /// a late write of an older value cannot overturn a Stop's disable.
     /// A verified write of the very disable a session Stop still owes, staged by a group admitted after that Stop, fulfils the obligation:
-    /// the file holds it. The fence stays, and nothing else about DNS changes.
+    /// the file holds it. The fence stays, and nothing else about DNS changes. A pending DNS Start that displaced the obligation keeps it
+    /// until a write under the current intent verifies: only that Start's own group stages true, so a true one is its newer saved fact, and
+    /// any other is the disable itself. The same holds once that Start ended before its write verified and gave the save back: its own
+    /// late enable, under the intent revision its explicit DNS admission set, is the newer fact. A newer session Stop moved the revision.
     mutating func recordVerifiedDNSWrite(_ enabled: Bool, for ticket: RuntimeLifecycleTicket) {
         guard dnsIntentRevision == ticket.dnsIntentRevision else { return }
         dnsConfigured = enabled
-        if !enabled, case .stopSave(let revision) = modules.dns.pending, revision == ticket.dnsIntentRevision {
+        let ownEnable = enabled && ticket.actions.dns == .start && ticket.group == ticket.dnsIntentRevision
+        switch modules.dns.pending {
+        case .stopSave(let revision) where (!enabled || ownEnable) && revision == ticket.dnsIntentRevision:
             modules.dns.pending = nil
+        case .start(var start) where start.displacesOwedSave:
+            start.displacesOwedSave = false
+            modules.dns.pending = .start(start)
+        case .stopSave, .start, nil:
+            break
         }
     }
 
@@ -188,8 +202,9 @@ struct RuntimeModuleIntents: Equatable, Sendable {
             if let expected = request.expectedRevisions[module], expected != modules[module].revision {
                 return .failure(.stale(module))
             }
-            // A configured Start is no DNS intent, so it may not displace the disable save a session Stop still owes from DNS's one slot.
-            if request.actions[module] == .configuredStart, modules[module].pending.isStopSave {
+            // A configured Start is no DNS intent, so it may not displace the disable save a session Stop still owes from DNS's one slot,
+            // held there itself or by an explicit DNS Start that displaced it.
+            if request.actions[module] == .configuredStart, modules[module].pending.owesStopSave {
                 return .failure(.busy(module))
             }
         }
@@ -197,6 +212,8 @@ struct RuntimeModuleIntents: Equatable, Sendable {
         let group = counter
         // Only an explicit Start changes a module's control. The companion is recorded in the ticket, and DNS's slot, save and revision stay.
         for module in actionable where request.actions[module] == .start || request.actions[module] == .configuredStart {
+            // A DNS Start carries the disable save the slot still owes, never ends it (decision 0015).
+            let displacesOwedSave = module == .dns && modules.dns.pending.owesStopSave
             supersede(module, at: group)
             var intent = modules[module]
             // A Start that replaces an authorized one not yet settled inherits its prior and takes the module from it at once: the
@@ -210,7 +227,8 @@ struct RuntimeModuleIntents: Equatable, Sendable {
                 group: group,
                 priorEnabled: intent.enabled,
                 priorFenced: intent.fenced,
-                configured: request.actions[module] == .configuredStart
+                configured: request.actions[module] == .configuredStart,
+                displacesOwedSave: displacesOwedSave
             ))
             intent.startedGroup = nil
             intent.revision = group
@@ -282,9 +300,18 @@ struct RuntimeModuleIntents: Equatable, Sendable {
         }
     }
 
+    /// Ends a group's pending members. A DNS member that displaced an owed disable save and ended unauthorized, with no verified write of its
+    /// own, gives the save back, keyed to the current DNS intent so a later verified disable under it fulfils the obligation.
     private mutating func endGroup(_ group: Int, at revision: Int?) {
         for module in ControlModule.allCases where modules[module].pending?.group == group {
-            modules[module].pending = nil
+            var vacated: RuntimeModulePending?
+            if case .start(let start) = modules[module].pending, start.displacesOwedSave {
+                guard let intentRevision = dnsIntentRevision else {
+                    preconditionFailure("a DNS Start is admitted only under a DNS intent revision, and only a Stop at the maximum clears it")
+                }
+                vacated = .stopSave(revision: intentRevision)
+            }
+            modules[module].pending = vacated
             if let revision { modules[module].revision = revision }
         }
     }
@@ -426,5 +453,14 @@ private extension Optional where Wrapped == RuntimeModulePending {
     var isStopSave: Bool {
         if case .stopSave = self { return true }
         return false
+    }
+
+    /// Whether the slot still owes a session Stop's disable save: the save itself, or a Start that displaced it unresolved.
+    var owesStopSave: Bool {
+        switch self {
+        case .stopSave: true
+        case .start(let start): start.displacesOwedSave
+        case nil: false
+        }
     }
 }

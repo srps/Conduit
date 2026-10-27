@@ -16,8 +16,27 @@ final class PhysicalLifecycle {
     /// Only `run` sets it, once the effect owns the slot, and the effect clears it itself before it completes, so a waiter never awaits a
     /// finished handle.
     private var active: Task<Void, Error>?
+    /// The one whole start in flight and its epoch: its preparation before the bind as well as the bind, up to what it publishes. A newer
+    /// start, or a restart under the same epoch, replaces it, and a start clears it only while it holds that start's own completion, so a
+    /// finished older one never clears a newer one.
+    private var start: (epoch: Int, completion: Task<Void, Error>)?
 
     nonisolated init() {}
+
+    /// The completion of the start that is the latest admitted operation, while it runs. An equivalent start joins it and gets its real
+    /// result, rather than reading a `starting` snapshot as done. After a stop is admitted there is none: a start then runs after that stop.
+    func joinableStart() -> Task<Void, Error>? {
+        guard admitsRunning, let start, start.epoch == epoch else { return nil }
+        return start.completion
+    }
+
+    /// Runs a whole start admitted at `epoch` as the joinable completion, and returns or throws its own result.
+    func runStart(epoch: Int, _ body: @escaping @MainActor () async throws -> Void) async throws {
+        let completion = Task<Void, Error> { @MainActor in try await body() }
+        start = (epoch, completion)
+        defer { if self.start?.completion == completion { self.start = nil } }
+        try await completion.value
+    }
 
     /// Admits a start (`running`) or a stop, superseding every operation admitted before it, and returns its epoch.
     func admit(running: Bool) -> Int {

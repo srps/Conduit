@@ -734,7 +734,10 @@ package final class ProxyOrchestrator {
             let epoch = dnsLifecycle.epoch
             emitEvent(.config, "config.dns_restart", detail: "reason=dns_section")
             logStore.log(.notice, "Config reload: DNS config changed, restarting DNS forwarder.", category: .network)
-            await restartDNS(epoch: epoch)
+            // The rebind is a start too: a start that finds it in flight joins its completion rather than reading `starting` as done.
+            await awaitInfallibleStart(category: .network) {
+                try await self.dnsLifecycle.runStart(epoch: epoch) { await self.restartDNS(epoch: epoch) }
+            }
         }
 
         if diff.tunnelsChanged && (snapshot.tunnelsRunState == .running || snapshot.tunnelsRunState == .warning)
@@ -1390,18 +1393,29 @@ package final class ProxyOrchestrator {
     }
 
     package func startProxy() async throws {
-        // An equivalent start in flight or running answers for itself. A stop still in flight is different: it tears down what this start
-        // would have joined, so this start runs after it instead of returning as though the listeners were still up.
+        // An equivalent start in flight answers with its own completion, its PAC and probe work included, so a caller never takes its
+        // `starting` for done: it returns once that start published `running`, and throws what that start threw. One admitted after a stop
+        // runs after that stop, and is joinable too. A start already running answers for itself. A stop still in flight is different: it
+        // tears down what this start would have found, so this start runs after it instead of returning as though the listeners were up.
+        if let inFlight = proxyLifecycle.joinableStart() {
+            try await inFlight.value
+            return
+        }
         let state = snapshot.runtimeStatus.state
         guard (state != .starting && state != .running) || stopsInFlight > 0 else { return }
+        // Admitted and published as starting in one turn, so a stop admitted after it always publishes over it.
         let epoch = proxyLifecycle.admit(running: true)
         emitEvent(.lifecycle, "proxy.starting")
-
         mutateSnapshot {
             $0.runtimeStatus.state = .starting
             $0.proxyError = nil
         }
+        try await proxyLifecycle.runStart(epoch: epoch) { try await self.runProxyStart(epoch: epoch) }
+    }
 
+    /// The rest of the proxy start admitted at `epoch`, its PAC and probe work, bind and publication, run as `proxyLifecycle`'s joinable
+    /// completion.
+    private func runProxyStart(epoch: Int) async throws {
         do {
             // A VPN report during startup supersedes the probe; the listener
             // is not up yet, so that report reacts to nothing and this probe
@@ -1616,11 +1630,29 @@ package final class ProxyOrchestrator {
     }
 
     package func startDNS() async {
-        // A start in flight or running, with no stop admitted since, answers for itself, as `startProxy` does: rebinding would close live
-        // listeners for nothing. A DNS config edit rebinds through `restartDNS`; a start after a stop runs after that stop's teardown.
+        // A start in flight, a config rebind included, answers with its own completion, the forwarder and the transparent proxy together,
+        // as `startProxy` does. One running, with no stop admitted since, answers for itself: rebinding would close live listeners for
+        // nothing. A DNS config edit rebinds through `restartDNS`; a start after a stop runs after that stop's teardown.
+        if let inFlight = dnsLifecycle.joinableStart() {
+            await awaitInfallibleStart(category: .network) { try await inFlight.value }
+            return
+        }
         let state = snapshot.dnsRunState
         guard (state != .starting && state != .running) || !dnsLifecycle.admitsRunning else { return }
-        await runDNSStart(epoch: dnsLifecycle.admit(running: true))
+        let epoch = dnsLifecycle.admit(running: true)
+        await awaitInfallibleStart(category: .network) {
+            try await self.dnsLifecycle.runStart(epoch: epoch) { await self.runDNSStart(epoch: epoch) }
+        }
+    }
+
+    /// Awaits a start whose body cannot fail, its own or one it joined. Its outcome is the snapshot it published; a thrown error is
+    /// unreachable today and is logged, as `runInfallibleEffect` does.
+    private func awaitInfallibleStart(category: LogCategory, _ start: () async throws -> Void) async {
+        do {
+            try await start()
+        } catch {
+            logStore.log(.error, "Listener start failed: \(error.localizedDescription)", category: category)
+        }
     }
 
     /// Binds the forwarder, then the transparent proxy, as one effect for `epoch`, and publishes each only while `epoch` is the latest. A
@@ -1711,8 +1743,13 @@ package final class ProxyOrchestrator {
     }
 
     package func startTunnels() async {
-        // A start in flight or running, with no stop admitted since, answers for itself: rebinding would close live listeners and reset
-        // the session count under sessions that outlive them. A config edit has its own reconcile; a start after a stop runs after it.
+        // A start in flight answers with its own completion, as `startProxy` does. One running, with no stop admitted since, answers for
+        // itself: rebinding would close live listeners and reset the session count under sessions that outlive them. A config edit has its
+        // own reconcile; a start after a stop runs after it.
+        if let inFlight = tunnelLifecycle.joinableStart() {
+            await awaitInfallibleStart(category: .tunnel) { try await inFlight.value }
+            return
+        }
         let state = snapshot.tunnelsRunState
         guard ![.starting, .running, .warning].contains(state) || !tunnelLifecycle.admitsRunning else { return }
         let currentConfig = config
@@ -1780,8 +1817,17 @@ package final class ProxyOrchestrator {
             maxPerTunnel: currentConfig.maxSessionsPerTunnel
         )
 
-        // The listeners bind, and publish, as one effect. A stop admitted during the bind closes them once the effect ends, so a superseded
-        // start publishes nothing and starts no prober.
+        // The listeners bind, and publish, as one effect, run as `tunnelLifecycle`'s joinable start. A stop admitted during the bind closes
+        // them once the effect ends, so a superseded start publishes nothing and starts no prober.
+        await awaitInfallibleStart(category: .tunnel) {
+            try await self.tunnelLifecycle.runStart(epoch: epoch) {
+                await self.bindTunnelListeners(activeTunnels, config: currentConfig, epoch: epoch)
+            }
+        }
+    }
+
+    /// The tunnel start's one physical effect for `epoch`: bind the listeners, then publish what bound.
+    private func bindTunnelListeners(_ activeTunnels: [TunnelDefinition], config currentConfig: ProxyConfig, epoch: Int) async {
         await runInfallibleEffect(tunnelLifecycle, epoch: epoch, category: .tunnel) {
             // A start superseded after its bind by this one, with a stop admitted between that never ran its teardown, left listeners
             // open: close those listeners first, so nothing binds twice. Only the listeners: the pool is shared with the transparent proxy,

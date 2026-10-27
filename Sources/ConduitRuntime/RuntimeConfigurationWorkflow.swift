@@ -15,8 +15,8 @@ package enum RuntimeStartRefusal: LocalizedError, Equatable, Sendable {
     case intentExhausted
     /// A terminal stop has latched, so no Start runs in this process.
     case terminated
-    /// This Start joined an identical Start in flight, and that Start ended without leaving the runtime running. This call does not
-    /// claim a start that did not happen.
+    /// This Start joined a start in flight, an identical host Start or the kernel's proxy start, and that start ended without leaving the
+    /// runtime running. This call does not claim a start that did not happen.
     case notRunning
     /// DNS still owes a session Stop's disable save, which this Start may not displace. Nothing was admitted.
     case stopSaveOwed
@@ -32,7 +32,7 @@ package enum RuntimeStartRefusal: LocalizedError, Equatable, Sendable {
         case .held: "the configuration inputs did not verify or block a start, so nothing was started"
         case .intentExhausted: "the intent generation is at its maximum, so the start was not admitted"
         case .terminated: "a terminal stop has latched, so no start runs in this process"
-        case .notRunning: "the identical start this call joined ended without leaving the runtime running"
+        case .notRunning: "the start this call joined ended without leaving the runtime running"
         case .stopSaveOwed: "DNS still owes a stop's disable save, so the start was not admitted"
         case .superseded: "a newer start or stop, or a change or loss of the saved input it captured, ended this start before it ran"
         case .stale(let module): "the \(module.rawValue) revision moved since it was observed, so the whole request was refused"
@@ -271,20 +271,31 @@ final class RuntimeConfigurationWorkflow {
         case notOwed
         /// The disable verified, and the obligation ended.
         case saved
-        /// The obligation stays owed: the store's slot was taken, or the write did not verify. Nothing retries it; the next explicit Stop,
-        /// save or reload attempt is the next chance.
+        /// The obligation stays owed: the store's slot was taken, the write did not verify, or a pending explicit DNS Start carries it and
+        /// nothing was written. Nothing retries it; the next explicit Stop, save or reload attempt is the next chance.
         case owed
     }
 
     /// Persists the disable a session DNS Stop owes, through the store's runtime-only lifecycle commit (decision 0015): the canonical
     /// stager, the legacy-preservation checks and the runtime baseline guard all apply, and no platform file is touched. The write is claimed
     /// only while that Stop's save is still the one owed, and the obligation ends only once the write verifies. It never retries.
+    /// An explicit DNS Start pending in the slot may carry the obligation instead: it is still owed, and that Start's own verified write,
+    /// or its end without one, settles it, so this writes nothing.
     func saveOwedDNSStop() async -> (save: DNSStopSave, events: [ConfigurationWorkflowEvent]) {
-        let owed = intent.withLockedValue { state -> Int? in
-            if case .stopSave(let revision) = state.modules.dns.pending { return revision }
-            return nil
+        enum Owed { case save(revision: Int), carried, notOwed }
+        let owed = intent.withLockedValue { state -> Owed in
+            switch state.modules.dns.pending {
+            case .stopSave(let revision): .save(revision: revision)
+            case .start(let start) where start.displacesOwedSave: .carried
+            case .start, nil: .notOwed
+            }
         }
-        guard let revision = owed else { return (.notOwed, []) }
+        let revision: Int
+        switch owed {
+        case .save(let owedRevision): revision = owedRevision
+        case .carried: return (.owed, [])
+        case .notOwed: return (.notOwed, [])
+        }
         operationsInFlight += 1
         defer { operationsInFlight -= 1 }
         let intent = self.intent

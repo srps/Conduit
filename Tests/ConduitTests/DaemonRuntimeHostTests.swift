@@ -3102,6 +3102,10 @@ final class DaemonRuntimeHostTests: XCTestCase {
         if case .failure(let error) = await second.result { XCTFail("the joining start threw \(error)") }
         XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running)
         XCTAssertTrue(harness.wifi.routesThroughAProxy, "the first start applied its surfaces for both")
+        let settled = host.orchestrator.eventLog.events.settledValues
+        XCTAssertEqual(settled.map(\.settlement.module), [.proxy, .dns, .tunnels],
+                       "the joined effect records each member once, and the joiner records none of its own")
+        XCTAssertEqual(Set(settled.map(\.group)), [host.workflow.generation], "under the joiner's group, which adopted the effect")
         await host.stopRuntime()
         XCTAssertFalse(harness.wifi.routesThroughAProxy)
     }
