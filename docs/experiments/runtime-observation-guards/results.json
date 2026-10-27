@@ -1,0 +1,105 @@
+{
+  "head": "8f5b71d676490ff60ee1c92ee5e0116cd8e88420",
+  "sourceTree": "3f3876b4a3ccff2059c8e78e1d1f6dd2977a130c",
+  "testTree": "eb26db22be038f1e943fb46b132257375e337590",
+  "driver_sha256": "bd6fb9fcab91376c22148bbd46e4f1d1d5597687f90db6b78a3950d03ec52b91",
+  "records": [
+    {
+      "name": "baseline",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "testTheHostsTypedEventsReachTheActualStreamAndTheWriterRecordsEachOnce|testTheShutdownAloneWakesAParkedWaitAfterWhatWasPublished|testASubmitBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound|testAnOpenBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound"
+      ],
+      "exit": 0,
+      "seconds": 8.111,
+      "timeout": false,
+      "intendedAssertion": false,
+      "compileOrCrashFailure": false,
+      "log": "baseline.log",
+      "assertionLines": []
+    },
+    {
+      "name": "event-feed",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "testTheHostsTypedEventsReachTheActualStreamAndTheWriterRecordsEachOnce"
+      ],
+      "exit": 1,
+      "seconds": 19.327,
+      "timeout": false,
+      "intendedAssertion": true,
+      "compileOrCrashFailure": false,
+      "log": "event-feed.log",
+      "assertionLines": [
+        "<repo>/Tests/ConduitTests/RuntimeHostControlStreamTests.swift:125: error: -[ConduitTests.RuntimeHostControlStreamTests testTheHostsTypedEventsReachTheActualStreamAndTheWriterRecordsEachOnce] : XCTAssertNil failed: \"readAborted(ConduitShared.RuntimeWaitEnd.deadlineExpired)\" - the stream stayed open",
+        "<repo>/Tests/ConduitTests/RuntimeHostControlStreamTests.swift:127: error: -[ConduitTests.RuntimeHostControlStreamTests testTheHostsTypedEventsReachTheActualStreamAndTheWriterRecordsEachOnce] : XCTAssertTrue failed - the proxy member's typed settlement reached the stream",
+        "<repo>/Tests/ConduitTests/RuntimeHostControlStreamTests.swift:135: error: -[ConduitTests.RuntimeHostControlStreamTests testTheHostsTypedEventsReachTheActualStreamAndTheWriterRecordsEachOnce] : XCTAssertNil failed: \"readAborted(ConduitShared.RuntimeWaitEnd.deadlineExpired)\" - the stream stayed open",
+        "<repo>/Tests/ConduitTests/RuntimeHostControlStreamTests.swift:136: error: -[ConduitTests.RuntimeHostControlStreamTests testTheHostsTypedEventsReachTheActualStreamAndTheWriterRecordsEachOnce] : XCTAssertTrue failed - the reload's typed observation reached the stream"
+      ]
+    },
+    {
+      "name": "shutdown-wakeup",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "testTheShutdownAloneWakesAParkedWaitAfterWhatWasPublished"
+      ],
+      "exit": 1,
+      "seconds": 8.61,
+      "timeout": false,
+      "intendedAssertion": true,
+      "compileOrCrashFailure": false,
+      "log": "shutdown-wakeup.log",
+      "assertionLines": [
+        "<repo>/Tests/ConduitTests/RuntimeHostControlStreamTests.swift:239: error: -[ConduitTests.RuntimeHostControlStreamTests testTheShutdownAloneWakesAParkedWaitAfterWhatWasPublished] : XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(true)\") - the shutdown woke the parked wait"
+      ]
+    },
+    {
+      "name": "deadline-provenance",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "testASubmitBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound|testAnOpenBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound"
+      ],
+      "exit": 1,
+      "seconds": 6.991,
+      "timeout": false,
+      "intendedAssertion": true,
+      "compileOrCrashFailure": false,
+      "log": "deadline-provenance.log",
+      "assertionLines": [
+        "<repo>/Tests/ConduitTests/RuntimeServiceLifetimeTests.swift:190: error: -[ConduitTests.RuntimeServiceLifetimeTests testAnOpenBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound] : XCTAssertTrue failed - the typed budget refusal returns while the stalled owner still holds the round",
+        "<repo>/Tests/ConduitTests/RuntimeServiceLifetimeTests.swift:190: error: -[ConduitTests.RuntimeServiceLifetimeTests testASubmitBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound] : XCTAssertTrue failed - the typed budget refusal returns while the stalled owner still holds the round"
+      ]
+    },
+    {
+      "name": "restored",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "testTheHostsTypedEventsReachTheActualStreamAndTheWriterRecordsEachOnce|testTheShutdownAloneWakesAParkedWaitAfterWhatWasPublished|testASubmitBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound|testAnOpenBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound"
+      ],
+      "exit": 0,
+      "seconds": 5.82,
+      "timeout": false,
+      "intendedAssertion": false,
+      "compileOrCrashFailure": false,
+      "log": "restored.log",
+      "assertionLines": []
+    }
+  ],
+  "exactBytesRestored": true,
+  "productCleanAfter": true
+}

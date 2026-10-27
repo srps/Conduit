@@ -282,7 +282,10 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
         }
     }
 
-    private func invalidateCache() {
+    /// Drops the cached credential, so the next caller reads the store. A read already out stays out and its answer is dropped when it
+    /// lands, so there is still never more than one. Every save and clear here calls it; a host whose store another process writes calls it
+    /// when told, since that write passed no invalidation of its own (`ControlRuntimeCommand.credentialsChanged`). It reads nothing.
+    package func invalidateCachedCredentials() {
         cacheCondition.lock()
         invalidateLocked()
         cacheCondition.unlock()
@@ -292,7 +295,7 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     package func setCredentials(_ credentials: ProxyCredentials, for _: UpstreamProxy) throws {
         let identity = identityProvider()
         let envelope = try credentials.keychainData()
-        defer { invalidateCache() }
+        defer { invalidateCachedCredentials() }
         try keychain.save(secret: envelope, account: accountKey(for: identity))
     }
 
@@ -311,7 +314,7 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
             ntHash: hash
         )
         let envelope = try credentials.keychainData()
-        defer { invalidateCache() }
+        defer { invalidateCachedCredentials() }
         try keychain.save(secret: envelope, account: accountKey(for: config))
     }
 
@@ -330,7 +333,7 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     }
 
     package func clear(for config: ProxyConfig) throws {
-        defer { invalidateCache() }
+        defer { invalidateCachedCredentials() }
         try keychain.delete(account: accountKey(for: config))
     }
 

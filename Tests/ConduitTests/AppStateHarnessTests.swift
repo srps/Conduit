@@ -838,9 +838,10 @@ final class AppStateHarnessTests: XCTestCase {
         let onMainBefore = machine.privilege.mainThreadOperations.filter { $0 == .startDNSRelay }.count
         XCTAssertEqual(onMainBefore, 0, "`startDNS` asks from the platform work queue too")
 
-        appState.handleDNSHealthResult(alive: false)
+        let token = appState.dnsObservationToken
+        appState.handleDNSHealthResult(alive: false, armedBy: token)
         // A second tick while the first restart is out adds nothing.
-        appState.handleDNSHealthResult(alive: false)
+        appState.handleDNSHealthResult(alive: false, armedBy: token)
         await harness.deliveries()
 
         XCTAssertEqual(machine.privilege.commands(matching: .startDNSRelay).count, startsBefore + 1, "one restart for the two ticks")
@@ -2264,11 +2265,36 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(machine.dnsRelayRunning)
         let startsBefore = machine.privilege.commands(matching: .startDNSRelay).count
 
-        appState.handleDNSHealthResult(alive: false)
+        // The Stop's own run is current, so this reaches the manager, whose check is what is tested here.
+        appState.handleDNSHealthResult(alive: false, armedBy: appState.dnsObservationToken)
         await harness.deliveries()
 
         XCTAssertEqual(machine.privilege.commands(matching: .startDNSRelay).count, startsBefore)
         XCTAssertFalse(machine.dnsRelayRunning)
+    }
+
+    /// Twin of `RuntimeHostDNSHealthTests`: a health reading belongs to the DNS run whose timer armed it. Once a Stop and a newer Start
+    /// superseded run A, A's late failed reading restarts nothing for run B and degrades nothing. B's own failed reading restarts B's relay
+    /// once. Its degraded display is not asserted: this overlay is transient, the next snapshot may replace it, and it goes at the single
+    /// cut; the persistent degraded and recovered snapshot is the shared host's (`RuntimeHostDNSHealthTests`).
+    func testAHealthReadingFromASupersededDNSRunActsOnNothing() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        await appState.startDNS()
+        let runA = appState.dnsObservationToken
+        await appState.stopDNS()
+        await appState.startDNS()
+        XCTAssertTrue(runA.isSuperseded)
+        XCTAssertTrue(machine.dnsRelayRunning, "run B points system DNS at the relay")
+        let startsBefore = machine.privilege.commands(matching: .startDNSRelay).count
+
+        appState.handleDNSHealthResult(alive: false, armedBy: runA)
+        await harness.deliveries()
+        XCTAssertEqual(machine.privilege.commands(matching: .startDNSRelay).count, startsBefore, "no relay restart for a superseded run")
+        XCTAssertNil(appState.runtime.dnsError)
+
+        appState.handleDNSHealthResult(alive: false, armedBy: appState.dnsObservationToken)
+        await harness.deliveries()
+        XCTAssertEqual(machine.privilege.commands(matching: .startDNSRelay).count, startsBefore + 1, "run B's own reading restarts its relay")
     }
 
     /// An uninstall waits on an admin password dialog. The window that asked

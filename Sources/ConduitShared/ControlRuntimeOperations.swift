@@ -247,15 +247,18 @@ package struct ControlCompletion: Codable, Sendable, Equatable {
         try container.encode(result, forKey: .result)
     }
 
-    /// Lifecycle commands settle with no payload. Each observation command reports its own.
+    /// Stop, quit and a credentials invalidation settle with no payload. Each observation command reports its own, and a reload its typed
+    /// answer. A saved Start or Restart never completes here: it settles with its causal receipt (`configurationSettled`), or fails with
+    /// its closed cause when no commit ran.
     private static func pairs(command: ControlRuntimeCommandKind, result: ControlCommandResult) -> Bool {
         switch (command, result) {
-        case (.stop, .settled), (.restart, .settled), (.quit, .settled): true
+        case (.stop, .settled), (.quit, .settled), (.credentialsChanged, .settled): true
         case (.stop, .dnsDisable): true
         case (.testUpstream, .upstreamProbe): true
         case (.testDNS, .dnsLiveness): true
         case (.refreshPreflight, .preflight): true
         case (.setLaunchAtLogin, .platformWrite): true
+        case (.reload, .reload): true
         default: false
         }
     }
@@ -269,8 +272,8 @@ package enum ControlOperationOutcome: Codable, Sendable, Equatable {
     /// Some modules completed and others did not. See `ControlModuleOutcomes`.
     case partiallyCompleted(ControlModuleOutcomes)
     case failed(ControlFailureCode)
-    /// A private editor update settled: its causal receipt, whatever each file and module came to. It is settlement, never admission,
-    /// and it carries no configuration value.
+    /// A private editor update, or a saved Start or Restart whose preparation ran its commit, settled: its causal receipt, whatever each
+    /// file and module came to. It is settlement, never admission or success, and it carries no configuration value.
     case configurationSettled(ControlConfigurationReceipt)
     /// A private preferences update settled: its causal receipt. Settlement only, with no configuration value.
     case preferencesSettled(ControlPreferencesReceipt)

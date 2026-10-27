@@ -128,7 +128,7 @@ extension ControlCommandResult {
             try budget.text(probe.name)
             try budget.text(probe.endpoint)
             try budget.elements(probe.displayNotices.count)
-        case .settled, .dnsLiveness, .preflight, .platformWrite, .dnsDisable:
+        case .settled, .dnsLiveness, .preflight, .platformWrite, .dnsDisable, .reload:
             break
         }
     }
@@ -220,8 +220,8 @@ extension ControlTypedRuntimeEvent {
         switch self {
         case .lifecycle(let lifecycle):
             try lifecycle.measure(into: &budget)
-        case .configWorkflow, .runtimeService:
-            // Closed enums and bounded integers only: no free text to count, as the lifecycle's closed cases.
+        case .configWorkflow, .runtimeService, .proxyRecovery:
+            // Closed enums, Booleans and bounded integers only: no free text to count, as the lifecycle's closed cases.
             break
         }
     }

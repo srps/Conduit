@@ -17,7 +17,7 @@ enum RuntimePartition: Hashable, Sendable {
         switch command {
         case .stop(let module): .stop(module)
         case .quit: .quit
-        case .restart, .testDNS, .testUpstream, .refreshPreflight, .setLaunchAtLogin: .ordinary
+        case .start, .restart, .testDNS, .testUpstream, .refreshPreflight, .setLaunchAtLogin, .credentialsChanged, .reload: .ordinary
         }
     }
 

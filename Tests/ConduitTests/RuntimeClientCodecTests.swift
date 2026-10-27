@@ -95,7 +95,9 @@ final class RuntimeClientCodecTests: XCTestCase {
                 configRevision: try XCTUnwrap(ControlConfigRevision(rawValue: 2)),
                 upstreamID: ControlUpstreamID(rawValue: uuid(7))
             )),
-            .refreshPreflight,
+            .refreshPreflight(helperReplaced: false),
+            .refreshPreflight(helperReplaced: true),
+            .credentialsChanged,
         ]
         for command in commands {
             let message = try submit(command)
@@ -204,7 +206,7 @@ final class RuntimeClientCodecTests: XCTestCase {
     }
 
     func testEncodingIsDeterministic() throws {
-        let message = try submit(.refreshPreflight)
+        let message = try submit(.refreshPreflight(helperReplaced: false))
         XCTAssertEqual(
             try ControlRuntimeCodec.encodeFrame(message, limits: limits),
             try ControlRuntimeCodec.encodeFrame(message, limits: limits)
@@ -557,7 +559,7 @@ final class RuntimeClientCodecTests: XCTestCase {
 
     func testFramerHandlesFragmentedAndCoalescedFrames() throws {
         let first = try ControlRuntimeCodec.encodeFrame(try submit(.testDNS, id: 1), limits: limits)
-        let second = try ControlRuntimeCodec.encodeFrame(try submit(.refreshPreflight, id: 2), limits: limits)
+        let second = try ControlRuntimeCodec.encodeFrame(try submit(.refreshPreflight(helperReplaced: false), id: 2), limits: limits)
         let stream = first + second
 
         var byteByByte = ControlRuntimeLineFramer(limits: limits)
@@ -570,7 +572,7 @@ final class RuntimeClientCodecTests: XCTestCase {
         try byteByByte.finish()
         XCTAssertEqual(payloads.count, 2)
         XCTAssertEqual(try ControlRuntimeCodec.decodeFrame(payloads[0], limits: limits), try submit(.testDNS, id: 1))
-        XCTAssertEqual(try ControlRuntimeCodec.decodeFrame(payloads[1], limits: limits), try submit(.refreshPreflight, id: 2))
+        XCTAssertEqual(try ControlRuntimeCodec.decodeFrame(payloads[1], limits: limits), try submit(.refreshPreflight(helperReplaced: false), id: 2))
 
         var coalesced = ControlRuntimeLineFramer(limits: limits)
         let (frames, consumed) = try drain(&coalesced, Array(stream))

@@ -42,6 +42,16 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         }
     }
 
+    /// Ends what a failed step left pending, without awaiting it. The manual clock never fires a deadline and a held cancellation never
+    /// completes on its own, so awaiting the caller after a failed step could hang the suite instead of failing the test.
+    private func abandonAfterFailure(_ harness: RuntimeServiceHarness, cancel: () -> Void) {
+        cancel()
+        harness.timing.releaseHeldCancellations()
+        harness.timing.fireAll()
+        harness.scheduling.drainAll()
+        harness.timing.releaseHeldCancellations()
+    }
+
     /// Opens one live subscription directly on the transport, and runs the open's owner hop.
     private func openStreamDirectly(_ harness: RuntimeServiceHarness, _ transport: RuntimeInMemoryTransport) async throws -> ControlRuntimeStream {
         let frame = try ControlRuntimeCodec.encodeFrame(
@@ -141,6 +151,111 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         guard case .accepted = live else { return XCTFail("a fresh call with a live deadline is admitted, got \(live)") }
     }
 
+    // MARK: - Budget refusal under a stalled owner
+
+    /// One budgeted call whose budget, shorter than the caller's deadline, ends while the owner is stalled: its round's hop is queued and
+    /// left un-run. The timer makes the typed refusal before any claim, so it reaches the caller at once while the hop still holds the
+    /// lane; draining the hop then runs the round unclaimed and releases the lane. It returns the caller's bytes, or nil after a failed
+    /// step, having ended what that step left pending instead of awaiting it.
+    private func budgetRefusalUnderAStalledOwner(
+        _ harness: RuntimeServiceHarness,
+        _ transport: RuntimeInMemoryTransport,
+        lane: RuntimeLane,
+        _ call: @escaping @Sendable () async throws -> Data
+    ) async throws -> Data? {
+        final class Answered: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            var value: Bool { lock.withLock { done } }
+            func set() { lock.withLock { done = true } }
+        }
+        let answered = Answered()
+        let caller = Task {
+            let bytes = try await call()
+            answered.set()
+            return bytes
+        }
+        // The call's own signals: its budget timer armed, and its one round queued in the seam.
+        let queued = await awaitState { harness.timing.armedTimerCount == 1 && harness.scheduling.pendingCount == 1 }
+        XCTAssertTrue(queued, "the call armed its budget timer and queued its round")
+        guard queued else {
+            abandonAfterFailure(harness) { caller.cancel() }
+            return nil
+        }
+
+        // Past the budget and short of the caller's deadline. The round stays in the seam: the owner is stalled.
+        harness.timing.advance(by: .seconds(1))
+        harness.timing.fireAll()
+        let detached = await awaitState { answered.value }
+        XCTAssertTrue(detached, "the typed budget refusal returns while the stalled owner still holds the round")
+        XCTAssertEqual(harness.scheduling.pendingCount, 1, "the round's hop has not run")
+        XCTAssertEqual(transport.lanes.inFlight(lane), 1, "the queued hop still holds the lane")
+        guard detached else {
+            abandonAfterFailure(harness) { caller.cancel() }
+            return nil
+        }
+        let refusal = try await caller.value
+
+        harness.scheduling.drainAll()
+        let released = await awaitState { transport.lanes.inFlight(lane) == 0 }
+        XCTAssertTrue(released, "the lane releases once the round has run unclaimed and the timer has ended")
+        return refusal
+    }
+
+    func testASubmitBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound() async throws {
+        let harness = try RuntimeServiceHarness()
+        let transport = harness.transport()
+        let limits = frameLimits
+        let id = 21
+        let frame = try ControlRuntimeCodec.encodeFrame(
+            ControlRuntimeMessage(
+                correlation: RuntimeServiceFixtures.requestID(id),
+                body: .request(ControlRuntimeRequest(budget: try ControlWireBudget(500), call: .submit(ControlOperationRequest(
+                    requestID: RuntimeServiceFixtures.requestID(id),
+                    expectedIncarnation: RuntimeServiceFixtures.incarnation(1),
+                    command: .restart(.proxy, ifLifecycleRevision: lifecycle)
+                ))))
+            ),
+            limits: limits
+        )
+        // The caller's deadline is past the request's budget, so the budget is the bound and its end is the typed refusal.
+        let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
+        let answer = try await budgetRefusalUnderAStalledOwner(harness, transport, lane: .ordinary) {
+            try await transport.exchange(frame, limits: limits, deadline: deadline)
+        }
+        guard let refusal = answer else { return }
+
+        let decoded = try ControlRuntimeCodec.decodeFullFrame(refusal, limits: limits)
+        XCTAssertEqual(decoded.body, .response(.admission(.rejected(.deadlineExpired))), "the submit's typed budget refusal")
+        XCTAssertTrue(harness.owner.fenceLog.isEmpty, "the drained round ran unclaimed and never reached the owner")
+        let lookup = try RuntimeServiceFixtures.lookupRequest(harness.core, id)
+        XCTAssertEqual(lookup, .unknown(.notRecorded), "nothing was admitted")
+    }
+
+    func testAnOpenBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound() async throws {
+        let harness = try RuntimeServiceHarness()
+        let transport = harness.transport()
+        let limits = frameLimits
+        let frame = try ControlRuntimeCodec.encodeFrame(
+            ControlRuntimeMessage(
+                correlation: RuntimeServiceFixtures.requestID(22),
+                body: .request(ControlRuntimeRequest(budget: try ControlWireBudget(500), call: .subscribe(.live)))
+            ),
+            limits: limits
+        )
+        let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
+        // An open's budget refusal is its stream's first frame, which the caller takes without an owner hop.
+        let answer = try await budgetRefusalUnderAStalledOwner(harness, transport, lane: .read) {
+            let stream = try await transport.openStream(frame, limits: limits, deadline: deadline)
+            return try await stream.next(deadline)
+        }
+        guard let refusal = answer else { return }
+
+        let decoded = try ControlRuntimeCodec.decodeFullFrame(refusal, limits: limits)
+        XCTAssertEqual(decoded.body, .response(.failure(.deadlineExpired)), "the open's typed budget refusal")
+        XCTAssertEqual(harness.core.openSubscriberCount, 0, "the drained round ran unclaimed and registered no subscriber")
+    }
+
     // MARK: - Cancelled timers and cleanup
 
     func testACancelledWaitKeepsItsReservationUntilItsTimerAndItsCleanupQuiesce() async throws {
@@ -179,6 +294,170 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         harness.timing.releaseHeldCancellations()
         let released = await awaitState { transport.lanes.inFlight(.stream) == 0 }
         XCTAssertTrue(released, "the reservation releases once the timer ends")
+        subscription.cancel()
+        harness.scheduling.drainAll()
+    }
+
+    /// The same successful handoff on a capacity-one lane: an answered Stop returns only once its reservation has released, so the next
+    /// Stop of the module is admitted at once, not refused busy. A Stop's lane holds one slot per module.
+    func testAnAnsweredStopReturnsOnlyAfterItsReservationReleasedSoTheNextStopIsNotBusy() async throws {
+        final class Answered: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            var value: Bool { lock.withLock { done } }
+            func set() { lock.withLock { done = true } }
+        }
+        let harness = try RuntimeServiceHarness()
+        let transport = harness.transport()
+        let client = try makeClient(harness, transport)
+        let incarnation = RuntimeServiceFixtures.incarnation(1)
+        let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
+        XCTAssertEqual(harness.limits.stopLaneCapacityPerModule, 1)
+        harness.timing.holdCancelledCompletions()
+
+        let answered = Answered()
+        let first = Task {
+            let admission = try await client.submit(.stop(.proxy), requestID: RuntimeServiceFixtures.requestID(11), expectedIncarnation: incarnation, deadline: deadline)
+            answered.set()
+            return admission
+        }
+        let queued = await awaitState { harness.scheduling.pendingCount > 0 }
+        XCTAssertTrue(queued)
+        harness.scheduling.drainAll()
+        let held = await awaitState { harness.timing.heldCancellationCount == 1 }
+        XCTAssertTrue(held, "the answered Stop cancelled its timer, whose completion is held")
+        XCTAssertFalse(answered.value, "the caller is not answered while the timer still holds the Stop's slot")
+        XCTAssertEqual(transport.lanes.inFlight(.stop(.proxy)), 1)
+        guard queued, held else { return abandonAfterFailure(harness) { first.cancel() } }
+
+        harness.timing.releaseHeldCancellations()
+        _ = try await first.value
+        XCTAssertEqual(transport.lanes.inFlight(.stop(.proxy)), 0, "the slot was returned before the caller was answered")
+
+        let second = Task {
+            try await client.submit(.stop(.proxy), requestID: RuntimeServiceFixtures.requestID(12), expectedIncarnation: incarnation, deadline: deadline)
+        }
+        let secondQueued = await awaitState { harness.scheduling.pendingCount > 0 }
+        XCTAssertTrue(secondQueued, "the next Stop reserved the slot and queued its round, not refused busy")
+        harness.scheduling.drainAll()
+        let secondHeld = await awaitState { harness.timing.heldCancellationCount == 1 }
+        XCTAssertTrue(secondHeld)
+        guard secondQueued, secondHeld else { return abandonAfterFailure(harness) { second.cancel() } }
+        harness.timing.releaseHeldCancellations()
+        _ = try await second.value
+        harness.scheduling.drainAll()
+    }
+
+    /// The ticket's complete release: a waiter that named no part to keep resumes only after the final end has returned the lane slot
+    /// and its release callback has returned, whether it registered before that end or arrived while the release was in progress. The
+    /// callback is held on a bounded gate; the gate is always opened, so a failure cannot strand the callback's thread.
+    func testSettledWaitsUntilTheReleaseCallbackHasReturned() async throws {
+        final class Flag: @unchecked Sendable {
+            private let lock = NSLock()
+            private var set = false
+            var value: Bool { lock.withLock { set } }
+            func mark() { lock.withLock { set = true } }
+        }
+        let harness = try RuntimeServiceHarness()
+        let lanes = RuntimeLaneCounter(limits: harness.limits)
+        for arrivesDuringRelease in [false, true] {
+            let entered = DispatchSemaphore(value: 0)
+            let gate = DispatchSemaphore(value: 0)
+            defer { gate.signal() }
+            let callbackReturned = Flag()
+            let ticket = try XCTUnwrap(lanes.reserve(.read, onQuiesced: {
+                entered.signal()
+                _ = gate.wait(timeout: .now() + 5)
+                callbackReturned.mark()
+            }))
+            let resumed = Flag()
+            var waiter: Task<Void, Never>?
+            if !arrivesDuringRelease {
+                waiter = Task { await ticket.settled(leaving: []); resumed.mark() }
+                for _ in 0..<100 { await Task.yield() }
+            }
+            DispatchQueue.global().async { ticket.end(.timer) }
+            XCTAssertEqual(entered.wait(timeout: .now() + 5), .success, "the final end began the release and entered its callback")
+            if arrivesDuringRelease {
+                waiter = Task { await ticket.settled(leaving: []); resumed.mark() }
+            }
+            for _ in 0..<100 { await Task.yield() }
+            XCTAssertFalse(resumed.value, "settled stays suspended while the release callback runs (arrives during release: \(arrivesDuringRelease))")
+            XCTAssertFalse(ticket.isReleased, "the release is not complete until its callback has returned")
+            XCTAssertEqual(lanes.inFlight(.read), 0, "the lane slot was returned before the callback")
+
+            gate.signal()
+            await waiter?.value
+            XCTAssertTrue(callbackReturned.value, "the waiter resumed only after the callback returned")
+            XCTAssertTrue(resumed.value)
+            XCTAssertTrue(ticket.isReleased)
+        }
+    }
+
+    /// A pull that delivers returns only once its reservation has fully released, as an answered private exchange does: with its
+    /// cancelled timer's completion held, its caller is not answered; once that completes, the answer arrives with the lane slot already
+    /// returned and the pull slot free, so the next pull succeeds at once, with no wait or retry in the caller.
+    func testADeliveredPullReturnsOnlyAfterItsReservationReleasedSoTheNextPullSucceeds() async throws {
+        final class Answered: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            var value: Bool { lock.withLock { done } }
+            func set() { lock.withLock { done = true } }
+        }
+        let harness = try RuntimeServiceHarness()
+        let transport = harness.transport()
+        let client = try makeClient(harness, transport)
+        let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
+        let subscription = try await runCall(harness.scheduling) { try await client.subscribe(.live, deadline: deadline) }
+        _ = try await subscription.next(deadline)
+        harness.timing.holdCancelledCompletions()
+
+        // One published event, so the first pull has a frame ready and delivers in its first round.
+        harness.core.ingest(ControlRuntimeEvent(timestamp: Date(timeIntervalSince1970: 0), kind: "proxy", event: "test.first"))
+        harness.scheduling.drainAll()
+        let answered = Answered()
+        let first = Task {
+            let frame = try await subscription.next(deadline)
+            answered.set()
+            return frame
+        }
+        let queued = await awaitState { harness.scheduling.pendingCount > 0 }
+        XCTAssertTrue(queued)
+        harness.scheduling.drainAll()
+        let held = await awaitState { harness.timing.heldCancellationCount == 1 }
+        XCTAssertTrue(held, "the delivered pull cancelled its timer, whose completion is held")
+        XCTAssertFalse(answered.value, "the caller is not answered while the timer still holds the reservation")
+        XCTAssertEqual(transport.lanes.inFlight(.stream), 1, "the timer still holds the lane")
+        guard queued, held else {
+            return abandonAfterFailure(harness) {
+                first.cancel()
+                subscription.cancel()
+            }
+        }
+
+        harness.timing.releaseHeldCancellations()
+        guard case .events = try await first.value else { return XCTFail("the first pull delivers the published event") }
+        XCTAssertEqual(transport.lanes.inFlight(.stream), 0, "the lane slot was returned before the caller was answered")
+
+        // The next pull starts at once: no busy refusal, and no wait or retry in the caller.
+        harness.core.ingest(ControlRuntimeEvent(timestamp: Date(timeIntervalSince1970: 1), kind: "proxy", event: "test.second"))
+        harness.scheduling.drainAll()
+        let second = Task { try await subscription.next(deadline) }
+        let secondQueued = await awaitState { harness.scheduling.pendingCount > 0 }
+        XCTAssertTrue(secondQueued, "the next pull was admitted and queued its round, not refused busy")
+        harness.scheduling.drainAll()
+        let secondHeld = await awaitState { harness.timing.heldCancellationCount == 1 }
+        XCTAssertTrue(secondHeld)
+        guard secondQueued, secondHeld else {
+            return abandonAfterFailure(harness) {
+                second.cancel()
+                subscription.cancel()
+            }
+        }
+        harness.timing.releaseHeldCancellations()
+        guard case .events = try await second.value else { return XCTFail("the next pull delivers the next event") }
+        XCTAssertEqual(transport.lanes.inFlight(.stream), 0)
+
         subscription.cancel()
         harness.scheduling.drainAll()
     }

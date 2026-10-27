@@ -1,0 +1,8 @@
+{
+  "productSourceCommit": "3ed13fac0a7418133a3da46c32cbabca112d5fea",
+  "result": "probe_compile_failure",
+  "runtimeReleaseBuild": "passed",
+  "modeRuns": 0,
+  "cause": "Probe-only VPNObservedState.disconnected calls omitted required reason label; corrected before separate 8p7pkC run",
+  "finalSuccessfulRun": "../3ed13fa-8p7pkC/metadata.json"
+}

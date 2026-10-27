@@ -1,0 +1,66 @@
+{"footprintOverBaselineBytes":0,"footprintPeakBytes":2097632,"mallocInUseBytes":146320,"mallocOverBaselineBytes":0,"mode":"codec-bounds","peakRSSBytes":10305536,"phaseMaxFootprintBytes":2097632,"phaseMaxMallocInUseBytes":146320,"phaseMaxResidentBytes":10223616,"phaseSamples":1,"phaseSeconds":0.000144917,"physicalFootprintBytes":2097632,"record":"stage","residentBytes":10223616,"seconds":0.00015729199999999998,"stage":"baseline"}
+{"clientAndHostShareOneProcess":true,"mode":"codec-bounds","outcomePollIntervalMS":1,"profile":"CANDIDATE-4K-64K-10K-4M measured experiment profile; not a shipping default or owner selection","record":"measurement-method","samplerEnabled":true,"samplerIntervalMS":1,"samplerTakesMallocZoneLocks":true,"statusSampleIntervalMS":2,"workerOutcomePollIntervalMS":2}
+{"aliasByteCapacityPerPartition":8960,"aliasCapacityPerPartition":64,"aliasPartitionAccountingDiscrepancy":false,"aliasPartitionsChargedByInitializer":5,"aliasPartitionsInSource":5,"aliasRecordBytesMeasured":140,"baselineFrameOverheadBytesMeasured":303,"budgetKind":"encoded-byte reservation from the actual initializer; not an allocation and not an RSS bound","collectionCaptureBytes":4194304,"collectionProofsPerKind":4,"collectionRetainedBytes":8388608,"collectionRowCapacity":10000,"collectionRowCapacityBasis":"experiment only; count and byte caps independent; list behaviour not selected","collectionRowRetentionSeconds":60,"collectionRowRevisionsPerKind":2,"controlLogByteCapacity":619584,"controlLogCapacity":64,"drainBytesPerTurn":65536,"drainItemsPerTurn":32,"ingressBytes":262144,"ingressCapacity":256,"initializerBudgetBytes":17082600,"label":"CANDIDATE-4K-64K-10K-4M measured experiment profile; not a shipping default or owner selection","laneCapacityEach":4,"latestSnapshotByteCapacity":65233,"maxEventBytes":8192,"maxEventBytesBasis":"probe choice; not derived from a catalogue sweep","maxReplyBytes":65536,"maxRequestBytes":4096,"mode":"codec-bounds","ordinaryPendingCapacity":8,"outcomeByteCapacity":615424,"outcomeCapacity":64,"privateCustodyKind":"one transfer and one admitted input, outside the service budget","privateReplyFrameCap":8388608,"privateRequestFrameCap":8388608,"record":"profile","retainedByteCeilingBytes":17082600,"retentionSeconds":300,"ringBytes":262144,"ringCapacity":256,"runtimeFileBytes":8388608,"sidecarFileBytes":131072,"stopLanePerModule":1,"subscriberLimit":4,"subscriberRecordBytes":1024,"subscriberRecordMinimumAccepted":80,"widestFinishedBytes":9681,"widestFinishedKind":"test-upstream","widestOutcomeBytes":9616,"widestOutcomeKind":"test-upstream","widestRowBytes":12796,"widestRowKind":"activeConnections"}
+{"mode":"codec-bounds","name":"profile.aliasPartitionsMatchSource","passed":true,"record":"check"}
+{"firstIssuedShapeFrameBytes":3763,"label":"actual private reply codec over a small observation","mode":"codec-bounds","record":"metadata-reply","widestMetadataDeltaBytes":118,"widestMetadataFrameBytes":3881}
+{"conditionalStartCompanion":"measured","label":"actual private request codec over a small configuration","measuredShapeFrameBytes":3229,"mode":"codec-bounds","record":"metadata-request","widestMetadataDeltaBytes":115,"widestMetadataFrameBytes":3344}
+{"call":"submit-stop-proxy","frameBytes":295,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-stop-dns","frameBytes":293,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-stop-tunnels","frameBytes":297,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-saved-start-proxy-companion","frameBytes":378,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-saved-start-tunnels","frameBytes":335,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-restart-proxy-companion","frameBytes":383,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-restart-tunnels","frameBytes":340,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-test-dns","frameBytes":282,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-test-upstream","frameBytes":389,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-refresh-preflight-helper-replaced","frameBytes":313,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-refresh-preflight","frameBytes":314,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-set-launch-at-login-false","frameBytes":427,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-set-launch-at-login-true","frameBytes":426,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-credentials-changed","frameBytes":293,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-reload","frameBytes":280,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"submit-quit-both-flushes","frameBytes":427,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"outcome","frameBytes":256,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"request-lookup","frameBytes":266,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"subscribe-live","frameBytes":160,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"subscribe-resume","frameBytes":244,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"read-page-activeConnections","frameBytes":309,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"read-page-upstreamHealth","frameBytes":306,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"read-page-tunnelBindings","frameBytes":306,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"read-page-tunnelDNSHosts","frameBytes":306,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"call":"read-snapshot","frameBytes":135,"framesWithinCandidateRequestCap":true,"mode":"codec-bounds","record":"ordinary-request"}
+{"calls":25,"candidateMaxRequestBytes":4096,"label":"widest legal forms the probe built; not a proven absolute maximum","mode":"codec-bounds","record":"ordinary-request-bounds","widestRequestCall":"submit-set-launch-at-login-false","widestRequestFrameBytes":427}
+{"mode":"codec-bounds","name":"ordinary.everyRequestFramesWithinCandidateCap","passed":true,"record":"check"}
+{"finishedBytes":771,"kind":"configuration-receipt-conditional-dns","lookupReplyFrameBytes":856,"mode":"codec-bounds","operationFinishedFrameBytes":902,"outcomeBytes":706,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":780,"kind":"configuration-receipt-three-members","lookupReplyFrameBytes":865,"mode":"codec-bounds","operationFinishedFrameBytes":911,"outcomeBytes":715,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":952,"kind":"saved-start-receipt-prior-conditional-dns","lookupReplyFrameBytes":1037,"mode":"codec-bounds","operationFinishedFrameBytes":1083,"outcomeBytes":887,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":920,"kind":"saved-start-receipt-prior-tunnels","lookupReplyFrameBytes":1005,"mode":"codec-bounds","operationFinishedFrameBytes":1051,"outcomeBytes":855,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":401,"kind":"preferences-receipt","lookupReplyFrameBytes":486,"mode":"codec-bounds","operationFinishedFrameBytes":532,"outcomeBytes":336,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":499,"kind":"stop-dns-disable","lookupReplyFrameBytes":584,"mode":"codec-bounds","operationFinishedFrameBytes":630,"outcomeBytes":434,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":188,"kind":"stop-settled","lookupReplyFrameBytes":273,"mode":"codec-bounds","operationFinishedFrameBytes":319,"outcomeBytes":123,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":203,"kind":"credentials-changed","lookupReplyFrameBytes":288,"mode":"codec-bounds","operationFinishedFrameBytes":334,"outcomeBytes":138,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":276,"kind":"reload-widest","lookupReplyFrameBytes":361,"mode":"codec-bounds","operationFinishedFrameBytes":407,"outcomeBytes":211,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":188,"kind":"quit-settled","lookupReplyFrameBytes":273,"mode":"codec-bounds","operationFinishedFrameBytes":319,"outcomeBytes":123,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":240,"kind":"test-dns","lookupReplyFrameBytes":325,"mode":"codec-bounds","operationFinishedFrameBytes":371,"outcomeBytes":175,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":9681,"kind":"test-upstream","lookupReplyFrameBytes":9766,"mode":"codec-bounds","operationFinishedFrameBytes":9812,"outcomeBytes":9616,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":907,"kind":"refresh-preflight-widest-reading","lookupReplyFrameBytes":992,"mode":"codec-bounds","operationFinishedFrameBytes":1038,"outcomeBytes":842,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":907,"kind":"refresh-preflight-busy-read","lookupReplyFrameBytes":992,"mode":"codec-bounds","operationFinishedFrameBytes":1038,"outcomeBytes":842,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":392,"kind":"set-launch-at-login","lookupReplyFrameBytes":477,"mode":"codec-bounds","operationFinishedFrameBytes":523,"outcomeBytes":327,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":349,"kind":"partially-completed","lookupReplyFrameBytes":434,"mode":"codec-bounds","operationFinishedFrameBytes":480,"outcomeBytes":284,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":113,"kind":"failed","lookupReplyFrameBytes":198,"mode":"codec-bounds","operationFinishedFrameBytes":244,"outcomeBytes":48,"record":"outcome-bounds","withinCandidateBounds":true}
+{"finishedBytes":130,"kind":"superseded","lookupReplyFrameBytes":215,"mode":"codec-bounds","operationFinishedFrameBytes":261,"outcomeBytes":65,"record":"outcome-bounds","withinCandidateBounds":true}
+{"candidateControlLogByteCapacity":619584,"candidateMaxReplyBytes":65536,"candidateOutcomeByteCapacity":615424,"mode":"codec-bounds","record":"receipt-bounds","widestLookupKind":"test-upstream","widestLookupReplyFrameBytes":9766,"widestOperationFinishedFrameBytes":9812,"widestOperationFinishedKind":"test-upstream"}
+{"mode":"codec-bounds","name":"receipt.everyWidestOutcomeFitsCandidateBounds","passed":true,"record":"check"}
+{"acceptedBusyRead":7,"acceptedConclusiveRead":7,"helperStatuses":8,"mode":"codec-bounds","record":"preflight-pairs","refusedByItemsOrCodec":2}
+{"heldPairsRefusedForReloadPhase":30,"mode":"codec-bounds","record":"reload-variants","roundTripped":16,"variants":16,"widestLookupReplyFrameBytes":361}
+{"mode":"codec-bounds","name":"reload.everyVariantFramesAndRoundTrips","passed":true,"record":"check"}
+{"frameBytes":196,"framesWithinCandidateReplyCap":true,"kind":"admission-reply","mode":"codec-bounds","record":"reply-bounds"}
+{"frameBytes":237,"framesWithinCandidateReplyCap":true,"kind":"request-lookup-reply","mode":"codec-bounds","record":"reply-bounds"}
+{"frameBytes":138,"framesWithinCandidateReplyCap":true,"kind":"lookup-pending-reply","mode":"codec-bounds","record":"reply-bounds"}
+{"frameBytes":169,"framesWithinCandidateReplyCap":true,"kind":"lookup-unknown-reply","mode":"codec-bounds","record":"reply-bounds"}
+{"frameBytes":143,"framesWithinCandidateReplyCap":true,"kind":"failure-reply","mode":"codec-bounds","record":"reply-bounds"}
+{"frameBytes":241,"framesWithinCandidateReplyCap":true,"kind":"page-unavailable-reply","mode":"codec-bounds","record":"reply-bounds"}
+{"frameBytes":139,"framesWithinCandidateReplyCap":true,"kind":"stream-end-frame","mode":"codec-bounds","record":"reply-bounds"}
+{"frameBytes":144,"framesWithinCandidateReplyCap":true,"kind":"replay-caught-up-frame","mode":"codec-bounds","record":"reply-bounds"}
+{"mode":"codec-bounds","name":"reply.everyOtherReplyAndFrameFitsCandidateCap","passed":true,"record":"check"}
+{"failedChecks":0,"failures":[],"inconclusive":[],"mode":"codec-bounds","record":"summary","released":true}

@@ -4,6 +4,7 @@ import NIOConcurrencyHelpers
 import NIOCore
 import NIOHTTP1
 import NIOPosix
+import RuntimeEvents
 import XCTest
 @testable import ProxyKernel
 @testable import ProxyPAC
@@ -12,13 +13,21 @@ import XCTest
 /// a later-started probe overtook, must not change routing.
 @MainActor
 final class ConnectivityProbeSupersessionTests: XCTestCase {
-    /// Answers every request 200, so a health check through it passes.
+    /// Answers every request 200, so a health check through it passes. With
+    /// `failures`, that many first requests, on any connection, get 503.
     private final class HealthyProxy: ChannelInboundHandler {
         typealias InboundIn = HTTPServerRequestPart
         typealias OutboundOut = HTTPServerResponsePart
+        private let failures: NIOLockedValueBox<Int>?
+        init(failures: NIOLockedValueBox<Int>? = nil) { self.failures = failures }
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             if case .end = unwrapInboundIn(data) {
-                var head = HTTPResponseHead(version: .http1_1, status: .ok)
+                let fail = failures?.withLockedValue { remaining -> Bool in
+                    guard remaining > 0 else { return false }
+                    remaining -= 1
+                    return true
+                } ?? false
+                var head = HTTPResponseHead(version: .http1_1, status: fail ? .serviceUnavailable : .ok)
                 head.headers.add(name: "Content-Length", value: "0")
                 context.write(wrapOutboundOut(.head(head)), promise: nil)
                 context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
@@ -409,13 +418,14 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
 
     // MARK: - A stop during a health continuation's probe
 
-    /// A local upstream that answers every health check, so no recovery ladder runs and takes a scripted verdict.
-    private func healthyUpstream() async throws -> Channel {
+    /// A local upstream that answers every health check, so no recovery ladder runs and takes a scripted verdict. With `failures`, it
+    /// first fails that many checks.
+    private func healthyUpstream(failing failures: NIOLockedValueBox<Int>? = nil) async throws -> Channel {
         try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .childChannelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.configureHTTPServerPipeline()
-                    try channel.pipeline.syncOperations.addHandler(HealthyProxy())
+                    try channel.pipeline.syncOperations.addHandler(HealthyProxy(failures: failures))
                 }
             }.bind(host: "127.0.0.1", port: 0).get()
     }
@@ -449,6 +459,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .stopped, "the stop's state stands")
         XCTAssertNil(orchestrator.snapshot.bindings.proxyPort, "no listener came back")
         XCTAssertEqual(script.callCount, 2, "nothing probed again for the stopped runtime")
+        XCTAssertEqual(Self.recoveryOutcomes(orchestrator.eventLog), [], "a ladder the stop superseded reports no outcome")
     }
 
     /// The direct-mode retry probes while the timer that started it is still running. A stop admitted during that probe owns the state: the
@@ -547,6 +558,204 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .stopped, "the stop's state stands")
         XCTAssertNil(orchestrator.snapshot.bindings.proxyPort)
         try await upstream.close()
+    }
+
+    // MARK: - Typed ladder outcomes
+
+    /// One `onEvent` callback, as the outcome it reports, with the typed outcomes the event log already held when it ran.
+    private struct CallbackObservation: Equatable, Sendable {
+        let callback: ProxyRecoveryEvent
+        let recordedFirst: [ProxyRecoveryEvent]
+    }
+
+    /// One published snapshot's state, with the typed outcomes the event log already held when it was published.
+    private struct StateObservation: Equatable, Sendable {
+        let state: ProxyConnectionState
+        let recordedFirst: [ProxyRecoveryEvent]
+    }
+
+    /// What a client of the kernel sees of a ladder: the app's callback, which stays until the app's switch to the shared host, and
+    /// every published snapshot, each with what the log held at that moment.
+    private struct Observed: Sendable {
+        let callbacks = NIOLockedValueBox<[CallbackObservation]>([])
+        let states = NIOLockedValueBox<[StateObservation]>([])
+
+        /// The first published state that leaves the ladder's `.recovering`: the outcome site's own transition.
+        var firstStateLeavingRecovery: StateObservation? {
+            let published = self.states.withLockedValue { $0 }
+            guard let entered = published.firstIndex(where: { $0.state == .recovering }) else { return nil }
+            return published[entered...].first { $0.state != .recovering }
+        }
+    }
+
+    nonisolated private static func recoveryOutcomes(_ log: RuntimeEventLog) -> [ProxyRecoveryEvent] {
+        log.events.compactMap { event in
+            guard case .proxyRecovery(let outcome)? = event.typed else { return nil }
+            return outcome
+        }
+    }
+
+    private func observe(_ orchestrator: ProxyOrchestrator) -> Observed {
+        let observed = Observed()
+        let log = orchestrator.eventLog
+        orchestrator.onEvent = { event in
+            let callback: ProxyRecoveryEvent = switch event {
+            case .proxyRecovered: .recovered
+            case .proxyRecoveryFailed(_, let authenticationLikely): .failed(authenticationLikely: authenticationLikely)
+            }
+            observed.callbacks.withLockedValue {
+                $0.append(CallbackObservation(callback: callback, recordedFirst: Self.recoveryOutcomes(log)))
+            }
+        }
+        orchestrator.onSnapshotChange = { snapshot in
+            observed.states.withLockedValue {
+                $0.append(StateObservation(state: snapshot.runtimeStatus.state, recordedFirst: Self.recoveryOutcomes(log)))
+            }
+        }
+        return observed
+    }
+
+    /// Runs `body`, then `cleanup` whether or not `body` threw, so a failed unwrap or a cancelled wait does not leave a listener or a
+    /// fixture open for the rest of the run. The body's failure is the one reported.
+    private func withCleanup(_ body: () async throws -> Void, cleanup: () async throws -> Void) async throws {
+        do {
+            try await body()
+        } catch {
+            do {
+                try await cleanup()
+            } catch let cleanupError {
+                XCTFail("cleanup after a failed test body also failed: \(cleanupError)")
+            }
+            throw error
+        }
+        try await cleanup()
+    }
+
+    /// The first health check gets a 503 and starts the ladder; its first step's check passes. The kernel records one typed recovery,
+    /// with the detail derived from it, before the state it decides is published and before the app's callback runs.
+    func testALadderThatRecoversRecordsOneTypedOutcomeBeforeItsStateAndCallback() async throws {
+        let failures = NIOLockedValueBox(1)
+        let upstream = try await healthyUpstream(failing: failures)
+        var started: ProxyOrchestrator?
+        try await withCleanup {
+            var config = ProxyConfig()
+            config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
+            config.healthCheckIntervalSeconds = 3600
+            config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: try XCTUnwrap(upstream.localAddress?.port), priority: 0)]
+            let orchestrator = ProxyOrchestrator(config: config, authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
+                connectivityProbe: { upstreams in
+                    UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) })
+                })
+            started = orchestrator
+            let observed = observe(orchestrator)
+            try await orchestrator.startProxy()
+            for _ in 0..<5_000 where observed.callbacks.withLockedValue({ $0.isEmpty }) { try await Task.sleep(for: .milliseconds(1)) }
+
+            XCTAssertEqual(failures.withLockedValue { $0 }, 0, "the first health check failed")
+            XCTAssertEqual(Self.recoveryOutcomes(orchestrator.eventLog), [.recovered])
+            XCTAssertEqual(observed.firstStateLeavingRecovery, StateObservation(state: .running, recordedFirst: [.recovered]),
+                           "the outcome is recorded before the state it decides is published")
+            XCTAssertEqual(observed.callbacks.withLockedValue { $0 }, [CallbackObservation(callback: .recovered, recordedFirst: [.recovered])])
+            let record = try XCTUnwrap(orchestrator.eventLog.events.last { $0.typed == .proxyRecovery(.recovered) })
+            XCTAssertEqual(record.kind, .health)
+            XCTAssertEqual(record.detail, "outcome=recovered")
+            XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .running)
+        } cleanup: {
+            await started?.stopProxy()
+            try await upstream.close()
+        }
+    }
+
+    /// LEGACY BRANCH MECHANICS through existing testing seams, not proof that production reaches this branch. Source analysis finds
+    /// that today's routing makes an exhausted ladder's probe end in direct mode or with a reachable upstream before this branch: every
+    /// committed unreachable probe derives a direct-mode cause. This test builds the one state the branch reads, routing on the upstream
+    /// path with nothing reachable, through `setDirectModeForTesting` and `mutateSnapshotForTesting`: a wake probe under the same VPN
+    /// state commits first, so the ladder answers with its unreachable result, and the seam puts routing back on the upstream. It pins the
+    /// branch's mechanics only: one typed failure carrying the kernel's own authentication verdict and no summary text, recorded before
+    /// the state is published and before the callback runs.
+    func testTheLegacyFailedBranchRecordsOneTypedOutcomeBeforeItsStateAndCallback() async throws {
+        for summary in ["Upstream unreachable", "Proxy authentication rejected (HTTP 407)"] {
+            let authenticationLikely = summary.contains("rejected")
+            let script = ProbeScript()
+            let orchestrator = makeOrchestrator(script)
+            try await withCleanup {
+                let observed = observe(orchestrator)
+                _ = script.next(reachable: true)                             // start
+                let ladderProbe = script.next(reachable: false, hold: true)  // after the ladder exhausts against the dead port
+                try await orchestrator.startProxy()
+                for _ in 0..<5_000 where !script.isParked(ladderProbe) { try await Task.sleep(for: .milliseconds(1)) }
+                XCTAssertTrue(script.isParked(ladderProbe), "the exhausted ladder is probing")
+
+                _ = script.next(reachable: false)                            // wake, committed first
+                await orchestrator.handleSystemWake()
+                orchestrator.setDirectModeForTesting(.none)
+                orchestrator.mutateSnapshotForTesting { $0.runtimeStatus.lastHealthSummary = summary }
+                XCTAssertEqual(Self.recoveryOutcomes(orchestrator.eventLog), [])
+                script.release(ladderProbe)
+                for _ in 0..<5_000 where orchestrator.snapshot.runtimeStatus.state != .failed {
+                    try await Task.sleep(for: .milliseconds(1))
+                }
+
+                let failed = ProxyRecoveryEvent.failed(authenticationLikely: authenticationLikely)
+                XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .failed, summary)
+                XCTAssertEqual(details(orchestrator, "connectivity.probe_superseded"),
+                               ["by=newer_probe probed_vpn=unknown current_vpn=unknown reachable=false"])
+                XCTAssertEqual(Self.recoveryOutcomes(orchestrator.eventLog), [failed], summary)
+                XCTAssertEqual(observed.firstStateLeavingRecovery, StateObservation(state: .failed, recordedFirst: [failed]), summary)
+                XCTAssertEqual(observed.callbacks.withLockedValue { $0 }, [CallbackObservation(callback: failed, recordedFirst: [failed])],
+                               summary)
+                let record = try XCTUnwrap(orchestrator.eventLog.events.last { $0.typed == .proxyRecovery(failed) })
+                XCTAssertEqual(record.kind, .health)
+                XCTAssertEqual(record.detail, "outcome=failed authentication_likely=\(authenticationLikely)")
+            } cleanup: {
+                await orchestrator.stopProxy()
+            }
+        }
+    }
+
+    /// An exhausted ladder whose probe finds an upstream answering, hands the state to direct mode, or is superseded by a VPN
+    /// transition decides the state without an outcome to report: no typed record and no callback, as before.
+    func testAnExhaustedLadderThatEndsWithoutAnOutcomeRecordsNone() async throws {
+        enum Ending: CaseIterable { case upstreamReachable, directMode, superseded }
+        for ending in Ending.allCases {
+            let script = ProbeScript()
+            let orchestrator = makeOrchestrator(script)
+            try await withCleanup {
+                let observed = observe(orchestrator)
+                _ = script.next(reachable: true)
+                let ladderProbe = script.next(reachable: ending == .upstreamReachable, hold: true)
+                try await orchestrator.startProxy()
+                for _ in 0..<5_000 where !script.isParked(ladderProbe) { try await Task.sleep(for: .milliseconds(1)) }
+                XCTAssertTrue(script.isParked(ladderProbe), "\(ending)")
+
+                switch ending {
+                case .upstreamReachable, .directMode:
+                    script.release(ladderProbe)
+                    for _ in 0..<5_000 where orchestrator.snapshot.runtimeStatus.state == .recovering {
+                        try await Task.sleep(for: .milliseconds(1))
+                    }
+                    XCTAssertNotEqual(orchestrator.snapshot.runtimeStatus.state, .recovering, "\(ending)")
+                    XCTAssertEqual(orchestrator.snapshot.directModeCause,
+                                   ending == .directMode ? DirectModeCause.vpnDisconnected : DirectModeCause.none, "\(ending)")
+                case .superseded:
+                    _ = script.next(reachable: true)
+                    await orchestrator.handleVPNStateChange(.connected)
+                    script.release(ladderProbe)
+                    for _ in 0..<5_000 where details(orchestrator, "recovery.cooldown_cleared").isEmpty {
+                        try await Task.sleep(for: .milliseconds(1))
+                    }
+                    XCTAssertEqual(details(orchestrator, "recovery.cooldown_cleared"), ["reason=superseded"])
+                }
+
+                // After a superseded ladder the cooldown is cleared, so the reconnect's own health check may start another ladder against
+                // the dead port. That one cannot recover, and its probe answers reachable, so it reports no outcome either.
+                XCTAssertFalse(details(orchestrator, "recovery.exhausted").isEmpty, "\(ending)")
+                XCTAssertEqual(Self.recoveryOutcomes(orchestrator.eventLog), [], "\(ending)")
+                XCTAssertEqual(observed.callbacks.withLockedValue { $0 }, [], "\(ending)")
+            } cleanup: {
+                await orchestrator.stopProxy()
+            }
+        }
     }
 
     /// Hosts stamp reports on the monitor's callback. An older report that

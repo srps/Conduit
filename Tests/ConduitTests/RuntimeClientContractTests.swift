@@ -102,13 +102,19 @@ final class RuntimeClientContractTests: XCTestCase {
     // MARK: - Commands and admission
 
     /// The ordinary commands, with the login-item administration as the one write: it saves a single platform flag and applies nothing.
-    /// The process quit carries only its total budget and which flushes it reserves, never a value. Start and configuration apply stay off
-    /// this wire; they travel on the private editor request.
-    func testTheApprovedCommandSetExcludesStartAndConfigApply() throws {
+    /// The process quit carries only its total budget and which flushes it reserves, never a value. The saved Start names only a module and
+    /// its revision. Configuration apply stays off this wire; it travels on the private editor request.
+    func testTheApprovedCommandSetExcludesConfigApply() throws {
         XCTAssertEqual(
             ControlRuntimeCommandKind.allCases.map(\.rawValue),
-            ["stop", "restart", "test-dns", "test-upstream", "refresh-preflight", "set-launch-at-login", "quit"]
+            ["stop", "start", "restart", "test-dns", "test-upstream", "refresh-preflight", "set-launch-at-login", "credentials-changed",
+             "reload", "quit"]
         )
+        // The invalidation names nothing beyond itself: no secret, identity or digest.
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(ControlRuntimeCommand.credentialsChanged), as: UTF8.self),
+                       #"{"type":"credentials-changed"}"#)
+        XCTAssertThrowsError(try JSONDecoder().decode(ControlRuntimeCommand.self, from: Data(#"{"type":"refresh-preflight"}"#.utf8)),
+                             "a preflight refresh names whether the helper was replaced")
         let save = ControlRequestID(rawValue: UUID())
         let quit = ControlRuntimeCommand.quit(total: try ControlWireBudget(5_000), flush: try ControlQuitFlush(configuration: save, preferences: nil))
         XCTAssertEqual(try JSONDecoder().decode(ControlRuntimeCommand.self, from: try JSONEncoder().encode(quit)), quit)
@@ -116,7 +122,9 @@ final class RuntimeClientContractTests: XCTestCase {
         let sameID = Data(#"{"type":"quit","totalMilliseconds":5000,"flush":{"configuration":"\#(save.rawValue.uuidString)","preferences":"\#(save.rawValue.uuidString)"}}"#.utf8)
         XCTAssertThrowsError(try JSONDecoder().decode(ControlRuntimeCommand.self, from: sameID))
         let decoder = JSONDecoder()
-        XCTAssertThrowsError(try decoder.decode(ControlRuntimeCommand.self, from: Data(#"{"type":"start","module":"proxy"}"#.utf8)))
+        XCTAssertThrowsError(
+            try decoder.decode(ControlRuntimeCommand.self, from: Data(#"{"type":"start","module":"proxy"}"#.utf8)), "a Start names its revision"
+        )
         XCTAssertThrowsError(try decoder.decode(ControlRuntimeCommand.self, from: Data(#"{"type":"apply-config"}"#.utf8)))
     }
 
@@ -220,6 +228,43 @@ final class RuntimeClientContractTests: XCTestCase {
         for completion in [dns, preflight] {
             let data = try JSONEncoder().encode(completion)
             XCTAssertEqual(try JSONDecoder().decode(ControlCompletion.self, from: data), completion)
+        }
+    }
+
+    /// One observed reading tells a client both the held helper verdict to show and whether this pass's own read was busy. The flag is
+    /// written only where the verdict does not imply it, a busy read that kept a conclusive verdict, so a conclusive pass and a `busy`
+    /// verdict encode as before, and an absent flag decodes as what the verdict implies. The two pairs no pass produces are refused on
+    /// construction and on decode.
+    func testAPreflightReadingCarriesTheHeldVerdictAndWhetherItsReadWasBusy() throws {
+        let off = ControlIntegrationStatus(enabled: false, alreadyApplied: false, privilegeLevel: .none)
+        func items(_ helper: ControlHelperStatus, busy: Bool? = nil) throws -> ControlPreflightItems {
+            try ControlPreflightItems(systemProxy: off, environmentVariables: off, splitDNS: off, helper: helper, helperReadBusy: busy)
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        func text(_ value: ControlPreflightItems) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
+
+        let kept = try items(.installed, busy: true)
+        let keptText = try text(kept)
+        XCTAssertTrue(keptText.contains(#""helper":"installed","helperReadBusy":true"#), keptText)
+        XCTAssertEqual(try JSONDecoder().decode(ControlPreflightItems.self, from: Data(try text(kept).utf8)), kept)
+        for (helper, implied) in [(ControlHelperStatus.installed, false), (.busy, true), (.notInstalled, false)] {
+            let value = try items(helper)
+            XCTAssertEqual(value.helperReadBusy, implied, "\(helper)")
+            let valueText = try text(value)
+            XCTAssertFalse(valueText.contains("helperReadBusy"), valueText)
+            XCTAssertEqual(try JSONDecoder().decode(ControlPreflightItems.self, from: Data(valueText.utf8)), value)
+        }
+
+        XCTAssertThrowsError(try items(.busy, busy: false), "a busy verdict comes only from a busy read")
+        XCTAssertThrowsError(try items(.notInstalled, busy: true), "a busy read implies an installed binary")
+        let base = try text(try items(.installed))
+        for refused in [
+            base.replacingOccurrences(of: #""helper":"installed""#, with: #""helper":"busy","helperReadBusy":false"#),
+            base.replacingOccurrences(of: #""helper":"installed""#, with: #""helper":"notInstalled","helperReadBusy":true"#),
+        ] {
+            XCTAssertNotEqual(refused, base, "the mutation applies")
+            XCTAssertThrowsError(try JSONDecoder().decode(ControlPreflightItems.self, from: Data(refused.utf8)), refused)
         }
     }
 

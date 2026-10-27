@@ -30,6 +30,17 @@ extension ControlTypedRuntimeEvent {
             self = .configWorkflow(ControlConfigWorkflowEvent(event))
         case .runtimeService(let event):
             self = .runtimeService(ControlRuntimeServiceEvent(event))
+        case .proxyRecovery(let event):
+            self = .proxyRecovery(ControlProxyRecoveryEvent(event))
+        }
+    }
+}
+
+extension ControlProxyRecoveryEvent {
+    package init(_ event: ProxyRecoveryEvent) {
+        switch event {
+        case .recovered: self = .recovered
+        case .failed(let authenticationLikely): self = .failed(authenticationLikely: authenticationLikely)
         }
     }
 }

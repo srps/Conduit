@@ -1,0 +1,42 @@
+{
+  "head": "00a4b304c368107b353460e33f5a8dee1fbe2d17",
+  "target": "Sources/ConduitRuntime/RuntimePrivateEditor.swift",
+  "original_sha256": "6fc09b55f5f81093b4390e1699a6890806b9c282b7fbc442b214d0e46ca51a54",
+  "mutant_sha256": "e498fb3a71e54838493ecfc5abe415e4da379fb51a60ece1d81b3d13d1d0df77",
+  "model": "RuntimePrivateEditorAuthorityModelTests/testAllThreeStepHistoriesWithTheMenusSavedStartAndItsOwnSave",
+  "runs": [
+    {
+      "label": "baseline",
+      "exit": 0,
+      "seconds": 11.113,
+      "assertions": 0,
+      "fatal_or_crash": false
+    },
+    {
+      "label": "missing-start-prior",
+      "exit": 1,
+      "seconds": 8.375,
+      "assertions": 1,
+      "fatal_or_crash": false
+    },
+    {
+      "label": "restored",
+      "exit": 0,
+      "seconds": 10.743,
+      "assertions": 0,
+      "fatal_or_crash": false
+    }
+  ],
+  "byte_restored": true,
+  "passed": true,
+  "sourceTrees": {
+    "Sources": "de641e997c85ed7817a5438ffa2458c6e2a9bd66",
+    "Tests": "dccae165670c5d96186347c94f8e1d2428524863",
+    "scripts": "01bf59d6a5101a4103e0cbe353d05d7006de4913",
+    "Package.swift": "0173794e80f45eb7deeda702299f8ba24ac75fa4",
+    "Package.resolved": "4c6507fc79d91582604d35c34c9db137d7c5b4ac"
+  },
+  "intendedFailure": [
+    "$REPO/Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:208: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepHistoriesWithTheMenusSavedStartAndItsOwnSave] : XCTUnwrap failed: expected non-nil value of type \"ControlCommitPrior\" - readA \u2192 readA \u2192 startA"
+  ]
+}

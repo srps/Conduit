@@ -15,7 +15,7 @@ import RuntimeEvents
 /// The host is built through its one `effects` input, with each machine effect named here: the `FakeMachine` for the
 /// privilege client, `networksetup` and `launchctl`, an in-memory Keychain, a PAC evaluator, a port-holder probe and a
 /// loopback listener probe that never fetch, look up or connect to anything, a Kerberos stack that refuses every token,
-/// and no-op path and network observers.
+/// no-op path and network observers, and a wake source only the wake exercise fires.
 /// The state root is taken through the production bootstrap over a scratch directory, and the listener is a loopback
 /// port this scenario holds. Nothing reads the machine's proxy, resolver directory, home or Keychain, and no installed
 /// app or helper is reached.
@@ -125,14 +125,21 @@ enum RuntimeHostEffectsScenario {
                 assertions += modules.assertions
                 notes += modules.notes
             }
+            var woken = Shutdown(quiesced: false, assertions: [], notes: [], pinnedHost: nil)
             if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
                 && captured.quiesced && modules.quiesced {
+                woken = await exerciseWake(session: session!, environment: environment, fakes: fakes, home: home)
+                assertions += woken.assertions
+                notes += woken.notes
+            }
+            if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
+                && captured.quiesced && modules.quiesced && woken.quiesced {
                 releaseRoot(&session, environment: environment, scratch: scratch, releaseFailures: releaseFailures,
                             assertions: &assertions, notes: &notes)
             } else {
                 // The host keeps its session, so the root stays claimed for the rest of the process. The slot is the
                 // only reference this scenario keeps, and the scratch directory stays on disk for inspection.
-                unconfirmedHost = modules.pinnedHost ?? captured.pinnedHost ?? respelling.pinnedHost ?? source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
+                unconfirmedHost = woken.pinnedHost ?? modules.pinnedHost ?? captured.pinnedHost ?? respelling.pinnedHost ?? source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
                 assertions.append(.init("the shutdown is confirmed", false))
                 notes.append("shutdown not confirmed: host pinned until process exit; root and scratch kept at \(scratch.path)")
             }
@@ -152,8 +159,11 @@ enum RuntimeHostEffectsScenario {
     }
 
     /// Every machine effect one host run uses, from the run's fakes. Production selects its adapters in `ConduitDaemon`; this is the simulator's
-    /// explicit assembly over fakes and the owned scratch root. `pac` replaces the refusing PAC fake for a run that fetches one.
-    private static func effects(_ fakes: Fakes, home: URL, pac: (any PacEvaluator)? = nil) -> RuntimeHostEffects {
+    /// explicit assembly over fakes and the owned scratch root. `pac` replaces the refusing PAC fake for a run that fetches one. Each host
+    /// gets its own wake fake; only the wake exercise keeps and fires its own.
+    private static func effects(
+        _ fakes: Fakes, home: URL, pac: (any PacEvaluator)? = nil, wake: FakeSystemWakeObserver = FakeSystemWakeObserver()
+    ) -> RuntimeHostEffects {
         let machine = fakes.machine
         return RuntimeHostEffects(
             privilege: { _ in RuntimePrivilegeAdapters(client: machine, helperStatus: fakes.helper) },
@@ -169,6 +179,7 @@ enum RuntimeHostEffectsScenario {
             networkLocation: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil },
             vpnStatusMonitor: { _, _ in FakeVPNStatusObserver() },
+            wake: wake,
             homeDirectory: home,
             resolverDirectory: machine.resolverDirectory.path,
             stateFiles: StateFileAccess.operatingSystem()
@@ -445,7 +456,7 @@ enum RuntimeHostEffectsScenario {
                 held = error as? RuntimeStartRefusal
                 notes.append("captured start: \(error.localizedDescription)")
             }
-            await reload.value
+            _ = await reload.value
             check("the start whose capture was replaced reports its typed supersession", held == .superseded)
             check("the held start leaves no listener", host.status().bindings.proxyPort == nil)
             check("the held start leaves no system proxy", machine.service("Wi-Fi").webProxy.enabled == false)
@@ -478,8 +489,11 @@ enum RuntimeHostEffectsScenario {
 
     /// The per-module lifecycle facade of the actual host (decisions 0031, 0035, 0036 and 0037), over the run's fakes and an ephemeral DNS
     /// port. A proxy Start's companion starts configured DNS; a proxy Stop leaves DNS running; a session DNS Stop restores system DNS and
-    /// saves its disable; a menu Restart's companion then finds the fence; a request naming a moved revision is refused whole; an explicit
-    /// DNS Start enables DNS again; and the process quit latches, tears every module down and returns with every lane idle.
+    /// saves its disable; a menu Restart's companion then finds the fence; a request naming a moved revision is refused whole; the menu's
+    /// saved DNS Start through the framed client enables DNS again with its causal receipt, and a saved tunnels Start binds the loopback
+    /// tunnel without rewriting the pair; a preflight refresh reads the fake helper and a credentials notice completes, through the same
+    /// client; an explicit reload through it refuses a malformed file whole and adopts an external edit, writing neither (decision 0032);
+    /// and the process quit latches, tears every module down and returns with every lane idle.
     @MainActor
     private static func exerciseModuleLifecycle(
         session: StateRootSession,
@@ -498,6 +512,8 @@ enum RuntimeHostEffectsScenario {
         config.localPACEnabled = false
         config.pacRoutingEnabled = false
         config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        // One loopback tunnel on an ephemeral port, for the saved tunnels Start through the framed client.
+        config.tunnelDefinitions = [TunnelDefinition(localPort: 0, remoteHost: "127.0.0.1", remotePort: 9)]
         let host: RuntimeHost
         // The earlier hosts' events share the owned file, so only the events after this count are this host's.
         let earlier: Int
@@ -525,6 +541,8 @@ enum RuntimeHostEffectsScenario {
         }
 
         var quiesced = false
+        // Owned here, so the error path ends and joins it before the root is released.
+        var witness: Task<StreamWitness, Never>?
         do {
             let proxy = try await host.startProxy(conditionalDNS: true)
             check("a proxy Start reports its proxy started", proxy.modules.proxy == .started)
@@ -550,6 +568,9 @@ enum RuntimeHostEffectsScenario {
             let clients = try host.makeInMemoryControlClient(
                 limits: try controlProfile(), clientFrameLimits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
             )
+            // A witness stream read beside every step below until it ends, so it sees the host's own events as they are published.
+            let witnessStream = try await clients.control.subscribe(.live, deadline: RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now))
+            witness = Task { @MainActor in await readUntilEnd(witnessStream) }
             let viaClient = try await stopProxyThroughClient(clients.control)
             check("the client's snapshot shows the restarted proxy", viaClient.proxyShown)
             check("a proxy Stop through the framed client completes", viaClient.completed)
@@ -563,8 +584,54 @@ enum RuntimeHostEffectsScenario {
             check("a request naming a moved revision is refused whole", refusal == .stale(.dns))
             check("the refused request starts nothing and writes nothing", !machine.dnsRelayRunning && savedDNS() == false)
 
-            let dns = try await host.startDNS(expecting: PrivateModuleSlots(proxy: nil, dns: host.moduleRevisions.dns, tunnels: nil))
-            check("an explicit DNS Start enables DNS again", dns.modules.dns == .started && savedDNS() == true && machine.dnsRelayRunning)
+            // The menu's saved DNS Start through the framed client: no configuration value, the client's own observed DNS revision, and
+            // a causal receipt naming the runtime baseline its enable was conditional on and the one it wrote.
+            let dns = try await savedStartThroughClient(clients.control, .dns)
+            check("a saved DNS Start through the framed client enables DNS again",
+                  dns.receipt?.modules == [ControlModuleReceipt(module: .dns, result: .started)]
+                      && dns.receipt?.committedDNSForwarderEnabled == true && savedDNS() == true && machine.dnsRelayRunning)
+            check("its receipt names the baseline its enable was conditional on and the newer one it wrote", dns.receipt.map { receipt in
+                guard receipt.runtime.write == .persisted(reportedError: false), let prior = receipt.prior?.runtime,
+                      let written = receipt.runtime.baseline else { return false }
+                return written.version > prior.version
+            } ?? false)
+            check("the same Start at the revision it moved is refused whole", dns.staleRefused && savedDNS() == true)
+            let tunnels = try await savedStartThroughClient(clients.control, .tunnels)
+            check("a saved tunnels Start through the framed client binds the configured tunnel",
+                  tunnels.receipt?.modules == [ControlModuleReceipt(module: .tunnels, result: .started)]
+                      && tunnels.after.tunnelsRunState == .running && tunnels.after.dnsRunState == .running)
+            check("its unchanged saved pair verifies without a rewrite", tunnels.receipt.map { receipt in
+                receipt.runtime.write == .unchanged && receipt.prior?.runtime == receipt.runtime.baseline
+                    && receipt.committedDNSForwarderEnabled == true
+            } ?? false)
+            // The app's preflight and its credentials notice, through the same client: the fake helper answers installed.
+            let preflight = try await settleThroughClient(clients.control, .refreshPreflight(helperReplaced: true))
+            check("a preflight refresh through the framed client reads the installed helper", {
+                guard case .completed(let completion)? = preflight, case .preflight(let observation) = completion.result,
+                      case .observed(let items) = observation.reading else { return false }
+                return items.helper == .installed && !items.helperReadBusy
+            }())
+            let credentials = try await settleThroughClient(clients.control, .credentialsChanged)
+            check("a credentials notice through the framed client completes", {
+                guard case .completed(let completion)? = credentials else { return false }
+                return completion.command == .credentialsChanged && completion.result == .settled
+            }())
+
+            let valid = try Data(contentsOf: environment.configFile)
+            let malformed = Data("{".utf8)
+            try malformed.write(to: environment.configFile)
+            let refused = reloadResult(try await settleThroughClient(clients.control, .reload))
+            check("a malformed file reloaded through the framed client is refused whole and left as it is",
+                  refused == .refused(.invalidContent) && (try? Data(contentsOf: environment.configFile)) == malformed)
+            try valid.write(to: environment.configFile)
+            var external = try ProxyConfigPersistence.load(in: environment, allowMissing: false)
+            external.profileName = "Reloaded through the client"
+            try ProxyConfigPersistence.save(external, in: environment)
+            let edited = try Data(contentsOf: environment.configFile)
+            let adopted = reloadResult(try await settleThroughClient(clients.control, .reload))
+            check("an external edit reloaded through the framed client is adopted and its reconcile attempted under its admission",
+                  adopted == .adopted(.reconcileAttempted(currentAtEnd: true)) && host.status().profileName == external.profileName)
+            check("the reload writes nothing", (try? Data(contentsOf: environment.configFile)) == edited)
 
             let quit = try await quitThroughClient(clients)
             let stored = try AppPreferencesPersistence.load(in: environment)
@@ -572,7 +639,8 @@ enum RuntimeHostEffectsScenario {
             check("a framed Quit latches, admits its reserved preferences flush and completes", quit.completed)
             check("the reserved flush wrote the quit-time preferences",
                   quit.flushed && stored.preferredBrowserTestURL == "https://quit-flush.example.test/")
-            check("the quit leaves every module down", host.status().state == "stopped" && host.status().dnsRunState != "running")
+            check("the quit leaves every module down", host.status().state == "stopped" && host.status().dnsRunState != "running"
+                && host.status().tunnelsRunState != "running")
             check("the quit restores system DNS", !machine.dnsRelayRunning)
             check("the quit persists no disable", savedDNS() == true)
             var afterQuit: RuntimeStartRefusal?
@@ -582,6 +650,11 @@ enum RuntimeHostEffectsScenario {
                 afterQuit = refused
             }
             check("no Start runs after the quit", afterQuit == .terminated)
+            let seen = await witness?.value ?? StreamWitness()
+            witness = nil
+            check("the host's own typed events reach the actual stream", seen.dnsStartedEvent)
+            check("the witness stream receives the Quit's settlement before its end", seen.quitFinished)
+            check("the stream ends with hostShutdown after the quit's physical work", seen.ended == .streamClosed(.hostShutdown))
 
             let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
             check("the module host settles before its root is released", settled == .settled)
@@ -594,17 +667,60 @@ enum RuntimeHostEffectsScenario {
             check("each member and each companion records its own settlement once", written == [
                 .explicit(.proxy, .started), .conditionalDNS(.started),
                 .explicit(.proxy, .started), .conditionalDNS(.fenced),
-                .explicit(.dns, .started),
+                .explicit(.dns, .started), .explicit(.tunnels, .started),
             ])
         } catch {
             notes.append("module exercise error: \(error.localizedDescription)")
             await host.shutdown()
+            // The quit's end ends the witness; a cancel covers a stream that never got one. Joined either way.
+            witness?.cancel()
+            _ = await witness?.value
             let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
             let flush = await host.flushEvents()
             quiesced = settled == .settled && flush.allConfirmed
             assertions.append(.init("the module error path settled the host and confirmed its flush", quiesced))
         }
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// What the witness stream saw: whether the saved DNS Start's typed settlement and the Quit's settlement reached it, and what ended it.
+    /// Flags only, so reading holds nothing that grows with the stream.
+    private struct StreamWitness {
+        var dnsStartedEvent = false
+        var quitFinished = false
+        var ended: RuntimeClientError?
+    }
+
+    /// Reads one stream until it ends, bounded in frames and in each wait, so a stream that never ends fails a check instead of hanging.
+    @MainActor
+    private static func readUntilEnd(_ stream: RuntimeSubscription) async -> StreamWitness {
+        var witness = StreamWitness()
+        defer { stream.cancel() }
+        for _ in 0..<4_096 {
+            do {
+                switch try await stream.next(RuntimeDeadline.after(.seconds(10), from: ContinuousClock.now)) {
+                case .events(let batch):
+                    for case .known(let event) in batch.events {
+                        if case .lifecycle(.moduleSettled(let settlement, _))? = event.typed, settlement == .explicit(.dns, .started) {
+                            witness.dnsStartedEvent = true
+                        }
+                    }
+                case .operationFinished(let finished):
+                    if case .completed(let completion) = finished.outcome, completion.command == .quit {
+                        witness.quitFinished = true
+                    }
+                case .baseline, .snapshot, .replayCaughtUp, .end:
+                    continue
+                }
+            } catch let error as RuntimeClientError {
+                witness.ended = error
+                return witness
+            } catch {
+                witness.ended = .unexpectedReply
+                return witness
+            }
+        }
+        return witness
     }
 
     /// A proxy Stop through the host's in-memory control client. Its stream ends when this returns; the stream's cancel queues the one hop
@@ -628,6 +744,70 @@ enum RuntimeHostEffectsScenario {
             }
         }
         return (proxyShown, false)
+    }
+
+    /// One saved Start of `module` through the host's framed client (decision 0037): it names the module revision the client's own snapshot
+    /// stamp reads and carries no configuration value, and its settlement is the receipt the client reads. The same request is then sent
+    /// again at that revision, which the Start moved, and the host must refuse it whole. `after` is the client's next snapshot.
+    @MainActor
+    private static func savedStartThroughClient(
+        _ client: any RuntimeClient,
+        _ module: ControlModule
+    ) async throws -> (receipt: ControlConfigurationReceipt?, staleRefused: Bool, after: ControlRuntimeSnapshot) {
+        let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
+        let snapshot = try await client.readSnapshot(deadline: deadline)
+        guard let modules = snapshot.stamp.modules else { return (nil, false, snapshot) }
+        let observed = switch module {
+        case .proxy: modules.proxy
+        case .dns: modules.dns
+        case .tunnels: modules.tunnels
+        }
+        let stream = try await client.subscribe(.live, deadline: deadline)
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline)
+        func submit() async throws -> ControlAdmission {
+            try await client.submit(
+                .start(module, ifModuleRevision: observed), requestID: ControlRequestID(rawValue: UUID()),
+                expectedIncarnation: snapshot.stamp.incarnation, deadline: deadline
+            )
+        }
+        var receipt: ControlConfigurationReceipt?
+        if case .accepted(let operation) = try await submit() {
+            for _ in 0..<64 {
+                if case .operationFinished(let finished) = try await stream.next(deadline), finished.operationID == operation {
+                    if case .configurationSettled(let settled) = finished.outcome { receipt = settled }
+                    break
+                }
+            }
+        }
+        let staleRefused = try await submit() == .rejected(.staleRevision)
+        return (receipt, staleRefused, try await client.readSnapshot(deadline: deadline))
+    }
+
+    /// One command through the host's framed client, and its settlement, nil when it was not admitted or never settled within the bound.
+    @MainActor
+    private static func settleThroughClient(_ client: any RuntimeClient, _ command: ControlRuntimeCommand) async throws -> ControlOperationOutcome? {
+        let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
+        let incarnation = try await client.readSnapshot(deadline: deadline).stamp.incarnation
+        let stream = try await client.subscribe(.live, deadline: deadline)
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline)
+        let admission = try await client.submit(
+            command, requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: incarnation, deadline: deadline
+        )
+        guard case .accepted(let operation) = admission else { return nil }
+        for _ in 0..<64 {
+            if case .operationFinished(let finished) = try await stream.next(deadline), finished.operationID == operation {
+                return finished.outcome
+            }
+        }
+        return nil
+    }
+
+    /// The reload answer a settlement carries, nil for any other outcome.
+    private static func reloadResult(_ outcome: ControlOperationOutcome?) -> ControlReloadResult? {
+        guard case .completed(let completion)? = outcome, case .reload(let result) = completion.result else { return nil }
+        return result
     }
 
     /// A preferences save through the editor client, then the process quit through the framed client with its reserved preferences flush,
@@ -697,17 +877,18 @@ enum RuntimeHostEffectsScenario {
     }
 
     /// This scenario's own control-service profile. Every value is explicit and scenario-only, sized for one client and a handful of
-    /// operations; none is a shipping default.
+    /// operations; none is a shipping default. The event ring and the ingress carry the host's own events, so they are sized for a
+    /// Start's or a quit's burst, and one more subscriber holds the witness stream beside each step's own.
     private static func controlProfile() throws -> RuntimeServiceLimits {
         try RuntimeServiceLimits(
             maxRequestBytes: 4096, maxReplyBytes: 64 * 1024,
             aliasCapacityPerPartition: 8, aliasByteCapacityPerPartition: 1 << 20,
             ordinaryPendingCapacity: 2, outcomeCapacity: 8, outcomeByteCapacity: 1 << 20,
             retentionAge: .seconds(60), janitorBatch: 4,
-            ordinaryLaneCapacity: 2, readLaneCapacity: 2, streamLaneCapacity: 2, stopLaneCapacityPerModule: 1, subscriberLimit: 2,
-            ringCapacity: 16, ringByteCapacity: 1 << 16, maxEventBytes: 4096,
-            ingressCapacity: 8, ingressByteCapacity: 1 << 15, drainItemsPerTurn: 4, drainBytesPerTurn: 1 << 14,
-            controlLogCapacity: 8, controlLogByteCapacity: 1 << 14, replayChunkItems: 4, replayChunkBytes: 1 << 14,
+            ordinaryLaneCapacity: 2, readLaneCapacity: 2, streamLaneCapacity: 2, stopLaneCapacityPerModule: 1, subscriberLimit: 3,
+            ringCapacity: 256, ringByteCapacity: 1 << 18, maxEventBytes: 4096,
+            ingressCapacity: 256, ingressByteCapacity: 1 << 18, drainItemsPerTurn: 32, drainBytesPerTurn: 1 << 16,
+            controlLogCapacity: 8, controlLogByteCapacity: 1 << 14, replayChunkItems: 32, replayChunkBytes: 1 << 14,
             collectionRowCapacity: 16, collectionByteCapacity: 1 << 14, collectionProofCapacityPerKind: 4,
             collectionRowRevisionsPerKind: 2, collectionRetainedByteCapacity: 1 << 14, collectionRowRetentionAge: .seconds(60),
             latestSnapshotByteCapacity: 1 << 14, subscriberRecordBytes: 256, retainedByteCeiling: 1 << 24
@@ -884,6 +1065,117 @@ enum RuntimeHostEffectsScenario {
             assertions.append(.init("the source error path settled the host and confirmed its flush", quiesced))
         }
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// System wake through the actual host, the twin of `AppState.handleSystemWake`, over the run's fakes and its own wake fake. The host
+    /// observes wake from open; a wake while stopped runs only the kernel's wake path; a wake while the forwarder runs re-pins the interface
+    /// a simulated VPN client rewrote; a module Stop keeps observing; the quit ends observation in its admission, and a wake already in
+    /// flight then does nothing. The kernel's wake path is read back from the owned events file after a confirmed flush.
+    @MainActor
+    private static func exerciseWake(
+        session: StateRootSession,
+        environment: RuntimeEnvironment,
+        fakes: Fakes,
+        home: URL
+    ) async -> Shutdown {
+        var assertions: [ScenarioAssertion] = []
+        var notes: [String] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+        let machine = fakes.machine
+        let wake = FakeSystemWakeObserver()
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderEnabled = true
+        config.dnsForwarderPort = 0
+        config.localPACEnabled = false
+        config.pacRoutingEnabled = false
+        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        let host: RuntimeHost
+        // The earlier hosts' events share the owned file, so only the records after this count are this host's.
+        let earlier: Int
+        do {
+            earlier = try recordedEvents(in: environment.eventsFile).count
+            try ProxyConfigPersistence.save(config, in: environment)
+            try PlatformConfigPersistence.save(PlatformIntegrationConfig(manageSystemDNS: true), in: environment)
+            host = try await RuntimeHost.open(
+                stateSession: session,
+                logger: DiscardingLogSink(),
+                startupAllowsMissing: false,
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                terminalExit: {},
+                effects: effects(fakes, home: home, wake: wake)
+            )
+        } catch {
+            notes.append("wake host did not open: \(error.localizedDescription)")
+            check("the wake host opened over the saved configuration", false)
+            return Shutdown(quiesced: true, assertions: assertions, notes: notes, pinnedHost: nil)
+        }
+        func dnsServers() throws -> String {
+            try machine.run("/usr/sbin/networksetup", ["-getdnsservers", "Wi-Fi"]).standardOutput
+        }
+        func kernelWakes() throws -> Int {
+            try recordedEvents(in: environment.eventsFile).dropFirst(earlier)
+                .filter { $0.event == "dns.transports_reset" && $0.detail == "source=system_wake" }.count
+        }
+        /// Settles the stopped host's deliveries and confirms a flush, so the file holds what they recorded.
+        func settledAndFlushed() async -> Bool {
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            let flush = await host.flushEvents()
+            return settled == .settled && flush.allConfirmed
+        }
+
+        var quiesced = false
+        do {
+            check("the host observes wake from open", wake.isObserving && wake.startCount == 1)
+
+            let writesBefore = machine.privilege.commands(matching: .setDNSServers).count
+            wake.emitWake()
+            check("a wake while stopped settles and flushes", await settledAndFlushed())
+            check("a wake while stopped runs the kernel's wake path", try kernelWakes() == 1)
+            check("a wake while stopped writes no DNS", machine.privilege.commands(matching: .setDNSServers).count == writesBefore)
+
+            try await host.startRuntime()
+            check("the start pins the interface to the forwarder", try dnsServers() == "127.0.0.1")
+            // A VPN client re-asserts its own resolvers over sleep, through the machine's own DNS write.
+            try machine.execute(.setDNSServers, values: ["Wi-Fi", "10.9.9.9"])
+            wake.emitWake()
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while try dnsServers() != "127.0.0.1", ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            check("a wake while the forwarder runs re-pins the rewritten interface", try dnsServers() == "127.0.0.1")
+
+            await host.stopRuntime()
+            check("a Stop that leaves every module down keeps observing wake", wake.isObserving && wake.stopCount == 0)
+
+            let inFlight = wake.pendingWake()
+            await host.shutdown()
+            check("the quit ends wake observation once", !wake.isObserving && wake.stopCount == 1)
+            let writesAtQuit = machine.privilege.commands(matching: .setDNSServers).count
+            inFlight?()
+            wake.emitWake()
+            quiesced = await settledAndFlushed()
+            check("the wake host settles and its observability flush is confirmed", quiesced)
+            check("the kernel's wake path ran once while stopped and once while running, and not after the quit", try kernelWakes() == 2)
+            check("a wake in flight at the quit writes no DNS", machine.privilege.commands(matching: .setDNSServers).count == writesAtQuit)
+        } catch {
+            // The error path joins the host's work before anything is released: quit, settle, then flush, then judge.
+            notes.append("wake exercise error: \(error.localizedDescription)")
+            await host.shutdown()
+            quiesced = await settledAndFlushed()
+            assertions.append(.init("the wake error path settled the host and confirmed its flush", quiesced))
+        }
+        return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// Every record in the owned events file, typed or legacy, decoded through the canonical decoder. A line that does not decode is an
+    /// error, not a skipped record, so the caller reports it.
+    private static func recordedEvents(in file: URL) throws -> [RuntimeEvent] {
+        let text = try String(contentsOf: file, encoding: .utf8)
+        let decoder = CanonicalJSON.decoder()
+        return try text.split(separator: "\n").map { line in
+            try decoder.decode(RuntimeEvent.self, from: Data(line.utf8))
+        }
     }
 
     /// The typed payloads in the owned events file, decoded through the canonical decoder (decision 0033). A line that does not decode

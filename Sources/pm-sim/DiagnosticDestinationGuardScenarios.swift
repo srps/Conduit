@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import ConduitShared
 import Foundation
+import NIOConcurrencyHelpers
 import ProxyKernel
 import ProxyControlBridge
 
@@ -105,6 +106,12 @@ enum DiagnosticDestinationGuardScenarios {
         let collisionSurvived = try Data(contentsOf: collisionEnvironment.configFile) == collisionConfig
             && collisionWriter.statistics.writtenRecords == 0
 
+        // 6. Launch recovery's first atomic platform-state write races the snapshot writer's admission.
+        // A witness, not an oracle: the window between the guard's two reads is narrow, so a pass shows
+        // only that no round was refused. `DiagnosticDestinationGuardTests` orders the race exactly.
+        let raceProblems = try racePlatformStateCreation(
+            under: root.appendingPathComponent("race", isDirectory: true), rounds: raceRounds)
+
         let checks: [(String, Bool)] = [
             ("runtime serves before the refused audit path is used", listening),
             ("config bytes survive an audit path aliasing the config", configSurvivedDirect),
@@ -115,9 +122,10 @@ enum DiagnosticDestinationGuardScenarios {
             ("stop completes and releases the proxy port", stopped),
             ("one refusal event names only fixed codes, in the log and the events file", oneSafeRefusal),
             ("events collision leaves the config intact and flushes", collisionFlushed && collisionSurvived),
+            ("a first atomic platform-state write racing snapshot admission is never refused", raceProblems.isEmpty),
         ]
         guard checks.allSatisfy({ $0.1 }) else {
-            let failed = checks.filter { !$0.1 }.map(\.0).joined(separator: "; ")
+            let failed = (checks.filter { !$0.1 }.map(\.0) + raceProblems).joined(separator: "; ")
             throw Failure(message: "Diagnostic destination guard failed: \(failed)")
         }
         return ScenarioResult(
@@ -127,7 +135,35 @@ enum DiagnosticDestinationGuardScenarios {
             assertions: checks.map { .init($0.0, $0.1) },
             notes: ["PASS: protected config bytes unchanged (\(config.count) bytes) across direct, symlink and hardlink audit aliases",
                     "PASS: refusal counted as failed/dropped, never written; events file carries the fixed refusal event",
-                    "PASS: runtime served on an ephemeral loopback port and stopped; events collision left config intact"])
+                    "PASS: runtime served on an ephemeral loopback port and stopped; events collision left config intact",
+                    "PASS: \(raceRounds) rounds of first atomic platform-state creation racing snapshot admission, none refused (witness only)"])
+    }
+
+    private static let raceRounds = 64
+
+    /// Each round makes a fresh state directory, then writes its platform state atomically on one lane
+    /// while the other admits the snapshot destination through the production composition. Returns every
+    /// lane that failed; an empty list is a clean write and an admission in every round.
+    nonisolated private static func racePlatformStateCreation(under directory: URL, rounds: Int) throws -> [String] {
+        let problems = NIOLockedValueBox<[String]>([])
+        for round in 0..<rounds {
+            let environment = RuntimeEnvironment(
+                configDirectory: directory.appendingPathComponent("\(round)", isDirectory: true))
+            try FileManager.default.createDirectory(at: environment.configDirectory, withIntermediateDirectories: true)
+            let snapshotGuard = diagnosticDestinationGuard(for: .snapshot, in: environment)
+            DispatchQueue.concurrentPerform(iterations: 2) { lane in
+                do {
+                    if lane == 0 {
+                        try Data("{}".utf8).write(to: environment.platformStateFile, options: .atomic)
+                    } else {
+                        try snapshotGuard.admit(destination: environment.snapshotFile)
+                    }
+                } catch {
+                    problems.withLockedValue { $0.append("race round=\(round) lane=\(lane) error=\(error)") }
+                }
+            }
+        }
+        return problems.withLockedValue { $0 }
     }
 
     private static func audit(at url: URL, environment: RuntimeEnvironment, log: RuntimeEventLog) -> FileConnectionAuditSink {

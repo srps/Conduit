@@ -2,6 +2,7 @@
 import Foundation
 import NIOConcurrencyHelpers
 import NIOPosix
+import RuntimeEvents
 
 package struct ProxyOrchestratorBindings: Sendable, Codable, Equatable {
     package var proxyHost: String?
@@ -431,6 +432,18 @@ package final class ProxyOrchestrator {
 
     private func emitEvent(_ kind: RuntimeEventKind, _ event: String, detail: String? = nil) {
         eventLog.append(RuntimeEvent(kind: kind, event: event, detail: detail))
+    }
+
+    /// Records an admitted ladder's outcome (`proxy_recovery.*`), then logs the line derived from it. Called at the two sites where the
+    /// outcome decides the state, before the state changes or the callback runs.
+    private func emitRecoveryOutcome(_ outcome: ProxyRecoveryEvent) {
+        let event = RuntimeEvent(payload: .proxyRecovery(outcome))
+        eventLog.append(event)
+        let level: LogLevel = switch outcome {
+        case .recovered: .notice
+        case .failed: .warning
+        }
+        logStore.log(level, "Recovery ladder outcome: \(event.event) \(event.detail ?? "")", category: .network)
     }
 
     /// Build and emit one `ConnectionAuditRecord` for the closing
@@ -2830,6 +2843,7 @@ package final class ProxyOrchestrator {
                 self.logStore.log(.notice, "Automatic recovery paused for \(seconds)s; health checks continue.", category: .network)
             }
             if recovered {
+                self.emitRecoveryOutcome(.recovered)
                 self.mutateSnapshot {
                     $0.runtimeStatus.state = .running
                     $0.proxyError = nil
@@ -2877,6 +2891,7 @@ package final class ProxyOrchestrator {
                 let summary = self.snapshot.runtimeStatus.lastHealthSummary
                 let authenticationLikely = summary.localizedCaseInsensitiveContains("authentication")
                     || summary.localizedCaseInsensitiveContains("rejected")
+                self.emitRecoveryOutcome(.failed(authenticationLikely: authenticationLikely))
                 self.mutateSnapshot {
                     $0.runtimeStatus.state = .failed
                     if authenticationLikely {

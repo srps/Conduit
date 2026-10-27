@@ -23,8 +23,10 @@ verification evidence. It is not an in-memory service or production transport.
 The bounded admission/lookup/subscription engine is implemented in
 [`RuntimeServiceCore`](../Sources/ConduitRuntime/RuntimeServiceCore.swift), with
 headless transport coverage. The shared host now consumes the sole configuration
-store/workflow (PR #244). Actual host/service adaptation, interactive private
-operations, a production v2 socket and AppState adoption remain incomplete.
+store/workflow (PR #244). The [actual-client checkpoint](verification-runtime-client-owner-2026-10-27.md)
+connects that host/service and the private editor, preferences, administration and
+final Quit saves. Ordinary saved Start and the remaining native integration still
+precede AppState adoption; a production v2 socket remains separately scoped.
 V1 control and helper IPC remain compatible; no production peer uses v2.
 
 The shared-host extraction merged in PR #221 (`3d566d8`) and added ConduitRuntime, with its own [verification checkpoint](verification-runtime-host-extraction-2026-10-24.md). AppState still runs its twin; this inventory does not claim client adoption.
@@ -32,8 +34,9 @@ The shared-host extraction merged in PR #221 (`3d566d8`) and added ConduitRuntim
 Selected for private configuration: one full frozen request (0018), capped at eight
 MiB and refined by domain/startup bounds (0021–0022). Its explicit codec and
 [domain bridge](../Sources/ProxyControlBridge/PrivateConfigurationBridge.swift) are
-implemented through PR #227/#228; global single-body admission and independent
-Stop/status capacity remain adoption obligations.
+implemented through PR #227/#228. The actual-client checkpoint implements shared
+single-body custody and independent Stop/status capacity; production AppState
+composition and measured profile selection remain adoption obligations.
 The ordinary v2 reply/stream ceiling is selected at 64 KiB (0030), and complete
 private editor replies at 8 MiB (0034). The v1 16 KiB frame
 (`ControlSocket.maxFrameBytes`) remains compatible. Queue, page, retention and

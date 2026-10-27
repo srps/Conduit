@@ -96,11 +96,30 @@ Partial: the stage-1 foundation is implemented on this branch.
 
 Parent verification now includes executed source variants for gate release and cross-kind eviction, with exact detection mechanisms and limits in [the retained-page verification note](../verification-runtime-service-pages-2026-10-25.md). These are limited sensitivity checks, not a complete model proof.
 
-Not implemented: a production owner adapter in the actual host, a production v2 socket transport, the configuration workflow and AppState adoption. A snapshot read returns the current stamped view; its existing request has no expected-incarnation input. The actual RuntimeHost has not adopted the command-owner protocol or its fault-to-event emitter; fake owners establish service behavior only. No shipping ordinary v2 frame/queue/deadline defaults are selected; v1 keeps its 16 KiB frame. Private configuration limits are recorded separately in 0021–0022.
+The service-only checkpoints above preceded actual-host adoption. The merged
+[actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md)
+connects [`RuntimeHostControlOwner`](../../Sources/ConduitRuntime/RuntimeHostControlOwner.swift)
+and [`RuntimePrivateEditor`](../../Sources/ConduitRuntime/RuntimePrivateEditor.swift)
+to that same framed service, with the sole configuration workflow, causal
+receipts and shared physical custody. A snapshot read returns the current stamped
+view; its request has no expected-incarnation input. Production v2 socket transport
+and AppState adoption remain open. Ordinary v2 replies/streams use the selected
+64 KiB ceiling (0030); remaining queue, retention and deadline values await the
+measured composition profile. V1 retains its 16 KiB frame.
 
-Does not prove: a production control socket, cross-process authority, host fences, admission order, retention, validated shipping resource limits, or the full client-engine behavior.
+Does not prove: cross-process authority, release readiness or real-machine
+validation. See the linked verification notes for each model's scope.
 
-The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) connects [`RuntimeHostControlOwner`](../../Sources/ConduitRuntime/RuntimeHostControlOwner.swift) and [`RuntimePrivateEditor`](../../Sources/ConduitRuntime/RuntimePrivateEditor.swift) to that same framed service, with causal receipts and shared physical custody. It records focused checks and outstanding review/profile/activation gates; mechanism-only results do not establish release readiness.
+The native-client follow-up adds the Foundation-only
+[`ProxyRecoveryEvent`](../../Sources/RuntimeEvents/ProxyRecoveryEvents.swift)
+family, its separate wire mirror and exhaustive bridge. The kernel emits at its
+existing recovery decision sites; RuntimeHost's extra recovery callback is
+removed. AppState retains its legacy notification callback until activation.
+No summary or endpoint enters the new typed payload. The same
+[native-client checkpoint](../verification-runtime-native-client-2026-10-27.md)
+adds saved Start receipts, admitted helper observations, credential cache
+invalidation and injected, coalesced wake observation. It records the focused,
+workflow and actual-adapter evidence separately from AppState activation.
 
 ## Open questions
 

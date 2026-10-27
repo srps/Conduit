@@ -44,7 +44,7 @@ readable by `jq`, Splunk, Datadog, and `date -r`.
 | `kind` | string enum | yes | Coarse category — see below. |
 | `event` | string | yes | Dotted machine name, `<subsystem>.<what_happened>`. The primary dispatch key for consumers. |
 | `detail` | string | no | Diagnostic detail, often `key=value` tokens separated by spaces. **Always credential-sanitized** (`Authorization`/`Proxy-Authorization`/cookies/bearer/long-base64 masked, URL userinfo stripped) before it reaches any sink. |
-| `typed` | object | no | The typed value behind a migrated `lifecycle.*`, `config.workflow.*` or `runtime_service.*` name. Absent on legacy records. Its name, kind and sanitized detail must match the record's; the sections below define each closed family. |
+| `typed` | object | no | The typed value behind a migrated `lifecycle.*`, `config.workflow.*`, `runtime_service.*` or `proxy_recovery.*` name. Absent on legacy records. Its name, kind and sanitized detail must match the record's; the sections below define each closed family. |
 
 ### `kind` values (v1)
 
@@ -118,6 +118,28 @@ literal producers or consumers outside their defining files. Known malformed
 payloads fail decoding; genuinely unknown bounded informational wire records keep
 the existing unknown-display behavior. Historical files without `typed` still
 read as legacy records; no typed value is inferred from detail text.
+
+## Typed proxy_recovery payloads
+
+Both `proxy_recovery.*` names are typed from their first emission, with the
+`health` kind. The payload is
+`{"family": "proxy_recovery", "proxyRecovery": {"type": …}}`. They report the
+outcome of an admitted recovery ladder; the ladder's steps keep their legacy
+`recovery.*` names, so the closed namespace is `proxy_recovery.`, not `recovery.`.
+
+| `type` | Name | Field | Allowed values |
+| --- | --- | --- | --- |
+| `recovered` | `proxy_recovery.recovered` | none | A `recovered` value that carries `authentication_likely` fails decoding. |
+| `failed` | `proxy_recovery.failed` | `authentication_likely` | Required JSON Boolean. |
+
+The detail is derived from the value only: `outcome=recovered`, or
+`outcome=failed authentication_likely=true|false`. No endpoint, active upstream,
+health summary or error text is carried; a reader that shows one takes it from
+the snapshot, and the event and the snapshot that reflects it may arrive in
+either order. The namespace is closed like the other typed families, and the
+catalogue gate pins both inventories. Known malformed payloads fail decoding,
+and a genuinely unknown future type under an unknown name keeps the
+unknown-display behavior.
 
 ## Event catalogue (v1)
 
@@ -272,6 +294,8 @@ exactly these semantics; do not repurpose them.
 | `recovery.step_skipped` | A ladder step was skipped because it cannot address the latest health failure (`step=reauthenticate`, `reason=upstream_unreachable`, `summary=`). The latest failure is the one that started the ladder until a step's health check replaces it. Emitted before its NOTICE log line. |
 | `recovery.abandoned` | A VPN transition, Start or Stop superseded the recovery ladder, so the failure that started it is stale; the ladder stops (`reason=superseded`, then `next_step=` the step it did not start or `after_step=` the step whose outcome it discarded), without `recovery.exhausted` or a cooldown (#155). Emitted before its NOTICE log line. |
 | `recovery.exhausted` | Every ladder step ran and the health check still failed (`failure=` one of `unreachable`, `credential_unavailable`, `authentication_rejected`, `upstream_status`, `unknown`; `summary=` the last failure). The ERROR log line is derived from it: only `credential_unavailable` and `authentication_rejected` (an upstream that answered with a final 407) suggest re-entering the password, and `unknown` keeps the conditional hint. Followed by `recovery.cooldown_started`. |
+| `proxy_recovery.recovered` | An admitted recovery ladder's health check passed, so the runtime returns to running (`outcome=recovered`). Recorded once per ladder, before the state changes. A ladder that a VPN transition, Start or Stop superseded records no outcome. Typed: see [proxy_recovery payloads](#typed-proxy_recovery-payloads). NOTICE log line derived from it. |
+| `proxy_recovery.failed` | An exhausted ladder's follow-up probe found no reachable upstream while routing stayed on the upstream path, so the runtime fails (`outcome=failed`, `authentication_likely=` the kernel's verdict that the last health failure was an authentication rejection). Recorded once, before the state changes. Not recorded when the probe was superseded (`recovery.cooldown_cleared`), when direct mode took the state, or when an upstream answered. Legacy branch: source analysis finds that today's routing ends every exhausted ladder's probe in direct mode or with a reachable upstream before this branch, so no production path is known to reach it; its tests pin the branch mechanics through existing testing seams only. Typed: see [proxy_recovery payloads](#typed-proxy_recovery-payloads). WARNING log line derived from it. |
 | `tcp_relay.reasserted` / `tcp_relay.unresponsive` | The transparent-proxy relay probe found the helper's port-443 relay gone and reissued it, or found it bound but not accepting (`host=`, `target=`). |
 | `tcp_relay.reassert_superseded` | The relay probe found nothing accepting, but a relay start or stop ran while the probe was out, so its verdict is dropped and no start is issued (#199). A stop means the relay is meant to be gone; a start already put up what the current bindings want. `host=`, `target=`, `relay_active=` the relay flag now. Emitted before its INFO log line. |
 

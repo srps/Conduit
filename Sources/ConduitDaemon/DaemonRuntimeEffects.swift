@@ -36,6 +36,8 @@ extension RuntimeHostEffects {
             vpnStatusMonitor: { graceSeconds, minVisibleSeconds in
                 VPNStatusMonitor(graceSecondsProvider: graceSeconds, minVisibleSecondsProvider: minVisibleSeconds)
             },
+            // The daemon has no workspace session, so it hears no wake; the app composition will name the workspace adapter.
+            wake: InertSystemWakeObserver(),
             homeDirectory: homeDirectory,
             resolverDirectory: "/etc/resolver",
             // The configuration files' byte access, the OS adapter over the resolved state root (decision 0033).

@@ -306,6 +306,12 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
 
     /// One wait on a slot already reserved: one gate, its timer, its rounds through the scheduling seam, and the caller detached by its
     /// deadline or cancellation whatever the owner is doing. The private channel reserves its slot from its own custody and waits here.
+    ///
+    /// The one successful handoff: a reply or an open's first frame that a claimed owner round answered returns only once its reservation
+    /// has fully released, its ending hop and cancelled timer included, as an answered private exchange does. So the caller's next call
+    /// finds the lane slot and any pull slot free, not a spurious busy refusal. A wait that ends by failure, deadline, cancellation or a
+    /// budget refusal made before any claim returns at once, and its reservation stays held until the work it left behind physically
+    /// ends. A private turn is settled by its own exchange, which keeps its client scope.
     func wait(
         on ticket: RuntimeLaneTicket,
         deadline: RuntimeDeadline,
@@ -322,13 +328,24 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
             attempt: attempt,
             abandoned: abandoned
         )
-        return await withTaskCancellationHandler {
+        let outcome = await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<RuntimeWaitOutcome, Never>) in
                 gate.start(continuation)
             }
         } onCancel: {
             gate.expire(.cancelled)
         }
+        switch outcome {
+        case .reply, .opened:
+            // Only an owner round's answer waits for the release. A budget refusal is a reply too, but the timer made it before any
+            // claim, so its round may still be queued behind a stalled owner.
+            if gate.resolvedFromClaimedRound {
+                await ticket.settled(leaving: [])
+            }
+        case .failed, .privateTurn:
+            break
+        }
+        return outcome
     }
 
     /// The owner's answer to one exchange. It runs inside the owner's turn, and every admission it makes is
@@ -625,6 +642,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         case .released:
             throw RuntimeWaitEnd.disconnected
         }
+        // The pull slot frees when this reservation releases; `run` returns a delivered frame only after that release.
         let outcome = await run(lane: .stream, deadline: deadline, onQuiesced: { handle.endPull() }) { gate in
             self.pullOnce(handle, limits: limits, gate: gate)
         }

@@ -1,0 +1,75 @@
+# 0039: Bound the in-process app's complete Quit wait to ten seconds
+
+- Date: 2026-10-27
+- Decision: proposed
+- Implementation: planned
+- Validation: pending
+- Supersedes: none
+- Superseded by: none
+
+## Context
+
+Decision 0015 selected one total monotonic Quit deadline, independent of save
+success, without selecting its shipping duration. The legacy app has a five-second
+platform-drain allowance followed by other work; that is not a five-second total.
+The new client already accepts an explicit total for the entire caller wait.
+
+The latest resource run completed the actual client Quit routine in about one
+second with fake effects and the widest final save. Its 30-second caller budget
+was an experimental value, not a production selection. That run found a separate
+diagnostic guard race and is not complete profile acceptance. Real helper and
+machine teardown timing remains unvalidated.
+
+## Decision
+
+Proposed: use ten seconds total for the in-process app's Quit, counted once when
+it begins. Fence immediately, then spend only that remaining time on final frozen
+saves, operation observation and cleanup confirmation. Return earlier when the
+Quit settles. No app-owned final work starts under a fresh budget afterwards.
+
+At expiry, report unresolved work honestly and preserve recovery records. Expiry
+does not prove a started physical write was canceled or cleanup completed. It
+creates no durable disable, retry or replacement writer. The host retains physical
+authority while its started work runs; process exit and next-launch recovery keep
+the selected semantics. Later daemon-mode UI Quit still disconnects only (0015).
+
+## Alternatives
+
+- **Five seconds total:** faster worst-case exit, less time than the existing
+  combined shutdown work. Diagnostic writers alone may spend up to six seconds
+  within their phase, so loaded-machine exits would more often leave confirmation
+  unresolved.
+- **Thirty seconds total:** more opportunity for slow teardown and final saves;
+  a stuck helper can visibly delay app exit or logout for the whole interval.
+- **A new allowance per step:** loses the selected single total bound and makes
+  the maximum exit wait hard to predict. Not proposed.
+
+## Consequences
+
+Ten seconds is a responsiveness/cleanup tradeoff, not a claim that every helper
+call can finish within it. It does not change frame caps, configuration bounds or
+selected collection budgets. Other finite service capacities are engineering
+profile values reviewed and measured together, not separate owner decisions.
+
+Revisit if native acceptance or actual use repeatedly reaches expiry, if helper
+latency changes materially, or when UI/runtime ownership moves out of process.
+
+## Invariants and verification
+
+Run the actual client Quit probe with the selected total, including widest final
+saves and held effects. Keep deadline tests covering unstarted writes, physical
+work retained after logical expiry, unavailable streams and final-save ordering.
+Native app acceptance must verify AppKit terminate-later behavior and the total
+wait; machine cleanup validation remains separate from fake timing.
+
+## Implementation evidence
+
+The existing [client Quit routine](../../Sources/ConduitShared/PrivateConfiguration/RuntimeClientQuit.swift)
+and [host flush window](../../Sources/ConduitRuntime/RuntimeQuitFlush.swift) accept
+one explicit total and distinguish deadline outcome from physical quiescence.
+Shipping composition has not selected ten seconds yet. This record is a proposal.
+
+## Open questions
+
+Owner selection of ten versus thirty seconds before the affected production
+composition is implemented; complete corrected-source resource and native checks.

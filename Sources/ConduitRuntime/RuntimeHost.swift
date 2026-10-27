@@ -48,6 +48,8 @@ package final class RuntimeHost {
     /// Told when the host's safe state may have changed, so the control service composed over it captures a new snapshot. Set only by
     /// that composition; nil when no service is composed.
     var onControlStateChange: (@MainActor () -> Void)?
+    /// Told once, when the quit's physical work has ended, so the composed control service ends its streams. Set only by that composition.
+    var onControlShutdown: (@MainActor () -> Void)?
     /// The control operations this host admitted at the service's fence and has not launched yet. The service bounds them: its ordinary
     /// capacity, and at most one queued Stop per module, whose replacement is dropped here in the same fence turn.
     var controlAdmissions: [ControlOperationID: RuntimeControlAdmission] = [:]
@@ -151,6 +153,10 @@ package final class RuntimeHost {
     )
     private let networkLocationStoreFactory: @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?
     let networkLocationObserver: any NetworkLocationObserving
+    /// The system wake source, from `effects`: observed from open until the quit (`RuntimeHostWake.swift`).
+    let systemWakeObserver: any SystemWakeObserving
+    /// Bounds the work a burst of wakes can start: one running and one pending pass per repair.
+    let wakeDeliveries = SystemWakeDeliveries()
     private let networkLocationLimits: NetworkLocationLimits
     /// At most one pending retry for a drift repair withheld by the contention budget.
     private var proxyRepairRetry: Task<Void, Never>?
@@ -205,6 +211,11 @@ package final class RuntimeHost {
     private let vpnFlapWindowBox: NIOLockedValueBox<RuntimeVPNFlapWindowConfig>
     /// Internal for the host's tests: whether the health probe runs beside the DNS module it watches.
     private(set) var dnsHealthTimer: DispatchSourceTimer?
+    /// The health timer's one observation: the relay restart for the run that armed it found the pipeline still unresponsive. Control
+    /// snapshots project it as the DNS error while the kernel runs the forwarder and reports no error of its own (`snapshot()`).
+    private(set) var dnsRelayUnresponsive = false {
+        didSet { if dnsRelayUnresponsive != oldValue { onControlStateChange?() } }
+    }
     /// Whether the proxy module's surfaces are up: a proxy Start completed them, and no teardown of the proxy has begun since. Its
     /// split-DNS entry files exist only in that window, so VPN transitions and repairs must not apply them outside it.
     var runtimeStarted = false
@@ -225,6 +236,8 @@ package final class RuntimeHost {
     var laneEffects = PrivateModuleSlots<RuntimeLifecycleEffect?>(proxy: nil, dns: nil, tunnels: nil)
     /// The single process quit, once one has begun, so a second caller joins it rather than tearing down again.
     var quit: Task<Void, Never>?
+    /// Set once the quit's physical work has ended, so a control service composed after it starts shut down. Sticky.
+    var quitEnded = false
     /// The latest generation any module lane has begun. Internal so a test can wait for a stop to have begun rather than time it: the
     /// stop's first visible effect is queued behind the work the test is holding. A whole-host operation advances every lane together.
     var lifecycleGeneration: Int { ControlModule.allCases.map { lanes[$0].current }.max() ?? 0 }
@@ -259,9 +272,11 @@ package final class RuntimeHost {
     /// The resolver flag's baseline covers it too, and a split-DNS retry
     /// writes no intercept files, so a repair does not stand in for it.
     private var resolverSwitchInterceptRefreshFailed = false
-    /// Where the helper check reads the helper's status, from `effects`. `nil`
+    /// Where the helper check and the preflight read the helper's status, from `effects`. `nil`
     /// makes no observation, so a test never reaches the installed helper.
-    private let helperStatusSource: (any HelperLifecycleManaging)?
+    let helperStatusSource: (any HelperLifecycleManaging)?
+    /// The preflight's held helper verdict, its generation and its two passes (`RuntimeHostPreflight.swift`).
+    var preflight = RuntimeHostPreflightState()
     /// Stamps VPN reports on the monitor's callback; the split-DNS gate
     /// and the orchestrator each apply only reports newer than the last
     /// they applied, since deliveries can land out of order (#155).
@@ -363,6 +378,7 @@ package final class RuntimeHost {
         self.reapplyRetrySchedule = reapplyRetrySchedule
         self.networkPathObserver = effects.networkPath
         self.networkLocationObserver = effects.networkLocation
+        self.systemWakeObserver = effects.wake
         self.networkLocationStoreFactory = effects.networkLocationStoreFactory
         self.networkLocationLimits = networkLocationLimits
         self.stateSession = stateSession
@@ -480,11 +496,7 @@ package final class RuntimeHost {
         // `onConfigChange` is not wired. The orchestrator fires it only from `applyConfigChange`, which here runs only the reconciler's
         // pushes of inputs this host already adopted, and its delivery lands later. A writer there would move `config` outside
         // `adoptHostView`, which keeps the accepted view, the flap window and `configGeneration` together.
-        orchestrator.onEvent = { [weak self, deliveries] event in
-            deliveries.deliver {
-                self?.handle(orchestratorEvent: event)
-            }
-        }
+        // `onEvent` is not wired either: the kernel records each ladder outcome as a typed `proxy_recovery.*` event and logs it.
         self.networkPathObserver.setOnChange { [weak self, deliveries] change in
             deliveries.deliver {
                 await self?.handleNetworkChange(change)
@@ -536,6 +548,7 @@ package final class RuntimeHost {
             )
         }
         startLocationObserver()
+        startWakeObserver()
         startEnvironmentDriftTimer()
     }
 
@@ -545,9 +558,9 @@ package final class RuntimeHost {
     /// test that asserts on what recovery did joins it rather than polls.
     ///
     /// Joined at the head of `startRuntime`, `stopRuntime` and
-    /// `reloadConfiguration`. Every other path that touches a surface is
+    /// `performReload`. Every other path that touches a surface is
     /// reachable only after one of those has run: the reconciler's passes
-    /// are queued by `reloadConfiguration` alone, the network and VPN
+    /// are queued by `performReload` alone, the network and VPN
     /// monitors and the DNS health timer are started by `startRuntime` (or
     /// by a reload's `.applySystemDNS`), after its join. The VPN handler in
     /// particular must not join: two transitions suspended on the join could
@@ -748,40 +761,56 @@ package final class RuntimeHost {
         join.finish(stoppedEffectsPending() ?? .settled)
     }
 
-    /// An explicit reload-and-reconcile (decision 0032). The workflow observes the files through the store, read-only, and decides what
-    /// may apply. The generation is captured before the first suspension, launch recovery included, so an admission made during that
-    /// wait makes this reload stale. A stale or held observation changes no applied view, reconciler baseline or configuration generation.
-    package func reloadConfiguration() async {
+    /// An explicit reload-and-reconcile (decision 0032), counted and captured from this call: the host's own facade of `performReload`.
+    @discardableResult
+    package func reloadConfiguration() async -> RuntimeReloadDecision {
         // Counted from the call, so a settle that starts while this reload waits for recovery sees it as pending work.
         pendingAdmissions += 1
         defer { pendingAdmissions -= 1 }
-        let captured = workflow.generation
+        return await performReload(capturedAt: workflow.generation, requestID: nil)
+    }
+
+    /// The one reload, which the facade and the control command both run. The workflow observes the files through the store, read-only,
+    /// and decides what may apply. The caller captured `captured` before its first suspension, launch recovery included, and counts
+    /// itself pending from then, so an admission made during that wait makes this reload stale. A stale or held observation changes no
+    /// applied view, reconciler baseline or configuration generation. `requestID` is the client request the store context names.
+    func performReload(capturedAt captured: Int, requestID: ControlRequestID?) async -> RuntimeReloadDecision {
         await awaitLaunchRecovery()
-        let outcome = await workflow.reload(capturedAt: captured)
+        let outcome = await workflow.reload(capturedAt: captured, requestID: requestID)
         emitConfigurationEvents(outcome.events)
         // An adopted observation changes the host view a pending settle read, whether or not its runtime input may apply.
         if outcome.adopted {
             stoppedEffectsJoin?.finish(.superseded)
         }
-        guard let applied = outcome.applied else {
+        switch outcome.answer {
+        case .decided(let decision):
             writeSnapshotFile(snapshot: orchestrator.snapshot)
-            return
+            return decision
+        case .eligible(let runtime, let platform):
+            // Every eligible reload counts, an unchanged one included.
+            adoptHostView(runtime: runtime, platform: platform)
         }
-        // Every eligible reload counts, an unchanged one included.
-        adoptHostView(runtime: applied.runtime, platform: applied.platform)
         logNonBlockingConfigProblems()
+        // The pass acts, and the answer calls it current, only while this reload's observation still stands (decision 0032): no newer
+        // Start or Stop, no fence, and no later adoption of another accepted view, by a reload or an apply, which moves `configGeneration`.
+        // Weak: the reconciler keeps the last admission for its retry.
+        let view = configGeneration
+        let stands: @MainActor () -> Bool = { [weak self, workflow] in
+            guard let self else { return false }
+            return workflow.isLatest(captured) && !workflow.stopFenced && self.configGeneration == view
+        }
         // Queued and then awaited: a caller that reloads and then stops must
         // see the machine the reload left, and the control path has no
         // editor to hand back to while the pass runs. What the pass does is
         // the `RuntimeReconcilerHost` conformance below.
-        // The pass acts only while this reload's observation still stands: no newer Start or Stop, and no fence (decision 0032).
-        reconciler.reconcile(config: config, platformConfig: platformConfig, isCurrent: { [workflow] in
-            workflow.isLatest(captured) && !workflow.stopFenced
-        })
+        reconciler.reconcile(config: config, platformConfig: platformConfig, isCurrent: stands)
         await reconciler.drain()
-        logger.log(.notice, "Daemon configuration reloaded.", category: .general)
+        // Read once after the drain, with the same predicate: anything that replaced this observation during the pass may have stopped it.
+        let currentAtEnd = stands()
+        logger.log(.notice, "Configuration reloaded.", category: .general)
         // Submitted, not awaited, as in `startRuntime`.
         writeSnapshotFile(snapshot: orchestrator.snapshot)
+        return .adopted(.reconcileAttempted(currentAtEnd: currentAtEnd))
     }
 
     /// The one emitter for `config.workflow.*` (decision 0031). Each typed value becomes its record, and the log line is derived from it.
@@ -917,16 +946,6 @@ package final class RuntimeHost {
                 detail: String(decoding: data, as: UTF8.self)))
         } catch {
             logger.log(.warning, "Failed to encode writer statistics: \(error.localizedDescription)", category: .general)
-        }
-    }
-
-    private func handle(orchestratorEvent event: ProxyOrchestratorEvent) {
-        switch event {
-        case .proxyRecovered(let activeUpstream):
-            logger.log(.notice, "Daemon observed proxy recovery via \(activeUpstream ?? "unknown upstream").", category: .network)
-        case .proxyRecoveryFailed(let summary, let authenticationLikely):
-            let suffix = authenticationLikely ? " authenticationLikely=true" : ""
-            logger.log(.warning, "Daemon observed proxy recovery failure: \(summary)\(suffix)", category: .network)
         }
     }
 
@@ -1071,7 +1090,7 @@ package final class RuntimeHost {
     /// a check sleeping on the count from before it. Returns whether it
     /// dispatched one.
     @discardableResult
-    private func observeHelperForSplitDNS(available: Bool, trigger: String) -> Bool {
+    func observeHelperForSplitDNS(available: Bool, trigger: String) -> Bool {
         guard splitDNSRepair.shouldRetry(helperAvailable: available), !splitDNSRetryInFlight else { return false }
         splitDNSRetryInFlight = true
         endSplitDNSHelperCheck()
@@ -1167,7 +1186,7 @@ package final class RuntimeHost {
     }
 
     /// Same bounded proxy-drift recovery as the app, guarded against a later stop.
-    private func reconcileSystemProxyIfRunning() async {
+    func reconcileSystemProxyIfRunning() async {
         scheduleEnvironmentDriftPass(trigger: .observed)
         guard platformConfig.manageSystemProxy else { return }
         guard !proxySettingsReconcileInFlight else { proxySettingsReconcileWanted = true; return }
@@ -1312,7 +1331,7 @@ package final class RuntimeHost {
     /// to the queue, to drain later as so many stale ones. A trigger that
     /// finds a pass out asks for one more after it, since that pass may have
     /// read the machine before the change behind this trigger.
-    private func reconcileSystemDNSIfRunning() async {
+    func reconcileSystemDNSIfRunning() async {
         guard systemDNSReconcileIsDue else { return }
         guard !dnsReconcileInFlight else {
             dnsReconcileWanted = true
@@ -1339,15 +1358,19 @@ package final class RuntimeHost {
         platformConfig.manageSystemDNS && orchestrator.snapshot.dnsRunState == .running
     }
 
+    /// Arms the probe for the DNS run that holds the lane now, and starts its observation clear.
     func startDNSHealthTimer(forwarderPort: Int) {
         stopDNSHealthTimer()
         let manager = systemDNSManager
+        // Taken when the timer is armed, not when a probe completes: a probe still out when a Stop or a newer Start begins names the
+        // run that asked for it, so its reading is never taken for the newer run's.
+        let token = lanes.dns.observationToken
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + 30, repeating: 30)
         timer.setEventHandler { [weak self, manager] in
             let alive = manager.probeLiveness()
             Task { @MainActor in
-                self?.handleDNSHealthResult(alive: alive, forwarderPort: forwarderPort)
+                self?.handleDNSHealthResult(alive: alive, forwarderPort: forwarderPort, armedBy: token)
             }
         }
         dnsHealthTimer = timer
@@ -1357,14 +1380,20 @@ package final class RuntimeHost {
     func stopDNSHealthTimer() {
         dnsHealthTimer?.cancel()
         dnsHealthTimer = nil
+        dnsRelayUnresponsive = false
     }
 
-    /// Internal so the host's tests can report a failed probe; the probe
-    /// itself asks the real port 53.
-    func handleDNSHealthResult(alive: Bool, forwarderPort: Int) {
+    /// One probe reading for the run whose timer `token` armed. Internal so the host's tests can report a reading; the probe itself asks
+    /// port 53 through the injected effect. A reading for a run a Stop or newer Start superseded, or taken while the kernel no longer
+    /// runs the forwarder, describes no current pipeline and is dropped.
+    func handleDNSHealthResult(alive: Bool, forwarderPort: Int, armedBy token: LifecycleLane.Token) {
+        guard !token.isSuperseded, orchestrator.snapshot.dnsRunState == .running else { return }
+        if alive {
+            dnsRelayUnresponsive = false
+            return
+        }
         // Twin of `AppState.handleDNSHealthResult`: the restart and the probe
         // after it run off the main actor, one at a time.
-        if alive { return }
         guard !dnsRelayRestartInFlight else { return }
         dnsRelayRestartInFlight = true
 
@@ -1374,21 +1403,25 @@ package final class RuntimeHost {
             let outcome = await platformWork.run {
                 manager.restartRelayIfManaged(forwarderPort: forwarderPort, logger: logger)
             }
-            self?.finishDNSRelayRestart(outcome)
+            self?.finishDNSRelayRestart(outcome, armedBy: token)
         }
     }
 
-    private func finishDNSRelayRestart(_ outcome: SystemDNSManager.RelayRestart) {
+    /// The restart's own final probe is the reading. It is reported whatever happened since, and it sets the observation only for the
+    /// run that asked for it, while the kernel still runs the forwarder.
+    private func finishDNSRelayRestart(_ outcome: SystemDNSManager.RelayRestart, armedBy token: LifecycleLane.Token) {
         dnsRelayRestartInFlight = false
         switch outcome {
         case .notManaged:
             // A stop finished while the restart was out.
-            break
+            return
         case .restarted:
-            orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.relay_restarted", detail: "source=daemon_health_timer"))
+            orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.relay_restarted", detail: "source=health_timer"))
         case .unresponsive:
-            orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.pipeline_unresponsive", detail: "source=daemon_health_timer"))
+            orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.pipeline_unresponsive", detail: "source=health_timer"))
         }
+        guard !token.isSuperseded, orchestrator.snapshot.dnsRunState == .running else { return }
+        dnsRelayUnresponsive = outcome == .unresponsive
     }
 
     private func writeReadyFile() {

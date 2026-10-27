@@ -5,9 +5,12 @@ Status: **activation sequence selected by the owner**, 2026-10-25, recorded in
 Implementation is partial: the consumed session/store capability is merged;
 the headless host/workflow now consumes the store and selected reload policy,
 with its [verification checkpoint](verification-runtime-workflow-2026-10-26.md).
-The client/AppState activation remains open. PRs #240/#241 are merged; reply/stream frames are
-selected at 64 KiB in 0030. The measured candidate profile remains test-only;
-actual-host scheduling and selection of its remaining values are still open. Claude Code
+Actual host/client integration is merged in PR254; the
+[native-client completion](verification-runtime-native-client-2026-10-27.md)
+records saved commands, helper/credential/wake integration, actual event delivery
+and shutdown, plus explicit reload and DNS health. AppState activation remains open. Reply/stream frames are selected
+at 64 KiB in 0030. The measured candidate profile remains experimental; select its
+remaining values after complete actual-host integration checks. Claude Code
 and Codex source-review findings are recorded below; Claude used the owner's
 claude.ai subscription.
 
@@ -71,8 +74,8 @@ One semantic store/workflow remains in ConduitRuntime, sibling to RuntimeHost.
 StateRootSession already retains its private lease. Adoption uses a narrow
 component-scoped replacement seam delegating to the existing verified physical
 primitive. That seam is now consumed by the store; its raw-plan/raw-lease
-constructor is removed. Production host/workflow adoption is still open. The
-lease stays private and no registry is added.
+constructor is removed. The shared host now consumes that store/workflow; AppState adoption remains open.
+The lease stays private and no registry is added.
 The host consumes the exact verified immutable input. AppState keeps editor drafts,
 presentation, notifications and app administration.
 
@@ -110,12 +113,13 @@ approved final spelling:
   the store echoing a context does not make the fields optional correlation.
   Store-internal file baseline versions are not machine-effect revisions or
   caller-minted receipts. Capture the authoritative generation before suspension
-  and recheck it and Stop/shutdown fences before apply. The existing ordinary
-  stamp does not yet expose intent generation: the API review must define the
-  single workflow owner's increment rules (including superseding configuration
-  intent), private observation source and initial value before implementation.
-  Any added observation field requires bounded framing tests under 0030; do not
-  silently turn the precondition into optional correlation.
+  and recheck it and Stop/shutdown fences before apply. The implemented stamp
+  carries the workflow lifecycle revision and each module's revision; the private
+  observation carries exact component baselines. Reload reconciliation also
+  checks the host's accepted-view generation, using the same predicate for its
+  remaining effects and typed result. The native-client checkpoint verifies
+  these paths. Future observation fields still need bounded framing checks
+  under 0030; presentation revisions never grant mutation authority.
 - Ordinary saves merge current explicit lifecycle intent before staging. Keep
   save, admission, apply and physical quiescence facts separate, with closed safe
   result types and no configuration plaintext in outcomes.
@@ -153,3 +157,45 @@ interpretation of 0001 and the still-incomplete intent-generation observation AP
 are explicitly qualified. Both reviewers recommend incremental verification with
 one final activation, subsequently selected by the owner in #186. No claim of
 implemented migration or complete API specification follows from this review.
+
+
+## App activation boundary reviewed on 2026-10-27
+
+Subscription-backed Claude source review found the current command and private
+editor APIs cover the actions used by the app. Keep one composition and one
+opening phase: migrate under the held session, open RuntimeHost, create its
+clients, obtain the editor baselines, commit explicit launch overrides through the
+existing save-only request, then enable editing and lifecycle controls. A refused
+open follows the existing journal recovery path and configuration banner. Never
+construct a second orchestrator or let a default draft overwrite unread files.
+
+| Responsibility | After the one switch |
+| --- | --- |
+| Runtime, lifecycle, reconciliation, recovery and persistence | RuntimeHost and its sole workflow/store; delete the corresponding AppState managers, lanes, timers, observers, callbacks and direct saves. |
+| Drafts and editing | App-owned debounce/commit hold; private requests carry frozen values and exact baselines. Only the matching own receipt rebases an unchanged draft. |
+| Runtime presentation | Consume wire snapshots and revision-qualified collection pages. Clear current claims when observation is lost; never derive persistence authority from status. |
+| Helper installation and credential enrollment | App-owned adapters, followed by admitted refresh/invalidation commands. Retry only a known-unadmitted notice; recover ambiguous admission by lookup. |
+| PAC preview, updates, windows and notifications | App-owned. Preview uses the draft and its own evaluator. Typed recovery events classify generic notifications; a snapshot is not causally paired with an event. |
+| Quit | AppKit terminate-later, the existing client Quit routine and its final frozen saves; no synchronous owner wait or second teardown. |
+
+Production effects preserve the app's PAC-fetch compatibility and workspace wake
+adapter. The daemon remains inert for workspace wake. Do not call the daemon's
+ready-file entry point from the app. Host diagnostics own events.ndjson and
+snapshot.json; app-only events stay in the bounded app log.
+
+DNS health presentation must survive observation gaps without app-side runtime
+logic: retain one host-owned liveness observation, clear it on recovery/lifecycle
+changes and project it through the existing bounded dnsError while DNS runs and
+has no kernel error. Notifications remain best effort. Do not reproduce the
+legacy presentation override that could mark a failed kernel module running.
+This host-owned observation and its stale-run guards are implemented in the
+native-client checkpoint; AppState presentation adoption remains open.
+
+Before deleting an AppState test, identify its existing host witness, retain it as
+a thin client-flow test, add missing host coverage first, or explain why it is
+obsolete. Similar test names alone do not establish duplicate coverage. Update
+harness/dev compositions and their instructions in the same switch.
+
+Compatibility differences are explicit: asynchronous Quit; host diagnostic files
+in the app state root; and launch overrides persisted before use rather than on a
+later unrelated save. No new schema or helper/v1 protocol break is required.

@@ -12,11 +12,14 @@ package enum ControlModule: String, Codable, Sendable, Equatable, CaseIterable {
 /// listed here is refused as an unknown command.
 package enum ControlRuntimeCommandKind: String, Codable, Sendable, Equatable, CaseIterable {
     case stop
+    case start
     case restart
     case testDNS = "test-dns"
     case testUpstream = "test-upstream"
     case refreshPreflight = "refresh-preflight"
     case setLaunchAtLogin = "set-launch-at-login"
+    case credentialsChanged = "credentials-changed"
+    case reload
     case quit
 }
 
@@ -79,12 +82,19 @@ package struct ControlUpstreamReference: Codable, Sendable, Equatable {
     }
 }
 
-/// An explicit intent. Start and config apply are not defined on this wire yet:
-/// their payloads wait for the source inventory and an owner checkpoint, and until
-/// then a `start` discriminator is an unknown command.
+/// An explicit intent. Config apply is not defined on this wire: editor values travel on the private editor request.
 package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     /// Stops one module for this session. Admission sets the session fence.
     case stop(ControlModule)
+    /// The saved-value Start of one module, as the app's menu, Overview and shortcut controls ask it (decision 0037): it carries no
+    /// configuration value, and its preparation captures the saved pair once. It is admitted only while the module's lifecycle revision is
+    /// still `ifModuleRevision`, the one the client read in a snapshot stamp. `conditionalDNSRevision` is the proxy-only companion of
+    /// `restart`, under the same rule (decision 0036).
+    case start(
+        ControlModule,
+        ifModuleRevision: ControlLifecycleRevision,
+        conditionalDNSRevision: ControlLifecycleRevision? = nil
+    )
     /// Restarts one module only if the whole-host lifecycle revision still matches. `conditionalDNSRevision`, valid only for the proxy,
     /// asks for DNS's conditional companion (decision 0036) at the DNS revision the client observed; absent, the Restart has no companion,
     /// as before. A non-proxy Restart that names one is refused on decode and on encode.
@@ -95,10 +105,19 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     )
     case testDNS
     case testUpstream(ControlUpstreamReference)
-    case refreshPreflight
+    /// One helper and integration preflight pass that begins after this request was admitted. `helperReplaced` says the client has just
+    /// installed or uninstalled the helper: the verdict the host holds, and any pass already reading, describe the old one.
+    case refreshPreflight(helperReplaced: Bool)
     /// The app's login-item administration (decision 0018): it saves only the platform file's `launchAtLogin`, under the exact platform
     /// baseline the client observed, and applies nothing. It carries no configuration value beyond the flag.
     case setLaunchAtLogin(Bool, ifPlatformBaseline: PrivateBaseline)
+    /// The client wrote or cleared the saved proxy password in the shared store: the host drops the credential it caches, and a read
+    /// already out discards its answer. It carries no secret, identity or digest, and nothing is read again until a handshake needs it.
+    case credentialsChanged
+    /// The explicit reload-and-reconcile (decision 0032): one read-only observation of the files through the host's sole store, then
+    /// adoption and the eligible apply under the generation its admission captured. It carries nothing, and its result grants no
+    /// write authority: a client rebuilds a clean draft from a fresh private read, and a dirty draft keeps its original baselines.
+    case reload
     /// The process quit (decision 0015). Admission latches the terminal stop and opens the reserved flush window for `flush`. `total` is the
     /// one remaining budget, counted from the Quit's admission, that the flush, the store join, the teardown and the diagnostic flush share: the
     /// operation completes when they end, or fails `cleanupIncomplete` at that deadline, while the work still runs and owns the root until
@@ -108,11 +127,14 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     package var kind: ControlRuntimeCommandKind {
         switch self {
         case .stop: .stop
+        case .start: .start
         case .restart: .restart
         case .testDNS: .testDNS
         case .testUpstream: .testUpstream
         case .refreshPreflight: .refreshPreflight
         case .setLaunchAtLogin: .setLaunchAtLogin
+        case .credentialsChanged: .credentialsChanged
+        case .reload: .reload
         case .quit: .quit
         }
     }
@@ -120,11 +142,13 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case type
         case module
+        case moduleRevision
         case lifecycleRevision
         case conditionalDNSRevision
         case upstream
         case enabled
         case baseline
+        case helperReplaced
         case totalMilliseconds
         case flush
     }
@@ -138,14 +162,15 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         switch kind {
         case .stop:
             self = .stop(try container.decode(ControlModule.self, forKey: .module))
+        case .start:
+            let (module, companion) = try Self.decodeCompanion(container)
+            self = .start(
+                module,
+                ifModuleRevision: try container.decode(ControlLifecycleRevision.self, forKey: .moduleRevision),
+                conditionalDNSRevision: companion
+            )
         case .restart:
-            let module = try container.decode(ControlModule.self, forKey: .module)
-            let companion = try container.decodeIfPresent(ControlLifecycleRevision.self, forKey: .conditionalDNSRevision)
-            guard companion == nil || module == .proxy else {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .conditionalDNSRevision, in: container, debugDescription: "only a proxy restart has a DNS companion"
-                )
-            }
+            let (module, companion) = try Self.decodeCompanion(container)
             self = .restart(
                 module,
                 ifLifecycleRevision: try container.decode(ControlLifecycleRevision.self, forKey: .lifecycleRevision),
@@ -156,13 +181,21 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case .testUpstream:
             self = .testUpstream(try container.decode(ControlUpstreamReference.self, forKey: .upstream))
         case .refreshPreflight:
-            self = .refreshPreflight
+            self = .refreshPreflight(helperReplaced: try container.decode(Bool.self, forKey: .helperReplaced))
         case .setLaunchAtLogin:
             let baseline = try container.decode(PrivateBaseline.self, forKey: .baseline)
             guard baseline.component == .platform else {
                 throw DecodingError.dataCorruptedError(forKey: .baseline, in: container, debugDescription: "the flag is the platform file's")
             }
             self = .setLaunchAtLogin(try container.decode(Bool.self, forKey: .enabled), ifPlatformBaseline: baseline)
+        case .credentialsChanged:
+            self = .credentialsChanged
+        case .reload:
+            // Unknown keys stay additive; a known key belongs to another command, so the value is inconsistent.
+            guard container.allKeys.allSatisfy({ $0 == .type }) else {
+                throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "a reload carries nothing")
+            }
+            self = .reload
         case .quit:
             self = .quit(
                 total: try container.decode(ControlWireBudget.self, forKey: .totalMilliseconds),
@@ -177,17 +210,20 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         switch self {
         case .stop(let module):
             try container.encode(module, forKey: .module)
+        case .start(let module, let revision, let companion):
+            try Self.checkCompanion(module, companion, codingPath: encoder.codingPath)
+            try container.encode(module, forKey: .module)
+            try container.encode(revision, forKey: .moduleRevision)
+            try container.encodeIfPresent(companion, forKey: .conditionalDNSRevision)
         case .restart(let module, let revision, let companion):
-            guard companion == nil || module == .proxy else {
-                throw EncodingError.invalidValue(module, .init(
-                    codingPath: encoder.codingPath, debugDescription: "only a proxy restart has a DNS companion"
-                ))
-            }
+            try Self.checkCompanion(module, companion, codingPath: encoder.codingPath)
             try container.encode(module, forKey: .module)
             try container.encode(revision, forKey: .lifecycleRevision)
             try container.encodeIfPresent(companion, forKey: .conditionalDNSRevision)
-        case .testDNS, .refreshPreflight:
+        case .testDNS, .credentialsChanged, .reload:
             break
+        case .refreshPreflight(let helperReplaced):
+            try container.encode(helperReplaced, forKey: .helperReplaced)
         case .testUpstream(let reference):
             try container.encode(reference, forKey: .upstream)
         case .setLaunchAtLogin(let enabled, let baseline):
@@ -199,6 +235,26 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case .quit(let total, let flush):
             try container.encode(total, forKey: .totalMilliseconds)
             try container.encode(flush, forKey: .flush)
+        }
+    }
+
+    /// A Start's or Restart's module and DNS companion. Only the proxy has a companion, so any other module that names one is refused.
+    private static func decodeCompanion(
+        _ container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> (ControlModule, ControlLifecycleRevision?) {
+        let module = try container.decode(ControlModule.self, forKey: .module)
+        let companion = try container.decodeIfPresent(ControlLifecycleRevision.self, forKey: .conditionalDNSRevision)
+        guard companion == nil || module == .proxy else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .conditionalDNSRevision, in: container, debugDescription: "only the proxy has a DNS companion"
+            )
+        }
+        return (module, companion)
+    }
+
+    private static func checkCompanion(_ module: ControlModule, _ companion: ControlLifecycleRevision?, codingPath: [any CodingKey]) throws {
+        guard companion == nil || module == .proxy else {
+            throw EncodingError.invalidValue(module, .init(codingPath: codingPath, debugDescription: "only the proxy has a DNS companion"))
         }
     }
 }
@@ -290,7 +346,7 @@ package struct ControlDNSLivenessProbe: Codable, Sendable, Equatable {
 
 /// The value a settled command reports beyond its settled revision. Each command has
 /// exactly one result kind, which `ControlCompletion` enforces. `settled` belongs only
-/// to lifecycle commands, whose result is the revision they settle at; no command
+/// to Stop, quit and a credentials invalidation, whose result is the revision they settle at; no command
 /// reports a generic success in place of its observation.
 package enum ControlCommandResult: Codable, Sendable, Equatable {
     case settled
@@ -301,6 +357,8 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
     case platformWrite(ControlComponentWrite)
     /// A session DNS Stop that attempted its disable save: the save's causal runtime write. A Stop that attempted none is `settled`.
     case dnsDisable(ControlDNSDisableWrite)
+    /// An explicit reload's typed answer.
+    case reload(ControlReloadResult)
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -308,6 +366,7 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
         case liveness
         case observation
         case write
+        case reload
     }
 
     package init(from decoder: any Decoder) throws {
@@ -325,6 +384,8 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
             self = .platformWrite(try container.decode(ControlComponentWrite.self, forKey: .write))
         case "dns-disable":
             self = .dnsDisable(try container.decode(ControlDNSDisableWrite.self, forKey: .write))
+        case "reload":
+            self = .reload(try container.decode(ControlReloadResult.self, forKey: .reload))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "an unknown result")
         }
@@ -350,6 +411,9 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
         case .dnsDisable(let write):
             try container.encode("dns-disable", forKey: .type)
             try container.encode(write, forKey: .write)
+        case .reload(let result):
+            try container.encode("reload", forKey: .type)
+            try container.encode(result, forKey: .reload)
         }
     }
 }

@@ -99,7 +99,8 @@ Tests: [ConfigSaveGateTests.swift](../../Tests/ConduitTests/ConfigSaveGateTests.
 on a real `AppState` over the harness, and
 [ConfigExactPersistenceTests.swift](../../Tests/ConduitTests/ConfigExactPersistenceTests.swift).
 
-Still open: the save is not a store transaction, so ordering through an actor, read-back
+For the legacy AppState checkpoint above, still open: the save is not a store
+transaction, so ordering through an actor, read-back
 of physical writes, expected revisions, and Stop/Quit fences beyond the quit path are
 unproven. The app's runtime host is still a twin of `RuntimeHost`, not one isolated
 host. The Settings UI is not exercised by the gate tests.

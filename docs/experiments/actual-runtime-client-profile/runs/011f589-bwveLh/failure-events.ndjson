@@ -1,0 +1,6 @@
+{"sourceLine":1,"detail":"surface=systemDNS reason=nothing_recorded","event":"platform.launch_recovery_nothing_to_do","kind":"lifecycle","timestamp":1793118196.100451}
+{"sourceLine":3,"detail":"surface=systemProxy reason=nothing_recorded","event":"platform.launch_recovery_nothing_to_do","kind":"lifecycle","timestamp":1793118196.100613}
+{"sourceLine":4,"detail":"surface=resolverFile reason=fresh_install","event":"platform.launch_recovery_nothing_to_do","kind":"lifecycle","timestamp":1793118196.103843}
+{"sourceLine":5,"detail":"sink=snapshot reason=inspection_failed resource=platform_state","event":"config.diagnostic_destination_refused","kind":"config","timestamp":1793118196.1042829}
+{"sourceLine":9,"detail":"outcome=refused","event":"observability.snapshot_flush_unconfirmed","kind":"health","timestamp":1793118196.1199331}
+{"sourceLine":10,"detail":"outcome=refused","event":"observability.snapshot_flush_unconfirmed","kind":"health","timestamp":1793118196.124114}

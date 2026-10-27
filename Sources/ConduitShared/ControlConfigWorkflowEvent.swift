@@ -84,6 +84,39 @@ extension ControlConfigWorkflowRefusal {
         case .busy: "reason=busy"
         }
     }
+
+    /// The wire `reason` spelling, which the workflow event and the reload result share.
+    var wireReason: String {
+        switch self {
+        case .unreadable: "unreadable"
+        case .versionExhausted: "version_exhausted"
+        case .invalidContent: "invalid_content"
+        case .journalPresenceUnknown: "journal_presence_unknown"
+        case .unexpected: "unexpected"
+        case .busy: "busy"
+        }
+    }
+
+    /// The file the refusal names, when it names one.
+    var file: ControlConfigWorkflowFile? {
+        switch self {
+        case .unreadable(let file), .versionExhausted(let file): file
+        case .invalidContent, .journalPresenceUnknown, .unexpected, .busy: nil
+        }
+    }
+
+    /// The refusal `wireReason` spells, or nil for a reason this build does not know. `file` is read only for a reason that names one.
+    init?(wireReason: String, file: () throws -> ControlConfigWorkflowFile) rethrows {
+        switch wireReason {
+        case "unreadable": self = .unreadable(try file())
+        case "version_exhausted": self = .versionExhausted(try file())
+        case "invalid_content": self = .invalidContent
+        case "journal_presence_unknown": self = .journalPresenceUnknown
+        case "unexpected": self = .unexpected
+        case "busy": self = .busy
+        default: return nil
+        }
+    }
 }
 
 extension ControlConfigWorkflowWrite {
@@ -284,30 +317,18 @@ package enum ControlConfigWorkflowEvent: Codable, Sendable, Equatable {
     }
 
     private static func decodeRefusal(_ container: KeyedDecodingContainer<CodingKeys>) throws -> ControlConfigWorkflowRefusal {
-        switch try container.decode(String.self, forKey: .reason) {
-        case "unreadable": .unreadable(try container.decode(ControlConfigWorkflowFile.self, forKey: .file))
-        case "version_exhausted": .versionExhausted(try container.decode(ControlConfigWorkflowFile.self, forKey: .file))
-        case "invalid_content": .invalidContent
-        case "journal_presence_unknown": .journalPresenceUnknown
-        case "unexpected": .unexpected
-        case "busy": .busy
-        default: throw DecodingError.dataCorruptedError(forKey: .reason, in: container, debugDescription: "an unknown refusal reason")
+        let reason = try container.decode(String.self, forKey: .reason)
+        guard let refusal = try ControlConfigWorkflowRefusal(
+            wireReason: reason, file: { try container.decode(ControlConfigWorkflowFile.self, forKey: .file) }
+        ) else {
+            throw DecodingError.dataCorruptedError(forKey: .reason, in: container, debugDescription: "an unknown refusal reason")
         }
+        return refusal
     }
 
     private static func encodeRefusal(_ refusal: ControlConfigWorkflowRefusal, into container: inout KeyedEncodingContainer<CodingKeys>) throws {
-        switch refusal {
-        case .unreadable(let file):
-            try container.encode("unreadable", forKey: .reason)
-            try container.encode(file, forKey: .file)
-        case .versionExhausted(let file):
-            try container.encode("version_exhausted", forKey: .reason)
-            try container.encode(file, forKey: .file)
-        case .invalidContent: try container.encode("invalid_content", forKey: .reason)
-        case .journalPresenceUnknown: try container.encode("journal_presence_unknown", forKey: .reason)
-        case .unexpected: try container.encode("unexpected", forKey: .reason)
-        case .busy: try container.encode("busy", forKey: .reason)
-        }
+        try container.encode(refusal.wireReason, forKey: .reason)
+        try container.encodeIfPresent(refusal.file, forKey: .file)
     }
 
     private static func decodeWrite(_ container: KeyedDecodingContainer<CodingKeys>) throws -> ControlConfigWorkflowWrite {

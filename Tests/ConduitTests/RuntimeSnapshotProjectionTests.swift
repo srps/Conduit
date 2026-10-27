@@ -646,7 +646,7 @@ final class RuntimeSnapshotProjectionTests: XCTestCase {
         XCTAssertFalse(text.contains("systemProxy"))
         XCTAssertEqual(try JSONDecoder().decode(ControlPreflightObservation.self, from: Data(text.utf8)), unavailable)
 
-        let items = ControlPreflightItems(
+        let items = try ControlPreflightItems(
             systemProxy: ControlIntegrationStatus(enabled: true, alreadyApplied: false, privilegeLevel: .requiresAdmin),
             environmentVariables: .init(enabled: false, alreadyApplied: false, privilegeLevel: .none),
             splitDNS: ControlIntegrationStatus(enabled: true, alreadyApplied: true, privilegeLevel: .requiresAdmin),

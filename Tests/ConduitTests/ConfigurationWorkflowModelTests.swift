@@ -742,6 +742,9 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         if !committedEvents(outcome.events).isEmpty {
             return "\(label): a reload wrote a configuration commit"
         }
+        if let disagreement = Self.answerDisagrees(outcome) {
+            return "\(label): \(disagreement)"
+        }
         if observedCalls(h) != expected.calls {
             return "\(label): physical calls \(observedCalls(h)) but the reference expects \(expected.calls)"
         }
@@ -754,6 +757,29 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         if !expected.stale, expected.fenced { counts["reload.fencedHeld", default: 0] += 1 }
         counts["depth.\(trace.admissions.count)", default: 0] += 1
         return nil
+    }
+
+    /// The typed answer against the events of the same return: a refusal is its one refused observation, a supersession or hold is the
+    /// last event, and an eligible observation holds nothing. The workflow never answers a pass it did not run.
+    private static func answerDisagrees(_ outcome: RuntimeConfigurationWorkflow.ReloadOutcome) -> String? {
+        let adopted = ConfigurationWorkflowEvent.observed(ConfigurationWorkflowObserved(phase: .reload, observation: .adopted))
+        switch outcome.answer {
+        case .decided(.refused(let refusal)):
+            let refused = ConfigurationWorkflowEvent.observed(ConfigurationWorkflowObserved(phase: .reload, observation: .refused(refusal)))
+            return outcome.events == [refused] && !outcome.adopted ? nil : "a refused answer beside \(outcome.events)"
+        case .decided(.adopted(.superseded)):
+            guard case .superseded? = outcome.events.last, outcome.events.first == adopted, !outcome.adopted else {
+                return "a superseded answer beside \(outcome.events)"
+            }
+            return nil
+        case .decided(.adopted(.held(let input, let reason))):
+            let held = ConfigurationWorkflowEvent.held(ConfigurationWorkflowHeld(phase: .reload, input: input, reason: reason))
+            return outcome.events == [adopted, held] ? nil : "a held answer beside \(outcome.events)"
+        case .decided(.adopted(.reconcileAttempted)):
+            return "the workflow answered a reconcile it does not run"
+        case .eligible:
+            return outcome.events == [adopted] && outcome.adopted ? nil : "an eligible answer beside \(outcome.events)"
+        }
     }
 
     private func run(_ trace: Trace, _ root: ModelRoot) async -> String? {

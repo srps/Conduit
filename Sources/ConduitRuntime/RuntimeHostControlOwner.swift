@@ -111,12 +111,19 @@ struct RuntimeHostCollections {
 /// A control operation the host admitted at the service's fence and has not launched. It holds no configuration value.
 enum RuntimeControlAdmission {
     case stop(RuntimeAdmittedStop, ControlModule)
-    case restart(RuntimeAdmittedStart)
+    /// A saved Start or Restart, settled with its causal receipt for `request`.
+    case start(RuntimeAdmittedStart, request: ControlRequestID)
     case launchAtLogin(Bool, PrivateBaseline, ControlRequestID)
     /// The quit latched at the fence; its work already runs, and its window holds the one total deadline.
     case quit(Task<Void, Never>, RuntimeQuitFlush)
     /// A DNS liveness probe of the port the fence chose.
     case dnsProbe(port: Int)
+    /// A preflight request, pending work from its admission (`admitPreflight`); its effect joins a pass at launch (`preflightPass`).
+    case preflight
+    /// The client changed the saved password; the effect drops the cached credential.
+    case credentialsChanged
+    /// An explicit reload, pending work from its admission, with the intent generation its fence captured.
+    case reload(capturedAt: Int, request: ControlRequestID)
 }
 
 /// The latest control Stop of one module: the service operation and the revision its fence took.
@@ -148,7 +155,12 @@ extension RuntimeHost: ControlCommandOwner {
             incarnation: incarnation, presentationRevision: current, configRevision: configRevision, lifecycleRevision: lifecycle,
             modules: ControlModuleRevisions(proxy: proxy, dns: dns, tunnels: tunnels)
         )
-        let kernel = orchestrator.snapshot
+        var kernel = orchestrator.snapshot
+        // The host's DNS health observation is a fact of the running forwarder: the kernel's run state stays authoritative, and an error
+        // of the kernel's own wins. Projected before the stamp, so its change moves the presentation revision.
+        if dnsRelayUnresponsive, kernel.dnsRunState == .running, kernel.dnsError == nil {
+            kernel.dnsError = Self.dnsRelayUnresponsiveError
+        }
         let projected: ControlRuntimeSnapshot
         do {
             projected = try RuntimeSnapshotControlProjection.snapshot(
@@ -161,6 +173,9 @@ extension RuntimeHost: ControlCommandOwner {
         guard let stamped = presentation.stamp(projected) else { return snapshotUnavailable(.revisionExhausted) }
         return stamped
     }
+
+    /// The fixed DNS error the health observation projects; the app's own text for the same reading.
+    static let dnsRelayUnresponsiveError = "DNS pipeline unresponsive"
 
     /// The closed failure of a snapshot read, recorded once per failure episode so a persistent failure cannot flood the bounded event log.
     private func snapshotUnavailable(_ reason: RuntimeServiceSnapshotUnavailableReason) -> ControlRuntimeSnapshot? {
@@ -187,6 +202,10 @@ extension RuntimeHost: ControlCommandOwner {
         switch command {
         case .stop(let module):
             return fenceStop(module, request: request, operation: operation, candidate: candidate)
+        case .start(let module, let expected, let companion):
+            return fenceSavedStart(
+                module, expected: expected.rawValue, conditionalDNS: companion, restartsProxy: false, request: request, operation: operation
+            )
         case .restart(.proxy, let expected, let companion):
             return fenceProxyRestart(expected, conditionalDNS: companion, request: request, operation: operation)
         case .setLaunchAtLogin(let enabled, let baseline):
@@ -210,7 +229,23 @@ extension RuntimeHost: ControlCommandOwner {
             let port = platformConfig.manageSystemDNS ? 53 : (orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort)
             controlAdmissions[operation] = .dnsProbe(port: port)
             return .admitted
-        case .restart(.dns, _, _), .restart(.tunnels, _, _), .testUpstream, .refreshPreflight:
+        case .refreshPreflight(let helperReplaced):
+            // The app's preflight refresh. It reads; it changes no intent. A replacement it names revokes the pass already reading.
+            guard !workflow.isTerminal else { return .rejected(.hostStopping) }
+            admitPreflight(helperReplaced: helperReplaced)
+            controlAdmissions[operation] = .preflight
+            return .admitted
+        case .credentialsChanged:
+            guard !workflow.isTerminal else { return .rejected(.hostStopping) }
+            controlAdmissions[operation] = .credentialsChanged
+            return .admitted
+        case .reload:
+            // Captured in this admission turn, so a Start, Stop or update admitted before the effect's read makes it stale (decision 0032).
+            guard !workflow.isTerminal else { return .rejected(.hostStopping) }
+            pendingAdmissions += 1
+            controlAdmissions[operation] = .reload(capturedAt: workflow.generation, request: request)
+            return .admitted
+        case .restart(.dns, _, _), .restart(.tunnels, _, _), .testUpstream:
             // Not adopted on this owner yet; each is refused whole before anything changes.
             return .rejected(.notImplemented)
         }
@@ -276,18 +311,34 @@ extension RuntimeHost: ControlCommandOwner {
                 report.quiesced()
                 onControlStateChange?()
             }
-        case .restart(let start):
+        case .start(let start, let request):
             Task { @MainActor [self] in
-                let outcome: ControlOperationOutcome
-                do {
-                    outcome = controlOutcome(of: try await runAdmittedStart(start))
-                } catch let refusal as RuntimeStartRefusal {
-                    outcome = .failed(Self.failure(of: refusal))
-                } catch {
-                    // The proxy listener's own start failure surfaces as the member's typed `failed` settlement before it is thrown.
-                    outcome = .failed(.effectFailed)
-                }
-                report.settled(outcome)
+                report.settled(await settleAdmittedStart(start, requestID: request, reportsPrior: true))
+                report.quiesced()
+                onControlStateChange?()
+            }
+        case .preflight:
+            // The pass is joined in this launch turn. Quiesced when it ends: the read may outlast the quit, and the operation keeps its
+            // capacity, and its pending count, until then.
+            let pass = preflightPass()
+            Task { @MainActor [self] in
+                defer { pendingAdmissions -= 1 }
+                report.settled(await pass.value)
+                report.quiesced()
+                onControlStateChange?()
+            }
+        case .credentialsChanged:
+            // The next handshake reads the store afresh; a read already out discards its answer. Nothing is read again here: the client
+            // wrote the store, and the app never re-warms after a save or a clear either.
+            credentialManager.invalidateCachedCredentials()
+            report.settled(completed(.credentialsChanged))
+            report.quiesced()
+            onControlStateChange?()
+        case .reload(let captured, let request):
+            Task { @MainActor [self] in
+                defer { pendingAdmissions -= 1 }
+                let decision = await performReload(capturedAt: captured, requestID: request)
+                report.settled(completed(.reload, result: .reload(Self.reloadResult(decision))))
                 report.quiesced()
                 onControlStateChange?()
             }
@@ -336,17 +387,42 @@ extension RuntimeHost: ControlCommandOwner {
             emitConfigurationEvents(workflow.admissionEvents(.stale(.proxy)))
             return .rejected(.staleRevision)
         }
-        // Decoding refused a companion on any other module, so only the proxy reaches here with one.
-        let proxyRevision = workflow.revisions.proxy
-        switch admitModuleStart(
-            PrivateModuleSlots(proxy: .start, dns: conditionalDNS == nil ? .none : .conditionalActivation, tunnels: .none),
-            expecting: PrivateModuleSlots(proxy: proxyRevision, dns: conditionalDNS?.rawValue, tunnels: nil),
-            operation: .proxyStart,
-            restartsProxy: true,
-            requestID: request
-        ) {
+        return fenceSavedStart(
+            .proxy, expected: workflow.revisions.proxy, conditionalDNS: conditionalDNS, restartsProxy: true, request: request,
+            operation: operation
+        )
+    }
+
+    /// A saved Start of one module, the app's menu, Overview and shortcut controls (decision 0037), and the Restart's own admission: the
+    /// host's one Start path with no editor value, whose preparation captures the saved pair once. `expected` is the module's exact
+    /// revision and `conditionalDNS` the DNS revision the client observed for the proxy's companion (decision 0036); each is checked as
+    /// given in this one turn, so a moved one refuses the whole request before anything changes (decision 0035).
+    private func fenceSavedStart(
+        _ module: ControlModule,
+        expected: Int,
+        conditionalDNS: ControlLifecycleRevision?,
+        restartsProxy: Bool,
+        request: ControlRequestID,
+        operation: ControlOperationID
+    ) -> ControlOwnerFenceResult {
+        // Decoding and encoding refuse a companion on any module but the proxy, so none reaches here.
+        precondition(conditionalDNS == nil || module == .proxy, "only the proxy's Start has a DNS companion")
+        var actions = PrivateModuleSlots<RuntimeModuleAction>(proxy: .none, dns: .none, tunnels: .none)
+        var revisions = PrivateModuleSlots<Int?>(proxy: nil, dns: nil, tunnels: nil)
+        actions[module] = .start
+        revisions[module] = expected
+        if let conditionalDNS {
+            actions[.dns] = .conditionalActivation
+            revisions[.dns] = conditionalDNS.rawValue
+        }
+        let name: LifecycleOperation = switch module {
+        case .proxy: .proxyStart
+        case .dns: .dnsStart
+        case .tunnels: .tunnelsStart
+        }
+        switch admitModuleStart(actions, expecting: revisions, operation: name, restartsProxy: restartsProxy, requestID: request) {
         case .success(let admitted):
-            controlAdmissions[operation] = .restart(admitted)
+            controlAdmissions[operation] = .start(admitted, request: request)
             return .admitted
         case .failure(.stale):
             return .rejected(.staleRevision)
@@ -370,26 +446,10 @@ extension RuntimeHost: ControlCommandOwner {
         guard stop.stopped.contains(module) || modulesDown().contains(module) else { return .failed(.staleRevision) }
         guard let dnsWrite else { return completed(.stop) }
         do {
-            let write = try ControlDNSDisableWrite(
-                prior: dnsWrite.prior,
-                runtime: ControlComponentWrite(
-                    write: ControlConfigWorkflowWrite(RuntimeConfigurationWorkflow.write(dnsWrite.write)),
-                    baseline: dnsWrite.write.verifiedReceipt.map { RuntimeConfigurationWorkflow.privateBaseline($0) }
-                )
-            )
+            let write = try ControlDNSDisableWrite(prior: dnsWrite.prior, runtime: try Self.componentWrite(dnsWrite.write))
             return completed(.stop, result: .dnsDisable(write))
         } catch {
             preconditionFailure("a disable write is built from the store's own consistent facts")
-        }
-    }
-
-    /// A Restart's proxy member result. Its typed `lifecycle.module_settled` carries the same value.
-    private func controlOutcome(of start: RuntimeModuleStartOutcome) -> ControlOperationOutcome {
-        switch start.modules.proxy {
-        case .started?: completed(.restart)
-        case .failed?: .failed(.effectFailed)
-        case .superseded?: .failed(.staleRevision)
-        case .notConfigured?, nil: .failed(.internalFailure)
         }
     }
 
@@ -397,18 +457,28 @@ extension RuntimeHost: ControlCommandOwner {
     private func launchAtLoginOutcome(_ write: ConfigurationWriteOutcome?) -> ControlOperationOutcome {
         guard let write else { return .failed(.storeBusy) }
         do {
-            let component = try ControlComponentWrite(
-                write: ControlConfigWorkflowWrite(RuntimeConfigurationWorkflow.write(write)),
-                baseline: write.verifiedReceipt.map { RuntimeConfigurationWorkflow.privateBaseline($0) }
-            )
-            return completed(.setLaunchAtLogin, result: .platformWrite(component))
+            return completed(.setLaunchAtLogin, result: .platformWrite(try Self.componentWrite(write)))
         } catch {
             preconditionFailure("an admin settlement is built from the store's own consistent facts")
         }
     }
 
+    /// A reload's answer on the wire, one case for one. The shared refusal and hold vocabulary goes through the bridge's own maps.
+    static func reloadResult(_ decision: RuntimeReloadDecision) -> ControlReloadResult {
+        switch decision {
+        case .refused(let refusal):
+            .refused(ControlConfigWorkflowRefusal(refusal))
+        case .adopted(.superseded):
+            .adopted(.superseded)
+        case .adopted(.held(let input, let reason)):
+            .adopted(.held(ControlConfigWorkflowHeldInput(input), ControlConfigWorkflowHoldReason(reason)))
+        case .adopted(.reconcileAttempted(let currentAtEnd)):
+            .adopted(.reconcileAttempted(currentAtEnd: currentAtEnd))
+        }
+    }
+
     /// The one completion path of every command: its result, cited at the revision that reflects the settlement.
-    private func completed(_ command: ControlRuntimeCommandKind, result: ControlCommandResult = .settled) -> ControlOperationOutcome {
+    func completed(_ command: ControlRuntimeCommandKind, result: ControlCommandResult = .settled) -> ControlOperationOutcome {
         // The revision that reflects the settlement is the one this turn's snapshot carries. When none can be projected, the settlement
         // reserves the next one, which the first projection after it takes; the last body, from before the settlement, is never cited.
         // At the maximum no revision can reflect it, so it fails closed.
@@ -422,14 +492,6 @@ extension RuntimeHost: ControlCommandOwner {
             return .completed(try ControlCompletion(command: command, presentationRevision: revision, result: result))
         } catch {
             preconditionFailure("a command settles with its own result kind")
-        }
-    }
-
-    private static func failure(of refusal: RuntimeStartRefusal) -> ControlFailureCode {
-        switch refusal {
-        case .superseded, .terminated, .stale: .staleRevision
-        case .held, .notRunning: .effectFailed
-        case .intentExhausted, .stopSaveOwed: .internalFailure
         }
     }
 
@@ -483,16 +545,36 @@ extension RuntimeHost {
         wireBudgetCap: Duration
     ) throws -> RuntimeInMemoryClients {
         let composition = RuntimeControlComposition(host: self, limits: limits, timing: .system, scheduling: TaskOwnerScheduling())
+        let clients: RuntimeInMemoryClients
         do {
-            return RuntimeInMemoryClients(
+            clients = RuntimeInMemoryClients(
                 control: try makeFramedRuntimeClient(transport: composition.transport, limits: clientFrameLimits, wireBudgetCap: wireBudgetCap),
                 editor: PrivateEditorClient(transport: composition.transport)
             )
         } catch {
-            // No client holds the composition, so the host is left with none.
-            onControlStateChange = nil
+            // No client holds the composition, so the host is left with none: every connection the composition made is undone.
+            detachControlObservation()
             throw error
         }
+        return clients
+    }
+
+    /// Composes the diagnostics log's one sink with the control stream (decision 0014). Every event the host records reaches its file writer
+    /// exactly once, as before, and then the service's bounded leaf ingress, from whatever thread recorded it: an event that cannot be
+    /// retained there is a loss marker, which a subscriber reads as a resync. The service is held weakly and the host not at all, so the
+    /// sink keeps no composition or host alive. An event recorded before this call was written to the file only; the stream begins here.
+    func attachControlStream(_ service: RuntimeServiceCore) {
+        orchestrator.eventLog.setSink { [eventWriter, weak service] event in
+            eventWriter.record(event)
+            service?.ingest(ControlRuntimeEvent(event))
+        }
+    }
+
+    /// Undoes a composition no client came to hold: no state, event or shutdown callback is left, and the file writer records alone again.
+    func detachControlObservation() {
+        onControlStateChange = nil
+        onControlShutdown = nil
+        orchestrator.eventLog.setSink { [eventWriter] event in eventWriter.record(event) }
     }
 }
 
@@ -533,7 +615,15 @@ struct RuntimeControlComposition {
             core: service, limits: limits, timing: timing, scheduling: scheduling,
             privateChannel: RuntimePrivateChannel(custody: custody, owner: host)
         )
-        // Weak: the service holds the host as its owner, so the host must not keep the service alive.
+        // The host's whole observation is bound here, together, for every composition (decision 0014): its safe state, every event it
+        // records, beside its file writer, and the quit's end, which ends every stream after what was published. Weak throughout: the
+        // service holds the host as its owner, so the host must not keep the service alive.
         host.onControlStateChange = { [weak service] in service?.ownerDidChange() }
+        host.onControlShutdown = { [weak service] in service?.hostDidShutDown() }
+        host.attachControlStream(service)
+        // A host whose quit already ended has no later end to report, so the service starts shut down.
+        if host.quitEnded {
+            service.hostDidShutDown()
+        }
     }
 }

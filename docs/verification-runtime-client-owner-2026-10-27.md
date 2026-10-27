@@ -1,6 +1,6 @@
 # Shared host through the actual runtime clients
 
-Status: local integration checkpoint, 2026-10-27. This follows the merged
+Status: merged integration checkpoint, 2026-10-27 (PR254). This follows the merged
 [shared module owner](verification-runtime-module-owner-2026-10-27.md).
 AppState activation, RuntimeActor isolation, shipping profile selection and release
 acceptance remain open. The installed app and helper have not been replaced.
@@ -137,6 +137,11 @@ is `176bb9daa53d048b1ad93f0fb4b449d2bc3357ed`; the independent verification
 checkout has the same tree. Documentation updates that follow this run do not
 change the tested Sources, Tests, scripts, resources or package files.
 
-The resolved-source resource run and its independent review passed. Hosted CI
-and the next AppState integration obligations remain separate. No installed-app, RuntimeActor or release-readiness
+The resolved-source resource run and its independent review passed. Hosted Swift
+and CodeQL passed on exact head `f16c58e473344069e78f94c1115fa1c15e1f93ee` before
+expected-head squash merge in [PR254](https://github.com/srps/Conduit/pull/254) to
+`b83ae22f58626b4c54c701caf4b4b72b810a8631`. All three annotations were runner
+notices. Codex automated code/security reviews could not complete and Devin
+skipped; no completed automated-review evidence is claimed.
+The next AppState integration obligations remain separate. No installed-app, RuntimeActor or release-readiness
 claim follows from this passing workflow.

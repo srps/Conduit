@@ -71,7 +71,7 @@ production ownership/recovery (#48) remain independent obligations.
 
 ## Implementation evidence
 
-Partial: the stage-1 foundation is implemented on this branch.
+Partial. The following evidence describes the original stage-1 foundation; current client adoption evidence follows it.
 
 - Targets in [`Package.swift`](../../Package.swift): `RuntimeEvents` and `ConduitShared` have no dependencies. `ProxyControlBridge` depends on `ProxyKernel`, `ConduitShared` and `RuntimeEvents`. `ProxyKernel`, `PlatformMac`, the app and `ConduitDaemon` depend on `RuntimeEvents`.
 - Typed values: [`LifecycleEvents.swift`](../../Sources/RuntimeEvents/LifecycleEvents.swift) and [`RuntimeEventPayload.swift`](../../Sources/RuntimeEvents/RuntimeEventPayload.swift); the kernel carries them on `RuntimeEvent` ([`RuntimeEvent.swift`](../../Sources/ProxyKernel/Models/RuntimeEvent.swift)).
@@ -83,7 +83,7 @@ The behavior-preserving extraction adds [`RuntimeHost.swift`](../../Sources/Cond
 
 The [host verification checkpoint](../verification-runtime-host-extraction-2026-10-24.md) records all 39 passing workflow-equivalent gates on an unchanged relevant-source fingerprint (2,509 tests, two skips; 85 simulator results and perf).
 
-Not implemented: AppState adoption, the in-memory client/stream engine and RuntimeActor isolation (stage 4). The updater does not depend on ConduitRuntime; no running host serves v2 yet.
+At the extraction checkpoint, AppState adoption, the in-memory client/stream engine and RuntimeActor isolation were not implemented. The subsequent [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) connects the shared host and private store through the real in-memory framed clients. AppState adoption and RuntimeActor remain open; a production v2 socket is not selected by this work. The updater has no ConduitRuntime dependency.
 
 Does not prove: production daemon ownership, real-session auth/PAC behavior or
 machine-side concurrency safety.

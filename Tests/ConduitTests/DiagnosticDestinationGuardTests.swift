@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import XCTest
 @testable import ProxyControlBridge
 @testable import ProxyKernel
@@ -312,6 +313,231 @@ final class DiagnosticDestinationGuardTests: XCTestCase {
             XCTAssertThrowsError(try distinct.admit(destination: exactDescendant), "\(pair)") { error in
                 XCTAssertEqual(error as? RecordFileDestinationRefusal,
                                RecordFileDestinationRefusal(reason: .protectedPath, resource: .config), "\(pair)")
+            }
+        }
+    }
+
+    // MARK: - An entry created between the climb's two reads
+
+    /// Launch recovery writes `platform-state.json` for the first time with an atomic rename while the
+    /// snapshot writer admits its destination. Here the rename lands after `realpath` found nothing and
+    /// before `lstat` looks. That reproduces the plausible first-creation interleaving identified in review
+    /// of run bwveLh, where it was inferred from the recorded events, not observed. The one fresh
+    /// resolution finds the file, so the snapshot destination is admitted.
+    func testProtectedFileCreatedBetweenTheTwoReadsResolvesOnTheRetry() throws {
+        let environment = RuntimeEnvironment(configDirectory: root)
+        let platformState = environment.platformStateFile.standardizedFileURL.path
+        let reads = InterposedReads([
+            .init(before: .entry(platformState), occurrence: 1) {
+                try Data("{}".utf8).write(to: environment.platformStateFile, options: .atomic)
+            },
+        ])
+        let guardForSnapshot = SystemRecordFileDestinationGuard(
+            protected: protectedDiagnosticResources(for: .snapshot, in: environment),
+            caseSensitivity: { _ in true }, reads: reads.reads)
+
+        XCTAssertNoThrow(try guardForSnapshot.admit(destination: environment.snapshotFile))
+        XCTAssertEqual(reads.changeFailures, [])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: platformState), "the interposed creation did not happen")
+        XCTAssertEqual(reads.recorded(at: platformState),
+                       [.resolve(platformState), .entry(platformState), .resolve(platformState)])
+    }
+
+    /// A destination that appears between the reads as an alias of the config is judged on what it resolves
+    /// to: a symlink by its canonical path, a hardlink by its identity. Neither is admitted, and the config
+    /// bytes are untouched.
+    func testDestinationAppearingAsAnAliasOfAProtectedFileIsRefusedAfterTheRetry() throws {
+        let environment = RuntimeEnvironment(configDirectory: root)
+        try ProxyConfigPersistence.save(GenericDefaults.shared.makeConfig(), in: environment)
+        let config = try Data(contentsOf: environment.configFile)
+        let symlink = root.appendingPathComponent("audit-link.ndjson")
+        let hardlink = root.appendingPathComponent("audit-hard.ndjson")
+        let cases: [(URL, () throws -> Void, RecordFileDestinationRefusal)] = [
+            (symlink, { try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: environment.configFile) },
+             RecordFileDestinationRefusal(reason: .protectedPath, resource: .config)),
+            (hardlink, { try FileManager.default.linkItem(at: environment.configFile, to: hardlink) },
+             RecordFileDestinationRefusal(reason: .protectedIdentity, resource: .config)),
+        ]
+
+        for (destination, create, refusal) in cases {
+            let path = destination.standardizedFileURL.path
+            let reads = InterposedReads([.init(before: .entry(path), occurrence: 1, change: create)])
+            let guardForAudit = SystemRecordFileDestinationGuard(
+                protected: protectedDiagnosticResources(for: .connectionAudit, in: environment),
+                caseSensitivity: { _ in true }, reads: reads.reads)
+
+            XCTAssertThrowsError(try guardForAudit.admit(destination: destination), path) { error in
+                XCTAssertEqual(error as? RecordFileDestinationRefusal, refusal, path)
+            }
+            XCTAssertEqual(reads.changeFailures, [], path)
+            XCTAssertEqual(reads.recorded(at: path), [.resolve(path), .entry(path), .resolve(path)], path)
+        }
+        XCTAssertEqual(try Data(contentsOf: environment.configFile), config)
+    }
+
+    /// A dangling link fails the fresh resolution too and is refused, whether it is the destination or a
+    /// protected path. The climb reads the link three times and never past it, and its target is not created.
+    func testDanglingLinkIsRefusedAfterExactlyOneRetry() throws {
+        let environment = RuntimeEnvironment(configDirectory: root)
+        let nowhere = root.appendingPathComponent("nowhere.json")
+        let link = root.appendingPathComponent("audit.ndjson")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: nowhere)
+        let linkPath = link.standardizedFileURL.path
+        let reads = InterposedReads([])
+        let guardForAudit = SystemRecordFileDestinationGuard(
+            protected: protectedDiagnosticResources(for: .connectionAudit, in: environment),
+            caseSensitivity: { _ in true }, reads: reads.reads)
+
+        XCTAssertThrowsError(try guardForAudit.admit(destination: link)) { error in
+            XCTAssertEqual(error as? RecordFileDestinationRefusal,
+                           RecordFileDestinationRefusal(reason: .inspectionFailed, resource: nil))
+        }
+        XCTAssertEqual(reads.recorded, [.resolve(linkPath), .entry(linkPath), .resolve(linkPath)])
+
+        try FileManager.default.createSymbolicLink(at: environment.configFile, withDestinationURL: nowhere)
+        let protectedLink = SystemRecordFileDestinationGuard(
+            protected: protectedDiagnosticResources(for: .connectionAudit, in: environment),
+            caseSensitivity: { _ in true })
+        XCTAssertThrowsError(try protectedLink.admit(destination: root.appendingPathComponent("other.ndjson"))) { error in
+            XCTAssertEqual(error as? RecordFileDestinationRefusal,
+                           RecordFileDestinationRefusal(reason: .inspectionFailed, resource: .config))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: nowhere.path), "a dangling link's target was created")
+    }
+
+    /// An entry that appears and is gone again before the fresh resolution is refused, not climbed past.
+    func testEntryGoneBeforeTheRetryIsRefused() throws {
+        let environment = RuntimeEnvironment(configDirectory: root)
+        let destination = root.appendingPathComponent("audit.ndjson")
+        let path = destination.standardizedFileURL.path
+        let reads = InterposedReads([
+            .init(before: .entry(path), occurrence: 1) { try Data().write(to: destination, options: .atomic) },
+            .init(before: .resolve(path), occurrence: 2) { try FileManager.default.removeItem(at: destination) },
+        ])
+        let guardForAudit = SystemRecordFileDestinationGuard(
+            protected: protectedDiagnosticResources(for: .connectionAudit, in: environment),
+            caseSensitivity: { _ in true }, reads: reads.reads)
+
+        XCTAssertThrowsError(try guardForAudit.admit(destination: destination)) { error in
+            XCTAssertEqual(error as? RecordFileDestinationRefusal,
+                           RecordFileDestinationRefusal(reason: .inspectionFailed, resource: nil))
+        }
+        XCTAssertEqual(reads.changeFailures, [])
+        XCTAssertEqual(reads.recorded, [.resolve(path), .entry(path), .resolve(path)])
+    }
+
+    /// A failure that is not a missing name refuses at the read that gave it: the first resolution, the entry
+    /// read, or the fresh resolution. None of them climbs or reads again.
+    func testFailuresOtherThanAMissingNameRefuseWithoutFurtherReads() {
+        let destination = root.appendingPathComponent("audit.ndjson")
+        let scripts: [(resolve: [Int32], entry: [Int32], calls: [String])] = [
+            ([EACCES], [], ["resolve"]),
+            ([ENOENT], [EACCES], ["resolve", "entry"]),
+            ([ENOTDIR], [ELOOP], ["resolve", "entry"]),
+            ([ENOENT, EIO], [0], ["resolve", "entry", "resolve"]),
+            ([ENOENT, ENOENT], [0], ["resolve", "entry", "resolve"]),
+            ([ENOTDIR, ENOTDIR], [0], ["resolve", "entry", "resolve"]),
+        ]
+
+        for script in scripts {
+            let reads = ScriptedReads(resolve: script.resolve, entry: script.entry)
+            let guardUnderTest = SystemRecordFileDestinationGuard(
+                protected: [], caseSensitivity: { _ in true }, reads: reads.reads)
+
+            XCTAssertThrowsError(try guardUnderTest.admit(destination: destination), "\(script)") { error in
+                XCTAssertEqual(error as? RecordFileDestinationRefusal,
+                               RecordFileDestinationRefusal(reason: .inspectionFailed, resource: nil), "\(script)")
+            }
+            XCTAssertEqual(reads.calls, script.calls, "\(script)")
+        }
+    }
+
+    /// The system reads, each recorded in order, with a real filesystem change made just before a chosen
+    /// read. The change lands exactly between two of the climb's reads, and the real call still answers.
+    private final class InterposedReads: @unchecked Sendable {
+        enum Read: Equatable {
+            case resolve(String)
+            case entry(String)
+
+            var path: String {
+                switch self {
+                case .resolve(let path), .entry(let path): path
+                }
+            }
+        }
+
+        struct Step {
+            let before: Read
+            /// 1 for the first read of `before`, 2 for the second.
+            let occurrence: Int
+            let change: () throws -> Void
+        }
+
+        private let lock = NIOLock()
+        private let steps: [Step]
+        private var log: [Read] = []
+        private var failures: [String] = []
+
+        init(_ steps: [Step]) { self.steps = steps }
+
+        var reads: SystemRecordFileDestinationGuard.PathReads {
+            let system = SystemRecordFileDestinationGuard.PathReads.system
+            return .init(
+                resolve: { path in self.record(.resolve(path)); return system.resolve(path) },
+                entryFailure: { path in self.record(.entry(path)); return system.entryFailure(path) })
+        }
+
+        var recorded: [Read] { lock.withLock { log } }
+        var changeFailures: [String] { lock.withLock { failures } }
+
+        func recorded(at path: String) -> [Read] { recorded.filter { $0.path == path } }
+
+        private func record(_ read: Read) {
+            lock.withLock {
+                log.append(read)
+                let occurrence = log.filter { $0 == read }.count
+                for step in steps where step.before == read && step.occurrence == occurrence {
+                    do { try step.change() } catch { failures.append("\(read): \(error)") }
+                }
+            }
+        }
+    }
+
+    /// Reads answered from a script of `errno` values, 0 meaning success, for failures a real file
+    /// cannot be made to give on demand. A read past the end of its script answers EIO and is recorded.
+    private final class ScriptedReads: @unchecked Sendable {
+        private let lock = NIOLock()
+        private var resolveCodes: [Int32]
+        private var entryCodes: [Int32]
+        private var log: [String] = []
+
+        init(resolve: [Int32], entry: [Int32]) {
+            resolveCodes = resolve
+            entryCodes = entry
+        }
+
+        var calls: [String] { lock.withLock { log } }
+
+        var reads: SystemRecordFileDestinationGuard.PathReads {
+            typealias Failure = SystemRecordFileDestinationGuard.PathReads.Failure
+            return .init(
+                resolve: { path in
+                    let code = self.next("resolve")
+                    return code == 0 ? .success(path) : .failure(Failure(code: code))
+                },
+                entryFailure: { _ in
+                    let code = self.next("entry")
+                    return code == 0 ? nil : Failure(code: code)
+                })
+        }
+
+        private func next(_ read: String) -> Int32 {
+            lock.withLock {
+                log.append(read)
+                if read == "resolve" {
+                    return resolveCodes.isEmpty ? EIO : resolveCodes.removeFirst()
+                }
+                return entryCodes.isEmpty ? EIO : entryCodes.removeFirst()
             }
         }
     }

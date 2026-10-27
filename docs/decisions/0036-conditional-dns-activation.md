@@ -87,6 +87,14 @@ Does not prove: actual framed-client/private-editor adoption, AppState activatio
 
 The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) carries the exact client-observed DNS revision through ordinary Restart and the private Start's conditional DNS slot. [`RuntimePrivateEditor`](../../Sources/ConduitRuntime/RuntimePrivateEditor.swift) uses the same host lifecycle primitive and reports its companion result separately. It adds no DNS-enable write or fence-clearing shortcut. Complete-source review and AppState activation remain open.
 
+The conditional-activation slice above introduced no ordinary Start command.
+Subsequent native call-site review found menu, Overview and shortcut Starts use
+saved values, with no Settings Start caller. Completing that client under 0037
+adds an unshipped v2 saved Start through the same admission, preparation and
+settlement primitive. It does not add launch auto-start, alter v1/the daemon CLI
+or make a private Start follow saved input. The original conditional DNS policy
+and exact companion precondition remain unchanged.
+
 ## Open questions
 
 Production capacity/custody/deadline/total-Quit values still require actual-adapter measurements.

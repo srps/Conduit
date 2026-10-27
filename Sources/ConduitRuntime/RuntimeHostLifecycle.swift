@@ -63,6 +63,8 @@ struct RuntimeAdmittedStart: Sendable {
 final class RuntimeCommitFacts: Sendable {
     var commit: RuntimePlatformCommitResult?
     var dnsStaged: Bool?
+    /// The baselines the commit was conditional on, from the capture's own turn; set exactly when `commit` is.
+    var prior: ControlCommitPrior?
     var members: PrivateModuleSlots<RuntimeModuleStartResult?>?
     /// The conditional DNS companion's result as its effect recorded it, nil until it ran.
     var conditionalDNS: RuntimeConditionalDNSResult?
@@ -361,6 +363,7 @@ extension RuntimeHost {
         let preparation = await workflow.prepareStart(ticket, frozen: admitted.frozen)
         admitted.facts.commit = preparation.commit
         admitted.facts.dnsStaged = preparation.dnsStaged
+        admitted.facts.prior = preparation.prior
         admitted.facts.storeBusy = preparation.storeBusy
         emitConfigurationEvents(preparation.events)
         let prepared: RuntimeConfigurationWorkflow.PreparedStart
@@ -991,6 +994,8 @@ extension RuntimeHost {
         precondition(quit == nil, "the host runs a single quit")
         pendingAdmissions += 1
         workflow.admitStop(terminal: true)
+        // Wake is observed for the host's life, not a module's, so the latch's turn is where it ends.
+        stopWakeObserver()
         // In the latch's own turn, so no client sees the latch without the window.
         let flush = deadline.map { RuntimeQuitFlush(until: $0, admitting: parts, workflow: workflow) }
         quitFlush = flush
@@ -1009,6 +1014,9 @@ extension RuntimeHost {
             await workflow.waitUntilIdle()
             await flushEvents()
             flush?.quitDidEnd()
+            // The physical work is done: the composed control service ends its streams after what it already published.
+            quitEnded = true
+            onControlShutdown?()
         }
         self.quit = quit
         return quit

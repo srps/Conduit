@@ -1,0 +1,50 @@
+{
+  "head": "ef3e4dfcdc712e29b46a78953a01ab00caa4b852",
+  "source": "Sources/ProxyKernel/Support/SystemRecordFileDestinationGuard.swift",
+  "original_sha256": "7d794515a903c0f2605216e6a3fadb1e5eb65f7d779a50acbe6e00e3837e538b",
+  "mutant_sha256": "23b5bfc4f129d2c9580ef9713309de3c6d5ec7715dabf942f162f29757b76d20",
+  "restored_exact": true,
+  "checks": [
+    {
+      "name": "baseline",
+      "exit": 0,
+      "seconds": 11.535,
+      "assertions": [
+        "464 |         XCTAssertEqual(refusal(bootstrap(.isolated(stateDirectory: directory))), .busy, \"the owner still holds the root\")",
+        "\t Executed 1 test, with 0 failures (0 unexpected) in 0.009 (0.009) seconds",
+        "\t Executed 1 test, with 0 failures (0 unexpected) in 0.009 (0.009) seconds",
+        "\t Executed 1 test, with 0 failures (0 unexpected) in 0.009 (0.015) seconds"
+      ]
+    },
+    {
+      "name": "recheck-removed",
+      "exit": 1,
+      "seconds": 8.804,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/DiagnosticDestinationGuardTests.swift:339: error: -[ConduitTests.DiagnosticDestinationGuardTests testProtectedFileCreatedBetweenTheTwoReadsResolvesOnTheRetry] : XCTAssertNoThrow failed: threw error \"RecordFileDestinationRefusal(reason: ProxyKernel.RecordFileDestinationRefusal.Reason.inspectionFailed, resource: Optional(ProxyKernel.ProtectedRecordResource.platformState))\"",
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/DiagnosticDestinationGuardTests.swift:342: error: -[ConduitTests.DiagnosticDestinationGuardTests testProtectedFileCreatedBetweenTheTwoReadsResolvesOnTheRetry] : XCTAssertEqual failed: (\"[ConduitTests.DiagnosticDestinationGuardTests.(unknown context at $1183767d4).InterposedReads.Read.resolve(\"/var/folders/14/87q_90t12lx4ggfz71pwpb900000gn/T/conduit-diag-dest-B710200F-4F92-4DF7-AB59-548ACC3B90DC/platform-state.json\"), ConduitTests.DiagnosticDestinationGuardTests.(unknown context at $1183767d4).InterposedReads.Read.entry(\"/var/folders/14/87q_90t12lx4ggfz71pwpb900000gn/T/conduit-diag-dest-B710200F-4F92-4DF7-AB59-548ACC3B90DC/platform-state.json\")]\") is not equal to (\"[ConduitTests.DiagnosticDestinationGuardTests.(unknown context at $1183767d4).InterposedReads.Read.resolve(\"/var/folders/14/87q_90t12lx4ggfz71pwpb900000gn/T/conduit-diag-dest-B710200F-4F92-4DF7-AB59-548ACC3B90DC/platform-state.json\"), ConduitTests.DiagnosticDestinationGuardTests.(unknown context at $1183767d4).InterposedReads.Read.entry(\"/var/folders/14/87q_90t12lx4ggfz71pwpb900000gn/T/conduit-diag-dest-B710200F-4F92-4DF7-AB59-548ACC3B90DC/platform-state.json\"), ConduitTests.DiagnosticDestinationGuardTests.(unknown context at $1183767d4).InterposedReads.Read.resolve(\"/var/folders/14/87q_90t12lx4ggfz71pwpb900000gn/T/conduit-diag-dest-B710200F-4F92-4DF7-AB59-548ACC3B90DC/platform-state.json\")]\")",
+        "\t Executed 1 test, with 2 failures (0 unexpected) in 1.478 (1.479) seconds",
+        "\t Executed 1 test, with 2 failures (0 unexpected) in 1.478 (1.479) seconds",
+        "\t Executed 1 test, with 2 failures (0 unexpected) in 1.478 (1.485) seconds"
+      ]
+    },
+    {
+      "name": "restored",
+      "exit": 0,
+      "seconds": 7.112,
+      "assertions": [
+        "\t Executed 1 test, with 0 failures (0 unexpected) in 0.006 (0.006) seconds",
+        "\t Executed 1 test, with 0 failures (0 unexpected) in 0.006 (0.006) seconds",
+        "\t Executed 1 test, with 0 failures (0 unexpected) in 0.006 (0.013) seconds"
+      ]
+    }
+  ],
+  "command": [
+    "xcrun",
+    "swift",
+    "test",
+    "--filter",
+    "DiagnosticDestinationGuardTests.testProtectedFileCreatedBetweenTheTwoReadsResolvesOnTheRetry"
+  ],
+  "scope": "One deterministic first-creation interleaving; no proof of every external filesystem race."
+}

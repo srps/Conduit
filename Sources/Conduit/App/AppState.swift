@@ -249,6 +249,8 @@ final class AppState: ObservableObject {
     /// Reconcile passes waiting for a start or stop to finish. Internal for
     /// the harness, for the same reason.
     var passesWaitingForLifecycle: Int { proxyLane.idleWaiterCount + dnsLane.idleWaiterCount }
+    /// The DNS run a health timer armed now would watch. Internal so the harness can name the run a reading belongs to.
+    var dnsObservationToken: LifecycleLane.Token { dnsLane.observationToken }
     /// How long quit waits for the platform queue before it clears anyway.
     /// Five seconds: long enough for a start's remaining step on a healthy
     /// helper, short against the helper's 40 s transaction budget, which is
@@ -2215,11 +2217,14 @@ final class AppState: ObservableObject {
     private func startDNSHealthTimer() {
         stopDNSHealthTimer()
         let manager = systemDNSManager
+        // Twin of `RuntimeHost.startDNSHealthTimer`: taken when the timer is armed, so a probe still out when a Stop or a newer Start
+        // begins names the run that asked for it, and its reading is never taken for the newer run's.
+        let token = dnsLane.observationToken
         dnsHealthTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             DispatchQueue.global(qos: .utility).async {
                 let alive = manager.probeLiveness()
                 Task { @MainActor in
-                    self?.handleDNSHealthResult(alive: alive)
+                    self?.handleDNSHealthResult(alive: alive, armedBy: token)
                 }
             }
         }
@@ -2231,8 +2236,10 @@ final class AppState: ObservableObject {
     }
 
     /// Internal so the harness can report a failed probe; the probe itself
-    /// asks the real port 53.
-    func handleDNSHealthResult(alive: Bool) {
+    /// asks the real port 53. A reading for a DNS run a Stop or newer Start
+    /// superseded (`token`) acts on nothing: no relay restart and no override.
+    func handleDNSHealthResult(alive: Bool, armedBy token: LifecycleLane.Token) {
+        guard !token.isSuperseded else { return }
         if alive {
             if runtime.dnsRunState == .failed {
                 runtime.applyDNSHealthOverride(runState: .running, error: nil)
@@ -2253,14 +2260,14 @@ final class AppState: ObservableObject {
             let outcome = await platformWork.run {
                 manager.restartRelayIfManaged(forwarderPort: forwarderPort, logger: logStore)
             }
-            self?.finishDNSRelayRestart(outcome)
+            self?.finishDNSRelayRestart(outcome, armedBy: token)
         }
     }
 
-    private func finishDNSRelayRestart(_ outcome: SystemDNSManager.RelayRestart) {
+    private func finishDNSRelayRestart(_ outcome: SystemDNSManager.RelayRestart, armedBy token: LifecycleLane.Token) {
         dnsRelayRestartInFlight = false
-        // `notManaged` is a stop that finished while the restart was out.
-        guard outcome == .unresponsive else { return }
+        // `notManaged` is a stop that finished while the restart was out; a superseded run's result degrades nothing newer.
+        guard outcome == .unresponsive, !token.isSuperseded else { return }
         runtime.applyDNSHealthOverride(runState: nil, error: "DNS pipeline unresponsive")
         notificationManager.post(title: "DNS Forwarder Degraded", body: "The DNS relay is not responding. DNS resolution may fail.")
     }
@@ -3105,7 +3112,7 @@ final class AppState: ObservableObject {
             // dnsRunState may be a UI-only `.failed` health override,
             // which `handleDNSHealthResult` itself inspects.
             guard self.orchestrator.snapshot.dnsRunState == .running else { return }
-            self.handleDNSHealthResult(alive: alive)
+            self.handleDNSHealthResult(alive: alive, armedBy: token)
         }
     }
 }

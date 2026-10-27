@@ -141,6 +141,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
             .observed(ConfigurationWorkflowObserved(phase: .reload, observation: .adopted)),
             .held(ConfigurationWorkflowHeld(phase: .reload, input: .unit, reason: .uncommitted)),
         ])
+        XCTAssertEqual(reload.decision, .adopted(.held(.unit, .uncommitted)))
         XCTAssertFalse(FileManager.default.fileExists(atPath: session.environment.configFile.path), "a reload writes nothing")
 
         let ticket = try workflow.admitStart().get()
@@ -177,6 +178,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         XCTAssertNil(reload.applied)
         XCTAssertFalse(reload.adopted)
         XCTAssertEqual(reload.events.last, .superseded(ConfigurationWorkflowSuperseded(phase: .reload, generation: 0, current: 1)))
+        XCTAssertEqual(reload.decision, .adopted(.superseded), "the stale observation is the store's, and nothing applies")
     }
 
     /// A reload under a Stop fence adopts nothing that applies, and the fence stays in force.
@@ -194,6 +196,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
 
         XCTAssertNil(reload.applied)
         XCTAssertEqual(reload.events.last, .held(ConfigurationWorkflowHeld(phase: .reload, input: .unit, reason: .stopFenced)))
+        XCTAssertEqual(reload.decision, .adopted(.held(.unit, .stopFenced)))
         XCTAssertTrue(workflow.stopFenced, "a reload never clears the fence")
     }
 
@@ -241,6 +244,35 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         let reload = await stopped.reload(capturedAt: stopped.generation)
         XCTAssertNil(reload.applied)
         XCTAssertEqual(reload.events.last, .held(ConfigurationWorkflowHeld(phase: .reload, input: .unit, reason: .stopFenced)))
+        XCTAssertEqual(reload.decision, .adopted(.held(.unit, .stopFenced)))
+    }
+
+    /// A client's reload names its request in the store context it reads under; the host's own facade names a fresh one. A refused
+    /// observation is answered refused at the return of its one event, adopts nothing, and still names its request.
+    func testAReloadNamesItsRequestInTheStoreContextAndAnswersBesideItsEvents() async throws {
+        let (session, directory) = try scratchSession()
+        defer {
+            releaseScratchStateRoot(session)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let workflow = workflow(session)
+        _ = try await workflow.open()
+        let request = ControlRequestID(rawValue: UUID())
+
+        let named = await workflow.reload(capturedAt: workflow.generation, requestID: request)
+        XCTAssertEqual(named.context?.requestID, request)
+        XCTAssertEqual(named.context?.expectedOwnerGeneration.rawValue, workflow.generation)
+        let facade = await workflow.reload(capturedAt: workflow.generation)
+        XCTAssertNotNil(facade.context)
+        XCTAssertNotEqual(facade.context?.requestID, request)
+
+        try Data("{".utf8).write(to: session.environment.configFile)
+        let refused = await workflow.reload(capturedAt: workflow.generation, requestID: request)
+        XCTAssertEqual(refused.events, [.observed(ConfigurationWorkflowObserved(phase: .reload, observation: .refused(.invalidContent)))])
+        XCTAssertEqual(refused.decision, .refused(.invalidContent))
+        XCTAssertFalse(refused.adopted)
+        XCTAssertNil(refused.applied)
+        XCTAssertEqual(refused.context?.requestID, request)
     }
 
     /// Decision 0037: a saved-input Start captures the store's pair at preparation, not admission. A reload of valid B while the Start is
@@ -398,5 +430,12 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
 private extension RuntimeConfigurationWorkflow.StartPreparation {
     var isSuperseded: Bool {
         if case .superseded = self { true } else { false }
+    }
+}
+
+private extension RuntimeConfigurationWorkflow.ReloadOutcome {
+    /// The answer decided at the workflow's return, nil when the observation is eligible and the host's pass decides it.
+    var decision: RuntimeReloadDecision? {
+        if case .decided(let decision) = answer { decision } else { nil }
     }
 }

@@ -6,6 +6,7 @@ The probe links the existing Release objects with `-package-name conduit` (the l
 runner plus ConduitRuntime, PlatformMac, ProxyAuth and ProxyPAC), so it widens no product access and adds no product,
 dependency or test hook. Each mode runs in a fresh process under its own owned scratch root, with a bounded deadline and a
 bounded output, and prints numeric NDJSON only. The runner refuses any string value that is not a short fixed label.
+Every host mode runs at the probe's one measured CANDIDATE profile, which is not a shipping default or an owner selection.
 """
 import argparse
 import hashlib
@@ -21,7 +22,7 @@ import time
 MODES = ['lifetime-open', 'lifetime-composed', 'lifetime-read', 'lifetime-save', 'lifetime-start', 'small',
          'realistic-valid-64', 'realistic-valid-128', 'validator-widest', 'escape-maximum', 'padded-8mib', 'repeat',
          'contention', 'contention-encode', 'contention-store', 'contention-encode-nosampler', 'contention-store-nosampler',
-         'held', 'cancel', 'client-quit-widest', 'codec-bounds']
+         'held', 'cancel', 'client-quit-widest', 'codec-bounds', 'profile-sizing', 'pressure-candidate']
 # Fresh-process trials per mode; the live-A contention modes run several so a single outlier is visible as one.
 TRIALS = {'contention-encode': 3, 'contention-store': 3, 'contention-encode-nosampler': 3, 'contention-store-nosampler': 3}
 MODE_TIMEOUT_SECONDS = 300
