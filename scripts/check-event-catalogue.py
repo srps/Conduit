@@ -68,16 +68,13 @@ a computed string is. The run-time precondition behind the legacy RuntimeEvent i
 (which calls RuntimeEventPayload.requiresTypedPayload) stays the authority; this gate
 stops the recognised forms from reaching it unreviewed.
 
-Typed families (decision 0013). The `lifecycle.*` names with a typed value are
-pinned in TYPED_NAMES below and must match `LifecycleEventName` in
-Sources/RuntimeEvents. The `lifecycle.` namespace is closed: a literal in it
-outside Sources/RuntimeEvents and the wire's spelling is a failure, with no
-exception list, so every emitter and consumer goes through the typed value. A
-built name in that namespace is caught by the run-time rule above. The kernel's
-legacy envelope must keep refusing the whole namespace (`requiresTypedPayload`,
-which must still test the `lifecycle.` prefix). This is a checked inventory, not
-a naming convention: the types are what stop an untyped producer, and this check
-stops a later edit from quietly removing that.
+Typed families (decisions 0013/0014/0031/0032). TYPED_FAMILIES pins each domain
+and wire name inventory and its closed producer namespace: lifecycle.,
+config.workflow. and runtime_service. Literals outside their domain directory
+or wire spelling are rejected; there is no per-consumer exception list. The
+kernel's legacy envelope must refuse each whole namespace through
+requiresTypedPayload. Types stop untyped producers; this gate detects edits
+that quietly remove those boundaries.
 
 Usage: check-event-catalogue.py [ROOT]
 """
@@ -159,6 +156,20 @@ PAYLOAD_INVENTORY = 'Sources/RuntimeEvents/RuntimeEventPayload.swift'
 # same inventory, so its literals are allowed outside the typed directory.
 WIRE_TYPED_FILE = 'Sources/ConduitShared/ControlRuntimeEventTyped.swift'
 KERNEL_EVENT = 'Sources/ProxyKernel/Models/RuntimeEvent.swift'
+RUNTIME_SERVICE_TYPED_NAMES = {'runtime_service.fault', 'runtime_service.snapshot_unavailable'}
+RUNTIME_SERVICE_NAMESPACE = 'runtime_service.'
+RUNTIME_SERVICE_INVENTORY = 'Sources/RuntimeEvents/RuntimeServiceEvents.swift'
+WIRE_RUNTIME_SERVICE_FILE = 'Sources/ConduitShared/ControlRuntimeServiceEvent.swift'
+# Names, namespace, domain enum/file, wire file, payload prefix and authorization.
+TYPED_FAMILIES = (
+    (TYPED_NAMES, LIFECYCLE_NAMESPACE, 'LifecycleEventName', TYPED_INVENTORY,
+     WIRE_TYPED_FILE, 'lifecyclePrefix', 'decision 0013'),
+    (CONFIG_WORKFLOW_TYPED_NAMES, CONFIG_WORKFLOW_NAMESPACE, 'ConfigurationWorkflowEventName', CONFIG_WORKFLOW_INVENTORY,
+     WIRE_CONFIG_WORKFLOW_FILE, 'configWorkflowPrefix', 'decisions 0031 and 0032'),
+    (RUNTIME_SERVICE_TYPED_NAMES, RUNTIME_SERVICE_NAMESPACE, 'RuntimeServiceEventName', RUNTIME_SERVICE_INVENTORY,
+     WIRE_RUNTIME_SERVICE_FILE, 'runtimeServicePrefix', 'decisions 0013 and 0014'),
+)
+
 # Names only pm-sim uses: synthetic events it builds to test sinks and
 # writers, and a report name the updater contract must reject. Never emitted
 # by a product binary.
@@ -523,16 +534,11 @@ def check(root):
         target = pm_sim if relative.startswith(PM_SIM) else product
         for literal in literals(tokens):
             where = f'{relative}:{literal.line}'
-            if (literal.text.startswith(LIFECYCLE_NAMESPACE)
-                    and not relative.startswith(TYPED_DIRECTORY) and relative != WIRE_TYPED_FILE):
-                what = 'a typed name' if literal.text in TYPED_NAMES else 'in the closed lifecycle namespace'
-                problems.append(f'{where}: `{literal.text}` is {what}; emit it through RuntimeEvent(payload:) '
-                                'and match its typed value, not a literal (decision 0013)')
-            if (literal.text.startswith(CONFIG_WORKFLOW_NAMESPACE)
-                    and not relative.startswith(TYPED_DIRECTORY) and relative != WIRE_CONFIG_WORKFLOW_FILE):
-                what = 'a typed name' if literal.text in CONFIG_WORKFLOW_TYPED_NAMES else 'in the closed config.workflow namespace'
-                problems.append(f'{where}: `{literal.text}` is {what}; emit it through RuntimeEvent(payload:) '
-                                'and match its typed value, not a literal (decisions 0031 and 0032)')
+            for names, namespace, _, _, wire, _, authorization in TYPED_FAMILIES:
+                if literal.text.startswith(namespace) and not relative.startswith(TYPED_DIRECTORY) and relative != wire:
+                    what = 'a typed name' if literal.text in names else f'in the closed {namespace[:-1]} namespace'
+                    problems.append(f'{where}: `{literal.text}` is {what}; emit it through RuntimeEvent(payload:) '
+                                    f'and match its typed value, not a literal ({authorization})')
             if not is_event_literal(literal, families, seen_exceptions):
                 continue
             if literal.built:
@@ -576,48 +582,33 @@ def check(root):
 
 
 def typed_inventory_problems(root):
-    """The typed inventory matches LifecycleEventName, the wire spells the same names, and
-    the kernel's legacy envelope still refuses the whole namespace."""
+    """Pin each domain/wire inventory and the shared legacy-envelope namespace gate."""
     problems = []
-    inventory = root / TYPED_INVENTORY
-    text = inventory.read_text() if inventory.exists() else ''
-    block = re.search(r'enum LifecycleEventName\b[^{]*\{(.*?)\n\}', text, re.S)
-    listed = set(re.findall(r'"(lifecycle\.[a-z_]+)"', block.group(1))) if block else set()
-    if listed != TYPED_NAMES:
-        problems.append(f'{TYPED_INVENTORY}: LifecycleEventName lists {sorted(listed)}, but the typed inventory '
-                        f'pins {sorted(TYPED_NAMES)}; change both together')
     payload = root / PAYLOAD_INVENTORY
     payload_text = payload.read_text() if payload.exists() else ''
     if 'legacyLifecycleNames' in payload_text:
         problems.append(f'{PAYLOAD_INVENTORY}: legacyLifecycleNames reintroduces an untyped lifecycle exception; '
                         'the namespace is closed, so a lifecycle name gets a typed case')
-    if 'name.hasPrefix(lifecyclePrefix)' not in payload_text:
-        problems.append(f'{PAYLOAD_INVENTORY}: requiresTypedPayload no longer closes the lifecycle namespace')
-    if 'name.hasPrefix(configWorkflowPrefix)' not in payload_text:
-        problems.append(f'{PAYLOAD_INVENTORY}: requiresTypedPayload no longer closes the config.workflow namespace')
-    wire = root / WIRE_TYPED_FILE
-    wire_text = wire.read_text() if wire.exists() else ''
-    wire_names = set(re.findall(r'"(lifecycle\.[a-z_]+)"', wire_text))
-    if wire_names != TYPED_NAMES:
-        problems.append(f'{WIRE_TYPED_FILE}: the wire spells {sorted(wire_names)}, but the typed inventory '
-                        f'pins {sorted(TYPED_NAMES)}; change both together')
-    # The config.workflow family: the domain enum lists every name, the wire file spells the same set, and both are pinned here.
-    cw_inventory = root / CONFIG_WORKFLOW_INVENTORY
-    cw_text = cw_inventory.read_text() if cw_inventory.exists() else ''
-    cw_block = re.search(r'enum ConfigurationWorkflowEventName\b[^{]*\{(.*?)\n\}', cw_text, re.S)
-    cw_listed = set(re.findall(r'"(config\.workflow\.[a-z_]+)"', cw_block.group(1))) if cw_block else set()
-    if cw_listed != CONFIG_WORKFLOW_TYPED_NAMES:
-        problems.append(f'{CONFIG_WORKFLOW_INVENTORY}: ConfigurationWorkflowEventName lists {sorted(cw_listed)}, but the typed '
-                        f'inventory pins {sorted(CONFIG_WORKFLOW_TYPED_NAMES)}; change both together')
-    cw_wire = root / WIRE_CONFIG_WORKFLOW_FILE
-    cw_wire_text = cw_wire.read_text() if cw_wire.exists() else ''
-    cw_wire_names = set(re.findall(r'"(config\.workflow\.[a-z_]+)"', cw_wire_text))
-    if cw_wire_names != CONFIG_WORKFLOW_TYPED_NAMES:
-        problems.append(f'{WIRE_CONFIG_WORKFLOW_FILE}: the wire spells {sorted(cw_wire_names)}, but the typed inventory '
-                        f'pins {sorted(CONFIG_WORKFLOW_TYPED_NAMES)}; change both together')
+    for names, namespace, enum_name, inventory, wire, prefix, _ in TYPED_FAMILIES:
+        domain = root / inventory
+        domain_text = domain.read_text() if domain.exists() else ''
+        block = re.search(r'enum ' + enum_name + r'\b[^{]*\{(.*?)\n\}', domain_text, re.S)
+        pattern = r'"(' + re.escape(namespace) + r'[a-z_]+)"'
+        listed = set(re.findall(pattern, block.group(1))) if block else set()
+        if listed != names:
+            problems.append(f'{inventory}: {enum_name} lists {sorted(listed)}, but the typed inventory '
+                            f'pins {sorted(names)}; change both together')
+        if f'name.hasPrefix({prefix})' not in payload_text:
+            problems.append(f'{PAYLOAD_INVENTORY}: requiresTypedPayload no longer closes the {namespace[:-1]} namespace')
+        wire_path = root / wire
+        wire_text = wire_path.read_text() if wire_path.exists() else ''
+        wire_names = set(re.findall(pattern, wire_text))
+        if wire_names != names:
+            problems.append(f'{wire}: the wire spells {sorted(wire_names)}, but the typed inventory '
+                            f'pins {sorted(names)}; change both together')
     kernel = root / KERNEL_EVENT
     if not kernel.exists() or '!RuntimeEventPayload.requiresTypedPayload(event)' not in kernel.read_text():
-        problems.append(f'{KERNEL_EVENT}: the legacy RuntimeEvent init no longer refuses the lifecycle namespace; '
+        problems.append(f'{KERNEL_EVENT}: the legacy RuntimeEvent init no longer refuses the typed namespaces; '
                         'a typed name must be emitted through RuntimeEvent(payload:)')
     return problems
 

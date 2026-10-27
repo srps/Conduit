@@ -18,12 +18,14 @@ MENU_BAR = 'Sources/Conduit/App/MenuBarPresentation.swift'
 APP = 'Sources/Conduit/App/AppState.swift'
 TYPED = 'Sources/RuntimeEvents/LifecycleEvents.swift'
 CONFIG_WORKFLOW = 'Sources/RuntimeEvents/ConfigurationWorkflowEvents.swift'
+RUNTIME_SERVICE = 'Sources/RuntimeEvents/RuntimeServiceEvents.swift'
+WIRE_RUNTIME_SERVICE = 'Sources/ConduitShared/ControlRuntimeServiceEvent.swift'
 PAYLOAD = 'Sources/RuntimeEvents/RuntimeEventPayload.swift'
 WIRE = 'Sources/ConduitShared/ControlRuntimeEventTyped.swift'
 KERNEL = 'Sources/ProxyKernel/Models/RuntimeEvent.swift'
 UPDATES = 'Sources/PlatformMac/AppUpdates.swift'
 EVENTS = 'docs/events.md'
-MUTATED = (PRODUCT, PM_SIM, LOCATION, MENU_BAR, APP, TYPED, CONFIG_WORKFLOW, PAYLOAD, WIRE, KERNEL, UPDATES, EVENTS)  # restored after each case
+MUTATED = (PRODUCT, PM_SIM, LOCATION, MENU_BAR, APP, TYPED, CONFIG_WORKFLOW, RUNTIME_SERVICE, WIRE_RUNTIME_SERVICE, PAYLOAD, WIRE, KERNEL, UPDATES, EVENTS)  # restored after each case
 
 
 def append(path, text):
@@ -60,6 +62,22 @@ def both(*mutations):
 
 # (label, mutation, text the failure must contain)
 rejected = [
+    ('runtime service literal bypasses typed producer',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .health, event: "runtime_service.fault")'),
+     'is a typed name'),
+    ('future runtime service name bypasses closed namespace',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .health, event: "runtime_service.future")'),
+     'in the closed runtime_service namespace'),
+    ('runtime service domain inventory drifts',
+     replace(RUNTIME_SERVICE, 'case fault = "runtime_service.fault"', 'case fault = "runtime_service.renamed"'),
+     'typed inventory'),
+    ('runtime service wire inventory drifts',
+     replace(WIRE_RUNTIME_SERVICE, 'case fault = "runtime_service.fault"', 'case fault = "runtime_service.renamed"'),
+     'wire spells'),
+    ('runtime service namespace gate removed',
+     replace(PAYLOAD, 'name.hasPrefix(runtimeServicePrefix)', 'false'),
+     'requiresTypedPayload no longer closes the runtime_service namespace'),
+
     ('catalogue entry removed', drop_catalogue_row('auth.upstream_not_trusted'),
      '`auth.upstream_not_trusted` is emitted but not catalogued'),
     ('undocumented literal at an event label',
@@ -170,7 +188,7 @@ rejected = [
      'ConfigurationWorkflowEventName lists'),
     ('legacy envelope stops refusing typed names',
      replace(KERNEL, '!RuntimeEventPayload.requiresTypedPayload(event)', 'true'),
-     'no longer refuses the lifecycle namespace'),
+     'no longer refuses the typed namespaces'),
     ('unreviewed lifecycle name in the closed namespace',
      append(PRODUCT, 'let probe = RuntimeEvent(kind: .lifecycle, event: "lifecycle.future", detail: "x")'),
      '`lifecycle.future` is in the closed lifecycle namespace'),
