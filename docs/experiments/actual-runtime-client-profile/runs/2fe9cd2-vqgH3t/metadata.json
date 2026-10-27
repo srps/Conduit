@@ -1,0 +1,492 @@
+{
+  "sourceCommit": "2fe9cd2701b6dc74028bbddb72c26e55617bad33",
+  "provenanceBefore": {
+    "head": "2fe9cd2701b6dc74028bbddb72c26e55617bad33",
+    "productSourcesDirty": false,
+    "productSourceFingerprint": "7b838f6956fbbc80d7bea96af6722eedd3c7c716df972cf0e293afe54765d704",
+    "untrackedProductFiles": 0,
+    "experimentFiles": {
+      "Probe.swift": "0308ba0eb0c51e4795f0eb317b831c10765b14fd5703998a7fd1837d467a69b2",
+      "README.md": "a91b924462bc3b5e792d231d48c127fd95fb9095133aa7219256893f1c0ed27e",
+      "run.py": "9af9b2a912bf7c7cdeab49d8264bc7604d43227dcb0ce2c58363d69d37603d7b"
+    }
+  },
+  "provenanceAfter": {
+    "head": "2fe9cd2701b6dc74028bbddb72c26e55617bad33",
+    "productSourcesDirty": false,
+    "productSourceFingerprint": "7b838f6956fbbc80d7bea96af6722eedd3c7c716df972cf0e293afe54765d704",
+    "untrackedProductFiles": 0,
+    "experimentFiles": {
+      "Probe.swift": "0308ba0eb0c51e4795f0eb317b831c10765b14fd5703998a7fd1837d467a69b2",
+      "README.md": "a91b924462bc3b5e792d231d48c127fd95fb9095133aa7219256893f1c0ed27e",
+      "run.py": "9af9b2a912bf7c7cdeab49d8264bc7604d43227dcb0ce2c58363d69d37603d7b"
+    }
+  },
+  "sourceUnchangedDuringRun": true,
+  "objectsUnchangedDuringRun": true,
+  "probe_sha256": "0308ba0eb0c51e4795f0eb317b831c10765b14fd5703998a7fd1837d467a69b2",
+  "runner_sha256": "9af9b2a912bf7c7cdeab49d8264bc7604d43227dcb0ce2c58363d69d37603d7b",
+  "swiftc": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)\nTarget: arm64-apple-macosx26.0",
+  "objects": {
+    "CNIOOpenBSD.o": {
+      "sha256": "9ee5ca76c7e6995b5ad57aab52f02fa59b545c76a3ba55489ffb32ea7f5eb379",
+      "mtime": 1793082661.5822992
+    },
+    "RuntimeEvents.o": {
+      "sha256": "9251b47834f034f1f4c9160e50a025cb4c1663bf71a3f01af4948e9e1b6fe35d",
+      "mtime": 1793075884.7372117
+    },
+    "CNIOLinux.o": {
+      "sha256": "b4295e1b0aadafe014b2cab20c598b82680c89617c55e2e8c2edbe8651bb948e",
+      "mtime": 1793082661.6688867
+    },
+    "InternalCollectionsUtilities.o": {
+      "sha256": "ee03dc9dbd576825f8b9ce546061ade0fffdd0560e3ffb7e7e79db98bca139bc",
+      "mtime": 1793075878.064557
+    },
+    "CNIOFreeBSD.o": {
+      "sha256": "6ec6ca7414a8c5a137e8076dc3f01bc620090cfd08fb90e01d9320d399966e85",
+      "mtime": 1793082661.6173146
+    },
+    "_AtomicsShims.o": {
+      "sha256": "bca90041b54b077b56b754be48c78642e71f427b4cbe91eabf93ac75eb9f78fb",
+      "mtime": 1793075878.1386788
+    },
+    "CNIOAtomics.o": {
+      "sha256": "b3475fc7c945ac10dbcd8a2af4494d39bab6d4d7a5b6db06e896e7c704a8e855",
+      "mtime": 1793082662.329657
+    },
+    "CNIOLLHTTP.o": {
+      "sha256": "88920ff3061a24f78228c8583d37750019949149c5578d7e780e9d7f77cddee3",
+      "mtime": 1793082662.3678663
+    },
+    "_NIODataStructures.o": {
+      "sha256": "63c6c7ef6bf988504c7fa462cb91ce1f92c21cee3f19fbeb707d52eb385e9edf",
+      "mtime": 1793075881.4776945
+    },
+    "CNIOWindows.o": {
+      "sha256": "63f3e7d513bc29cbf870c6c9703ccb049b718b2e992161fdc27489940990cea7",
+      "mtime": 1793075876.4970024
+    },
+    "Atomics.o": {
+      "sha256": "128baa89cbc770530cd07bfc574fe5c424c2248fc44606cce47196327ac125f8",
+      "mtime": 1793075879.814031
+    },
+    "NIOConcurrencyHelpers.o": {
+      "sha256": "e7590981e37cb41743aef8e23e15b04740dd06b1280e45b80e3e9b7a73a21a50",
+      "mtime": 1793075881.5623474
+    },
+    "ProxyKernel.o": {
+      "sha256": "7690424b13532f0d6a0580568f617e5734b7283f9b0ce1457b0b979cc7df4d90",
+      "mtime": 1793075926.9992828
+    },
+    "CNIOPosix.o": {
+      "sha256": "691597e6be0d2ac824bcb5435addb4bc003d1df3012b2973f9400c97e64cf86f",
+      "mtime": 1793082661.5988626
+    },
+    "NIOCore.o": {
+      "sha256": "544f7cd2c103e8cfed0a808e119445ce2ceea21e74552d8c3a983daade1dadca",
+      "mtime": 1793075890.00051
+    },
+    "DequeModule.o": {
+      "sha256": "14b71645ecc4ece9881c8d471feaa85746fcec370a4dc9bbb9eca610846fe64e",
+      "mtime": 1793075880.528774
+    },
+    "CNIODarwin.o": {
+      "sha256": "050d60fbc53a627e6471feee0eb6d425216650e5ce29101cc1a130bfc6743bf6",
+      "mtime": 1793082662.0027356
+    },
+    "NIOEmbedded.o": {
+      "sha256": "7dea919bf836d7a719ab3048e1392b7dc5d89e346347cdcfcd107b7e96abac88",
+      "mtime": 1793075892.151156
+    },
+    "NIO.o": {
+      "sha256": "7b4b3248c23cce04097741322a8fe53ed5b091143db2faa8544b43b0f5db3b47",
+      "mtime": 1793075900.792075
+    },
+    "ConduitShared.o": {
+      "sha256": "3fc57d09d35eeac4150ae89fcd88bce7537a955c68d2b7dd2353c2113e2ddf19",
+      "mtime": 1793082674.7350593
+    },
+    "NIOPosix.o": {
+      "sha256": "c321c0d6c98df509521e5a9fa2139fa437884120222abd730b43d4b39395bb5d",
+      "mtime": 1793075900.499857
+    },
+    "ContainersPreview.o": {
+      "sha256": "9c4e6cd4945f84d3569af9613055a207cab1ee89e48573843dc3e04caa4819dc",
+      "mtime": 1793075878.6802619
+    },
+    "CNIOWASI.o": {
+      "sha256": "63f3e7d513bc29cbf870c6c9703ccb049b718b2e992161fdc27489940990cea7",
+      "mtime": 1793082661.5145535
+    },
+    "NIOHTTP1.o": {
+      "sha256": "aac4e909f7bb93dd0cb1961a940c8e2e9bed44f8878a19013b4db701920b314c",
+      "mtime": 1793075904.6676404
+    },
+    "_NIOBase64.o": {
+      "sha256": "f73e8f3cad52bc1eafd55464470806ea85f7eef6ea609e82b37cd06ca06ca713",
+      "mtime": 1793075877.784338
+    },
+    "ProxyControlBridge.o": {
+      "sha256": "c7a7f0065ff6c93fc01e56bdda71e8149348676b6e5537ded97998e9227dede9",
+      "mtime": 1793079166.66358
+    },
+    "ConduitRuntime.o": {
+      "sha256": "47cfae0f42a7f8a323fd3fb77a289cd5f1dae5238222ff56d031e64275ecaebd",
+      "mtime": 1793082726.6698213
+    },
+    "PlatformMac.o": {
+      "sha256": "ddc2da3ed7d9e2ad17ad256024ff145b7b4cc4baa5dbd36f7d27ef2082910a9b",
+      "mtime": 1793075942.7382627
+    },
+    "ProxyAuth.o": {
+      "sha256": "67563063582c01f5d3ea7759270267dca23177002bde27ed7461f009d592f404",
+      "mtime": 1793075929.9333787
+    },
+    "ProxyPAC.o": {
+      "sha256": "66b20f38ad97ad2eb74962bacc8aa7a90b26ec2f9277fc2b7c281494b881addb",
+      "mtime": 1793075928.928659
+    }
+  },
+  "modeTimeoutSeconds": 300,
+  "maxOutputBytes": 4194304,
+  "checks": [
+    {
+      "kind": "lifetime-open",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 1.117,
+      "log": "lifetime-open.ndjson",
+      "outputBytes": 2766,
+      "outputTruncated": false,
+      "records": 14,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "lifetime-composed",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.078,
+      "log": "lifetime-composed.ndjson",
+      "outputBytes": 2823,
+      "outputTruncated": false,
+      "records": 14,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "lifetime-read",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.082,
+      "log": "lifetime-read.ndjson",
+      "outputBytes": 2767,
+      "outputTruncated": false,
+      "records": 14,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "lifetime-save",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.082,
+      "log": "lifetime-save.ndjson",
+      "outputBytes": 2854,
+      "outputTruncated": false,
+      "records": 15,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "lifetime-start",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.078,
+      "log": "lifetime-start.ndjson",
+      "outputBytes": 3047,
+      "outputTruncated": false,
+      "records": 17,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "small",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.083,
+      "log": "small.ndjson",
+      "outputBytes": 11376,
+      "outputTruncated": false,
+      "records": 45,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "realistic-valid-64",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.466,
+      "log": "realistic-valid-64.ndjson",
+      "outputBytes": 12072,
+      "outputTruncated": false,
+      "records": 45,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "realistic-valid-128",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.533,
+      "log": "realistic-valid-128.ndjson",
+      "outputBytes": 12072,
+      "outputTruncated": false,
+      "records": 45,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "validator-widest",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 4.39,
+      "log": "validator-widest.ndjson",
+      "outputBytes": 11956,
+      "outputTruncated": false,
+      "records": 45,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "escape-maximum",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 5.033,
+      "log": "escape-maximum.ndjson",
+      "outputBytes": 11798,
+      "outputTruncated": false,
+      "records": 44,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "padded-8mib",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.196,
+      "log": "padded-8mib.ndjson",
+      "outputBytes": 11696,
+      "outputTruncated": false,
+      "records": 45,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "repeat",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 11.772,
+      "log": "repeat.ndjson",
+      "outputBytes": 15200,
+      "outputTruncated": false,
+      "records": 56,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "contention",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 3.9,
+      "log": "contention.ndjson",
+      "outputBytes": 5434,
+      "outputTruncated": false,
+      "records": 28,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "contention-encode",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.689,
+      "log": "contention-encode-t1.ndjson",
+      "outputBytes": 5970,
+      "outputTruncated": false,
+      "records": 29,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "contention-encode",
+      "trial": 2,
+      "exit": 0,
+      "seconds": 0.703,
+      "log": "contention-encode-t2.ndjson",
+      "outputBytes": 5950,
+      "outputTruncated": false,
+      "records": 29,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "contention-encode",
+      "trial": 3,
+      "exit": 0,
+      "seconds": 0.708,
+      "log": "contention-encode-t3.ndjson",
+      "outputBytes": 5949,
+      "outputTruncated": false,
+      "records": 29,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "contention-store",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.647,
+      "log": "contention-store-t1.ndjson",
+      "outputBytes": 5890,
+      "outputTruncated": false,
+      "records": 29,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "contention-store",
+      "trial": 2,
+      "exit": 0,
+      "seconds": 0.748,
+      "log": "contention-store-t2.ndjson",
+      "outputBytes": 5922,
+      "outputTruncated": false,
+      "records": 29,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "contention-store",
+      "trial": 3,
+      "exit": 0,
+      "seconds": 0.739,
+      "log": "contention-store-t3.ndjson",
+      "outputBytes": 5903,
+      "outputTruncated": false,
+      "records": 29,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "contention-encode-nosampler",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.701,
+      "log": "contention-encode-nosampler-t1.ndjson",
+      "outputBytes": 6259,
+      "outputTruncated": false,
+      "records": 29,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "contention-encode-nosampler",
+      "trial": 2,
+      "exit": 0,
+      "seconds": 0.694,
+      "log": "contention-encode-nosampler-t2.ndjson",
+      "outputBytes": 6222,
+      "outputTruncated": false,
+      "records": 29,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "contention-encode-nosampler",
+      "trial": 3,
+      "exit": 0,
+      "seconds": 0.698,
+      "log": "contention-encode-nosampler-t3.ndjson",
+      "outputBytes": 6270,
+      "outputTruncated": false,
+      "records": 29,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "contention-store-nosampler",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.72,
+      "log": "contention-store-nosampler-t1.ndjson",
+      "outputBytes": 6213,
+      "outputTruncated": false,
+      "records": 29,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "contention-store-nosampler",
+      "trial": 2,
+      "exit": 0,
+      "seconds": 0.71,
+      "log": "contention-store-nosampler-t2.ndjson",
+      "outputBytes": 6176,
+      "outputTruncated": false,
+      "records": 29,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "contention-store-nosampler",
+      "trial": 3,
+      "exit": 0,
+      "seconds": 0.659,
+      "log": "contention-store-nosampler-t3.ndjson",
+      "outputBytes": 6203,
+      "outputTruncated": false,
+      "records": 29,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "held",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.806,
+      "log": "held.ndjson",
+      "outputBytes": 6613,
+      "outputTruncated": false,
+      "records": 37,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "cancel",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.603,
+      "log": "cancel.ndjson",
+      "outputBytes": 4440,
+      "outputTruncated": false,
+      "records": 22,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "codec-bounds",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.053,
+      "log": "codec-bounds.ndjson",
+      "outputBytes": 2377,
+      "outputTruncated": false,
+      "records": 10,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    }
+  ]
+}

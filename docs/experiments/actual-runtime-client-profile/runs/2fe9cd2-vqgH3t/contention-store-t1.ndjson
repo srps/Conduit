@@ -1,0 +1,29 @@
+{"footprintOverBaselineBytes":0,"footprintPeakBytes":2097632,"mallocInUseBytes":144720,"mallocOverBaselineBytes":0,"mode":"contention-store","peakRSSBytes":10289152,"phaseMaxFootprintBytes":2097632,"phaseMaxMallocInUseBytes":144720,"phaseMaxResidentBytes":10207232,"phaseSamples":1,"phaseSeconds":0.00015625,"physicalFootprintBytes":2097632,"record":"stage","residentBytes":10207232,"seconds":0.000180292,"stage":"baseline"}
+{"clientAndHostShareOneProcess":true,"mode":"contention-store","outcomePollIntervalMS":1,"record":"measurement-method","samplerEnabled":true,"samplerIntervalMS":1,"samplerTakesMallocZoneLocks":true,"statusSampleIntervalMS":2,"workerOutcomePollIntervalMS":2}
+{"aliasByteCapacityPerPartition":16384,"aliasPartitionAccountingDiscrepancy":false,"aliasPartitionsChargedByInitializer":5,"aliasPartitionsInSource":5,"initializerBudgetBytes":6902606,"initializerBudgetStatus":"alias partitions match source; candidate value, not a default","label":"CANDIDATE experimental profile; not a shipping default","maxReplyBytes":65536,"maxRequestBytes":65536,"mode":"contention-store","privateReplyFrameCap":8388608,"privateRequestFrameCap":8388608,"record":"profile","retentionSeconds":300,"runtimeFileBytes":8388608,"sidecarFileBytes":131072}
+{"mode":"contention-store","name":"setup.proxyStarted","passed":true,"record":"check"}
+{"mode":"contention-store","name":"liveA.listenerAccepts","passed":true,"record":"check"}
+{"condition":"live-a-idle","maxMS":0.360041,"mode":"contention-store","p50MS":0.255,"p90MS":0.33841700000000002,"record":"status-latency","samples":20}
+{"footprintOverBaselineBytes":5292176,"footprintPeakBytes":7389808,"mallocInUseBytes":3697776,"mallocOverBaselineBytes":3553056,"mode":"contention-store","peakRSSBytes":23314432,"phaseMaxFootprintBytes":7389808,"phaseMaxMallocInUseBytes":3714656,"phaseMaxResidentBytes":23314432,"phaseSamples":34,"phaseSeconds":0.050978999999999997,"physicalFootprintBytes":7389808,"record":"stage","residentBytes":23314432,"seconds":0.051135582999999998,"stage":"live-a-running"}
+{"admission":"accepted","admissionMS":0.3145,"completionMS":3.9743339999999998,"condition":"live-a-during-b-store-save","listenerClosed":true,"mode":"contention-store","outcome":"completed.stop","proxyRunning":true,"record":"stop-latency","snapshotStopped":true,"systemProxyCleared":true,"transferPhaseAtAdmission":"store-save","transferPhaseAtCompletion":"store-save"}
+{"mode":"contention-store","name":"liveStop.physicallyComplete","passed":true,"record":"check"}
+{"mode":"contention-store","name":"liveStop.admittedInTargetPhase","passed":true,"record":"check"}
+{"condition":"live-a-b-store-save","maxMS":0.72954200000000002,"mode":"contention-store","p50MS":0.34570800000000002,"p90MS":0.51100000000000001,"record":"status-latency","samples":22}
+{"condition":"live-a-b-not-started","maxMS":0.33883400000000002,"mode":"contention-store","p50MS":0.33883400000000002,"p90MS":0.33883400000000002,"record":"status-latency","samples":1}
+{"condition":"live-a-b-update-exchange","maxMS":0.449042,"mode":"contention-store","p50MS":0.25974999999999998,"p90MS":0.31545899999999999,"record":"status-latency","samples":151}
+{"admission":"accepted","appliedField":"absent","enter_done_MS":540.67379200000005,"enter_read-exchange_MS":0.016084000000000001,"enter_store-save_MS":466.87854199999998,"enter_update-exchange_MS":0.42808400000000002,"label":"save-only escape-heavy B beside live A; never applied","mode":"contention-store","moduleReceipts":0,"outcome":"configurationSettled","record":"transfer-b","runtimeWrite":"persisted.false"}
+{"mode":"contention-store","name":"liveStop.issued","passed":true,"record":"check"}
+{"mode":"contention-store","name":"transferB.savedNotApplied","passed":true,"record":"check"}
+{"mode":"contention-store","name":"transferB.hostViewStillA","passed":true,"record":"check"}
+{"footprintOverBaselineBytes":60260544,"footprintPeakBytes":62358176,"mallocInUseBytes":5831600,"mallocOverBaselineBytes":5686880,"mode":"contention-store","peakRSSBytes":78430208,"phaseMaxFootprintBytes":62358176,"phaseMaxMallocInUseBytes":30112032,"phaseMaxResidentBytes":78430208,"phaseSamples":368,"phaseSeconds":0.55594449999999995,"physicalFootprintBytes":62358176,"record":"stage","residentBytes":78430208,"seconds":0.60708000000000006,"stage":"live-transfer-done"}
+{"mode":"contention-store","name":"quit.completed","passed":true,"record":"check"}
+{"flushConfirmed":true,"flushMS":0.0091249999999999994,"mode":"contention-store","record":"release-settle","settled":true,"settleMS":0.040458000000000001}
+{"mode":"contention-store","name":"release.settled","passed":true,"record":"check"}
+{"mode":"contention-store","name":"release.flushConfirmed","passed":true,"record":"check"}
+{"deallocationWaitMS":0.00020900000000000001,"hostDeallocated":true,"mode":"contention-store","record":"release-host"}
+{"mode":"contention-store","name":"release.hostDeallocated","passed":true,"record":"check"}
+{"attempts":1,"closeFailures":0,"leaseReacquired":true,"leaseWaitMS":0.77749999999999997,"mode":"contention-store","probeLeaseReleasedAndReacquired":true,"record":"release-lease"}
+{"mode":"contention-store","name":"release.leaseClosed","passed":true,"record":"check"}
+{"mode":"contention-store","name":"release.scratchRemoved","passed":true,"record":"check"}
+{"footprintOverBaselineBytes":60276928,"footprintPeakBytes":62374560,"mallocInUseBytes":3760624,"mallocOverBaselineBytes":3615904,"mode":"contention-store","peakRSSBytes":78561280,"phaseMaxFootprintBytes":62374560,"phaseMaxMallocInUseBytes":5855248,"phaseMaxResidentBytes":78561280,"phaseSamples":7,"phaseSeconds":0.011637708,"physicalFootprintBytes":62374560,"record":"stage","released":true,"residentBytes":78561280,"seconds":0.61871795799999996,"stage":"after-release"}
+{"failedChecks":0,"failures":[],"inconclusive":[],"mode":"contention-store","record":"summary","released":true}
