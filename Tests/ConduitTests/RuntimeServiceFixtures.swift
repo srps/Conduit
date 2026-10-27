@@ -40,6 +40,10 @@ enum RuntimeServiceFixtures {
         snapshotBytes: Int = 1 << 14,
         subscriberRecordBytes: Int = 256,
         ringCapacity: Int = 16,
+        ringByteCapacity: Int = 1 << 16,
+        ingressCapacity: Int = 8,
+        ingressByteCapacity: Int = 1 << 15,
+        drainItemsPerTurn: Int = 4,
         controlLogCapacity: Int = 8,
         controlLogByteCapacity: Int = 1 << 14,
         replayChunkItems: Int = 4,
@@ -61,11 +65,11 @@ enum RuntimeServiceFixtures {
             stopLaneCapacityPerModule: 1,
             subscriberLimit: subscribers,
             ringCapacity: ringCapacity,
-            ringByteCapacity: 1 << 16,
+            ringByteCapacity: ringByteCapacity,
             maxEventBytes: 4096,
-            ingressCapacity: 8,
-            ingressByteCapacity: 1 << 15,
-            drainItemsPerTurn: 4,
+            ingressCapacity: ingressCapacity,
+            ingressByteCapacity: ingressByteCapacity,
+            drainItemsPerTurn: drainItemsPerTurn,
             drainBytesPerTurn: 1 << 14,
             controlLogCapacity: controlLogCapacity,
             controlLogByteCapacity: controlLogByteCapacity,
@@ -80,6 +84,16 @@ enum RuntimeServiceFixtures {
             latestSnapshotByteCapacity: snapshotBytes,
             subscriberRecordBytes: subscriberRecordBytes,
             retainedByteCeiling: retainedByteCeiling
+        )
+    }
+
+    /// Fixture bounds for a service composed over an actual host, whose own events reach the stream: the event ring and the ingress are
+    /// sized for a Start's or a quit's burst of host events, so a subscriber reading an operation's settlement is not ended by an
+    /// overflow. Still fixture values, not product policy; every other bound is the small fixture one.
+    static func hostLimits(ordinaryPending: Int = 2, subscribers: Int = 2) throws -> RuntimeServiceLimits {
+        try limits(
+            ordinaryPending: ordinaryPending, subscribers: subscribers, ringCapacity: 256, ringByteCapacity: 1 << 18, ingressCapacity: 256,
+            ingressByteCapacity: 1 << 18, drainItemsPerTurn: 32, replayChunkItems: 32
         )
     }
 

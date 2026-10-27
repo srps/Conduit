@@ -1014,6 +1014,9 @@ extension RuntimeHost {
             await workflow.waitUntilIdle()
             await flushEvents()
             flush?.quitDidEnd()
+            // The physical work is done: the composed control service ends its streams after what it already published.
+            quitEnded = true
+            onControlShutdown?()
         }
         self.quit = quit
         return quit

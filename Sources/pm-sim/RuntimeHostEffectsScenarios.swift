@@ -540,6 +540,8 @@ enum RuntimeHostEffectsScenario {
         }
 
         var quiesced = false
+        // Owned here, so the error path ends and joins it before the root is released.
+        var witness: Task<StreamWitness, Never>?
         do {
             let proxy = try await host.startProxy(conditionalDNS: true)
             check("a proxy Start reports its proxy started", proxy.modules.proxy == .started)
@@ -565,6 +567,9 @@ enum RuntimeHostEffectsScenario {
             let clients = try host.makeInMemoryControlClient(
                 limits: try controlProfile(), clientFrameLimits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
             )
+            // A witness stream read beside every step below until it ends, so it sees the host's own events as they are published.
+            let witnessStream = try await clients.control.subscribe(.live, deadline: RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now))
+            witness = Task { @MainActor in await readUntilEnd(witnessStream) }
             let viaClient = try await stopProxyThroughClient(clients.control)
             check("the client's snapshot shows the restarted proxy", viaClient.proxyShown)
             check("a proxy Stop through the framed client completes", viaClient.completed)
@@ -628,6 +633,11 @@ enum RuntimeHostEffectsScenario {
                 afterQuit = refused
             }
             check("no Start runs after the quit", afterQuit == .terminated)
+            let seen = await witness?.value ?? StreamWitness()
+            witness = nil
+            check("the host's own typed events reach the actual stream", seen.dnsStartedEvent)
+            check("the witness stream receives the Quit's settlement before its end", seen.quitFinished)
+            check("the stream ends with hostShutdown after the quit's physical work", seen.ended == .streamClosed(.hostShutdown))
 
             let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
             check("the module host settles before its root is released", settled == .settled)
@@ -645,12 +655,55 @@ enum RuntimeHostEffectsScenario {
         } catch {
             notes.append("module exercise error: \(error.localizedDescription)")
             await host.shutdown()
+            // The quit's end ends the witness; a cancel covers a stream that never got one. Joined either way.
+            witness?.cancel()
+            _ = await witness?.value
             let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
             let flush = await host.flushEvents()
             quiesced = settled == .settled && flush.allConfirmed
             assertions.append(.init("the module error path settled the host and confirmed its flush", quiesced))
         }
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// What the witness stream saw: whether the saved DNS Start's typed settlement and the Quit's settlement reached it, and what ended it.
+    /// Flags only, so reading holds nothing that grows with the stream.
+    private struct StreamWitness {
+        var dnsStartedEvent = false
+        var quitFinished = false
+        var ended: RuntimeClientError?
+    }
+
+    /// Reads one stream until it ends, bounded in frames and in each wait, so a stream that never ends fails a check instead of hanging.
+    @MainActor
+    private static func readUntilEnd(_ stream: RuntimeSubscription) async -> StreamWitness {
+        var witness = StreamWitness()
+        defer { stream.cancel() }
+        for _ in 0..<4_096 {
+            do {
+                switch try await stream.next(RuntimeDeadline.after(.seconds(10), from: ContinuousClock.now)) {
+                case .events(let batch):
+                    for case .known(let event) in batch.events {
+                        if case .lifecycle(.moduleSettled(let settlement, _))? = event.typed, settlement == .explicit(.dns, .started) {
+                            witness.dnsStartedEvent = true
+                        }
+                    }
+                case .operationFinished(let finished):
+                    if case .completed(let completion) = finished.outcome, completion.command == .quit {
+                        witness.quitFinished = true
+                    }
+                case .baseline, .snapshot, .replayCaughtUp, .end:
+                    continue
+                }
+            } catch let error as RuntimeClientError {
+                witness.ended = error
+                return witness
+            } catch {
+                witness.ended = .unexpectedReply
+                return witness
+            }
+        }
+        return witness
     }
 
     /// A proxy Stop through the host's in-memory control client. Its stream ends when this returns; the stream's cancel queues the one hop
@@ -801,17 +854,18 @@ enum RuntimeHostEffectsScenario {
     }
 
     /// This scenario's own control-service profile. Every value is explicit and scenario-only, sized for one client and a handful of
-    /// operations; none is a shipping default.
+    /// operations; none is a shipping default. The event ring and the ingress carry the host's own events, so they are sized for a
+    /// Start's or a quit's burst, and one more subscriber holds the witness stream beside each step's own.
     private static func controlProfile() throws -> RuntimeServiceLimits {
         try RuntimeServiceLimits(
             maxRequestBytes: 4096, maxReplyBytes: 64 * 1024,
             aliasCapacityPerPartition: 8, aliasByteCapacityPerPartition: 1 << 20,
             ordinaryPendingCapacity: 2, outcomeCapacity: 8, outcomeByteCapacity: 1 << 20,
             retentionAge: .seconds(60), janitorBatch: 4,
-            ordinaryLaneCapacity: 2, readLaneCapacity: 2, streamLaneCapacity: 2, stopLaneCapacityPerModule: 1, subscriberLimit: 2,
-            ringCapacity: 16, ringByteCapacity: 1 << 16, maxEventBytes: 4096,
-            ingressCapacity: 8, ingressByteCapacity: 1 << 15, drainItemsPerTurn: 4, drainBytesPerTurn: 1 << 14,
-            controlLogCapacity: 8, controlLogByteCapacity: 1 << 14, replayChunkItems: 4, replayChunkBytes: 1 << 14,
+            ordinaryLaneCapacity: 2, readLaneCapacity: 2, streamLaneCapacity: 2, stopLaneCapacityPerModule: 1, subscriberLimit: 3,
+            ringCapacity: 256, ringByteCapacity: 1 << 18, maxEventBytes: 4096,
+            ingressCapacity: 256, ingressByteCapacity: 1 << 18, drainItemsPerTurn: 32, drainBytesPerTurn: 1 << 16,
+            controlLogCapacity: 8, controlLogByteCapacity: 1 << 14, replayChunkItems: 32, replayChunkBytes: 1 << 14,
             collectionRowCapacity: 16, collectionByteCapacity: 1 << 14, collectionProofCapacityPerKind: 4,
             collectionRowRevisionsPerKind: 2, collectionRetainedByteCapacity: 1 << 14, collectionRowRetentionAge: .seconds(60),
             latestSnapshotByteCapacity: 1 << 14, subscriberRecordBytes: 256, retainedByteCeiling: 1 << 24

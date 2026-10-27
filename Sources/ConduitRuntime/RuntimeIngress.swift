@@ -23,6 +23,8 @@ final class RuntimeIngress: @unchecked Sendable {
     private var items: [RuntimeIngressItem] = []
     private var queuedBytes = 0
     private var drainScheduled = false
+    /// Sticky once the host has shut down: the stream has ended, so a later event is not queued. The diagnostics writer still records it.
+    private var closed = false
 
     init(limits: RuntimeServiceLimits) {
         capacity = limits.ingressCapacity
@@ -34,6 +36,7 @@ final class RuntimeIngress: @unchecked Sendable {
     /// means the event has no encoding, and it becomes a loss marker, like an event over the bound or a full queue.
     func enqueue(_ record: ControlRuntimeEventRecord, bytes: Int?) -> Bool {
         lock.withLock {
+            guard !closed else { return false }
             if let bytes, bytes <= maxEventBytes, items.count < capacity, bytes <= byteCapacity - queuedBytes {
                 items.append(.event(record, bytes: bytes))
                 queuedBytes += bytes
@@ -64,6 +67,16 @@ final class RuntimeIngress: @unchecked Sendable {
             drainScheduled = more
             return (batch, more)
         }
+    }
+
+    /// Closes the ingress for good. What is already queued still drains, in order; nothing is queued after.
+    func close() {
+        lock.withLock { closed = true }
+    }
+
+    /// Whether the ingress is closed and everything queued before the close has been taken.
+    var isClosedAndDrained: Bool {
+        lock.withLock { closed && items.isEmpty }
     }
 
     /// Adds one loss marker at the tail. Consecutive losses collapse, so the queue holds at most one item more

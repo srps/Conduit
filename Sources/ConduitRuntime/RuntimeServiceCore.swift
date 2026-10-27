@@ -443,11 +443,32 @@ final class RuntimeServiceCore {
                 return (.frame(.snapshot(snapshot)), after)
             }
         }
+        if case .idle = ordered.pull, hostShutdownReady {
+            // Everything published before the shutdown, and every settlement of the quit, has been delivered: the stream ends.
+            return (.end(.hostShutdown), start)
+        }
         var after = ordered.after
         if case .frame = ordered.pull {
             after.lastWasSnapshot = false
         }
         return (ordered.pull, after)
+    }
+
+    /// The owner reports, once, that the host has shut down: the quit's physical work has ended. The ingress closes, so no event recorded
+    /// after this point is queued, and every parked wait is woken. Each subscriber then receives, in order, every event queued before the
+    /// close and every settlement of an operation still pending when it reaches its end, the quit's own included, and only then the
+    /// `hostShutdown` end. An operation admitted after a subscriber has ended (a Stop is still admitted after the quit) is not streamed to
+    /// it; its outcome is answered by lookup. A subscription opened later receives its baseline and the same end. Sticky: nothing reopens.
+    func hostDidShutDown() {
+        ingress.close()
+        wakeWaiters()
+    }
+
+    /// Whether a subscriber with nothing left to read ends with `hostShutdown`: the ingress is closed and empty, and no admitted operation is
+    /// pending at this moment. Every operation settles, at the latest as an internal failure when it quiesces, and after the quit the owner
+    /// refuses new ordinary work, so the pending set drains and the end comes. A settlement wakes every parked wait, so the end is not missed.
+    private var hostShutdownReady: Bool {
+        ingress.isClosedAndDrained && !operations.values.contains { $0.logical == .pending }
     }
 
     /// Commits a cursor that a peek produced, once its frame has been delivered.

@@ -92,7 +92,11 @@ final class RuntimeLaneTicket: @unchecked Sendable {
     private var held: RuntimeTicketParts = [.timer]
     /// The owner hops held: one per queued or running round.
     private var hopHolds = 0
+    /// Set under the lock by the end that releases the reservation, so no part can begin again.
     private var released = false
+    /// Set only after that release has returned the lane slot and run the release callback, outside the lock. A caller woken on it
+    /// finds both done, so a next reservation over the same slot or callback state cannot race them.
+    private var releaseComplete = false
     /// One caller waiting for every part but the named ones to end (`settled(leaving:)`).
     private var settleWaiter: (remaining: RuntimeTicketParts, continuation: CheckedContinuation<Void, Never>)?
 
@@ -102,9 +106,9 @@ final class RuntimeLaneTicket: @unchecked Sendable {
         self.onQuiesced = onQuiesced
     }
 
-    /// Whether every part has ended and the slot has been returned.
+    /// Whether every part has ended, the lane slot has been returned and the release callback has run.
     var isReleased: Bool {
-        lock.withLock { released }
+        lock.withLock { releaseComplete }
     }
 
     /// Adds parts to the reservation. It returns false once the reservation has released, so no caller queues work
@@ -121,7 +125,8 @@ final class RuntimeLaneTicket: @unchecked Sendable {
         }
     }
 
-    /// Ends the parts it holds. The last one releases the slot, and then the release callback runs outside the lock.
+    /// Ends the parts it holds. The last one marks the reservation released, then returns the slot and runs the release callback outside
+    /// the lock, and only then marks the release complete and wakes a waiter that named no part to keep.
     func end(_ parts: RuntimeTicketParts) {
         var settled: CheckedContinuation<Void, Never>?
         let releasing = lock.withLock { () -> Bool in
@@ -136,27 +141,40 @@ final class RuntimeLaneTicket: @unchecked Sendable {
                 held.subtract(others)
                 changed = true
             }
-            if let waiter = settleWaiter, hopHolds == 0, held.isSubset(of: waiter.remaining) {
+            let releasingNow = changed && held.isEmpty && hopHolds == 0
+            if releasingNow {
+                released = true
+            } else if let waiter = settleWaiter, hopHolds == 0, held.isSubset(of: waiter.remaining) {
+                // Early-ready: only the parts the waiter named to keep are still held.
                 settled = waiter.continuation
                 settleWaiter = nil
             }
-            guard changed, held.isEmpty, hopHolds == 0 else { return false }
-            released = true
-            return true
+            return releasingNow
         }
         settled?.resume()
         guard releasing else { return }
         counter.release(lane)
         onQuiesced?()
+        let completed = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            releaseComplete = true
+            defer { settleWaiter = nil }
+            return settleWaiter?.continuation
+        }
+        completed?.resume()
     }
 
-    /// Returns once no hop is held and every other held part is among `remaining`. A private exchange whose round answered waits here
-    /// for its round's hop and its cancelled timer, both already ending, so its slot is free when its client scope ends. A caller whose
-    /// wait was detached does not wait here: its slot stays held until the work it left behind physically ends. One waiter at a time.
+    /// Returns once no hop is held and every other held part is among `remaining`. A private exchange whose round answered waits here,
+    /// leaving its client scope, for its round's hop and its cancelled timer, both already ending, so its slot is free when that scope
+    /// ends. A reply or open that a claimed round answered waits leaving nothing, so it returns only after the whole release has
+    /// completed: the lane slot is returned and the release callback has run. A caller whose wait was detached, or answered by a budget
+    /// refusal made before any claim, does not wait here: its slot stays held until the work it left behind physically ends. One waiter
+    /// at a time.
     func settled(leaving remaining: RuntimeTicketParts) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let ready = lock.withLock { () -> Bool in
-                if released || (hopHolds == 0 && held.isSubset(of: remaining)) { return true }
+                if releaseComplete { return true }
+                // A release in progress is not ready: its slot and callback are still being returned.
+                if !released, hopHolds == 0, held.isSubset(of: remaining) { return true }
                 precondition(settleWaiter == nil, "one caller waits on a ticket")
                 settleWaiter = (remaining, continuation)
                 return false
@@ -217,6 +235,9 @@ final class RuntimeWaitGate: @unchecked Sendable {
     /// round that parks can return the wait to open on a wake, and it is cleared at resolution like the round's closure.
     private var boundRefusal: RuntimeWaitOutcome?
     private var phase = RuntimeGatePhase.open
+    /// Whether the first resolution was a round's own answer, made while that round held the claim. It is set in the resolving step,
+    /// before the caller resumes, and never changes after.
+    private var answeredByClaimedRound = false
     private var continuation: CheckedContinuation<RuntimeWaitOutcome, Never>?
     private var resolution: RuntimeWaitOutcome?
     private var timer: Task<Void, Never>?
@@ -247,6 +268,12 @@ final class RuntimeWaitGate: @unchecked Sendable {
     /// The phase, for tests and the model.
     var currentPhase: RuntimeGatePhase {
         lock.withLock { phase }
+    }
+
+    /// Whether the wait was resolved by a claimed owner round's answer (`finish` while claimed). A deadline, budget refusal or
+    /// cancellation is not one, whatever the phase, so its caller waits on no owner work. Stable once the wait has resolved.
+    var resolvedFromClaimedRound: Bool {
+        lock.withLock { answeredByClaimedRound }
     }
 
     /// Arms the caller's continuation, starts the wait's one timer, and queues its first round. A resolution that came
@@ -281,7 +308,7 @@ final class RuntimeWaitGate: @unchecked Sendable {
     /// a stream frame commits it only on a win.
     @discardableResult
     func finish(_ outcome: RuntimeWaitOutcome) -> Bool {
-        resolve { current in current == .resolved ? nil : outcome }
+        resolve(roundAnswer: true) { current in current == .resolved ? nil : outcome }
     }
 
     /// Ends the wait because its deadline passed or its task was cancelled. The phase is read and the failure is chosen
@@ -462,8 +489,11 @@ final class RuntimeWaitGate: @unchecked Sendable {
     /// round, such as the deadline timer or a wake's cleanup, releases them first. A `finish` that runs inside an attempt is
     /// different: that attempt's own frame still holds its closure while the continuation resumes. No universal pre-resume
     /// release is claimed.
+    ///
+    /// `roundAnswer` marks a round's own answer. It counts as the claimed round's only when the phase was still claimed, so the
+    /// provenance is fixed in the same locked step as the win.
     @discardableResult
-    private func resolve(_ choose: (RuntimeGatePhase) -> RuntimeWaitOutcome?) -> Bool {
+    private func resolve(roundAnswer: Bool = false, _ choose: (RuntimeGatePhase) -> RuntimeWaitOutcome?) -> Bool {
         var resumeCaller: CheckedContinuation<RuntimeWaitOutcome, Never>?
         var timerToCancel: Task<Void, Never>?
         var registrationEnd: ParkEnd?
@@ -471,6 +501,7 @@ final class RuntimeWaitGate: @unchecked Sendable {
         var spent = SpentPayloads()
         lock.withLock {
             guard let outcome = choose(phase) else { return }
+            answeredByClaimedRound = roundAnswer && phase == .claimed
             phase = .resolved
             resumeCaller = continuation
             continuation = nil

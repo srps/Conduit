@@ -121,7 +121,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         let host = try await harness.makeHost()
         let composition = RuntimeControlComposition(
             host: host,
-            limits: try RuntimeServiceFixtures.limits(),
+            limits: try RuntimeServiceFixtures.hostLimits(),
             timing: .system,
             scheduling: TaskOwnerScheduling()
         )
@@ -842,7 +842,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         }
         let latched = try await eventually { host.workflow.isTerminal }
         XCTAssertTrue(latched)
-        let operation = try accepted(try await admitInOneRound(editor, request, scheduling: scheduling))
+        let operation = try accepted(try await admitInOneRound(editor, request, service: composition.service, scheduling: scheduling))
         await quit.value
         XCTAssertFalse(host.workflow.isIdle && host.pendingAdmissions == 0, "the admitted flush has not run yet")
 
@@ -864,7 +864,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         let host = try await harness.makeHost()
         try await host.startRuntime()
         let composition = RuntimeControlComposition(
-            host: host, limits: try RuntimeServiceFixtures.limits(ordinaryPending: 1), timing: .system, scheduling: TaskOwnerScheduling()
+            host: host, limits: try RuntimeServiceFixtures.hostLimits(ordinaryPending: 1), timing: .system, scheduling: TaskOwnerScheduling()
         )
         let client = try makeFramedRuntimeClient(
             transport: composition.transport, limits: ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
@@ -965,11 +965,11 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
 
         // The request's one-second budget ends before the caller's own deadline while its round waits in the seam.
         let budgeted = try update(host: host, from: observed) { $0.profileName = "Never admitted" }
-        let hopsBeforeBudgeted = scheduling.queuedHopCount
         let timersBefore = clock.armedTimerCount
         let (waiting, budgetedAnswer) = submitting(budgeted)
+        // The request's own signals: its timer and its claimed transfer. A hop count would also move for a drain of the host's events.
         let armed = try await eventually {
-            clock.armedTimerCount > timersBefore && scheduling.queuedHopCount > hopsBeforeBudgeted
+            clock.armedTimerCount > timersBefore && custody.held.transfer
         }
         XCTAssertTrue(armed, "the wait armed its timer and queued its round")
         clock.advance(by: .seconds(2))
@@ -993,9 +993,11 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
 
         // A caller cancelled while its round waits ends unsent; the round then runs unclaimed.
         let cancelled = try update(host: host, from: observed) { $0.profileName = "Cancelled" }
-        let hopsBeforeCancelled = scheduling.queuedHopCount
+        let timersBeforeCancelled = clock.armedTimerCount
         let (task, cancelledAnswer) = submitting(cancelled)
-        let queued = try await eventually { scheduling.queuedHopCount > hopsBeforeCancelled }
+        // The request's own signals: its claimed transfer, which the previous round released above, and its armed timer, which the gate
+        // arms in the same step that queues its round. A hop count would also move for a drain of the host's events.
+        let queued = try await eventually { custody.held.transfer && clock.armedTimerCount > timersBeforeCancelled }
         XCTAssertTrue(queued, "the cancelled caller's round waits in the seam")
         task.cancel()
         let cancelAnswered = try await eventually { cancelledAnswer.value != nil }
@@ -1013,20 +1015,21 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), before, "nothing was written")
     }
 
-    /// An update whose one owner round waits in the manual seam: that round alone is run, so the update is admitted and its launch hop
-    /// stays queued for the test to order.
+    /// An update whose one owner round waits in the manual seam: hops run in order only until that round has recorded the request, so the
+    /// update is admitted and its launch hop stays queued for the test to order. The host's own events also drain through the seam, so a
+    /// drain hop may run before the round; it only publishes. Whatever the round queues stays behind.
     private func admitInOneRound(
         _ editor: PrivateEditorClient,
         _ request: PrivateConfigurationRequest,
+        service: RuntimeServiceCore,
         scheduling: ManualOwnerScheduling
     ) async throws -> ControlAdmission {
-        let before = scheduling.queuedHopCount
-        let earlier = scheduling.pendingCount
         let submit = Task { try await editor.submit(request, deadline: deadline()) }
-        let queued = try await eventually { scheduling.queuedHopCount > before }
-        XCTAssertTrue(queued, "the private round waits in the scheduling seam")
-        // The hops queued before it run first, in order, then the round; anything they or the round queue stays behind.
-        for _ in 0...earlier { scheduling.runNext() }
+        let query = ControlRequestQuery(expectedIncarnation: service.incarnation, requestID: request.requestID)
+        for _ in 0..<5_000 where service.requestLookup(query) == .unknown(.notRecorded) {
+            if !scheduling.runNext() { try await Task.sleep(for: .milliseconds(1)) }
+        }
+        XCTAssertNotEqual(service.requestLookup(query), .unknown(.notRecorded), "the private round ran in the scheduling seam")
         return try await submit.value
     }
 
@@ -1071,7 +1074,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
                 proxy: .applyWhileRunning(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision), dns: .saveOnly, tunnels: .saveOnly
             )
         )
-        let operation = try accepted(try await admitInOneRound(editor, request, scheduling: scheduling))
+        let operation = try accepted(try await admitInOneRound(editor, request, service: composition.service, scheduling: scheduling))
         _ = try accepted(composition.service.submit(ControlOperationRequest(
             requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: host.incarnation, command: .stop(.proxy)
         )))

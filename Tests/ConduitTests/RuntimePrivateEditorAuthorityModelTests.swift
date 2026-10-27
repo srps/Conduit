@@ -111,8 +111,9 @@ final class RuntimePrivateEditorAuthorityModelTests: XCTestCase {
         let harness = try makeInteractiveHarness(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: false)
         do {
             let host = try await harness.makeHost()
+            // An actual host's composition streams its own events, so the event ring and ingress carry a Start's burst.
             let composition = RuntimeControlComposition(
-                host: host, limits: try RuntimeServiceFixtures.limits(), timing: .system, scheduling: TaskOwnerScheduling()
+                host: host, limits: try RuntimeServiceFixtures.hostLimits(), timing: .system, scheduling: TaskOwnerScheduling()
             )
             let control = try makeFramedRuntimeClient(
                 transport: composition.transport, limits: ControlFrameLimits(maxFrameBytes: 64 * 1024),
@@ -122,6 +123,7 @@ final class RuntimePrivateEditorAuthorityModelTests: XCTestCase {
             let stream = try await control.subscribe(.live, deadline: deadline())
             defer { stream.cancel() }
             _ = try await stream.next(deadline())
+            let trace = history.map(\.rawValue).joined(separator: " → ")
 
             func read() async throws -> PrivateEditorObservation {
                 let answer = try await editor.read(
@@ -138,11 +140,11 @@ final class RuntimePrivateEditorAuthorityModelTests: XCTestCase {
             var requests: [PrivateConfigurationRequest?] = [nil, nil]
             var reference = Reference(name: firstDraft.config.profileName)
             let initialVersion = firstDraft.runtime.version
-            let trace = history.map(\.rawValue).joined(separator: " → ")
 
+            // The composition streams the host's own events, so the settlement may follow event frames; each read is one plain `next`.
             func settlement(of operation: ControlOperationID) async throws -> ControlConfigurationReceipt {
                 var receipt: ControlConfigurationReceipt?
-                for _ in 0..<64 where receipt == nil {
+                for _ in 0..<256 where receipt == nil {
                     if case .operationFinished(let finished) = try await stream.next(deadline()), finished.operationID == operation {
                         guard case .configurationSettled(let value) = finished.outcome else {
                             XCTFail("\(trace): outcome \(finished.outcome)")

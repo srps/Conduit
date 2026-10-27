@@ -48,6 +48,8 @@ package final class RuntimeHost {
     /// Told when the host's safe state may have changed, so the control service composed over it captures a new snapshot. Set only by
     /// that composition; nil when no service is composed.
     var onControlStateChange: (@MainActor () -> Void)?
+    /// Told once, when the quit's physical work has ended, so the composed control service ends its streams. Set only by that composition.
+    var onControlShutdown: (@MainActor () -> Void)?
     /// The control operations this host admitted at the service's fence and has not launched yet. The service bounds them: its ordinary
     /// capacity, and at most one queued Stop per module, whose replacement is dropped here in the same fence turn.
     var controlAdmissions: [ControlOperationID: RuntimeControlAdmission] = [:]
@@ -229,6 +231,8 @@ package final class RuntimeHost {
     var laneEffects = PrivateModuleSlots<RuntimeLifecycleEffect?>(proxy: nil, dns: nil, tunnels: nil)
     /// The single process quit, once one has begun, so a second caller joins it rather than tearing down again.
     var quit: Task<Void, Never>?
+    /// Set once the quit's physical work has ended, so a control service composed after it starts shut down. Sticky.
+    var quitEnded = false
     /// The latest generation any module lane has begun. Internal so a test can wait for a stop to have begun rather than time it: the
     /// stop's first visible effect is queued behind the work the test is holding. A whole-host operation advances every lane together.
     var lifecycleGeneration: Int { ControlModule.allCases.map { lanes[$0].current }.max() ?? 0 }

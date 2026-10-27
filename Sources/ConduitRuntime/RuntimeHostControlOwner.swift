@@ -507,16 +507,36 @@ extension RuntimeHost {
         wireBudgetCap: Duration
     ) throws -> RuntimeInMemoryClients {
         let composition = RuntimeControlComposition(host: self, limits: limits, timing: .system, scheduling: TaskOwnerScheduling())
+        let clients: RuntimeInMemoryClients
         do {
-            return RuntimeInMemoryClients(
+            clients = RuntimeInMemoryClients(
                 control: try makeFramedRuntimeClient(transport: composition.transport, limits: clientFrameLimits, wireBudgetCap: wireBudgetCap),
                 editor: PrivateEditorClient(transport: composition.transport)
             )
         } catch {
-            // No client holds the composition, so the host is left with none.
-            onControlStateChange = nil
+            // No client holds the composition, so the host is left with none: every connection the composition made is undone.
+            detachControlObservation()
             throw error
         }
+        return clients
+    }
+
+    /// Composes the diagnostics log's one sink with the control stream (decision 0014). Every event the host records reaches its file writer
+    /// exactly once, as before, and then the service's bounded leaf ingress, from whatever thread recorded it: an event that cannot be
+    /// retained there is a loss marker, which a subscriber reads as a resync. The service is held weakly and the host not at all, so the
+    /// sink keeps no composition or host alive. An event recorded before this call was written to the file only; the stream begins here.
+    func attachControlStream(_ service: RuntimeServiceCore) {
+        orchestrator.eventLog.setSink { [eventWriter, weak service] event in
+            eventWriter.record(event)
+            service?.ingest(ControlRuntimeEvent(event))
+        }
+    }
+
+    /// Undoes a composition no client came to hold: no state, event or shutdown callback is left, and the file writer records alone again.
+    func detachControlObservation() {
+        onControlStateChange = nil
+        onControlShutdown = nil
+        orchestrator.eventLog.setSink { [eventWriter] event in eventWriter.record(event) }
     }
 }
 
@@ -557,7 +577,15 @@ struct RuntimeControlComposition {
             core: service, limits: limits, timing: timing, scheduling: scheduling,
             privateChannel: RuntimePrivateChannel(custody: custody, owner: host)
         )
-        // Weak: the service holds the host as its owner, so the host must not keep the service alive.
+        // The host's whole observation is bound here, together, for every composition (decision 0014): its safe state, every event it
+        // records, beside its file writer, and the quit's end, which ends every stream after what was published. Weak throughout: the
+        // service holds the host as its owner, so the host must not keep the service alive.
         host.onControlStateChange = { [weak service] in service?.ownerDidChange() }
+        host.onControlShutdown = { [weak service] in service?.hostDidShutDown() }
+        host.attachControlStream(service)
+        // A host whose quit already ended has no later end to report, so the service starts shut down.
+        if host.quitEnded {
+            service.hostDidShutDown()
+        }
     }
 }

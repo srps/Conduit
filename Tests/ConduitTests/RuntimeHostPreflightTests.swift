@@ -27,7 +27,8 @@ private struct PreflightComposed {
         harness.credentials = credentials
         let host = try await harness.makeHost()
         let composition = RuntimeControlComposition(
-            host: host, limits: try RuntimeServiceFixtures.limits(ordinaryPending: ordinaryPending), timing: .system,
+            // An actual host's composition streams its own events, so the event ring and ingress carry a Start's burst.
+            host: host, limits: try RuntimeServiceFixtures.hostLimits(ordinaryPending: ordinaryPending), timing: .system,
             scheduling: TaskOwnerScheduling()
         )
         let client = try makeFramedRuntimeClient(
