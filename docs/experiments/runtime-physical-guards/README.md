@@ -1,6 +1,6 @@
 # Physical lifecycle guards: executed negative controls
 
-These four actual production-source mutations were executed on 2026-10-27 in an isolated worktree. Each failed its named assertion; none was counted from a compiler failure or crash. Baseline and byte-exact restored runs passed all 12 physical-ordering tests. `results.json` records source hashes, targeted assertions and exit codes.
+The first four actual production-source mutations were executed on 2026-10-27 in an isolated worktree. Each failed its named assertion; none was counted from a compiler failure or crash. Baseline and byte-exact restored runs passed all 12 physical-ordering tests. `results.json` records source hashes, targeted assertions and exit codes.
 
 | Mutation | Actual witness |
 | --- | --- |
@@ -11,7 +11,9 @@ These four actual production-source mutations were executed on 2026-10-27 in an 
 
 The first baseline attempt, before any mutation, failed one TCP release assertion in an earlier ephemeral-port fixture. Its gate retained the first attempted UDP port even when the forwarder legitimately retried a different pair after TCP contention. That is a confirmed fixture ambiguity; the exact historical holder/schedule was not identified. The corrected fixture chooses a currently free configured pair, verifies both actual bindings and performs release probes without retrying them. The local ephemeral range was read as 49152–65535; the fixture chooses below it. Port selection still has a normal external bind race and fails loudly if one occurs.
 
-Run the portable replay from a worktree with no concurrent source author or test process:
+A review follow-up made the restart epoch explicit and added three real-loopback histories, including config edits during a held Stop teardown. `results-review-followup.json` records all six executed mutations on that revised source: the original four, plus removing the outer DNS and tunnel `admitsRunning` checks. Every mutant failed intended assertions; the restored 15-test suite passed. The DNS mutant rebound after Stop and leaked its edited pair until fixture teardown; the tunnel mutant was stopped by its inner backstop but emitted an incorrect reconcile decision, which its event assertion detected. These scopes are deliberately distinct.
+
+The updated portable replay contains all six. Run it from a worktree with no concurrent source author or test process:
 
 ```sh
 python3 docs/experiments/runtime-physical-guards/replay.py "$PWD"

@@ -728,11 +728,13 @@ package final class ProxyOrchestrator {
 
         // The forwarder binds `ProxyConfig.dnsForwarderHost`, not the proxy's
         // listen host, so only a DNS section edit restarts it.
-        // A stop in flight still reads running until its teardown ends; a restart admitted then would bind after it.
+        // A stop in flight still reads running until its teardown ends; a restart admitted then would bind after it. The restart's epoch
+        // is the one this check found running, taken in the same turn.
         if diff.dnsChanged && snapshot.dnsRunState == .running && dnsLifecycle.admitsRunning {
+            let epoch = dnsLifecycle.epoch
             emitEvent(.config, "config.dns_restart", detail: "reason=dns_section")
             logStore.log(.notice, "Config reload: DNS config changed, restarting DNS forwarder.", category: .network)
-            await restartDNS()
+            await restartDNS(epoch: epoch)
         }
 
         if diff.tunnelsChanged && (snapshot.tunnelsRunState == .running || snapshot.tunnelsRunState == .warning)
@@ -1681,10 +1683,9 @@ package final class ProxyOrchestrator {
         }
     }
 
-    /// Restarts the running forwarder on the applied config as one operation under the latest epoch, which is the start that bound it: a
-    /// stop admitted before or during the restart supersedes it, and the restart neither rebinds nor publishes after that stop.
-    private func restartDNS() async {
-        let epoch = dnsLifecycle.epoch
+    /// Restarts the running forwarder on the applied config as one operation under `epoch`, the running start the caller found admitted:
+    /// a start or stop admitted after it supersedes the restart, which neither rebinds nor publishes after that operation.
+    private func restartDNS(epoch: Int) async {
         if await runInfallibleEffect(dnsLifecycle, epoch: epoch, category: .network, { await self.closeDNSListeners() }),
            dnsLifecycle.isCurrent(epoch) {
             mutateSnapshot {

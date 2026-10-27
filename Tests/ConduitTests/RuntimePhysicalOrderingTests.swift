@@ -59,17 +59,20 @@ private func arrival(at gate: BindGate, file: StaticString = #filePath, line: UI
     throw BoundExhausted()
 }
 
-/// Every DNS and tunnel run state the orchestrator publishes once `record` is called, so a test sees a stale `running` even when a later
-/// teardown publishes `stopped` over it.
+/// Every DNS and tunnel run state change the orchestrator publishes once `record` is called, so a test sees a stale `running` even when a
+/// later teardown publishes `stopped` over it. Changes only: other publishes, such as a config edit's, repeat the module's state unchanged.
 @MainActor
 private final class PublishedStates {
     var dns: [ModuleRunState] = []
     var tunnels: [ModuleRunState] = []
 
     func record(_ orchestrator: ProxyOrchestrator) {
+        let dnsBefore = orchestrator.snapshot.dnsRunState
+        let tunnelsBefore = orchestrator.snapshot.tunnelsRunState
         orchestrator.onSnapshotChange = { [weak self] snapshot in
-            self?.dns.append(snapshot.dnsRunState)
-            self?.tunnels.append(snapshot.tunnelsRunState)
+            guard let self else { return }
+            if snapshot.dnsRunState != (self.dns.last ?? dnsBefore) { self.dns.append(snapshot.dnsRunState) }
+            if snapshot.tunnelsRunState != (self.tunnels.last ?? tunnelsBefore) { self.tunnels.append(snapshot.tunnelsRunState) }
         }
     }
 }
@@ -91,7 +94,7 @@ private func waitUntil(_ condition: () -> Bool, file: StaticString = #filePath, 
 
 /// The DNS forwarder and the tunnel listeners on real loopback sockets. A stop admitted while a DNS start or restart is inside its bind
 /// (held at `willBindTCP`), or while a tunnel start or reconcile is queued behind a held effect, leaves no listener open and nothing
-/// published; a config edit never starts a stopped module.
+/// published; a config edit never starts a stopped module, nor restarts or reconciles one whose stop is still tearing down.
 @MainActor
 final class RuntimePhysicalOrderingTests: XCTestCase {
     private let group = MultiThreadedEventLoopGroup.singleton
@@ -181,6 +184,31 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
         XCTAssertNil(orchestrator.dnsForwarder.tcpListeningPort, file: file, line: line)
         await assertReleased(udp: port, file: file, line: line)
         await assertReleased(tcp: port, file: file, line: line)
+    }
+
+    /// Holds `lifecycle`'s slot with a gated effect under the latest epoch, so the next operation queues behind it, before its claim.
+    private func holdSlot(_ lifecycle: PhysicalLifecycle, gate: BindGate) async throws -> Task<Bool, Error> {
+        let epoch = lifecycle.epoch
+        let held = Task { try await lifecycle.run(epoch: epoch) { await gate.hold(0) } }
+        _ = try await arrival(at: gate)
+        return held
+    }
+
+    /// Applies `edited` in a task and waits, bounded, for it to return without the held slot opening: an edit that queued a restart or
+    /// reconcile behind the slot fails here, and the caller still opens the gate and joins.
+    private func applyWhileHeld(
+        _ edited: ProxyConfig,
+        to orchestrator: ProxyOrchestrator,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async -> Task<Void, Never> {
+        let trace = Trace()
+        let apply = Task {
+            await orchestrator.applyConfigChange(edited)
+            trace.steps.append("applied")
+        }
+        await waitUntil({ trace.steps == ["applied"] }, file: file, line: line)
+        return apply
     }
 
     // MARK: - DNS
@@ -341,15 +369,93 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
         await assertDNSStopped(orchestrator, port: port)
     }
 
-    // MARK: - Tunnels
+    /// A stop admitted while its teardown waits behind a held effect leaves the snapshot `running`. A DNS edit then must not restart: the
+    /// restart would run under the stop's epoch, after its teardown, and bind the edited port with nothing left to close it.
+    func testADNSEditDuringAStopsHeldTeardownNeitherRestartsNorBinds() async throws {
+        let port = try await freePort()
+        let editedPort = try await freePort(excluding: [port])
+        let orchestrator = makeDNSOrchestrator(gate: BindGate(armed: false), port: port)
+        let slot = BindGate()
+        addTeardownBlock {
+            await slot.open()
+            await orchestrator.stopDNS()
+        }
+        await orchestrator.startDNS()
+        XCTAssertEqual(orchestrator.dnsForwarder.listeningPort, port)
+        XCTAssertEqual(orchestrator.dnsForwarder.tcpListeningPort, port)
+        let held = try await holdSlot(orchestrator.dnsLifecycle, gate: slot)
 
-    /// Holds the tunnel slot with a gated effect under the latest epoch, so the next start or reconcile queues behind it, before its claim.
-    private func holdTunnelSlot(_ orchestrator: ProxyOrchestrator, gate: BindGate) async throws -> Task<Bool, Error> {
-        let epoch = orchestrator.tunnelLifecycle.epoch
-        let held = Task { try await orchestrator.tunnelLifecycle.run(epoch: epoch) { await gate.hold(0) } }
-        _ = try await arrival(at: gate)
-        return held
+        let epoch = orchestrator.dnsLifecycle.epoch
+        let stop = Task { await orchestrator.stopDNS() }
+        await waitUntil { orchestrator.dnsLifecycle.epoch == epoch + 1 }
+        XCTAssertEqual(orchestrator.snapshot.dnsRunState, .running, "the stop's teardown has not run")
+        let published = PublishedStates()
+        published.record(orchestrator)
+        var edited = orchestrator.config
+        edited.dnsForwarderPort = editedPort
+        let apply = await applyWhileHeld(edited, to: orchestrator)
+        XCTAssertEqual(published.dns, [], "the edit changes no run state while the stop is in flight")
+        XCTAssertEqual(orchestrator.dnsForwarder.listeningPort, port, "the edit closed nothing")
+        await slot.open()
+        _ = try await held.value
+        await apply.value
+        await stop.value
+
+        await assertDNSStopped(orchestrator, port: port)
+        await assertReleased(udp: editedPort)
+        await assertReleased(tcp: editedPort)
+        XCTAssertEqual(published.dns, [.stopped], "only the stop publishes; nothing binds after it")
+        let restarts = orchestrator.eventLog.events.filter { $0.event == "config.dns_restart" }.map(\.detail)
+        XCTAssertEqual(restarts, [], "the edit decided no restart")
     }
+
+    /// A restart takes the epoch of the start it found running. A stop and then a newer start admitted during its rebind supersede it: its
+    /// partial bind publishes nothing, and the newer start closes that bind and holds the full edited pair itself.
+    func testADNSRestartSupersededDuringItsRebindByAStopAndANewerStartLeavesTheNewerStartRunning() async throws {
+        let port = try await freePort()
+        let editedPort = try await freePort(excluding: [port])
+        let gate = BindGate(armed: false)
+        let orchestrator = makeDNSOrchestrator(gate: gate, port: port)
+        addTeardownBlock {
+            await gate.open()
+            await orchestrator.stopDNS()
+        }
+        await orchestrator.startDNS()
+        XCTAssertEqual(orchestrator.dnsForwarder.tcpListeningPort, port)
+        let epoch = orchestrator.dnsLifecycle.epoch
+
+        await gate.arm()
+        var edited = orchestrator.config
+        edited.dnsForwarderPort = editedPort
+        let apply = Task { await orchestrator.applyConfigChange(edited) }
+        let held = try await arrival(at: gate)
+        XCTAssertEqual(held, editedPort, "the restart's rebind bound its UDP socket on the edited port")
+        let stop = Task { await orchestrator.stopDNS() }
+        await waitUntil { orchestrator.dnsLifecycle.epoch == epoch + 1 }
+        let start = Task { await orchestrator.startDNS() }
+        await waitUntil { orchestrator.dnsLifecycle.epoch == epoch + 2 }
+        let published = PublishedStates()
+        published.record(orchestrator)
+        await gate.open()
+        await apply.value
+        await stop.value
+        await start.value
+
+        XCTAssertEqual(published.dns, [.running], "only the newer start publishes")
+        XCTAssertEqual(orchestrator.snapshot.dnsRunState, .running)
+        XCTAssertEqual(orchestrator.dnsForwarder.listeningPort, editedPort)
+        XCTAssertEqual(orchestrator.dnsForwarder.tcpListeningPort, editedPort, "the newer start closed the restart's partial bind first")
+        XCTAssertEqual(orchestrator.snapshot.bindings.dnsPort, editedPort)
+        let restarts = orchestrator.eventLog.events.filter { $0.event == "config.dns_restart" }.map(\.detail)
+        XCTAssertEqual(restarts, ["reason=dns_section", "reason=dns_section outcome=superseded"])
+        await assertReleased(udp: port)
+        await assertReleased(tcp: port)
+
+        await orchestrator.stopDNS()
+        await assertDNSStopped(orchestrator, port: editedPort)
+    }
+
+    // MARK: - Tunnels
 
     /// The point tested is before the claim, not inside the bind: a start queued behind a held effect, then superseded by a stop, binds
     /// nothing and publishes nothing. (The real partial-bind case is the DNS tests' `willBindTCP` hold.) The old start never waited for
@@ -362,7 +468,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
             await gate.open()
             await orchestrator.stopTunnels()
         }
-        let held = try await holdTunnelSlot(orchestrator, gate: gate)
+        let held = try await holdSlot(orchestrator.tunnelLifecycle, gate: gate)
 
         let epoch = orchestrator.tunnelLifecycle.epoch
         let start = Task { await orchestrator.startTunnels() }
@@ -397,7 +503,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
         }
         await orchestrator.startTunnels()
         XCTAssertEqual(orchestrator.snapshot.tunnelActiveCount, 1)
-        let held = try await holdTunnelSlot(orchestrator, gate: gate)
+        let held = try await holdSlot(orchestrator.tunnelLifecycle, gate: gate)
 
         var edited = orchestrator.config
         edited.tunnels.definitions.append(Self.tunnel(port: added))
@@ -492,6 +598,48 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
         XCTAssertEqual(orchestrator.snapshot.tunnelsRunState, .stopped)
         XCTAssertTrue(orchestrator.snapshot.bindings.tunnels.isEmpty)
         await assertReleased(tcp: port)
+        await assertReleased(tcp: added)
+    }
+
+    /// As for DNS: a tunnel edit while a stop's teardown waits behind a held effect, with the snapshot still `running`, decides no
+    /// reconcile. The reconcile's own `admitsRunning` check would still bind nothing, so the decision event is what tells them apart.
+    func testATunnelEditDuringAStopsHeldTeardownNeitherReconcilesNorBinds() async throws {
+        let kept = try await freePort()
+        let added = try await freePort(excluding: [kept])
+        let orchestrator = makeTunnelOrchestrator(ports: [kept])
+        let gate = BindGate()
+        addTeardownBlock {
+            await gate.open()
+            await orchestrator.stopTunnels()
+        }
+        await orchestrator.startTunnels()
+        XCTAssertEqual(orchestrator.snapshot.tunnelsRunState, .running)
+        XCTAssertEqual(orchestrator.snapshot.tunnelActiveCount, 1)
+        let held = try await holdSlot(orchestrator.tunnelLifecycle, gate: gate)
+
+        let epoch = orchestrator.tunnelLifecycle.epoch
+        let stop = Task { await orchestrator.stopTunnels() }
+        await waitUntil { orchestrator.tunnelLifecycle.epoch == epoch + 1 }
+        XCTAssertEqual(orchestrator.snapshot.tunnelsRunState, .running, "the stop's teardown has not run")
+        let published = PublishedStates()
+        published.record(orchestrator)
+        var edited = orchestrator.config
+        edited.tunnels.definitions.append(Self.tunnel(port: added))
+        let apply = await applyWhileHeld(edited, to: orchestrator)
+        XCTAssertEqual(published.tunnels, [], "the edit changes no run state while the stop is in flight")
+        XCTAssertEqual(orchestrator.snapshot.bindings.tunnels.map(\.localPort), [kept], "the edit bound nothing")
+        await gate.open()
+        _ = try await held.value
+        await apply.value
+        await stop.value
+
+        XCTAssertEqual(orchestrator.snapshot.tunnelsRunState, .stopped)
+        XCTAssertEqual(orchestrator.snapshot.tunnelActiveCount, 0)
+        XCTAssertTrue(orchestrator.snapshot.bindings.tunnels.isEmpty)
+        XCTAssertEqual(published.tunnels, [.stopped], "only the stop publishes; nothing binds after it")
+        let reconciles = orchestrator.eventLog.events.filter { $0.event.hasPrefix("config.tunnels_reconcile") }.map(\.event)
+        XCTAssertEqual(reconciles, [], "the edit decided no reconcile")
+        await assertReleased(tcp: kept)
         await assertReleased(tcp: added)
     }
 }
