@@ -625,11 +625,22 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         let observed = try await observation(composed)
         let applied = composed.host.config.profileName
         let host = composed.host
-        let quit = Task { @MainActor in await host.shutdown(reservingFlushUntil: ContinuousClock.now.advanced(by: .seconds(30))) }
+        // The final save's ID is minted before the Quit names it; an older autosave and another client's save carry their own IDs.
+        let flush = try update(composed, from: observed) { $0.profileName = "Flushed" }
+        let reserved = try ControlQuitFlush(configuration: flush.requestID, preferences: nil)
+        let quit = Task { @MainActor in
+            await host.shutdown(reservingFlushUntil: ContinuousClock.now.advanced(by: .seconds(30)), flushing: reserved)
+        }
         let latched = try await eventually { host.workflow.isTerminal }
         XCTAssertTrue(latched)
 
-        let flush = try update(composed, from: observed) { $0.profileName = "Flushed" }
+        let autosave = try update(composed, from: observed) { $0.profileName = "Old autosave" }
+        let autosaved = try await editor(composed).submit(autosave, deadline: deadline())
+        XCTAssertEqual(autosaved, .rejected(.hostStopping), "an unrelated save after the latch cannot spend the reserved final save")
+        let otherClient = PrivateEditorClient(transport: composed.composition.transport)
+        let foreign = try update(composed, from: observed) { $0.profileName = "Another client" }
+        let foreignAnswer = try await otherClient.submit(foreign, deadline: deadline())
+        XCTAssertEqual(foreignAnswer, .rejected(.hostStopping))
         _ = try accepted(try await editor(composed).submit(flush, deadline: deadline()))
         await quit.value
         XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Flushed")
@@ -769,10 +780,13 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
             modules: PrivateModuleSlots(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly)
         )
         // The window is the quit's own deadline, the seam that closes it; the flush is admitted well inside it, and its launch hop is held.
-        let quit = Task { @MainActor in await host.shutdown(reservingFlushUntil: ContinuousClock.now.advanced(by: .seconds(2))) }
+        let reserved = try ControlQuitFlush(configuration: request.requestID, preferences: nil)
+        let quit = Task { @MainActor in
+            await host.shutdown(reservingFlushUntil: ContinuousClock.now.advanced(by: .seconds(2)), flushing: reserved)
+        }
         let latched = try await eventually { host.workflow.isTerminal }
         XCTAssertTrue(latched)
-        let operation = try accepted(try await editor.submit(request, deadline: deadline()))
+        let operation = try accepted(try await admitInOneRound(editor, request, scheduling: scheduling))
         await quit.value
         XCTAssertFalse(host.workflow.isIdle && host.pendingAdmissions == 0, "the admitted flush has not run yet")
 
@@ -819,15 +833,37 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         let full = try await send(.setLaunchAtLogin(true, ifPlatformBaseline: platformBaseline))
         XCTAssertEqual(full, .rejected(.queueFull), "ordinary capacity is exhausted")
 
-        let quit = try accepted(try await send(.quit(total: try ControlWireBudget(30_000), flush: ControlQuitFlush(configuration: true, preferences: false))))
-        XCTAssertTrue(host.workflow.isTerminal, "the quit latched in its admission turn")
-        let second = try await send(.quit(total: try ControlWireBudget(30_000), flush: ControlQuitFlush(configuration: false, preferences: false)))
-        XCTAssertEqual(second, .rejected(.hostStopping), "one quit per host")
+        // The final save's ID is minted before the Quit names it.
         let request = try update(host: host, from: observed) { $0.profileName = "Flushed at quit" }
-        let flush = try accepted(try await editor.submit(request, deadline: deadline()))
+        let quitID = ControlRequestID(rawValue: UUID())
+        let quitCommand = ControlRuntimeCommand.quit(
+            total: try ControlWireBudget(30_000), flush: try ControlQuitFlush(configuration: request.requestID, preferences: nil)
+        )
+        let selfNamed = try await client.submit(
+            .quit(total: try ControlWireBudget(30_000), flush: try ControlQuitFlush(configuration: nil, preferences: quitID)),
+            requestID: quitID, expectedIncarnation: host.incarnation, deadline: deadline()
+        )
+        XCTAssertEqual(selfNamed, .rejected(.requestConflict), "a Quit naming its own ID as a final save latches nothing")
+        XCTAssertFalse(host.workflow.isTerminal)
+        let quitRequest = ControlRequestID(rawValue: UUID())
+        let quit = try accepted(try await client.submit(quitCommand, requestID: quitRequest, expectedIncarnation: host.incarnation, deadline: deadline()))
+        XCTAssertTrue(host.workflow.isTerminal, "the quit latched in its admission turn")
+        let second = try await send(.quit(total: try ControlWireBudget(30_000), flush: .none))
+        XCTAssertEqual(second, .rejected(.hostStopping), "one quit per host")
 
         harness.hold.release()
-        let outcomes = try await finishedAll([restart, quit, flush], on: stream)
+        _ = try await finishedAll([restart], on: stream)
+        // A burst of unrelated saves past the alias capacity while the window is open: each is refused as ordinary work, in the ordinary
+        // alias partition, so the Quit's own alias survives it.
+        for _ in 0..<9 {
+            let unrelated = try update(host: host, from: observed) { $0.profileName = "Unrelated" }
+            let answer = try await editor.submit(unrelated, deadline: deadline())
+            XCTAssertEqual(answer, .rejected(.hostStopping))
+        }
+        let quitAlias = try await client.lookupAdmission(of: quitRequest, expectedIncarnation: host.incarnation, deadline: deadline())
+        XCTAssertEqual(quitAlias, .admission(.accepted(quit)), "the Quit's alias survives the burst")
+        let flush = try accepted(try await editor.submit(request, deadline: deadline()))
+        let outcomes = try await finishedAll([quit, flush], on: stream)
         XCTAssertEqual(outcomes[quit].flatMap(completed), .quit)
         XCTAssertEqual(try receipt(try XCTUnwrap(outcomes[flush])).runtime.write, .persisted(reportedError: false))
         XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false).profileName, "Flushed at quit")
@@ -835,6 +871,82 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertTrue(quiet)
         XCTAssertFalse(host.runtimeState().proxyIsUp)
         XCTAssertEqual(composition.privateCustody.held.input, false)
+    }
+
+    /// The private round waits in the transport's own gate: with its owner hop held in the seam, the request's budget ends the caller's wait
+    /// with the typed refusal and a cancelled caller ends unsent, both before any claim. Neither admits or records an alias, and neither frees
+    /// the transfer or the input before its queued round has physically run. A Stop stays independent of the held round.
+    func testAPrivateRoundHeldInTheSeamDetachesItsCallerAndReleasesItsCustodyOnlyAfterCleanup() async throws {
+        let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: false)
+        self.harness = harness
+        let host = try await harness.makeHost()
+        let scheduling = ManualOwnerScheduling()
+        let clock = ManualRuntimeTiming()
+        let composition = RuntimeControlComposition(
+            host: host, limits: try RuntimeServiceFixtures.limits(), timing: clock.timing, scheduling: scheduling
+        )
+        let editor = PrivateEditorClient(transport: composition.transport)
+        let custody = composition.privateCustody
+        let observed = try host.workflow.editorCapture().observation()
+        let before = try Data(contentsOf: harness.environment.configFile)
+        func lookup(_ request: PrivateConfigurationRequest) -> ControlRequestLookup {
+            composition.service.requestLookup(ControlRequestQuery(expectedIncarnation: host.incarnation, requestID: request.requestID))
+        }
+
+        // The request's one-second budget ends before the caller's own deadline while its round waits in the seam.
+        let budgeted = try update(host: host, from: observed) { $0.profileName = "Never admitted" }
+        let waiting = Task { try await editor.submit(budgeted, deadline: deadline()) }
+        let armed = try await eventually { clock.armedTimerCount > 0 && scheduling.pendingCount > 0 }
+        XCTAssertTrue(armed, "the wait armed its timer and queued its round")
+        clock.advance(by: .seconds(2))
+        clock.fireAll()
+        let refused = try await waiting.value
+        XCTAssertEqual(refused, .rejected(.deadlineExpired), "the typed budget refusal, before any claim")
+        XCTAssertEqual(custody.held.transfer, true, "the queued round still holds the transfer")
+        XCTAssertEqual(custody.held.input, true, "and the input it could still have admitted")
+        _ = try accepted(composition.service.submit(ControlOperationRequest(
+            requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: host.incarnation, command: .stop(.tunnels)
+        )))
+        scheduling.drainAll()
+        let released = try await eventually { !custody.held.transfer && !custody.held.input }
+        XCTAssertTrue(released, "the transfer and the input return once the round ran unclaimed")
+        XCTAssertEqual(lookup(budgeted), .unknown(.notRecorded), "nothing was admitted or recorded")
+
+        // A caller cancelled while its round waits ends unsent; the round then runs unclaimed.
+        let cancelled = try update(host: host, from: observed) { $0.profileName = "Cancelled" }
+        let task = Task { try await editor.submit(cancelled, deadline: deadline()) }
+        let queued = try await eventually { scheduling.pendingCount > 0 }
+        XCTAssertTrue(queued)
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("a cancelled wait is not answered")
+        } catch let error as RuntimeClientError {
+            XCTAssertEqual(error, .notSent(.cancelled))
+        }
+        XCTAssertEqual(custody.held.transfer, true, "the cancelled caller's round still holds the transfer")
+        scheduling.drainAll()
+        let cleaned = try await eventually { !custody.held.transfer && !custody.held.input }
+        XCTAssertTrue(cleaned)
+        XCTAssertEqual(lookup(cancelled), .unknown(.notRecorded))
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), before, "nothing was written")
+    }
+
+    /// An update whose one owner round waits in the manual seam: that round alone is run, so the update is admitted and its launch hop
+    /// stays queued for the test to order.
+    private func admitInOneRound(
+        _ editor: PrivateEditorClient,
+        _ request: PrivateConfigurationRequest,
+        scheduling: ManualOwnerScheduling
+    ) async throws -> ControlAdmission {
+        let before = scheduling.queuedHopCount
+        let earlier = scheduling.pendingCount
+        let submit = Task { try await editor.submit(request, deadline: deadline()) }
+        let queued = try await eventually { scheduling.queuedHopCount > before }
+        XCTAssertTrue(queued, "the private round waits in the scheduling seam")
+        // The hops queued before it run first, in order, then the round; anything they or the round queue stays behind.
+        for _ in 0...earlier { scheduling.runNext() }
+        return try await submit.value
     }
 
     /// A save-only update of `observed`'s values with `edit` applied, at its exact baselines, for a host composed in the test itself.
@@ -878,7 +990,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
                 proxy: .applyWhileRunning(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision), dns: .saveOnly, tunnels: .saveOnly
             )
         )
-        let operation = try accepted(try await editor.submit(request, deadline: deadline()))
+        let operation = try accepted(try await admitInOneRound(editor, request, scheduling: scheduling))
         _ = try accepted(composition.service.submit(ControlOperationRequest(
             requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: host.incarnation, command: .stop(.proxy)
         )))

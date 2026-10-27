@@ -196,7 +196,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         switch outcome {
         case .reply(let bytes): return bytes
         case .failed(let failure): throw failure
-        case .opened: throw ControlRuntimeTransportFailure.sent(.invalidReply)
+        case .opened, .privateTurn: throw ControlRuntimeTransportFailure.sent(.invalidReply)
         }
     }
 
@@ -242,6 +242,8 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
             return makeStream(RuntimeStreamHandle(correlation: correlation, subscriber: nil, firstFrame: refusal), limits: limits)
         case .failed(let failure):
             throw failure
+        case .privateTurn:
+            throw ControlRuntimeTransportFailure.sent(.invalidReply)
         }
     }
 
@@ -299,6 +301,18 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
             onQuiesced?()
             return .failed(.notSent(.transportBusy))
         }
+        return await wait(on: ticket, deadline: deadline, boundRefusal: boundRefusal.map { .reply($0) }, abandoned: abandoned, attempt: attempt)
+    }
+
+    /// One wait on a slot already reserved: one gate, its timer, its rounds through the scheduling seam, and the caller detached by its
+    /// deadline or cancellation whatever the owner is doing. The private channel reserves its slot from its own custody and waits here.
+    func wait(
+        on ticket: RuntimeLaneTicket,
+        deadline: RuntimeDeadline,
+        boundRefusal: RuntimeWaitOutcome? = nil,
+        abandoned: @escaping @MainActor @Sendable (RuntimeWaitOutcome) -> Void = { _ in },
+        attempt: @escaping RuntimeWaitGate.Attempt
+    ) async -> RuntimeWaitOutcome {
         let gate = RuntimeWaitGate(
             ticket: ticket,
             deadline: deadline,
@@ -619,7 +633,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
             return bytes
         case .failed(let failure):
             throw endOf(failure)
-        case .opened:
+        case .opened, .privateTurn:
             throw RuntimeWaitEnd.invalidReply
         }
     }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import ConduitShared
 import Foundation
+import NIOConcurrencyHelpers
 import ProxyControlBridge
 import ProxyKernel
 import RuntimeEvents
@@ -11,30 +12,40 @@ import RuntimeEvents
 // keep their own lanes, so neither waits on a private body. Encoding and decoding run on the caller's task, off the owner and off
 // `PlatformWork`; the owner turn only captures copy-on-write values or admits.
 
-/// The composition's one private custody. Both terms are structural bounds of one, like the three module slots, not profile values.
+/// The composition's one private custody. Both terms are structural bounds of one, like the three module slots, not profile values. The
+/// transfer is one slot of the custody's own lane counter, so its reservation is a lane ticket with the ordinary parts: the client's scope,
+/// and the wait's timer and owner hops.
 final class RuntimePrivateCustody: @unchecked Sendable {
     private let lock = NSLock()
-    private var transferHeld = false
+    private let transfers: RuntimeLaneCounter
     private var inputHeld = false
+
+    init(limits: RuntimeServiceLimits) {
+        transfers = RuntimeLaneCounter(limits: limits)
+    }
 
     /// Reserves the transfer, and for an update the frozen-input slot too, or nothing: a busy term refuses before anything is reserved.
     func reserve(_ purpose: PrivateExchangePurpose) -> RuntimePrivateReservation? {
-        let reserved = lock.withLock { () -> Bool in
-            guard !transferHeld, !purpose.holdsInput || !inputHeld else { return false }
-            transferHeld = true
-            if purpose.holdsInput { inputHeld = true }
-            return true
+        let input = RuntimePrivateInputHold()
+        let reserved = lock.withLock { () -> RuntimeLaneTicket? in
+            guard !purpose.holdsInput || !inputHeld else { return nil }
+            // An input the round never took is released only when the ticket has quiesced: no queued or running round can still admit.
+            guard let ticket = transfers.reserve(.privateTransfer, onQuiesced: { input.releaseUntaken() }) else { return nil }
+            if purpose.holdsInput {
+                inputHeld = true
+                input.hold(RuntimeFrozenInputSlot(custody: self))
+            }
+            return ticket
         }
-        return reserved ? RuntimePrivateReservation(custody: self, holdsInput: purpose.holdsInput) : nil
+        guard let ticket = reserved else { return nil }
+        _ = ticket.begin(.clientScope)
+        return RuntimePrivateReservation(ticket: ticket, input: input)
     }
 
     /// What is held now: for tests and measurements, which assert release only after physical cleanup.
     var held: (transfer: Bool, input: Bool) {
-        lock.withLock { (transferHeld, inputHeld) }
-    }
-
-    fileprivate func releaseTransfer() {
-        lock.withLock { transferHeld = false }
+        let transfer = transfers.inFlight(.privateTransfer) > 0
+        return (transfer, lock.withLock { inputHeld })
     }
 
     fileprivate func releaseInput() {
@@ -42,35 +53,61 @@ final class RuntimePrivateCustody: @unchecked Sendable {
     }
 }
 
-/// One reserved exchange. Its transfer ends with the exchange. An update's frozen-input slot ends with it too, unless an admitted operation
-/// took it over, which then releases it at quiescence. Each part is released once.
-final class RuntimePrivateReservation: @unchecked Sendable {
-    private let custody: RuntimePrivateCustody
+/// An exchange's frozen-input slot until its round hands it to the admitted operation, or the exchange's ticket quiesces without that.
+final class RuntimePrivateInputHold: @unchecked Sendable {
     private let lock = NSLock()
-    private var transferHeld = true
-    private var input: RuntimeFrozenInputSlot?
+    private var slot: RuntimeFrozenInputSlot?
 
-    fileprivate init(custody: RuntimePrivateCustody, holdsInput: Bool) {
-        self.custody = custody
-        self.input = holdsInput ? RuntimeFrozenInputSlot(custody: custody) : nil
+    fileprivate func hold(_ slot: RuntimeFrozenInputSlot) {
+        lock.withLock { self.slot = slot }
     }
 
-    /// The frozen-input slot, handed to the operation an update admitted. Nil when this exchange holds none or already handed it over.
-    func takeInputSlot() -> RuntimeFrozenInputSlot? {
+    fileprivate func take() -> RuntimeFrozenInputSlot? {
         lock.withLock {
-            defer { input = nil }
-            return input
+            defer { slot = nil }
+            return slot
         }
     }
 
-    /// Ends the exchange: after its reply was decoded and its buffers released, in the client's scope.
-    func end() {
-        let (transfer, slot) = lock.withLock { () -> (Bool, RuntimeFrozenInputSlot?) in
-            defer { transferHeld = false; input = nil }
-            return (transferHeld, input)
+    fileprivate func releaseUntaken() {
+        take()?.release()
+    }
+}
+
+/// One reserved exchange: its transfer ticket and its input. The client's scope is one ticket part, ended with the exchange; the one
+/// send's wait adds its timer and hop parts. The ticket, and with it the transfer, returns only when every part has physically ended.
+final class RuntimePrivateReservation: @unchecked Sendable {
+    let ticket: RuntimeLaneTicket
+    private let input: RuntimePrivateInputHold
+    private let lock = NSLock()
+    private var waited = false
+
+    fileprivate init(ticket: RuntimeLaneTicket, input: RuntimePrivateInputHold) {
+        self.ticket = ticket
+        self.input = input
+    }
+
+    /// The frozen-input slot, handed to the operation an update admitted, in the claimed round. Nil when this exchange holds none.
+    func takeInputSlot() -> RuntimeFrozenInputSlot? {
+        input.take()
+    }
+
+    /// Hands the ticket's timer part to the exchange's one wait. False for a second send, which the exchange refuses unsent.
+    fileprivate func beginWait() -> Bool {
+        lock.withLock {
+            defer { waited = true }
+            return !waited
         }
-        slot?.release()
-        if transfer { custody.releaseTransfer() }
+    }
+
+    /// Ends the exchange's client scope: after its reply was decoded and its buffers released. An exchange that never waited also ends the
+    /// timer part its ticket started with.
+    func end() {
+        let waitedOnce = lock.withLock {
+            defer { waited = true }
+            return waited
+        }
+        ticket.end(waitedOnce ? .clientScope : [.clientScope, .timer])
     }
 }
 
@@ -93,43 +130,58 @@ final class RuntimeFrozenInputSlot: @unchecked Sendable {
     }
 }
 
-/// The deadlines of one private exchange: the caller's own, and the receiver's, which is the arrival plus the request's budget, as for an
-/// ordinary request. Sampled in the owner turn that would admit or capture, so work invalidated before it is never newly admitted.
-struct RuntimePrivateGate: Sendable {
-    /// What the owner turn did: ran, found the receiver's budget lapsed, or found the caller's wait ended.
-    enum Turn<Value: Sendable>: Sendable {
-        case ran(Value)
-        case budgetExpired
-        case callerEnded(RuntimeWaitEnd)
-
-        /// The value, nil for a lapsed budget, or the sent failure of a caller that stopped waiting after its frame was handed over.
-        func result() throws -> Value? {
-            switch self {
-            case .ran(let value): return value
-            case .budgetExpired: return nil
-            case .callerEnded(let end): throw ControlRuntimeTransportFailure.sent(end)
-            }
-        }
-    }
-
-    let caller: RuntimeDeadline
-    let arrival: ContinuousClock.Instant
-    let now: @Sendable () -> ContinuousClock.Instant
-
-    @MainActor
-    func turn<Value: Sendable>(budget: ControlWireBudget, _ body: () -> Value) -> Turn<Value> {
-        if Task.isCancelled { return .callerEnded(.cancelled) }
-        let instant = now()
-        if caller.remaining(at: instant) <= .zero { return .callerEnded(.deadlineExpired) }
-        if instant >= arrival.advanced(by: .milliseconds(budget.rawValue)) { return .budgetExpired }
-        return .ran(body())
-    }
-}
-
 /// One owner turn of a private read: the capture, or the closed refusal.
 enum RuntimePrivateReadTurn: Sendable {
     case capture(RuntimeConfigurationWorkflow.EditorCapture)
     case refused(ControlRejectionCode)
+}
+
+/// What one private round answered, before any reply byte exists: a read's turn, or an update's admission. The round runs through the
+/// transport's ordinary gate (`RuntimeInMemoryTransport.wait`), so the caller's deadline or cancellation detaches it as for any request.
+enum RuntimePrivateTurn: Sendable {
+    case read(RuntimePrivateReadTurn)
+    case admission(ControlAdmission)
+}
+
+/// One private exchange's single owner round, through the transport's gate: the caller's deadline, or the request's budget from the
+/// arrival when that ends first, bounds the wait, and the caller's cancellation detaches it. Before a claim the end is unsent, or the typed
+/// budget refusal; after one it is sent, and the claimed round still runs and may admit. The round's turn holds only copy-on-write values
+/// or an admission: decoding, mapping and encoding stay on the caller's task.
+struct RuntimePrivateRound: Sendable {
+    let transport: RuntimeInMemoryTransport
+    let reservation: RuntimePrivateReservation
+    let caller: RuntimeDeadline
+    let arrival: ContinuousClock.Instant
+
+    func turn(
+        budget: ControlWireBudget,
+        refusal: RuntimePrivateTurn,
+        _ body: @escaping @MainActor @Sendable () -> RuntimePrivateTurn
+    ) async throws -> RuntimePrivateTurn {
+        guard reservation.beginWait() else { throw ControlRuntimeTransportFailure.notSent(.invalidReply) }
+        let budgetEnds = arrival.advanced(by: .milliseconds(budget.rawValue))
+        let bounded = budgetEnds < caller.instant
+        let answered = NIOLockedValueBox(false)
+        let outcome = await transport.wait(
+            on: reservation.ticket,
+            deadline: bounded ? RuntimeDeadline(instant: budgetEnds) : caller,
+            boundRefusal: bounded ? .privateTurn(refusal) : nil
+        ) { _ in
+            answered.withLockedValue { $0 = true }
+            return .privateTurn(body())
+        }
+        switch outcome {
+        case .privateTurn(let turn):
+            // A round that answered is ending its hop and has cancelled its timer: the slot is free once the client scope ends, so the
+            // client's next exchange is not refused busy by this one. A refusal made before any claim waits for nothing.
+            if answered.withLockedValue({ $0 }) { await reservation.ticket.settled(leaving: .clientScope) }
+            return turn
+        case .failed(let failure):
+            throw failure
+        case .reply, .opened:
+            throw ControlRuntimeTransportFailure.sent(.invalidReply)
+        }
+    }
 }
 
 /// The composition's private channel: its one custody and the host that answers it. Every transport of the composition shares it.
@@ -151,15 +203,14 @@ extension RuntimeInMemoryTransport: PrivateEditorTransport {
         return try await body(PrivateExchange { frame, deadline in
             // Before the frame is handed over, a known end means nothing was sent.
             if let end = Self.ended(deadline, now: now) { throw ControlRuntimeTransportFailure.notSent(end) }
-            let arrival = now()
-            let gate = RuntimePrivateGate(caller: deadline, arrival: arrival, now: now)
+            let round = RuntimePrivateRound(transport: self, reservation: reservation, caller: deadline, arrival: now())
             switch purpose {
             case .read:
-                return try await Self.answerRead(frame, owner: channel.owner, gate: gate)
+                return try await Self.answerRead(frame, owner: channel.owner, round: round)
             case .update:
-                return try await Self.answerUpdate(frame, owner: channel.owner, core: core, reservation: reservation, gate: gate)
+                return try await Self.answerUpdate(frame, owner: channel.owner, core: core, reservation: reservation, round: round)
             case .preferences:
-                return try await Self.answerPreferences(frame, owner: channel.owner, core: core, reservation: reservation, gate: gate)
+                return try await Self.answerPreferences(frame, owner: channel.owner, core: core, reservation: reservation, round: round)
             }
         })
     }
@@ -171,7 +222,7 @@ extension RuntimeInMemoryTransport: PrivateEditorTransport {
     }
 
     /// A read's answer: decoded here, captured in one owner turn, mapped and encoded here again.
-    private static func answerRead(_ frame: SecretBytes, owner: RuntimeHost, gate: RuntimePrivateGate) async throws -> SecretBytes {
+    private static func answerRead(_ frame: SecretBytes, owner: RuntimeHost, round: RuntimePrivateRound) async throws -> SecretBytes {
         let request: PrivateEditorReadRequest
         do {
             request = try PrivateConfigurationDecoder.decodeRead(try PrivateConfigurationFrame.body(of: frame, expecting: .read))
@@ -179,16 +230,16 @@ extension RuntimeInMemoryTransport: PrivateEditorTransport {
             // The private header carries no request ID, so no correlated answer exists for an undecodable read.
             throw ControlRuntimeTransportFailure.sent(.invalidReply)
         }
-        let turn = await MainActor.run { () -> RuntimePrivateGate.Turn<RuntimePrivateReadTurn> in
-            gate.turn(budget: request.budget) { owner.privateRead(request) }
+        let turn = try await round.turn(budget: request.budget, refusal: .read(.refused(.deadlineExpired))) {
+            .read(owner.privateRead(request))
         }
         let answer: PrivateEditorAnswer
-        switch try turn.result() {
-        case nil:
-            answer = .refused(.deadlineExpired)
-        case .refused(let code)?:
+        switch turn {
+        case .admission:
+            throw ControlRuntimeTransportFailure.sent(.invalidReply)
+        case .read(.refused(let code)):
             answer = .refused(code)
-        case .capture(let capture)?:
+        case .read(.capture(let capture)):
             do {
                 answer = .observation(try capture.observation())
             } catch {
@@ -209,7 +260,7 @@ extension RuntimeInMemoryTransport: PrivateEditorTransport {
         owner: RuntimeHost,
         core: RuntimeServiceCore,
         reservation: RuntimePrivateReservation,
-        gate: RuntimePrivateGate
+        round: RuntimePrivateRound
     ) async throws -> SecretBytes {
         let request: PrivateConfigurationRequest
         do {
@@ -217,30 +268,45 @@ extension RuntimeInMemoryTransport: PrivateEditorTransport {
         } catch {
             throw ControlRuntimeTransportFailure.sent(.invalidReply)
         }
-        let admission: ControlAdmission
-        do {
+        return try await answerAdmission(
+            requestID: request.requestID, incarnation: request.incarnation, budget: request.budget, core: core, round: round
+        ) {
             // The administrative flag is the store's, merged inside the claim, so the value passed here is never written.
             let values = try PrivateConfigurationBridge.makeValues(from: request, localLaunchAtLogin: false)
-            // Checked in the admission turn itself. A budget that lapsed during the decode and mapping is the typed refusal, with no alias:
-            // nothing was admitted. A caller whose own wait ended learns only that its admission is unknown.
-            let turn = await MainActor.run { () -> RuntimePrivateGate.Turn<ControlAdmission> in
-                gate.turn(budget: request.budget) {
-                    core.submitPrivate(requestID: request.requestID, expectedIncarnation: request.incarnation) { operation in
-                        owner.fencePrivateUpdate(
-                            request, values: (values.config, values.platform), operation: operation,
-                            takeInput: { reservation.takeInputSlot() }
-                        )
-                    }
-                }
+            return { operation in
+                owner.fencePrivateUpdate(
+                    request, values: (values.config, values.platform), operation: operation, takeInput: { reservation.takeInputSlot() }
+                )
             }
-            admission = try turn.result() ?? .rejected(.deadlineExpired)
+        }
+    }
+
+    /// An update's admission, either kind: the mapping on the caller's task, then one round through the gate that admits through the
+    /// service, then the admission encoded here. A budget that ends before the claim is the typed refusal, with no alias: nothing was
+    /// admitted. A caller whose own wait ended after the claim learns only that its admission is unknown; the claimed round still runs.
+    private static func answerAdmission(
+        requestID: ControlRequestID,
+        incarnation: ControlHostIncarnation,
+        budget: ControlWireBudget,
+        core: RuntimeServiceCore,
+        round: RuntimePrivateRound,
+        map: () throws -> @MainActor @Sendable (ControlOperationID) -> ControlOwnerFenceResult
+    ) async throws -> SecretBytes {
+        let admission: ControlAdmission
+        do {
+            let fence = try map()
+            let turn = try await round.turn(budget: budget, refusal: .admission(.rejected(.deadlineExpired))) {
+                .admission(core.submitPrivate(requestID: requestID, expectedIncarnation: incarnation, fence: fence))
+            }
+            guard case .admission(let admitted) = turn else { throw ControlRuntimeTransportFailure.sent(.invalidReply) }
+            admission = admitted
         } catch let failure as ControlRuntimeTransportFailure {
             throw failure
         } catch {
             admission = .rejected(.commandTooLarge)
         }
-        let hostIncarnation = admission == .rejected(.changedIncarnation) ? core.incarnation : request.incarnation
-        return try encodeReply(PrivateEditorReply(requestID: request.requestID, hostIncarnation: hostIncarnation, answer: .admission(admission))) {
+        let hostIncarnation = admission == .rejected(.changedIncarnation) ? core.incarnation : incarnation
+        return try encodeReply(PrivateEditorReply(requestID: requestID, hostIncarnation: hostIncarnation, answer: .admission(admission))) {
             .admission(.rejected(.internalFailure))
         }
     }
@@ -252,7 +318,7 @@ extension RuntimeInMemoryTransport: PrivateEditorTransport {
         owner: RuntimeHost,
         core: RuntimeServiceCore,
         reservation: RuntimePrivateReservation,
-        gate: RuntimePrivateGate
+        round: RuntimePrivateRound
     ) async throws -> SecretBytes {
         let request: PrivatePreferencesRequest
         do {
@@ -260,27 +326,13 @@ extension RuntimeInMemoryTransport: PrivateEditorTransport {
         } catch {
             throw ControlRuntimeTransportFailure.sent(.invalidReply)
         }
-        let admission: ControlAdmission
-        do {
+        return try await answerAdmission(
+            requestID: request.requestID, incarnation: request.incarnation, budget: request.budget, core: core, round: round
+        ) {
             let preferences = try PrivateConfigurationBridge.makePreferences(from: request)
-            let turn = await MainActor.run { () -> RuntimePrivateGate.Turn<ControlAdmission> in
-                gate.turn(budget: request.budget) {
-                    core.submitPrivate(requestID: request.requestID, expectedIncarnation: request.incarnation) { operation in
-                        owner.fencePrivatePreferences(
-                            request, preferences: preferences, operation: operation, takeInput: { reservation.takeInputSlot() }
-                        )
-                    }
-                }
+            return { operation in
+                owner.fencePrivatePreferences(request, preferences: preferences, operation: operation, takeInput: { reservation.takeInputSlot() })
             }
-            admission = try turn.result() ?? .rejected(.deadlineExpired)
-        } catch let failure as ControlRuntimeTransportFailure {
-            throw failure
-        } catch {
-            admission = .rejected(.commandTooLarge)
-        }
-        let hostIncarnation = admission == .rejected(.changedIncarnation) ? core.incarnation : request.incarnation
-        return try encodeReply(PrivateEditorReply(requestID: request.requestID, hostIncarnation: hostIncarnation, answer: .admission(admission))) {
-            .admission(.rejected(.internalFailure))
         }
     }
 
@@ -428,7 +480,7 @@ extension RuntimeHost {
         applying: PrivateModuleSlots<Int?>,
         flush: RuntimeQuitFlush.Part
     ) -> RuntimeConfigurationWorkflow.SaveTicket? {
-        let reserved = workflow.isTerminal && quitFlush?.admit(flush) == true
+        let reserved = workflow.isTerminal && quitFlush?.admit(flush, requestID: requestID) == true
         guard case .success(let ticket) = workflow.admitSave(requestID: requestID, applying: applying, quitFlush: reserved) else {
             emitConfigurationEvents(workflow.terminalRefusal())
             return nil

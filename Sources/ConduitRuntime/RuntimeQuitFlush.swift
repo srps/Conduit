@@ -19,8 +19,9 @@ final class RuntimeQuitFlush {
     }
 
     private let workflow: RuntimeConfigurationWorkflow
-    /// The declared parts not yet ended. The window is open while this is not empty and the deadline has not passed.
-    private var awaiting: Set<Part>
+    /// The declared parts not yet ended, each with the one request ID it admits. The window is open while this is not empty and the
+    /// deadline has not passed.
+    private var awaiting: [Part: ControlRequestID]
     private var admitted: Set<Part> = []
     private var open: Bool
     private var deadlinePassed = false
@@ -33,9 +34,9 @@ final class RuntimeQuitFlush {
     /// Opens the window for `flush` until `deadline`, in the latch's own turn. A deadline already past opens nothing and has passed.
     init(until deadline: ContinuousClock.Instant, admitting flush: ControlQuitFlush, workflow: RuntimeConfigurationWorkflow) {
         self.workflow = workflow
-        var parts: Set<Part> = []
-        if flush.configuration { parts.insert(.configuration) }
-        if flush.preferences { parts.insert(.preferences) }
+        var parts: [Part: ControlRequestID] = [:]
+        parts[.configuration] = flush.configuration
+        parts[.preferences] = flush.preferences
         awaiting = parts
         guard deadline > ContinuousClock.now else {
             open = false
@@ -54,19 +55,21 @@ final class RuntimeQuitFlush {
         }
     }
 
-    /// Whether the window is open: declared flushes remain and the deadline has not passed.
-    var isOpen: Bool { open }
+    /// Whether `requestID` is a declared final save the open window has not admitted yet.
+    func reserves(_ requestID: ControlRequestID) -> Bool {
+        open && awaiting.contains { $0.value == requestID && !admitted.contains($0.key) }
+    }
 
-    /// Admits the declared `part` once, while the window is open.
-    func admit(_ part: Part) -> Bool {
-        guard open, awaiting.contains(part), !admitted.contains(part) else { return false }
+    /// Admits the declared `part` once, while the window is open, and only under the request ID the Quit named for it.
+    func admit(_ part: Part, requestID: ControlRequestID) -> Bool {
+        guard open, awaiting[part] == requestID, !admitted.contains(part) else { return false }
         admitted.insert(part)
         return true
     }
 
     /// An admitted flush ended, whatever it wrote. The window closes once every declared part has.
     func finish(_ part: Part) {
-        awaiting.remove(part)
+        awaiting.removeValue(forKey: part)
         if awaiting.isEmpty { close() }
     }
 

@@ -102,12 +102,13 @@ protocol ControlCommandOwner: AnyObject {
     /// under `operation`; the service never held it.
     func startPrivateEffect(operation: ControlOperationID, report: ControlEffectReport)
 
-    /// Whether the quit's reserved flush window is open (decision 0015). A private update submitted then is admitted, if at all, as that
-    /// flush, into the quit's partition: the window bounds it to its declared parts, so it never waits on ordinary capacity.
-    var reservesQuitFlush: Bool { get }
+    /// Whether `requestID` is a final save the quit's open window reserved and has not admitted (decision 0015). Only such an update goes
+    /// into the quit's partition: the window bounds it to its declared IDs, so it never waits on ordinary capacity. Every other update,
+    /// after the latch too, is ordinary work.
+    func reservesQuitFlush(_ requestID: ControlRequestID) -> Bool
 }
 
 extension ControlCommandOwner {
     /// An owner with no quit window reserves no flush.
-    var reservesQuitFlush: Bool { false }
+    func reservesQuitFlush(_ requestID: ControlRequestID) -> Bool { false }
 }

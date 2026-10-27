@@ -648,7 +648,10 @@ enum RuntimeHostEffectsScenario {
             }
             return nil
         }
-        func preferences(_ edit: (inout AppPreferences) -> Void) async throws -> ControlOperationOutcome? {
+        func preferences(
+            _ requestID: ControlRequestID = ControlRequestID(rawValue: UUID()),
+            _ edit: (inout AppPreferences) -> Void
+        ) async throws -> ControlOperationOutcome? {
             let answer = try await clients.editor.read(
                 requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: incarnation,
                 budget: try ControlWireBudget(1_000), deadline: deadline
@@ -656,7 +659,6 @@ enum RuntimeHostEffectsScenario {
             guard case .observation(let observed) = answer, let baseline = observed.components.preferences.baseline else { return nil }
             var values = try PrivateConfigurationBridge.makeValues(from: observed).preferences
             edit(&values)
-            let requestID = ControlRequestID(rawValue: UUID())
             let request = try PrivateConfigurationBridge.makePreferencesRequest(
                 preferences: values, requestID: requestID, incarnation: incarnation,
                 budget: try ControlWireBudget(1_000), preferencesBaseline: baseline
@@ -668,11 +670,13 @@ enum RuntimeHostEffectsScenario {
             return receipt.preferences.write == .persisted(reportedError: false)
         }
         let saved = written(try await preferences { $0.automaticUpdateChecks = true })
+        // The final save's ID is minted before the Quit names it, so only that save may spend the reservation.
+        let finalSave = ControlRequestID(rawValue: UUID())
         let quit = try await clients.control.submit(
-            .quit(total: try ControlWireBudget(10_000), flush: ControlQuitFlush(configuration: false, preferences: true)),
+            .quit(total: try ControlWireBudget(10_000), flush: try ControlQuitFlush(configuration: nil, preferences: finalSave)),
             requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: incarnation, deadline: deadline
         )
-        let flushed = written(try await preferences { $0.preferredBrowserTestURL = "https://quit-flush.example.test/" })
+        let flushed = written(try await preferences(finalSave) { $0.preferredBrowserTestURL = "https://quit-flush.example.test/" })
         let completed = if case .completed(let completion)? = try await settled(quit) { completion.command == .quit } else { false }
         return (saved, completed, flushed)
     }

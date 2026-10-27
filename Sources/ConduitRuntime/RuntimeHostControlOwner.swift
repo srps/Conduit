@@ -194,8 +194,10 @@ extension RuntimeHost: ControlCommandOwner {
             controlAdmissions[operation] = .launchAtLogin(enabled, baseline, request)
             return .admitted
         case .quit(let total, let flush):
-            // A quit already latched, by this command or the host's own, admits no second one.
+            // A quit already latched, by this command or the host's own, admits no second one. A final save under the Quit's own ID could
+            // never be told apart from it, so that Quit is refused as conflicting before anything latches.
             guard !workflow.isTerminal, quit == nil else { return .rejected(.hostStopping) }
+            guard !flush.names(request) else { return .rejected(.requestConflict) }
             let work = admitQuit(until: ContinuousClock.now.advanced(by: .milliseconds(total.rawValue)), flushing: flush)
             guard let window = quitFlush else { preconditionFailure("a quit with a deadline holds its window") }
             controlAdmissions[operation] = .quit(work, window)
@@ -206,8 +208,8 @@ extension RuntimeHost: ControlCommandOwner {
         }
     }
 
-    var reservesQuitFlush: Bool {
-        workflow.isTerminal && quitFlush?.isOpen == true
+    func reservesQuitFlush(_ requestID: ControlRequestID) -> Bool {
+        workflow.isTerminal && quitFlush?.reserves(requestID) == true
     }
 
     func startEffect(_ command: ControlRuntimeCommand, operation: ControlOperationID, report: ControlEffectReport) {
@@ -457,7 +459,7 @@ struct RuntimeControlComposition {
             makeOperationID: { ControlOperationID(rawValue: UUID()) }
         )
         self.service = service
-        let custody = RuntimePrivateCustody()
+        let custody = RuntimePrivateCustody(limits: limits)
         privateCustody = custody
         transport = RuntimeInMemoryTransport(
             core: service, limits: limits, timing: timing, scheduling: scheduling,

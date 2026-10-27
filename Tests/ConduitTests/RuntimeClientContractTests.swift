@@ -109,8 +109,12 @@ final class RuntimeClientContractTests: XCTestCase {
             ControlRuntimeCommandKind.allCases.map(\.rawValue),
             ["stop", "restart", "test-dns", "test-upstream", "refresh-preflight", "set-launch-at-login", "quit"]
         )
-        let quit = ControlRuntimeCommand.quit(total: try ControlWireBudget(5_000), flush: ControlQuitFlush(configuration: true, preferences: false))
+        let save = ControlRequestID(rawValue: UUID())
+        let quit = ControlRuntimeCommand.quit(total: try ControlWireBudget(5_000), flush: try ControlQuitFlush(configuration: save, preferences: nil))
         XCTAssertEqual(try JSONDecoder().decode(ControlRuntimeCommand.self, from: try JSONEncoder().encode(quit)), quit)
+        XCTAssertThrowsError(try ControlQuitFlush(configuration: save, preferences: save), "the two final saves name two requests")
+        let sameID = Data(#"{"type":"quit","totalMilliseconds":5000,"flush":{"configuration":"\#(save.rawValue.uuidString)","preferences":"\#(save.rawValue.uuidString)"}}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(ControlRuntimeCommand.self, from: sameID))
         let decoder = JSONDecoder()
         XCTAssertThrowsError(try decoder.decode(ControlRuntimeCommand.self, from: Data(#"{"type":"start","module":"proxy"}"#.utf8)))
         XCTAssertThrowsError(try decoder.decode(ControlRuntimeCommand.self, from: Data(#"{"type":"apply-config"}"#.utf8)))

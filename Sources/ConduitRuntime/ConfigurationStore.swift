@@ -266,6 +266,8 @@ final class ConfigurationStore {
         guard !isBusy else { return .busy }
         isBusy = true
         defer { isBusy = false }
+        // A revoked claim, a late flush after the quit's window, does no I/O and moves no latch, as a configuration capture does not.
+        guard claim.isCurrent() else { return .admitted(PreferencesCommitResult(context: context, preferences: .notAttempted(.superseded))) }
         let baseline: ConfigurationFileBaseline
         switch authority(expected, for: .preferences) {
         case .success(let value):
@@ -309,6 +311,7 @@ final class ConfigurationStore {
         guard !isBusy else { return .busy }
         isBusy = true
         defer { isBusy = false }
+        guard claim.isCurrent() else { return .admitted(.notAttempted(.superseded)) }
         let baseline: ConfigurationFileBaseline
         switch authority(expected, for: .platform) {
         case .success(let value):

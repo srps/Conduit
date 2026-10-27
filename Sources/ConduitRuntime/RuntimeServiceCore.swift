@@ -286,9 +286,9 @@ final class RuntimeServiceCore {
         guard expectedIncarnation == incarnation else { return .rejected(.changedIncarnation) }
         let now = timing.now()
         if aliasTable.live(requestID, now: now) != nil { return .rejected(.requestReused) }
-        // Once the quit reserved its flush, an update is admitted only as that flush, in the quit's partition; otherwise it takes ordinary
-        // capacity, checked before the owner turn.
-        let partition: RuntimePartition = owner.reservesQuitFlush ? .quit : .ordinary
+        // A final save the quit's window reserved by this request ID goes into the quit's partition; every other update takes ordinary
+        // capacity, checked before the owner turn, and its alias stays ordinary.
+        let partition: RuntimePartition = owner.reservesQuitFlush(requestID) ? .quit : .ordinary
         var next: Int?
         if partition == .ordinary {
             guard ordinaryUnquiesced < limits.ordinaryPendingCapacity, let successor = RuntimeCounter.successor(ordinaryUnquiesced) else {

@@ -20,16 +20,50 @@ package enum ControlRuntimeCommandKind: String, Codable, Sendable, Equatable, Ca
     case quit
 }
 
-/// The updates a Quit's reserved flush window admits (decision 0015), each at most once: the runtime and platform save, and the preferences
-/// save. Each is an ordinary private update the client submits after the Quit's admission, under its exact submitted baselines. None is
-/// reserved when the client has nothing unsaved.
+/// The final saves a Quit's reserved flush window admits (decision 0015): the runtime and platform save and the preferences save, each named
+/// by the request ID the client minted for it before mapping, and each admitted once. Any other update after the latch, an older autosave or
+/// another client's save, is not the reservation's and is refused as ordinary work. The two IDs differ, and the host refuses a Quit that
+/// names its own ID. A nil part reserves nothing; none is reserved when the client has nothing unsaved.
 package struct ControlQuitFlush: Codable, Sendable, Equatable {
-    package var configuration: Bool
-    package var preferences: Bool
+    package let configuration: ControlRequestID?
+    package let preferences: ControlRequestID?
 
-    package init(configuration: Bool, preferences: Bool) {
+    /// Throws `invalidValue` when both parts name the same request.
+    package init(configuration: ControlRequestID?, preferences: ControlRequestID?) throws {
+        if let configuration, configuration == preferences { throw ControlRuntimeWireError.invalidValue }
         self.configuration = configuration
         self.preferences = preferences
+    }
+
+    /// No reserved save.
+    package static let none = try! ControlQuitFlush(configuration: nil, preferences: nil)
+
+    private enum CodingKeys: String, CodingKey {
+        case configuration
+        case preferences
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        do {
+            try self.init(
+                configuration: try container.decodeIfPresent(ControlRequestID.self, forKey: .configuration),
+                preferences: try container.decodeIfPresent(ControlRequestID.self, forKey: .preferences)
+            )
+        } catch is ControlRuntimeWireError {
+            throw DecodingError.dataCorruptedError(forKey: .preferences, in: container, debugDescription: "the two saves name one request")
+        }
+    }
+
+    package func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(configuration, forKey: .configuration)
+        try container.encodeIfPresent(preferences, forKey: .preferences)
+    }
+
+    /// Whether either part names `requestID`.
+    package func names(_ requestID: ControlRequestID) -> Bool {
+        configuration == requestID || preferences == requestID
     }
 }
 
@@ -66,7 +100,7 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     /// baseline the client observed, and applies nothing. It carries no configuration value beyond the flag.
     case setLaunchAtLogin(Bool, ifPlatformBaseline: PrivateBaseline)
     /// The process quit (decision 0015). Admission latches the terminal stop and opens the reserved flush window for `flush`. `total` is the
-    /// one remaining budget, from the host's arrival, that the flush, the store join, the teardown and the diagnostic flush share: the
+    /// one remaining budget, counted from the Quit's admission, that the flush, the store join, the teardown and the diagnostic flush share: the
     /// operation completes when they end, or fails `cleanupIncomplete` at that deadline, while the work still runs and owns the root until
     /// it ends; the operation quiesces only then.
     case quit(total: ControlWireBudget, flush: ControlQuitFlush)

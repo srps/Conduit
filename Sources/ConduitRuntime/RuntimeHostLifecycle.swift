@@ -958,10 +958,10 @@ extension RuntimeHost {
     ///
     /// `reservingFlushUntil` is the quit's one total deadline (`RuntimeQuitFlush`): it opens the reserved flush window for `flushing` until
     /// then, and the quit waits for the flushes it admits, or for the deadline, before it joins store work and confirms the flush of
-    /// diagnostics. Nil reserves none. The facade's default reserves the runtime and platform save alone.
+    /// diagnostics. Nil reserves none, and so does the default `flushing`: only the request IDs it names are admitted as final saves.
     package func shutdown(
         reservingFlushUntil deadline: ContinuousClock.Instant? = nil,
-        flushing parts: ControlQuitFlush = ControlQuitFlush(configuration: true, preferences: false)
+        flushing parts: ControlQuitFlush = .none
     ) async {
         if let quit {
             await quit.value
