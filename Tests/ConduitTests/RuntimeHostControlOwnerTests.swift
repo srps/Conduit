@@ -654,6 +654,204 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
                        observed.runtime.profileName)
     }
 
+    /// A preferences update through the actual client: the preferences file alone is written under its exact baseline, its safe receipt
+    /// names the new baseline, nothing starts or applies, the request ID stays lookup-only, and a draft at the old baseline is refused.
+    func testAPreferencesUpdateWritesOnlyThePreferencesFileAndSettlesWithItsReceipt() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        let environment = composed.harness.environment
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let baseline = try XCTUnwrap(observed.components.preferences.baseline)
+        let runtimeBytes = try Data(contentsOf: environment.configFile)
+        let platformBytes = try? Data(contentsOf: environment.platformConfigFile)
+        let generation = composed.host.workflow.generation
+        var preferences = try PrivateConfigurationBridge.makeValues(from: observed).preferences
+        preferences.preferredBrowserTestURL = "https://preferences.example.test/?token=private"
+        preferences.showMenuBarIcon.toggle()
+        let requestID = ControlRequestID(rawValue: UUID())
+        let edited = preferences
+        let request = try PrivateConfigurationBridge.makePreferencesRequest(
+            preferences: edited, requestID: requestID, incarnation: composed.host.incarnation,
+            budget: try ControlWireBudget(1_000), preferencesBaseline: baseline
+        )
+
+        let operation = try accepted(try await editor(composed).submitPreferences(requestID: requestID, deadline: deadline()) { request })
+        let outcome = try await finished(operation, on: stream)
+        guard case .preferencesSettled(let receipt) = outcome else { return XCTFail("a preferences update settles with its receipt: \(outcome)") }
+        XCTAssertEqual(receipt.requestID, requestID)
+        XCTAssertEqual(receipt.incarnation, composed.host.incarnation)
+        XCTAssertEqual(receipt.preferences.write, .persisted(reportedError: false))
+        let newer = try XCTUnwrap(receipt.preferences.baseline)
+        XCTAssertEqual(newer.component, .preferences)
+        XCTAssertGreaterThan(newer.version, baseline.version)
+        XCTAssertEqual(try AppPreferencesPersistence.load(in: environment), edited)
+        XCTAssertEqual(try Data(contentsOf: environment.configFile), runtimeBytes, "the runtime file is not touched")
+        XCTAssertEqual(try? Data(contentsOf: environment.platformConfigFile), platformBytes, "nor the platform file")
+        XCTAssertEqual(composed.host.workflow.generation, generation, "no lifecycle admission")
+        let reread = try await observation(composed)
+        XCTAssertEqual(reread.components.preferences, .verified(newer), "the store holds the receipt's baseline")
+        XCTAssertEqual(composed.composition.privateCustody.held.input, false)
+
+        let lookup = try await composed.client.lookupAdmission(of: requestID, expectedIncarnation: composed.host.incarnation, deadline: deadline())
+        XCTAssertEqual(lookup, .admission(.accepted(operation)), "the alias recovers the admission")
+        let reused = try await editor(composed).submitPreferences(requestID: requestID, deadline: deadline()) { request }
+        XCTAssertEqual(reused, .rejected(.requestReused), "a live private ID is lookup-only")
+
+        var older = edited
+        older.fileLoggingEnabled.toggle()
+        let staleRequest = try PrivateConfigurationBridge.makePreferencesRequest(
+            preferences: older, requestID: ControlRequestID(rawValue: UUID()), incarnation: composed.host.incarnation,
+            budget: try ControlWireBudget(1_000), preferencesBaseline: baseline
+        )
+        let stale = try accepted(try await editor(composed).submitPreferences(requestID: staleRequest.requestID, deadline: deadline()) {
+            staleRequest
+        })
+        guard case .preferencesSettled(let refused) = try await finished(stale, on: stream) else { return XCTFail("the stale draft settles") }
+        XCTAssertEqual(refused.preferences.write, .notAttempted(.baselineMismatch))
+        XCTAssertNil(refused.preferences.baseline)
+        XCTAssertEqual(try AppPreferencesPersistence.load(in: environment), edited, "the stale draft wrote nothing")
+    }
+
+    /// The admin write's completion takes the one completion path: while the projection fails it names the next revision, above any body
+    /// a subscriber holds, and the first snapshot after recovery takes exactly that revision.
+    func testAnAdminWriteCompletedWhileTheSnapshotFailsNamesTheRevisionTheRecoveredSnapshotTakes() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let platformBaseline = try XCTUnwrap(observed.components.platform.baseline)
+        let before = try await composed.client.readSnapshot(deadline: deadline()).stamp.presentationRevision
+
+        composed.host.orchestrator.mutateSnapshotForTesting { $0.runtimeStatus.metrics.vpnFlapTotalDuration = -1 }
+        do {
+            _ = try await composed.client.readSnapshot(deadline: deadline())
+            XCTFail("a read fails closed while the projection fails")
+        } catch let error as RuntimeClientError {
+            XCTAssertEqual(error, .wire(.internalFailure))
+        }
+        let operation = try accepted(try await submit(composed, .setLaunchAtLogin(true, ifPlatformBaseline: platformBaseline)))
+        let outcome = try await finished(operation, on: stream)
+        guard case .completed(let completion) = outcome, case .platformWrite(let write) = completion.result else {
+            return XCTFail("the admin write completes with its platform write: \(outcome)")
+        }
+        XCTAssertEqual(write.write, .persisted(reportedError: false))
+        XCTAssertGreaterThan(completion.presentationRevision, before, "the completion never names the body from before it")
+
+        composed.host.orchestrator.mutateSnapshotForTesting { $0.runtimeStatus.metrics.vpnFlapTotalDuration = 0 }
+        let recovered = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertEqual(recovered.stamp.presentationRevision, completion.presentationRevision)
+        XCTAssertEqual(unavailableEvents(composed.host), 1)
+    }
+
+    /// A reserved flush admitted inside the window but not launched before its deadline writes nothing afterwards: the window's close revokes
+    /// its claim. The quit returns at the deadline; the late launch then settles stale, and its custody and admission are released.
+    func testAFlushAdmittedButNotStartedBeforeTheQuitDeadlineWritesNothingAfterIt() async throws {
+        let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: false)
+        self.harness = harness
+        let host = try await harness.makeHost()
+        let scheduling = ManualOwnerScheduling()
+        let composition = RuntimeControlComposition(
+            host: host, limits: try RuntimeServiceFixtures.limits(), timing: ManualRuntimeTiming().timing, scheduling: scheduling
+        )
+        let editor = PrivateEditorClient(transport: composition.transport)
+        let observed = try host.workflow.editorCapture().observation()
+        let before = try Data(contentsOf: harness.environment.configFile)
+        var values = try PrivateConfigurationBridge.makeValues(from: observed)
+        values.config.profileName = "Too late"
+        let request = try PrivateConfigurationBridge.makeRequest(
+            config: values.config, platform: values.platform, requestID: ControlRequestID(rawValue: UUID()),
+            incarnation: host.incarnation, budget: try ControlWireBudget(1_000),
+            runtimeBaseline: try XCTUnwrap(observed.components.runtime.baseline),
+            platformBaseline: try XCTUnwrap(observed.components.platform.baseline),
+            modules: PrivateModuleSlots(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly)
+        )
+        // The window is the quit's own deadline, the seam that closes it; the flush is admitted well inside it, and its launch hop is held.
+        let quit = Task { @MainActor in await host.shutdown(reservingFlushUntil: ContinuousClock.now.advanced(by: .seconds(2))) }
+        let latched = try await eventually { host.workflow.isTerminal }
+        XCTAssertTrue(latched)
+        let operation = try accepted(try await editor.submit(request, deadline: deadline()))
+        await quit.value
+        XCTAssertFalse(host.workflow.isIdle && host.pendingAdmissions == 0, "the admitted flush has not run yet")
+
+        scheduling.drainAll()
+        let quiet = try await eventually { host.pendingAdmissions == 0 }
+        XCTAssertTrue(quiet)
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), before, "the revoked flush wrote nothing")
+        XCTAssertEqual(composition.service.operationLookup(ControlOperationQuery(expectedIncarnation: host.incarnation, operationID: operation)),
+                       .finished(.failed(.staleRevision)))
+        XCTAssertEqual(composition.privateCustody.held.input, false)
+    }
+
+    /// With ordinary capacity exhausted by held work, a Quit through the actual framed client is still admitted and latches at once, and its
+    /// reserved flush is admitted in the quit's own partition. Once the held work is released, the flush writes, the held Restart ends
+    /// under the quit, and the Quit completes; every admission and the custody are released.
+    func testAQuitBehindExhaustedOrdinaryCapacityLatchesAtOnceAndAdmitsItsReservedFlush() async throws {
+        let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: false)
+        self.harness = harness
+        let host = try await harness.makeHost()
+        try await host.startRuntime()
+        let composition = RuntimeControlComposition(
+            host: host, limits: try RuntimeServiceFixtures.limits(ordinaryPending: 1), timing: .system, scheduling: TaskOwnerScheduling()
+        )
+        let client = try makeFramedRuntimeClient(
+            transport: composition.transport, limits: ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
+        )
+        let editor = PrivateEditorClient(transport: composition.transport)
+        let stream = try await client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try host.workflow.editorCapture().observation()
+        func send(_ command: ControlRuntimeCommand) async throws -> ControlAdmission {
+            try await client.submit(command, requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: host.incarnation, deadline: deadline())
+        }
+
+        // The held work: a Restart parked on its first system-proxy read takes the one ordinary slot.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let lifecycle = try XCTUnwrap(ControlLifecycleRevision(rawValue: host.workflow.generation))
+        let restart = try accepted(try await send(.restart(.proxy, ifLifecycleRevision: lifecycle)))
+        await harness.hold.waitUntilReached()
+        let platformBaseline = try XCTUnwrap(observed.components.platform.baseline)
+        let full = try await send(.setLaunchAtLogin(true, ifPlatformBaseline: platformBaseline))
+        XCTAssertEqual(full, .rejected(.queueFull), "ordinary capacity is exhausted")
+
+        let quit = try accepted(try await send(.quit(total: try ControlWireBudget(30_000), flush: ControlQuitFlush(configuration: true, preferences: false))))
+        XCTAssertTrue(host.workflow.isTerminal, "the quit latched in its admission turn")
+        let second = try await send(.quit(total: try ControlWireBudget(30_000), flush: ControlQuitFlush(configuration: false, preferences: false)))
+        XCTAssertEqual(second, .rejected(.hostStopping), "one quit per host")
+        let request = try update(host: host, from: observed) { $0.profileName = "Flushed at quit" }
+        let flush = try accepted(try await editor.submit(request, deadline: deadline()))
+
+        harness.hold.release()
+        let outcomes = try await finishedAll([restart, quit, flush], on: stream)
+        XCTAssertEqual(outcomes[quit].flatMap(completed), .quit)
+        XCTAssertEqual(try receipt(try XCTUnwrap(outcomes[flush])).runtime.write, .persisted(reportedError: false))
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false).profileName, "Flushed at quit")
+        let quiet = try await eventually { host.pendingAdmissions == 0 && host.workflow.isIdle }
+        XCTAssertTrue(quiet)
+        XCTAssertFalse(host.runtimeState().proxyIsUp)
+        XCTAssertEqual(composition.privateCustody.held.input, false)
+    }
+
+    /// A save-only update of `observed`'s values with `edit` applied, at its exact baselines, for a host composed in the test itself.
+    private func update(host: RuntimeHost, from observed: PrivateEditorObservation, edit: (inout ProxyConfig) -> Void) throws
+        -> PrivateConfigurationRequest
+    {
+        var values = try PrivateConfigurationBridge.makeValues(from: observed)
+        edit(&values.config)
+        return try PrivateConfigurationBridge.makeRequest(
+            config: values.config, platform: values.platform, requestID: ControlRequestID(rawValue: UUID()),
+            incarnation: host.incarnation, budget: try ControlWireBudget(1_000),
+            runtimeBaseline: try XCTUnwrap(observed.components.runtime.baseline),
+            platformBaseline: try XCTUnwrap(observed.components.platform.baseline),
+            modules: PrivateModuleSlots(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly)
+        )
+    }
+
     /// A Stop of a module an apply-while-running save names, fenced after the save's admission and before its queued launch, revokes the
     /// unstarted write (decision 0035): nothing is written, the update settles stale, and its slot and admission are released.
     func testAStopAfterAnApplysAdmissionRevokesItsUnstartedWrite() async throws {

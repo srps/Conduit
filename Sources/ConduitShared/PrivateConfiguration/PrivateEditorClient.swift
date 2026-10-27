@@ -6,11 +6,18 @@ import Foundation
 // busy channel refuses before an eight-MiB body exists. The reservation belongs to the transport's composition, shared by
 // every transport and connection it serves; it is not this client's.
 
-/// What a private exchange reserves. A read reserves the one transfer. An update also reserves the one admitted frozen-input
-/// slot, which an accepted update keeps until its operation has physically quiesced.
+/// What a private exchange reserves. A read reserves the one transfer. An update, of the runtime and platform files or of the
+/// preferences file, also reserves the one admitted frozen-input slot, which an accepted update keeps until its operation has
+/// physically quiesced. Both updates share that one slot.
 package enum PrivateExchangePurpose: Sendable, Equatable {
     case read
     case update
+    case preferences
+
+    /// Whether the exchange also reserves the frozen-input slot.
+    package var holdsInput: Bool {
+        self != .read
+    }
 }
 
 /// One reserved private exchange. `send` carries one complete request frame and returns the one complete reply frame. It
@@ -105,16 +112,43 @@ package struct PrivateEditorClient: Sendable {
         deadline: RuntimeDeadline,
         request makeRequest: @Sendable () throws -> PrivateConfigurationRequest
     ) async throws -> ControlAdmission {
+        try await exchangeUpdate(.update, requestID: requestID) { exchange in
+            let request = try Self.mapLocally(requestID: requestID, requestIDOf: \.requestID, makeRequest)
+            let frame = try Self.encodeLocally { try PrivateConfigurationEncoder.encode(request) }
+            return try Self.admission(try await exchange.send(frame, deadline)) { try $0.admission(answering: request) }
+        }
+    }
+
+    /// One frozen preferences update, under the same reservation, mapping, single send and admission-only answer as `submit`. It
+    /// shares the one frozen-input slot with every other update. Its settlement is the ordinary lookup's preferences receipt.
+    package func submitPreferences(
+        requestID: ControlRequestID,
+        deadline: RuntimeDeadline,
+        request makeRequest: @Sendable () throws -> PrivatePreferencesRequest
+    ) async throws -> ControlAdmission {
+        try await exchangeUpdate(.preferences, requestID: requestID) { exchange in
+            let request = try Self.mapLocally(requestID: requestID, requestIDOf: \.requestID, makeRequest)
+            let frame = try Self.encodeLocally { try PrivateConfigurationEncoder.encode(request) }
+            return try Self.admission(try await exchange.send(frame, deadline)) { try $0.admission(answering: request) }
+        }
+    }
+
+    /// The reply's admission, decoded and correlated inside the reservation.
+    private static func admission(
+        _ reply: SecretBytes,
+        _ correlate: (PrivateEditorReply) throws -> ControlAdmission
+    ) throws -> ControlAdmission {
+        try correlate(try PrivateConfigurationDecoder.decodeReply(try PrivateConfigurationFrame.body(of: reply, expecting: .editorReply)))
+    }
+
+    /// One update exchange and its closed failures: nothing sent, or an admission that is unknown and recovered by request lookup.
+    private func exchangeUpdate(
+        _ purpose: PrivateExchangePurpose,
+        requestID: ControlRequestID,
+        _ body: (PrivateExchange) async throws -> ControlAdmission
+    ) async throws -> ControlAdmission {
         do {
-            return try await transport.withPrivateExchange(.update) { exchange in
-                let request = try Self.mapLocally(requestID: requestID, makeRequest)
-                let frame = try Self.encodeLocally { try PrivateConfigurationEncoder.encode(request) }
-                let reply = try await exchange.send(frame, deadline)
-                let decoded = try PrivateConfigurationDecoder.decodeReply(
-                    try PrivateConfigurationFrame.body(of: reply, expecting: .editorReply)
-                )
-                return try decoded.admission(answering: request)
-            }
+            return try await transport.withPrivateExchange(purpose, body)
         } catch let failure as ControlRuntimeTransportFailure {
             switch failure {
             case .notSent(let end): throw RuntimeClientError.notSent(end)
@@ -128,11 +162,12 @@ package struct PrivateEditorClient: Sendable {
     }
 
     /// The request the caller's producer maps, before any send. A mapping refusal, or a request under another ID, is the client's own.
-    private static func mapLocally(
+    private static func mapLocally<Request>(
         requestID: ControlRequestID,
-        _ makeRequest: () throws -> PrivateConfigurationRequest
-    ) throws -> PrivateConfigurationRequest {
-        let request: PrivateConfigurationRequest
+        requestIDOf: KeyPath<Request, ControlRequestID>,
+        _ makeRequest: () throws -> Request
+    ) throws -> Request {
+        let request: Request
         do {
             request = try makeRequest()
         } catch PrivateConfigurationWireError.frameTooLarge {
@@ -140,7 +175,7 @@ package struct PrivateEditorClient: Sendable {
         } catch {
             throw RuntimeClientError.localRefusal(.invalidValue)
         }
-        guard request.requestID == requestID else { throw RuntimeClientError.localRefusal(.invalidValue) }
+        guard request[keyPath: requestIDOf] == requestID else { throw RuntimeClientError.localRefusal(.invalidValue) }
         return request
     }
 

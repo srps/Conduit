@@ -7,18 +7,24 @@ import Foundation
 enum RuntimePartition: Hashable, Sendable {
     case ordinary
     case stop(ControlModule)
+    /// The process quit and its reserved flushes (decision 0015). Neither waits on ordinary capacity: the host's terminal latch admits one
+    /// quit per host, and its window each declared flush once, so the partition holds at most three operations.
+    case quit
 
-    static let all: [RuntimePartition] = [.ordinary] + ControlModule.allCases.map { RuntimePartition.stop($0) }
+    static let all: [RuntimePartition] = [.ordinary, .quit] + ControlModule.allCases.map { RuntimePartition.stop($0) }
 
     static func of(_ command: ControlRuntimeCommand) -> RuntimePartition {
-        if case .stop(let module) = command { return .stop(module) }
-        return .ordinary
+        switch command {
+        case .stop(let module): .stop(module)
+        case .quit: .quit
+        case .restart, .testDNS, .testUpstream, .refreshPreflight, .setLaunchAtLogin: .ordinary
+        }
     }
 
-    /// The module of a stop partition, and nil for ordinary commands.
+    /// The module of a stop partition, and nil for every other one.
     var stopModule: ControlModule? {
         switch self {
-        case .ordinary: nil
+        case .ordinary, .quit: nil
         case .stop(let module): module
         }
     }

@@ -250,7 +250,7 @@ package struct ControlCompletion: Codable, Sendable, Equatable {
     /// Lifecycle commands settle with no payload. Each observation command reports its own.
     private static func pairs(command: ControlRuntimeCommandKind, result: ControlCommandResult) -> Bool {
         switch (command, result) {
-        case (.stop, .settled), (.restart, .settled): true
+        case (.stop, .settled), (.restart, .settled), (.quit, .settled): true
         case (.testUpstream, .upstreamProbe): true
         case (.testDNS, .dnsLiveness): true
         case (.refreshPreflight, .preflight): true
@@ -271,6 +271,8 @@ package enum ControlOperationOutcome: Codable, Sendable, Equatable {
     /// A private editor update settled: its causal receipt, whatever each file and module came to. It is settlement, never admission,
     /// and it carries no configuration value.
     case configurationSettled(ControlConfigurationReceipt)
+    /// A private preferences update settled: its causal receipt. Settlement only, with no configuration value.
+    case preferencesSettled(ControlPreferencesReceipt)
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -294,6 +296,8 @@ package enum ControlOperationOutcome: Codable, Sendable, Equatable {
             self = .failed(try container.decode(ControlFailureCode.self, forKey: .failure))
         case "configurationSettled":
             self = .configurationSettled(try container.decode(ControlConfigurationReceipt.self, forKey: .receipt))
+        case "preferencesSettled":
+            self = .preferencesSettled(try container.decode(ControlPreferencesReceipt.self, forKey: .receipt))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "an unknown outcome")
         }
@@ -316,6 +320,9 @@ package enum ControlOperationOutcome: Codable, Sendable, Equatable {
             try container.encode(code, forKey: .failure)
         case .configurationSettled(let receipt):
             try container.encode("configurationSettled", forKey: .type)
+            try container.encode(receipt, forKey: .receipt)
+        case .preferencesSettled(let receipt):
+            try container.encode("preferencesSettled", forKey: .type)
             try container.encode(receipt, forKey: .receipt)
         }
     }

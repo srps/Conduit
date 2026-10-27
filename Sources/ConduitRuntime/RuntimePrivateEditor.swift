@@ -20,12 +20,12 @@ final class RuntimePrivateCustody: @unchecked Sendable {
     /// Reserves the transfer, and for an update the frozen-input slot too, or nothing: a busy term refuses before anything is reserved.
     func reserve(_ purpose: PrivateExchangePurpose) -> RuntimePrivateReservation? {
         let reserved = lock.withLock { () -> Bool in
-            guard !transferHeld, purpose == .read || !inputHeld else { return false }
+            guard !transferHeld, !purpose.holdsInput || !inputHeld else { return false }
             transferHeld = true
-            if purpose == .update { inputHeld = true }
+            if purpose.holdsInput { inputHeld = true }
             return true
         }
-        return reserved ? RuntimePrivateReservation(custody: self, holdsInput: purpose == .update) : nil
+        return reserved ? RuntimePrivateReservation(custody: self, holdsInput: purpose.holdsInput) : nil
     }
 
     /// What is held now: for tests and measurements, which assert release only after physical cleanup.
@@ -158,6 +158,8 @@ extension RuntimeInMemoryTransport: PrivateEditorTransport {
                 return try await Self.answerRead(frame, owner: channel.owner, gate: gate)
             case .update:
                 return try await Self.answerUpdate(frame, owner: channel.owner, core: core, reservation: reservation, gate: gate)
+            case .preferences:
+                return try await Self.answerPreferences(frame, owner: channel.owner, core: core, reservation: reservation, gate: gate)
             }
         })
     }
@@ -243,6 +245,45 @@ extension RuntimeInMemoryTransport: PrivateEditorTransport {
         }
     }
 
+    /// A preferences update's answer: decoded and mapped here, admitted in one owner turn through the service like any update, its
+    /// admission encoded here.
+    private static func answerPreferences(
+        _ frame: SecretBytes,
+        owner: RuntimeHost,
+        core: RuntimeServiceCore,
+        reservation: RuntimePrivateReservation,
+        gate: RuntimePrivateGate
+    ) async throws -> SecretBytes {
+        let request: PrivatePreferencesRequest
+        do {
+            request = try PrivateConfigurationDecoder.decodePreferences(try PrivateConfigurationFrame.body(of: frame, expecting: .preferences))
+        } catch {
+            throw ControlRuntimeTransportFailure.sent(.invalidReply)
+        }
+        let admission: ControlAdmission
+        do {
+            let preferences = try PrivateConfigurationBridge.makePreferences(from: request)
+            let turn = await MainActor.run { () -> RuntimePrivateGate.Turn<ControlAdmission> in
+                gate.turn(budget: request.budget) {
+                    core.submitPrivate(requestID: request.requestID, expectedIncarnation: request.incarnation) { operation in
+                        owner.fencePrivatePreferences(
+                            request, preferences: preferences, operation: operation, takeInput: { reservation.takeInputSlot() }
+                        )
+                    }
+                }
+            }
+            admission = try turn.result() ?? .rejected(.deadlineExpired)
+        } catch let failure as ControlRuntimeTransportFailure {
+            throw failure
+        } catch {
+            admission = .rejected(.commandTooLarge)
+        }
+        let hostIncarnation = admission == .rejected(.changedIncarnation) ? core.incarnation : request.incarnation
+        return try encodeReply(PrivateEditorReply(requestID: request.requestID, hostIncarnation: hostIncarnation, answer: .admission(admission))) {
+            .admission(.rejected(.internalFailure))
+        }
+    }
+
     /// The reply frame, or a closed refusal in its place when the answer cannot be encoded within the reply cap. A refusal that cannot be
     /// encoded either is a sent failure with no answer.
     private static func encodeReply(_ reply: PrivateEditorReply, fallback: () -> PrivateEditorAnswer) throws -> SecretBytes {
@@ -282,6 +323,8 @@ struct RuntimePrivateUpdate {
         case start(RuntimeAdmittedStart)
         /// A save; its ticket names the revision of each module it applies to.
         case save(RuntimeConfigurationWorkflow.SaveTicket, RuntimeConfigurationWorkflow.FrozenInput)
+        /// A preferences save under the exact preferences baseline its request named.
+        case preferences(RuntimeConfigurationWorkflow.SaveTicket, AppPreferences, PrivateBaseline)
     }
 
     let requestID: ControlRequestID
@@ -334,23 +377,14 @@ extension RuntimeHost {
             runtimeBaseline: request.runtimeBaseline, platformBaseline: request.platformBaseline
         )
         let members = ControlModule.allCases.filter { actions[$0] == .start }
-        // After the quit latched, only its one reserved flush is admitted: all save-only, nothing to start or apply.
-        var flush = false
-        if workflow.isTerminal {
-            guard members.isEmpty, applies.isEmpty, quitFlush?.admit() == true else {
-                emitConfigurationEvents(workflow.terminalRefusal())
-                return .rejected(.hostStopping)
-            }
-            flush = true
-        }
         let work: RuntimePrivateUpdate.Work
         if members.isEmpty {
-            guard case .success(let ticket) = workflow.admitSave(requestID: request.requestID, applying: applying, quitFlush: flush) else {
+            // After the quit latched, only its reserved flush is admitted: all save-only, nothing to start or apply.
+            if workflow.isTerminal, !applies.isEmpty {
                 emitConfigurationEvents(workflow.terminalRefusal())
                 return .rejected(.hostStopping)
             }
-            pendingAdmissions += 1
-            stoppedEffectsJoin?.finish(.superseded)
+            guard let ticket = admitSave(request.requestID, applying: applying, flush: .configuration) else { return .rejected(.hostStopping) }
             work = .save(ticket, frozen)
         } else {
             let operationName: LifecycleOperation = members.count == 1
@@ -368,6 +402,40 @@ extension RuntimeHost {
         guard let slot = takeInput() else { preconditionFailure("an update's exchange holds the frozen-input slot") }
         privateUpdates[operation] = RuntimePrivateUpdate(requestID: request.requestID, work: work, slot: slot)
         return .admitted
+    }
+
+    /// A preferences update in one turn: an all-save-only admission with no module, so it starts, applies and fences nothing. After the quit
+    /// latched, only its reserved preferences flush is admitted.
+    func fencePrivatePreferences(
+        _ request: PrivatePreferencesRequest,
+        preferences: AppPreferences,
+        operation: ControlOperationID,
+        takeInput: () -> RuntimeFrozenInputSlot?
+    ) -> ControlOwnerFenceResult {
+        guard let ticket = admitSave(request.requestID, applying: PrivateModuleSlots(proxy: nil, dns: nil, tunnels: nil), flush: .preferences)
+        else { return .rejected(.hostStopping) }
+        guard let slot = takeInput() else { preconditionFailure("an update's exchange holds the frozen-input slot") }
+        privateUpdates[operation] = RuntimePrivateUpdate(
+            requestID: request.requestID, work: .preferences(ticket, preferences, request.preferencesBaseline), slot: slot
+        )
+        return .admitted
+    }
+
+    /// The one all-save-only admission of both update kinds. Before the quit it is admitted as is; after it, only as the window's `flush`
+    /// part, once. A refusal comes with its typed event and changes nothing. An admitted save is pending work until its run ends.
+    private func admitSave(
+        _ requestID: ControlRequestID,
+        applying: PrivateModuleSlots<Int?>,
+        flush: RuntimeQuitFlush.Part
+    ) -> RuntimeConfigurationWorkflow.SaveTicket? {
+        let reserved = workflow.isTerminal && quitFlush?.admit(flush) == true
+        guard case .success(let ticket) = workflow.admitSave(requestID: requestID, applying: applying, quitFlush: reserved) else {
+            emitConfigurationEvents(workflow.terminalRefusal())
+            return nil
+        }
+        pendingAdmissions += 1
+        stoppedEffectsJoin?.finish(.superseded)
+        return ticket
     }
 
     func startPrivateEffect(operation: ControlOperationID, report: ControlEffectReport) {
@@ -401,7 +469,7 @@ extension RuntimeHost {
             await awaitLaunchRecovery()
             let saved = await workflow.saveFrozen(ticket, frozen)
             emitConfigurationEvents(saved.events)
-            if ticket.quitFlush { quitFlush?.finish() }
+            if ticket.quitFlush { quitFlush?.finish(.configuration) }
             var applied: Bool?
             if ControlModule.allCases.contains(where: { applying[$0] != nil }) {
                 applied = if let verified = saved.commit?.verifiedInput { await applyWhileRunning(verified, at: applying) } else { false }
@@ -410,6 +478,20 @@ extension RuntimeHost {
                 update.requestID, commit: saved.commit, dnsStaged: saved.dnsStaged, modules: [], applied: applied,
                 unsaved: saved.storeBusy ? .storeBusy : saved.superseded ? .staleRevision : .effectFailed
             )
+        case .preferences(let ticket, let preferences, let baseline):
+            defer { pendingAdmissions -= 1 }
+            await awaitLaunchRecovery()
+            let saved = await workflow.savePreferences(ticket, preferences, expecting: baseline)
+            emitConfigurationEvents(saved.events)
+            if ticket.quitFlush { quitFlush?.finish(.preferences) }
+            guard let write = saved.write else { return .failed(.storeBusy) }
+            do {
+                return .preferencesSettled(try ControlPreferencesReceipt(
+                    requestID: update.requestID, incarnation: incarnation, preferences: try Self.componentWrite(write)
+                ))
+            } catch {
+                preconditionFailure("a receipt is built from the store's own consistent facts")
+            }
         case .start(let admitted):
             var unsaved = ControlFailureCode.effectFailed
             do {
@@ -442,8 +524,9 @@ extension RuntimeHost {
     /// at, no terminal stop latched and the store still holds the pair (decisions 0025 and 0037). It never authorizes a Start, clears a fence
     /// or enables a module; a Stop or newer Start of a named module, or a newer write, holds the rest. As a reload does, the accepted view is
     /// adopted before the push, so it never falls behind what the runtime takes. Returns whether the runtime's applied input is now this
-    /// pair: the reconciler's baseline, which moves only to what a push reports held. That is not a claim that a listener came up; a failed
-    /// one shows in the snapshot and the lifecycle state.
+    /// whole pair: the reconciler's baseline, which moves only to what a push reports held. That is not a claim that a listener came up; a
+    /// failed one shows in the snapshot and the lifecycle state. False does not say the runtime half was not taken: a module that went down
+    /// before the flag actions leaves the runtime input held and the pair unreconciled.
     private func applyWhileRunning(_ verified: VerifiedRuntimePlatformInput, at revisions: PrivateModuleSlots<Int?>) async -> Bool {
         let stands: @MainActor @Sendable () -> Bool = { [weak self] in
             guard let self, !self.workflow.isTerminal, self.workflow.stillHolds(verified) else { return false }

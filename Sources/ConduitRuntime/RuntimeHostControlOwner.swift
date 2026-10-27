@@ -112,6 +112,8 @@ enum RuntimeControlAdmission {
     case stop(RuntimeAdmittedStop, ControlModule)
     case restart(RuntimeAdmittedStart)
     case launchAtLogin(Bool, PrivateBaseline, ControlRequestID)
+    /// The quit latched at the fence; its work already runs, and its window holds the one total deadline.
+    case quit(Task<Void, Never>, RuntimeQuitFlush)
 }
 
 /// The latest control Stop of one module: the service operation and the revision its fence took.
@@ -125,9 +127,9 @@ struct RuntimeControlStop {
 /// I/O. The service only dispatches: it never decides what a command does to intent. The effect is the matching `runAdmitted…` half.
 extension RuntimeHost: ControlCommandOwner {
     /// The scalar snapshot of this turn: the orchestrator's state, stamped with this host's incarnation, the v1 accepted-view counter
-    /// (`configGeneration`) as the config revision and the whole-host lifecycle counter as the lifecycle revision. Collections report no
-    /// captured revision, so their counts are exact and their rows unavailable as `not_captured`. Nil, with its event, when the projection
-    /// fails.
+    /// (`configGeneration`) as the config revision and the whole-host lifecycle counter as the lifecycle revision. Each collection names the
+    /// revision of the kernel value it was taken from in this turn (`RuntimeHostCollections`), so a page captured in the same turn is
+    /// exactly that revision's rows; one whose revisions are exhausted names none. Nil, with its event, when the projection fails.
     func snapshot() -> ControlRuntimeSnapshot? {
         let revisions = workflow.revisions
         guard let lifecycle = ControlLifecycleRevision(rawValue: workflow.generation),
@@ -191,10 +193,21 @@ extension RuntimeHost: ControlCommandOwner {
             pendingAdmissions += 1
             controlAdmissions[operation] = .launchAtLogin(enabled, baseline, request)
             return .admitted
+        case .quit(let total, let flush):
+            // A quit already latched, by this command or the host's own, admits no second one.
+            guard !workflow.isTerminal, quit == nil else { return .rejected(.hostStopping) }
+            let work = admitQuit(until: ContinuousClock.now.advanced(by: .milliseconds(total.rawValue)), flushing: flush)
+            guard let window = quitFlush else { preconditionFailure("a quit with a deadline holds its window") }
+            controlAdmissions[operation] = .quit(work, window)
+            return .admitted
         case .restart(.dns, _, _), .restart(.tunnels, _, _), .testDNS, .testUpstream, .refreshPreflight:
             // Not adopted on this owner yet; each is refused whole before anything changes.
             return .rejected(.notImplemented)
         }
+    }
+
+    var reservesQuitFlush: Bool {
+        workflow.isTerminal && quitFlush?.isOpen == true
     }
 
     func startEffect(_ command: ControlRuntimeCommand, operation: ControlOperationID, report: ControlEffectReport) {
@@ -219,6 +232,16 @@ extension RuntimeHost: ControlCommandOwner {
                 let outcome = await workflow.commitLaunchAtLogin(enabled, expecting: baseline, requestID: request)
                 emitConfigurationEvents(outcome.events)
                 report.settled(launchAtLoginOutcome(outcome.write))
+                report.quiesced()
+                onControlStateChange?()
+            }
+        case .quit(let work, let window):
+            // Settled at the first of the quit's end and its deadline; quiesced only when its work has ended, so the operation keeps its
+            // capacity, and the host the root, while a late teardown or write still runs.
+            Task { @MainActor [self] in
+                report.settled(await window.settled() ? completed(.quit) : .failed(.cleanupIncomplete))
+                onControlStateChange?()
+                await work.value
                 report.quiesced()
                 onControlStateChange?()
             }
@@ -330,17 +353,14 @@ extension RuntimeHost: ControlCommandOwner {
                 write: ControlConfigWorkflowWrite(RuntimeConfigurationWorkflow.write(write)),
                 baseline: write.verifiedReceipt.map { RuntimeConfigurationWorkflow.privateBaseline($0) }
             )
-            _ = snapshot()
-            guard let revision = ControlPresentationRevision(rawValue: presentation.revision) else {
-                preconditionFailure("a presentation revision is never negative")
-            }
-            return .completed(try ControlCompletion(command: .setLaunchAtLogin, presentationRevision: revision, result: .platformWrite(component)))
+            return completed(.setLaunchAtLogin, result: .platformWrite(component))
         } catch {
             preconditionFailure("an admin settlement is built from the store's own consistent facts")
         }
     }
 
-    private func completed(_ command: ControlRuntimeCommandKind) -> ControlOperationOutcome {
+    /// The one completion path of every command: its result, cited at the revision that reflects the settlement.
+    private func completed(_ command: ControlRuntimeCommandKind, result: ControlCommandResult = .settled) -> ControlOperationOutcome {
         // The revision that reflects the settlement is the one this turn's snapshot carries. When none can be projected, the settlement
         // reserves the next one, which the first projection after it takes; the last body, from before the settlement, is never cited.
         // At the maximum no revision can reflect it, so it fails closed.
@@ -351,9 +371,9 @@ extension RuntimeHost: ControlCommandOwner {
             preconditionFailure("a presentation revision is never negative")
         }
         do {
-            return .completed(try ControlCompletion(command: command, presentationRevision: revision, result: .settled))
+            return .completed(try ControlCompletion(command: command, presentationRevision: revision, result: result))
         } catch {
-            preconditionFailure("a lifecycle command settles with no payload")
+            preconditionFailure("a command settles with its own result kind")
         }
     }
 

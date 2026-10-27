@@ -956,17 +956,28 @@ extension RuntimeHost {
     /// because `applicationWillTerminate` is synchronous. `SIGTERM` reaches this through a `Task`, so the join leaves the main actor free,
     /// and the stop's clears never overlap recovery's.
     ///
-    /// `reservingFlushUntil` opens the quit's one reserved draft flush until that total deadline (`RuntimeQuitFlush`): the quit waits for the
-    /// flush it admits, or for the deadline, before it joins store work and confirms the flush of diagnostics. Nil reserves none.
-    package func shutdown(reservingFlushUntil deadline: ContinuousClock.Instant? = nil) async {
+    /// `reservingFlushUntil` is the quit's one total deadline (`RuntimeQuitFlush`): it opens the reserved flush window for `flushing` until
+    /// then, and the quit waits for the flushes it admits, or for the deadline, before it joins store work and confirms the flush of
+    /// diagnostics. Nil reserves none. The facade's default reserves the runtime and platform save alone.
+    package func shutdown(
+        reservingFlushUntil deadline: ContinuousClock.Instant? = nil,
+        flushing parts: ControlQuitFlush = ControlQuitFlush(configuration: true, preferences: false)
+    ) async {
         if let quit {
             await quit.value
             return
         }
+        await admitQuit(until: deadline, flushing: parts).value
+    }
+
+    /// The synchronous half of the quit, in one turn: the latch, the reserved window and the quit's work, which runs once and which a
+    /// second quit joins. Returns that work.
+    func admitQuit(until deadline: ContinuousClock.Instant?, flushing parts: ControlQuitFlush) -> Task<Void, Never> {
+        precondition(quit == nil, "the host runs a single quit")
         pendingAdmissions += 1
         workflow.admitStop(terminal: true)
         // In the latch's own turn, so no client sees the latch without the window.
-        let flush = deadline.map { RuntimeQuitFlush(until: $0) }
+        let flush = deadline.map { RuntimeQuitFlush(until: $0, admitting: parts, workflow: workflow) }
         quitFlush = flush
         stoppedEffectsJoin?.finish(.superseded)
         let quit = Task { @MainActor [self] in
@@ -982,9 +993,10 @@ extension RuntimeHost {
             await flush?.closed()
             await workflow.waitUntilIdle()
             await flushEvents()
+            flush?.quitDidEnd()
         }
         self.quit = quit
-        await quit.value
+        return quit
     }
 
     // MARK: Whole-host facade

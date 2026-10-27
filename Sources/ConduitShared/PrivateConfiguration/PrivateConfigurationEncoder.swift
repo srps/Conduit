@@ -238,6 +238,14 @@ extension PrivateConfigurationRequest: PrivateFrameRoot {
     }
 }
 
+extension PrivatePreferencesRequest: PrivateFrameRoot {
+    static var frameKind: PrivateConfigurationFrame.Kind { .preferences }
+
+    func writeBody<Sink: PrivateFrameSink>(to emitter: PrivateJSONEmitter<Sink>) throws {
+        try emitter.writePreferencesRequest(self)
+    }
+}
+
 extension PrivateEditorReadRequest: PrivateFrameRoot {
     static var frameKind: PrivateConfigurationFrame.Kind { .read }
 
@@ -283,6 +291,16 @@ extension PrivateJSONEmitter {
             try member("requestID") { try writeUUID(request.requestID.rawValue) }
             try member("incarnation") { try writeUUID(request.incarnation.rawValue) }
             try member("budgetMilliseconds") { try writeInt(request.budget.rawValue) }
+        }
+    }
+
+    func writePreferencesRequest(_ request: PrivatePreferencesRequest) throws {
+        try object {
+            try member("requestID") { try writeUUID(request.requestID.rawValue) }
+            try member("incarnation") { try writeUUID(request.incarnation.rawValue) }
+            try member("budgetMilliseconds") { try writeInt(request.budget.rawValue) }
+            try member("preferencesBaseline") { try writeBaseline(request.preferencesBaseline) }
+            try member("preferences") { try writePreferences(request.preferences) }
         }
     }
 
@@ -592,6 +610,16 @@ package enum PrivateConfigurationEncoder {
 
     /// Returns the request's update frame as redacted bytes.
     package static func encode(_ request: PrivateConfigurationRequest) throws -> SecretBytes {
+        try frame(request)
+    }
+
+    /// Returns the exact body length of a preferences update, without building a frame or any buffer.
+    package static func measureBody(_ request: PrivatePreferencesRequest) throws -> Int {
+        try measure(request)
+    }
+
+    /// Returns the preferences update frame as redacted bytes.
+    package static func encode(_ request: PrivatePreferencesRequest) throws -> SecretBytes {
         try frame(request)
     }
 

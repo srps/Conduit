@@ -101,4 +101,13 @@ protocol ControlCommandOwner: AnyObject {
     /// Launches a private editor update the owner admitted through `RuntimeServiceCore.submitPrivate`. The owner holds its frozen input
     /// under `operation`; the service never held it.
     func startPrivateEffect(operation: ControlOperationID, report: ControlEffectReport)
+
+    /// Whether the quit's reserved flush window is open (decision 0015). A private update submitted then is admitted, if at all, as that
+    /// flush, into the quit's partition: the window bounds it to its declared parts, so it never waits on ordinary capacity.
+    var reservesQuitFlush: Bool { get }
+}
+
+extension ControlCommandOwner {
+    /// An owner with no quit window reserves no flush.
+    var reservesQuitFlush: Bool { false }
 }

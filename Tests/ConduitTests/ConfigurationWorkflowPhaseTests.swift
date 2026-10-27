@@ -192,7 +192,7 @@ final class ConfigurationWorkflowPhaseTests: XCTestCase {
         let outcome = await reload.value
 
         XCTAssertNil(outcome.applied)
-        XCTAssertNil(outcome.preferences)
+        XCTAssertFalse(outcome.adopted)
         XCTAssertEqual(outcome.events.last, .superseded(ConfigurationWorkflowSuperseded(phase: .reload, generation: 0, current: 1)))
         XCTAssertEqual(files.replacements, 0, "a reload writes nothing")
     }

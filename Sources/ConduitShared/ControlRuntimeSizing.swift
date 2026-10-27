@@ -115,7 +115,7 @@ extension ControlOperationOutcome {
             try budget.elements(modules.entries.count)
         case .configurationSettled(let receipt):
             try budget.elements(receipt.modules.count)
-        case .superseded, .failed:
+        case .superseded, .failed, .preferencesSettled:
             break
         }
     }

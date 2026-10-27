@@ -126,6 +126,10 @@ struct RuntimeModuleIntent: Equatable, Sendable {
 struct RuntimeModuleIntents: Equatable, Sendable {
     private(set) var counter: Int
     private(set) var terminal = false
+    /// Whether the quit's reserved flush window is open (decision 0015): set in the latch's own turn when the quit reserves one, and
+    /// cleared once, when the window closes or its deadline passes. A flush's write claim holds only while it is set, so a flush admitted
+    /// but not yet at its replacement writes nothing after the window. A write already past its claim completes, and the quit joins it.
+    var quitFlushOpen = false
     private(set) var modules: PrivateModuleSlots<RuntimeModuleIntent>
     /// DNS's configured `forwarderEnabled`, separate from its runtime permission: the store's adopted value, a session Stop's disable, or
     /// an explicit DNS Start's verified write. A companion activation reads it; it is never a permission by itself.

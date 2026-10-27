@@ -23,6 +23,11 @@ package enum PrivateConfigurationDecoder {
         try decode(body, as: .update, root: PrivateConfigurationSchema.request, WireRequest.self).request
     }
 
+    /// Decodes one preferences update body.
+    package static func decodePreferences(_ body: PrivateConfigurationFrameBody) throws -> PrivatePreferencesRequest {
+        try decode(body, as: .preferences, root: PrivateConfigurationSchema.preferencesRequest, WirePreferencesRequest.self).request
+    }
+
     /// Decodes one read body.
     package static func decodeRead(_ body: PrivateConfigurationFrameBody) throws -> PrivateEditorReadRequest {
         try decode(body, as: .read, root: PrivateConfigurationSchema.readRequest, WireReadRequest.self).request
@@ -158,6 +163,26 @@ private struct WireRequest: Decodable {
             modules: try c.decode(WireModuleIntents.self, forKey: .modules).value,
             runtime: try c.decode(WireRuntime.self, forKey: .runtime).value,
             platform: try c.decode(WirePlatform.self, forKey: .platform).value
+        )
+    }
+}
+
+private struct WirePreferencesRequest: Decodable {
+    let request: PrivatePreferencesRequest
+
+    private enum Keys: String, CodingKey {
+        case requestID, incarnation, budgetMilliseconds, preferencesBaseline, preferences
+    }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.strictContainer(Keys.self)
+        // The initializer refuses a baseline of another file.
+        request = try PrivatePreferencesRequest(
+            requestID: ControlRequestID(rawValue: try WireValue.uuid(c.decode(String.self, forKey: .requestID))),
+            incarnation: ControlHostIncarnation(rawValue: try WireValue.uuid(c.decode(String.self, forKey: .incarnation))),
+            budget: try WireValue.budget(c.decode(Int.self, forKey: .budgetMilliseconds)),
+            preferencesBaseline: try c.decode(WireBaseline.self, forKey: .preferencesBaseline).value,
+            preferences: try c.decode(WirePreferences.self, forKey: .preferences).value
         )
     }
 }

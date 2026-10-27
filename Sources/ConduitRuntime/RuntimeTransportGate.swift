@@ -12,6 +12,8 @@ enum RuntimeLane: Hashable, Sendable {
     /// The next-frame pulls of open subscriptions. Each pull holds one reservation until its wait ends.
     case stream
     case stop(ControlModule)
+    /// The process quit's own lane, so a full ordinary lane never holds it. One slot: the host admits one quit.
+    case quit
 }
 
 /// The named parts of one lane reservation. A reservation returns its slot only when every part it holds has ended.
@@ -65,6 +67,7 @@ final class RuntimeLaneCounter: @unchecked Sendable {
         case .read: limits.readLaneCapacity
         case .stream: limits.streamLaneCapacity
         case .stop: limits.stopLaneCapacityPerModule
+        case .quit: 1
         }
     }
 }

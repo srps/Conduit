@@ -706,14 +706,15 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         }
     }
 
-    /// Ordinary commands, each module's stop, and reads each have their own lane.
+    /// Ordinary commands, each module's stop, the quit and reads each have their own lane.
     private func laneOf(_ envelope: ControlRuntimeRequest) -> RuntimeLane {
         switch envelope.call {
         case .submit(let submit):
-            if case .stop(let module) = submit.command {
-                return .stop(module)
+            switch RuntimePartition.of(submit.command) {
+            case .stop(let module): return .stop(module)
+            case .quit: return .quit
+            case .ordinary: return .ordinary
             }
-            return .ordinary
         case .requestLookup, .outcome, .readPage, .readSnapshot, .subscribe:
             return .read
         }

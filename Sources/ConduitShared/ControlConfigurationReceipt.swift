@@ -134,6 +134,47 @@ package struct ControlModuleReceipt: Codable, Sendable, Equatable {
     }
 }
 
+/// The causal settlement of one private preferences update: the preferences file's write, with its new baseline only when it verified.
+/// Like the configuration receipt it carries no value, and only the client that submitted `requestID` rebases its preferences draft from it.
+package struct ControlPreferencesReceipt: Codable, Sendable, Equatable {
+    package let requestID: ControlRequestID
+    package let incarnation: ControlHostIncarnation
+    package let preferences: ControlComponentWrite
+
+    package init(requestID: ControlRequestID, incarnation: ControlHostIncarnation, preferences: ControlComponentWrite) throws {
+        guard preferences.baseline.map({ $0.component == .preferences }) ?? true else { throw ControlRuntimeWireError.invalidValue }
+        self.requestID = requestID
+        self.incarnation = incarnation
+        self.preferences = preferences
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case requestID
+        case incarnation
+        case preferences
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        do {
+            try self.init(
+                requestID: try container.decode(ControlRequestID.self, forKey: .requestID),
+                incarnation: try container.decode(ControlHostIncarnation.self, forKey: .incarnation),
+                preferences: try container.decode(ControlComponentWrite.self, forKey: .preferences)
+            )
+        } catch is ControlRuntimeWireError {
+            throw DecodingError.dataCorruptedError(forKey: .preferences, in: container, debugDescription: "a baseline of another file")
+        }
+    }
+
+    package func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(requestID, forKey: .requestID)
+        try container.encode(incarnation, forKey: .incarnation)
+        try container.encode(preferences, forKey: .preferences)
+    }
+}
+
 /// The causal settlement of one private update. Only the client that submitted `requestID` to `incarnation` may rebase a draft from it,
 /// and only the draft it submitted: later local edits stay.
 package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
@@ -148,8 +189,8 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
     package let modules: [ControlModuleReceipt]
     /// For an apply-while-running update only: whether the runtime's applied input is now its verified pair. Nil when none was asked. True
     /// says the runtime took the input, not that every listener came up: a failed one shows in the snapshot and its lifecycle state. False
-    /// means the runtime did not take it: a named module stopped or moved before the push, a flag action did not land, or the pair did not
-    /// verify.
+    /// means the runtime did not take the whole pair: a named module stopped, moved or went down before the pass completed (its runtime input
+    /// may already be held, as the snapshot shows), a flag action did not land, or the pair did not verify.
     package let applied: Bool?
 
     package init(

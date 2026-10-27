@@ -175,7 +175,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         let reload = await workflow.reload(capturedAt: captured)
 
         XCTAssertNil(reload.applied)
-        XCTAssertNil(reload.preferences)
+        XCTAssertFalse(reload.adopted)
         XCTAssertEqual(reload.events.last, .superseded(ConfigurationWorkflowSuperseded(phase: .reload, generation: 0, current: 1)))
     }
 

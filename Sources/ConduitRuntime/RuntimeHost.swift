@@ -69,7 +69,6 @@ package final class RuntimeHost {
 
     private(set) var config: ProxyConfig
     private(set) var platformConfig: PlatformIntegrationConfig
-    private(set) var appPreferences: AppPreferences
     private(set) var configGeneration = 0
 
     let orchestrator: ProxyOrchestrator
@@ -370,7 +369,6 @@ package final class RuntimeHost {
         self.logger = logger
         self.config = loadedConfiguration.config
         self.platformConfig = loadedConfiguration.platformConfig
-        self.appPreferences = loadedConfiguration.appPreferences
         self.commandRunner = effects.commandRunner
         self.loopbackPortProbe = effects.loopbackPortProbe
         self.homeDirectory = effects.homeDirectory
@@ -758,11 +756,8 @@ package final class RuntimeHost {
         await awaitLaunchRecovery()
         let outcome = await workflow.reload(capturedAt: captured)
         emitConfigurationEvents(outcome.events)
-        if let preferences = outcome.preferences {
-            appPreferences = preferences
-        }
         // An adopted observation changes the host view a pending settle read, whether or not its runtime input may apply.
-        if outcome.preferences != nil || outcome.applied != nil {
+        if outcome.adopted {
             stoppedEffectsJoin?.finish(.superseded)
         }
         guard let applied = outcome.applied else {

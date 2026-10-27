@@ -138,7 +138,7 @@ final class RuntimeConfigurationWorkflow {
         /// The revision each apply-while-running module was admitted at, nil for a save-only module: actionable intent (decision 0035),
         /// so a Stop or Start of such a module after admission revokes the unstarted write.
         var applying = PrivateModuleSlots<Int?>(proxy: nil, dns: nil, tunnels: nil)
-        /// The quit's one reserved flush: admitted after the terminal latch, which alone does not revoke its claim.
+        /// The quit's reserved flush: admitted after the terminal latch, which does not revoke its claim; the window's close does.
         var quitFlush = false
     }
 
@@ -156,8 +156,9 @@ final class RuntimeConfigurationWorkflow {
         let events: [ConfigurationWorkflowEvent]
         /// The runtime and platform inputs the host may apply. `nil` keeps the applied view and the reconciler's baseline as they are.
         let applied: (runtime: ProxyConfig, platform: PlatformIntegrationConfig)?
-        /// The preferences the observation adopted. They are independent of the apply hold, and a stale observation adopts none.
-        let preferences: AppPreferences?
+        /// Whether a current observation was adopted, whatever the apply decision. A stale observation is still the store's durable one,
+        /// but it is not current, so it is not counted here.
+        let adopted: Bool
     }
 
     private let store: ConfigurationStore
@@ -472,6 +473,11 @@ final class RuntimeConfigurationWorkflow {
         intent.withLockedValue { $0.terminal }
     }
 
+    /// Opens or closes the quit's reserved flush window in the intent the flush's write claims read. It opens only after the latch.
+    func setQuitFlush(open: Bool) {
+        intent.withLockedValue { $0.quitFlushOpen = open && $0.terminal }
+    }
+
     /// The typed event for a Start that stopped after it was admitted, with its closed cause: a newer generation, a terminal stop, a Stop at
     /// the maximum that ended the group, or a replacement of the input its members still wait on.
     /// A group whose members still wait on their prepare was ended by its replaced input, whatever an admission on another module did to the
@@ -708,12 +714,13 @@ final class RuntimeConfigurationWorkflow {
         operationsInFlight += 1
         defer { operationsInFlight -= 1 }
         let intent = self.intent
-        // The quit's latch revokes every save but its own reserved flush; a newer DNS intent, or a moved revision of a module the save applies
-        // to, revokes either. One short lock, at the capture and again just before each replacement. The quit stages no disable, so a Stop's
-        // disable owed from before it is still the staged value and is written by the flush.
+        // The quit's latch revokes every save but its own reserved flush, and the flush only while its window is open; a newer DNS intent, or
+        // a moved revision of a module the save applies to, revokes either. One short lock, at the capture and again just before each
+        // replacement. The quit stages no disable, so a Stop's disable owed from before it is still the staged value and is written by the
+        // flush.
         let claim = ConfigurationWriteClaim {
             intent.withLockedValue { state in
-                (ticket.quitFlush || !state.terminal) && state.dnsIntentRevision == ticket.dnsIntentRevision
+                (ticket.quitFlush ? state.quitFlushOpen : !state.terminal) && state.dnsIntentRevision == ticket.dnsIntentRevision
                     && ControlModule.allCases.allSatisfy { module in
                         ticket.applying[module].map { state.modules[module].revision == $0 } ?? true
                     }
@@ -746,6 +753,28 @@ final class RuntimeConfigurationWorkflow {
         )
     }
 
+    /// Commits a preferences update through the store's preferences commit, under the exact baseline its request named (decision 0018).
+    /// It is admitted as an all-save-only update, but only the terminal latch revokes it, or, for the quit's flush, the window's close: the
+    /// preferences file holds no lifecycle intent, so no DNS or module admission moves it, and nothing is applied. A nil write is a busy store,
+    /// which attempted nothing.
+    func savePreferences(
+        _ ticket: SaveTicket,
+        _ preferences: AppPreferences,
+        expecting baseline: PrivateBaseline
+    ) async -> (write: ConfigurationWriteOutcome?, events: [ConfigurationWorkflowEvent]) {
+        operationsInFlight += 1
+        defer { operationsInFlight -= 1 }
+        let intent = self.intent
+        let admission = await store.commitPreferences(
+            preferences,
+            expecting: store.token(naming: baseline),
+            context: context(generation: generation, requestID: ticket.requestID),
+            claim: ConfigurationWriteClaim { intent.withLockedValue { ticket.quitFlush ? $0.quitFlushOpen : !$0.terminal } }
+        )
+        guard case .admitted(let result) = admission else { return (nil, [held(.start, .unit, .storeBusy)]) }
+        return (result.preferences, [committed(.preferences, result.preferences)])
+    }
+
     // MARK: - Reload
 
     /// An explicit reload: one read-only observation through the store, then adoption and the eligibility decision. `captured` is the
@@ -759,7 +788,7 @@ final class RuntimeConfigurationWorkflow {
             return ReloadOutcome(
                 events: [.observed(ConfigurationWorkflowObserved(phase: .reload, observation: .refused(.busy)))],
                 applied: nil,
-                preferences: nil
+                adopted: false
             )
         }
         switch loaded.outcome {
@@ -767,7 +796,7 @@ final class RuntimeConfigurationWorkflow {
             return ReloadOutcome(
                 events: [.observed(ConfigurationWorkflowObserved(phase: .reload, observation: .refused(Self.refusal(refusal))))],
                 applied: nil,
-                preferences: nil
+                adopted: false
             )
         case .adopted:
             var events: [ConfigurationWorkflowEvent] = [
@@ -777,16 +806,17 @@ final class RuntimeConfigurationWorkflow {
                 preconditionFailure("an adopted observation carries its values")
             }
             // The adopted DNS bit is a durable fact whether or not this observation may apply; the intents keep any fence, pending Start or
-            // owed save, and the observation never raises a permission.
+            // owed save, and the observation never raises a permission. The store's values, the preferences among them, are adopted either
+            // way; only the apply decision below depends on the generation.
             intent.withLockedValue { $0.observeDurableDNS(values.runtime.dnsForwarderEnabled) }
             // A newer intent that landed during the read makes this observation stale. It stays a durable observation, and nothing applies.
             let current = generation
             guard current == captured else {
                 events += staleEvents(.reload, generation: captured, current: current)
-                return ReloadOutcome(events: events, applied: nil, preferences: nil)
+                return ReloadOutcome(events: events, applied: nil, adopted: false)
             }
             let applied = eligibleInput(values, events: &events)
-            return ReloadOutcome(events: events, applied: applied, preferences: values.preferences)
+            return ReloadOutcome(events: events, applied: applied, adopted: true)
         }
     }
 

@@ -220,7 +220,8 @@ final class RuntimeServiceCore {
         var ordinaryNext: Int?
         if case .stop(let module) = request.command {
             stopModule = module
-        } else {
+        } else if partition != .quit {
+            // The quit's partition holds at most the one quit the host's latch admits, so it never waits on ordinary capacity.
             // The ordinary capacity is checked before any owner turn, so a refusal changes nothing and is not recorded.
             guard ordinaryUnquiesced < limits.ordinaryPendingCapacity,
                   let next = RuntimeCounter.successor(ordinaryUnquiesced)
@@ -264,7 +265,7 @@ final class RuntimeServiceCore {
             )
             recordAlias(request, fingerprint: fingerprint, partition: partition, admission: .accepted(operation))
             switch partition {
-            case .ordinary: scheduleOrdinaryLaunch(operation)
+            case .ordinary, .quit: scheduleOrdinaryLaunch(operation)
             case .stop(let module): scheduleStopLaunch(module)
             }
             sweepRetention()
@@ -285,8 +286,15 @@ final class RuntimeServiceCore {
         guard expectedIncarnation == incarnation else { return .rejected(.changedIncarnation) }
         let now = timing.now()
         if aliasTable.live(requestID, now: now) != nil { return .rejected(.requestReused) }
-        guard ordinaryUnquiesced < limits.ordinaryPendingCapacity, let next = RuntimeCounter.successor(ordinaryUnquiesced) else {
-            return .rejected(.queueFull)
+        // Once the quit reserved its flush, an update is admitted only as that flush, in the quit's partition; otherwise it takes ordinary
+        // capacity, checked before the owner turn.
+        let partition: RuntimePartition = owner.reservesQuitFlush ? .quit : .ordinary
+        var next: Int?
+        if partition == .ordinary {
+            guard ordinaryUnquiesced < limits.ordinaryPendingCapacity, let successor = RuntimeCounter.successor(ordinaryUnquiesced) else {
+                return .rejected(.queueFull)
+            }
+            next = successor
         }
         let operation = makeOperationID()
         let admission: ControlAdmission
@@ -298,12 +306,12 @@ final class RuntimeServiceCore {
             assertionFailure("the owner joined a private update")
             admission = .rejected(.internalFailure)
         case .admitted:
-            ordinaryUnquiesced = next
-            operations[operation] = RuntimeOperationRecord(partition: .ordinary, logical: .pending, physical: .queued(.privateUpdate))
+            if let next { ordinaryUnquiesced = next }
+            operations[operation] = RuntimeOperationRecord(partition: partition, logical: .pending, physical: .queued(.privateUpdate))
             admission = .accepted(operation)
             scheduleOrdinaryLaunch(operation)
         }
-        aliasTable.record(requestID, origin: .privateEditor, partition: .ordinary, admission: admission, now: now)
+        aliasTable.record(requestID, origin: .privateEditor, partition: partition, admission: admission, now: now)
         sweepRetention()
         return admission
     }
@@ -752,6 +760,9 @@ final class RuntimeServiceCore {
                     scheduleStopLaunch(module)
                 }
             }
+        case .quit:
+            // The quit and its reserved flushes took no ordinary capacity, so none returns.
+            break
         }
         sweepRetention()
         // The capacity is returned above, so the owner sees the operation closed and its slot free. Both faults wait for the whole transaction.

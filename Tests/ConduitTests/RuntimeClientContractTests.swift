@@ -102,12 +102,15 @@ final class RuntimeClientContractTests: XCTestCase {
     // MARK: - Commands and admission
 
     /// The ordinary commands, with the login-item administration as the one write: it saves a single platform flag and applies nothing.
-    /// Start and configuration apply stay off this wire; they travel on the private editor request.
+    /// The process quit carries only its total budget and which flushes it reserves, never a value. Start and configuration apply stay off
+    /// this wire; they travel on the private editor request.
     func testTheApprovedCommandSetExcludesStartAndConfigApply() throws {
         XCTAssertEqual(
             ControlRuntimeCommandKind.allCases.map(\.rawValue),
-            ["stop", "restart", "test-dns", "test-upstream", "refresh-preflight", "set-launch-at-login"]
+            ["stop", "restart", "test-dns", "test-upstream", "refresh-preflight", "set-launch-at-login", "quit"]
         )
+        let quit = ControlRuntimeCommand.quit(total: try ControlWireBudget(5_000), flush: ControlQuitFlush(configuration: true, preferences: false))
+        XCTAssertEqual(try JSONDecoder().decode(ControlRuntimeCommand.self, from: try JSONEncoder().encode(quit)), quit)
         let decoder = JSONDecoder()
         XCTAssertThrowsError(try decoder.decode(ControlRuntimeCommand.self, from: Data(#"{"type":"start","module":"proxy"}"#.utf8)))
         XCTAssertThrowsError(try decoder.decode(ControlRuntimeCommand.self, from: Data(#"{"type":"apply-config"}"#.utf8)))

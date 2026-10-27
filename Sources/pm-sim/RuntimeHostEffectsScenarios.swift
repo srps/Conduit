@@ -6,6 +6,7 @@ import ConduitShared
 import NIOConcurrencyHelpers
 import PlatformMac
 import ProxyAuth
+import ProxyControlBridge
 import ProxyKernel
 import RuntimeEvents
 
@@ -546,7 +547,10 @@ enum RuntimeHostEffectsScenario {
 
             // The same Stop through the actual composition: host, service, in-memory transport and framed client. The client and its
             // stream end inside the helper, so their release hops run during the awaits below, before the root is released.
-            let viaClient = try await stopProxyThroughClient(host)
+            let clients = try host.makeInMemoryControlClient(
+                limits: try controlProfile(), clientFrameLimits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
+            )
+            let viaClient = try await stopProxyThroughClient(clients.control)
             check("the client's snapshot shows the restarted proxy", viaClient.proxyShown)
             check("a proxy Stop through the framed client completes", viaClient.completed)
             check("the client's Stop clears the system proxy", !machine.service("Wi-Fi").routesThroughAProxy)
@@ -562,7 +566,12 @@ enum RuntimeHostEffectsScenario {
             let dns = try await host.startDNS(expecting: PrivateModuleSlots(proxy: nil, dns: host.moduleRevisions.dns, tunnels: nil))
             check("an explicit DNS Start enables DNS again", dns.modules.dns == .started && savedDNS() == true && machine.dnsRelayRunning)
 
-            await host.shutdown()
+            let quit = try await quitThroughClient(clients)
+            let stored = try AppPreferencesPersistence.load(in: environment)
+            check("a preferences save through the editor client writes the preferences file", quit.preferencesSaved && stored.automaticUpdateChecks)
+            check("a framed Quit latches, admits its reserved preferences flush and completes", quit.completed)
+            check("the reserved flush wrote the quit-time preferences",
+                  quit.flushed && stored.preferredBrowserTestURL == "https://quit-flush.example.test/")
             check("the quit leaves every module down", host.status().state == "stopped" && host.status().dnsRunState != "running")
             check("the quit restores system DNS", !machine.dnsRelayRunning)
             check("the quit persists no disable", savedDNS() == true)
@@ -598,13 +607,10 @@ enum RuntimeHostEffectsScenario {
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
     }
 
-    /// A proxy Stop through the host's in-memory control client. The client, its stream and the composition they hold end when this
-    /// returns; the stream's cancel queues the one hop that releases its subscriber.
+    /// A proxy Stop through the host's in-memory control client. Its stream ends when this returns; the stream's cancel queues the one hop
+    /// that releases its subscriber.
     @MainActor
-    private static func stopProxyThroughClient(_ host: RuntimeHost) async throws -> (proxyShown: Bool, completed: Bool) {
-        let client = try host.makeInMemoryControlClient(
-            limits: try controlProfile(), clientFrameLimits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
-        ).control
+    private static func stopProxyThroughClient(_ client: any RuntimeClient) async throws -> (proxyShown: Bool, completed: Bool) {
         let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
         let snapshot = try await client.readSnapshot(deadline: deadline)
         let stream = try await client.subscribe(.live, deadline: deadline)
@@ -622,6 +628,53 @@ enum RuntimeHostEffectsScenario {
             }
         }
         return (proxyShown, false)
+    }
+
+    /// A preferences save through the editor client, then the process quit through the framed client with its reserved preferences flush,
+    /// all over the one composition. Each answer is the client's own; files are read only after their operation settled.
+    @MainActor
+    private static func quitThroughClient(_ clients: RuntimeInMemoryClients) async throws -> (preferencesSaved: Bool, completed: Bool, flushed: Bool) {
+        let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
+        let incarnation = try await clients.control.readSnapshot(deadline: deadline).stamp.incarnation
+        let stream = try await clients.control.subscribe(.live, deadline: deadline)
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline)
+        func settled(_ admission: ControlAdmission) async throws -> ControlOperationOutcome? {
+            guard case .accepted(let operation) = admission else { return nil }
+            for _ in 0..<64 {
+                if case .operationFinished(let finished) = try await stream.next(deadline), finished.operationID == operation {
+                    return finished.outcome
+                }
+            }
+            return nil
+        }
+        func preferences(_ edit: (inout AppPreferences) -> Void) async throws -> ControlOperationOutcome? {
+            let answer = try await clients.editor.read(
+                requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: incarnation,
+                budget: try ControlWireBudget(1_000), deadline: deadline
+            )
+            guard case .observation(let observed) = answer, let baseline = observed.components.preferences.baseline else { return nil }
+            var values = try PrivateConfigurationBridge.makeValues(from: observed).preferences
+            edit(&values)
+            let requestID = ControlRequestID(rawValue: UUID())
+            let request = try PrivateConfigurationBridge.makePreferencesRequest(
+                preferences: values, requestID: requestID, incarnation: incarnation,
+                budget: try ControlWireBudget(1_000), preferencesBaseline: baseline
+            )
+            return try await settled(try await clients.editor.submitPreferences(requestID: requestID, deadline: deadline) { request })
+        }
+        func written(_ outcome: ControlOperationOutcome?) -> Bool {
+            guard case .preferencesSettled(let receipt)? = outcome else { return false }
+            return receipt.preferences.write == .persisted(reportedError: false)
+        }
+        let saved = written(try await preferences { $0.automaticUpdateChecks = true })
+        let quit = try await clients.control.submit(
+            .quit(total: try ControlWireBudget(10_000), flush: ControlQuitFlush(configuration: false, preferences: true)),
+            requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: incarnation, deadline: deadline
+        )
+        let flushed = written(try await preferences { $0.preferredBrowserTestURL = "https://quit-flush.example.test/" })
+        let completed = if case .completed(let completion)? = try await settled(quit) { completion.command == .quit } else { false }
+        return (saved, completed, flushed)
     }
 
     /// This scenario's own control-service profile. Every value is explicit and scenario-only, sized for one client and a handful of

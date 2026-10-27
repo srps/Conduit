@@ -65,8 +65,8 @@ struct PrivateObjectShape: Sendable {
     }
 }
 
-/// The schema of the private bodies. `request`, `readRequest` and `editorReply` are the roots of the three frame
-/// kinds, and each nested object is named by the wire mirror that decodes it.
+/// The schema of the private bodies. `request`, `preferencesRequest`, `readRequest` and `editorReply` are the roots of the
+/// four frame kinds, and each nested object is named by the wire mirror that decodes it.
 enum PrivateConfigurationSchema {
     private static let tokenValue = PrivateValueShape.string(.token)
     private static let numberValue = PrivateValueShape.number
@@ -81,6 +81,15 @@ enum PrivateConfigurationSchema {
         ("modules", .object(moduleIntents)),
         ("runtime", .object(runtime)),
         ("platform", .object(platform)),
+    ])
+
+    /// The preferences update: identity, budget, the preferences file's exact baseline and its full frozen values.
+    static let preferencesRequest = PrivateObjectShape([
+        ("requestID", tokenValue),
+        ("incarnation", tokenValue),
+        ("budgetMilliseconds", numberValue),
+        ("preferencesBaseline", .object(baseline)),
+        ("preferences", .object(preferences)),
     ])
 
     /// The read request: identity and budget only.

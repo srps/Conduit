@@ -17,6 +17,20 @@ package enum ControlRuntimeCommandKind: String, Codable, Sendable, Equatable, Ca
     case testUpstream = "test-upstream"
     case refreshPreflight = "refresh-preflight"
     case setLaunchAtLogin = "set-launch-at-login"
+    case quit
+}
+
+/// The updates a Quit's reserved flush window admits (decision 0015), each at most once: the runtime and platform save, and the preferences
+/// save. Each is an ordinary private update the client submits after the Quit's admission, under its exact submitted baselines. None is
+/// reserved when the client has nothing unsaved.
+package struct ControlQuitFlush: Codable, Sendable, Equatable {
+    package var configuration: Bool
+    package var preferences: Bool
+
+    package init(configuration: Bool, preferences: Bool) {
+        self.configuration = configuration
+        self.preferences = preferences
+    }
 }
 
 /// An upstream named together with the configuration revision it belongs to, so
@@ -51,6 +65,11 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     /// The app's login-item administration (decision 0018): it saves only the platform file's `launchAtLogin`, under the exact platform
     /// baseline the client observed, and applies nothing. It carries no configuration value beyond the flag.
     case setLaunchAtLogin(Bool, ifPlatformBaseline: PrivateBaseline)
+    /// The process quit (decision 0015). Admission latches the terminal stop and opens the reserved flush window for `flush`. `total` is the
+    /// one remaining budget, from the host's arrival, that the flush, the store join, the teardown and the diagnostic flush share: the
+    /// operation completes when they end, or fails `cleanupIncomplete` at that deadline, while the work still runs and owns the root until
+    /// it ends; the operation quiesces only then.
+    case quit(total: ControlWireBudget, flush: ControlQuitFlush)
 
     package var kind: ControlRuntimeCommandKind {
         switch self {
@@ -60,6 +79,7 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case .testUpstream: .testUpstream
         case .refreshPreflight: .refreshPreflight
         case .setLaunchAtLogin: .setLaunchAtLogin
+        case .quit: .quit
         }
     }
 
@@ -71,6 +91,8 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case upstream
         case enabled
         case baseline
+        case totalMilliseconds
+        case flush
     }
 
     package init(from decoder: any Decoder) throws {
@@ -107,6 +129,11 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
                 throw DecodingError.dataCorruptedError(forKey: .baseline, in: container, debugDescription: "the flag is the platform file's")
             }
             self = .setLaunchAtLogin(try container.decode(Bool.self, forKey: .enabled), ifPlatformBaseline: baseline)
+        case .quit:
+            self = .quit(
+                total: try container.decode(ControlWireBudget.self, forKey: .totalMilliseconds),
+                flush: try container.decode(ControlQuitFlush.self, forKey: .flush)
+            )
         }
     }
 
@@ -135,6 +162,9 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
             }
             try container.encode(enabled, forKey: .enabled)
             try container.encode(baseline, forKey: .baseline)
+        case .quit(let total, let flush):
+            try container.encode(total, forKey: .totalMilliseconds)
+            try container.encode(flush, forKey: .flush)
         }
     }
 }
