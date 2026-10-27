@@ -48,7 +48,8 @@ private final class UnscriptedGSSProvider: GSSTokenProvider, @unchecked Sendable
 }
 
 /// Every machine effect a host test runs against (decision 0033). There is one construction path: `makeHostEffects` names
-/// every adapter, with no default. The Kerberos and port-probe fakes are fixed inside it, since no test varies them yet.
+/// every adapter, with no default. The Kerberos and port-probe fakes are fixed inside it, since no test varies them yet. A test that does
+/// not fire wake gets a fresh wake fake nobody fires.
 private func makeHostEffects(
     loopbackPortProbe: FakeLoopbackPortProbe,
     privilege: @escaping RuntimePrivilegeAdaptersFactory,
@@ -63,7 +64,8 @@ private func makeHostEffects(
     dnsResponds: @escaping @Sendable (Int) -> Bool,
     homeDirectory: URL,
     resolverDirectory: String,
-    stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem()
+    stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem(),
+    wake: any SystemWakeObserving = FakeSystemWakeObserver()
 ) -> RuntimeHostEffects {
     RuntimeHostEffects(
         privilege: privilege,
@@ -79,6 +81,7 @@ private func makeHostEffects(
         networkLocation: networkLocation,
         networkLocationStoreFactory: networkLocationStoreFactory,
         vpnStatusMonitor: vpnStatusMonitor,
+        wake: wake,
         homeDirectory: homeDirectory,
         resolverDirectory: resolverDirectory,
         stateFiles: stateFiles
@@ -154,7 +157,8 @@ private func hostEffects(
     dnsResponds: @escaping @Sendable (Int) -> Bool,
     homeDirectory: URL,
     resolverDirectory: String,
-    stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem()
+    stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem(),
+    wake: any SystemWakeObserving = FakeSystemWakeObserver()
 ) -> RuntimeHostEffects {
     makeHostEffects(
         loopbackPortProbe: loopbackPortProbe,
@@ -170,7 +174,8 @@ private func hostEffects(
         dnsResponds: dnsResponds,
         homeDirectory: homeDirectory,
         resolverDirectory: resolverDirectory,
-        stateFiles: stateFiles
+        stateFiles: stateFiles,
+        wake: wake
     )
 }
 
@@ -1603,6 +1608,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let vpn = FakeVPNStatusObserver()
         let locationObserver = FakeNetworkLocationObserver()
         let pathObserver = FakeNetworkPathObserver()
+        /// The system wake source the host observes from open until its quit.
+        let wake = FakeSystemWakeObserver()
         /// Ends a terminal stop. Replaced by a test that asserts on the exit.
         var terminalExit: @MainActor () -> Void = unexpectedTerminalExit
         var locationStore: FakeNetworkLocationStore?
@@ -1695,7 +1702,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
                     dnsResponds: FakeDNSProbe().responds(onPort:),
                     homeDirectory: stateDirectory.appendingPathComponent("home", isDirectory: true),
                     resolverDirectory: machine.resolverDirectory.path,
-                    stateFiles: stateFiles
+                    stateFiles: stateFiles,
+                    wake: wake
                 ),
                 networkLocationLimits: locationLimits,
                 reapplyRetrySchedule: reapplyRetrySchedule,
@@ -2239,6 +2247,104 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
         XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
         XCTAssertLessThanOrEqual(host.orchestrator.eventLog.events.filter { $0.event == "platform.settings_observed" }.count, 2)
+    }
+
+    // MARK: - System wake (twin of `AppState.handleSystemWake`)
+
+    /// How many times the kernel's wake path ran: it records one DNS transport reset for each, before it awaits anything.
+    private func kernelWakes(_ host: RuntimeHost) -> Int {
+        host.orchestrator.eventLog.events.filter { $0.event == "dns.transports_reset" && $0.detail == "source=system_wake" }.count
+    }
+
+    /// Wake is observed from open until the quit, as `AppState` observes it from init until termination. A wake before any Start and
+    /// one after a Stop both reach the kernel's wake path, as the app's do. A Stop that leaves every module down keeps observing. The
+    /// quit's admission ends observation in its own turn, and a wake already in flight then does nothing.
+    func testWakeIsObservedFromOpenUntilTheQuitsAdmissionAndNotPastIt() async throws {
+        let host = try await launch(platform: PlatformIntegrationConfig())
+        XCTAssertTrue(harness.wake.isObserving, "observed from open, before any Start")
+        XCTAssertEqual(harness.wake.startCount, 1)
+        await host.awaitLaunchRecovery()
+
+        harness.wake.emitWake()
+        await host.deliveries.drain()
+        XCTAssertEqual(kernelWakes(host), 1, "a wake before any Start reaches the kernel's wake path")
+
+        try await host.startRuntime()
+        await host.stopRuntime()
+        XCTAssertTrue(harness.wake.isObserving, "a Stop that leaves every module down keeps observing")
+        XCTAssertEqual(harness.wake.stopCount, 0)
+        harness.wake.emitWake()
+        await host.deliveries.drain()
+        XCTAssertEqual(kernelWakes(host), 2, "a wake after a Stop reaches the kernel's wake path")
+
+        let inFlight = try XCTUnwrap(harness.wake.pendingWake())
+        let quit = host.admitQuit(until: nil, flushing: .none)
+        XCTAssertFalse(harness.wake.isObserving, "the quit's admission turn ends observation, before its teardown runs")
+        XCTAssertEqual(harness.wake.stopCount, 1)
+        inFlight()
+        harness.wake.emitWake()
+        await quit.value
+        await host.deliveries.drain()
+        XCTAssertEqual(kernelWakes(host), 2, "a wake in flight at the quit does nothing")
+        XCTAssertEqual(harness.wake.stopCount, 1, "observation ends once")
+    }
+
+    /// While the proxy runs, a wake repairs a system proxy rewritten during sleep, through the same bounded reconcile as a settings
+    /// notification, and runs the kernel's wake path. After a Stop, a wake repairs nothing.
+    func testWakeRepairsARewrittenSystemProxyOnlyWhileTheProxyRuns() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.localPACEnabled = true
+        config.localPACPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac))
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.deliveries.drain()
+        let url = try XCTUnwrap(host.orchestrator.snapshot.bindings.localPACURL)
+        func pac() throws -> NetworkSettingValue? { try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"] }
+        let corporatePAC = NetworkSettingValue.text("http://corporate.example/asleep.pac")
+
+        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = corporatePAC }
+        harness.wake.emitWake()
+        await host.deliveries.drain()
+        XCTAssertEqual(try pac(), .text(url), "the wake's proxy reconcile restores the running listener's PAC")
+        XCTAssertEqual(kernelWakes(host), 1)
+
+        await host.stopRuntime()
+        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = corporatePAC }
+        harness.wake.emitWake()
+        await host.deliveries.drain()
+        XCTAssertEqual(try pac(), corporatePAC, "a wake after the Stop repairs nothing")
+        XCTAssertEqual(kernelWakes(host), 2)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+    }
+
+    /// While the forwarder runs, a wake re-pins an interface a VPN client re-asserted its own resolvers on during sleep, through the
+    /// coalesced system DNS reconcile. After a Stop, a wake writes no DNS.
+    func testWakeRepinsSystemDNSOnlyWhileTheForwarderRuns() async throws {
+        let host = try await launch(platform: PlatformIntegrationConfig(manageSystemDNS: true), dnsForwarderEnabled: true)
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.deliveries.drain()
+        XCTAssertEqual(harness.wifi.dnsServers, ["127.0.0.1"], "the Start pinned the interface")
+
+        harness.machine.describe("Wi-Fi") { $0.dnsServers = ["10.9.9.9"] }
+        harness.wake.emitWake()
+        await host.deliveries.drain()
+        XCTAssertEqual(harness.wifi.dnsServers, ["127.0.0.1"], "the wake's DNS reconcile re-pins the interface")
+        XCTAssertEqual(kernelWakes(host), 1)
+
+        await host.stopRuntime()
+        let restored = harness.wifi.dnsServers
+        let writes = harness.machine.privilege.commands(matching: .setDNSServers).count
+        harness.wake.emitWake()
+        await host.deliveries.drain()
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .setDNSServers).count, writes, "a wake while DNS is down writes no DNS")
+        XCTAssertEqual(harness.wifi.dnsServers, restored)
+        XCTAssertEqual(kernelWakes(host), 2)
     }
 
     /// #98, as in `AppState`: the runtime start reads the saved password

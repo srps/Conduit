@@ -151,6 +151,8 @@ package final class RuntimeHost {
     )
     private let networkLocationStoreFactory: @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?
     let networkLocationObserver: any NetworkLocationObserving
+    /// The system wake source, from `effects`: observed from open until the quit (`RuntimeHostWake.swift`).
+    let systemWakeObserver: any SystemWakeObserving
     private let networkLocationLimits: NetworkLocationLimits
     /// At most one pending retry for a drift repair withheld by the contention budget.
     private var proxyRepairRetry: Task<Void, Never>?
@@ -363,6 +365,7 @@ package final class RuntimeHost {
         self.reapplyRetrySchedule = reapplyRetrySchedule
         self.networkPathObserver = effects.networkPath
         self.networkLocationObserver = effects.networkLocation
+        self.systemWakeObserver = effects.wake
         self.networkLocationStoreFactory = effects.networkLocationStoreFactory
         self.networkLocationLimits = networkLocationLimits
         self.stateSession = stateSession
@@ -532,6 +535,7 @@ package final class RuntimeHost {
             )
         }
         startLocationObserver()
+        startWakeObserver()
         startEnvironmentDriftTimer()
     }
 
@@ -1153,7 +1157,7 @@ package final class RuntimeHost {
     }
 
     /// Same bounded proxy-drift recovery as the app, guarded against a later stop.
-    private func reconcileSystemProxyIfRunning() async {
+    func reconcileSystemProxyIfRunning() async {
         scheduleEnvironmentDriftPass(trigger: .observed)
         guard platformConfig.manageSystemProxy else { return }
         guard !proxySettingsReconcileInFlight else { proxySettingsReconcileWanted = true; return }
@@ -1298,7 +1302,7 @@ package final class RuntimeHost {
     /// to the queue, to drain later as so many stale ones. A trigger that
     /// finds a pass out asks for one more after it, since that pass may have
     /// read the machine before the change behind this trigger.
-    private func reconcileSystemDNSIfRunning() async {
+    func reconcileSystemDNSIfRunning() async {
         guard systemDNSReconcileIsDue else { return }
         guard !dnsReconcileInFlight else {
             dnsReconcileWanted = true

@@ -994,6 +994,8 @@ extension RuntimeHost {
         precondition(quit == nil, "the host runs a single quit")
         pendingAdmissions += 1
         workflow.admitStop(terminal: true)
+        // Wake is observed for the host's life, not a module's, so the latch's turn is where it ends.
+        stopWakeObserver()
         // In the latch's own turn, so no client sees the latch without the window.
         let flush = deadline.map { RuntimeQuitFlush(until: $0, admitting: parts, workflow: workflow) }
         quitFlush = flush

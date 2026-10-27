@@ -723,6 +723,24 @@ package final class FakeNetworkLocationObserver: NetworkLocationObserving, @unch
     }
 }
 
+/// A wake source a test or simulator fires. It counts its starts and stops, so a check sees when observation began and ended.
+package final class FakeSystemWakeObserver: SystemWakeObserving, @unchecked Sendable {
+    private let lock = NSLock()
+    private var callback: (@Sendable () -> Void)?
+    private var starts = 0
+    private var stops = 0
+    package init() {}
+    package func start(onWake: @escaping @Sendable () -> Void) { lock.withLock { callback = onWake; starts += 1 } }
+    package func stop() { lock.withLock { callback = nil; stops += 1 } }
+    package var isObserving: Bool { lock.withLock { callback != nil } }
+    package var startCount: Int { lock.withLock { starts } }
+    package var stopCount: Int { lock.withLock { stops } }
+    /// A wake while observing; nothing after `stop`.
+    package func emitWake() { lock.withLock { callback }?() }
+    /// Models a wake notification already in flight when observation is stopped.
+    package func pendingWake() -> (@Sendable () -> Void)? { lock.withLock { callback } }
+}
+
 /// The error an explicit fake throws for an effect its scenario did not plan (decision 0033). A simulator
 /// or test that reaches one has an unplanned effect, which is a failure, not a silent default. The effect names
 /// the kind of work only, never a URL or a payload.

@@ -78,6 +78,9 @@ package struct RuntimeHostEffects {
     package let networkLocation: any NetworkLocationObserving
     package let networkLocationStoreFactory: @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?
     package let vpnStatusMonitor: RuntimeVPNStatusMonitorFactory
+    /// The system wake source, observed from open until the quit. The daemon names the inert adapter; the app composition names the
+    /// workspace adapter, so this target imports no AppKit.
+    package let wake: any SystemWakeObserving
     /// The user's home, where the shell profiles are edited. Production is the real home; a
     /// simulator passes a scratch home.
     package let homeDirectory: URL
@@ -103,6 +106,7 @@ package struct RuntimeHostEffects {
         networkLocation: any NetworkLocationObserving,
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?,
         vpnStatusMonitor: @escaping RuntimeVPNStatusMonitorFactory,
+        wake: any SystemWakeObserving,
         homeDirectory: URL,
         resolverDirectory: String,
         stateFiles: any StateFileAccessing
@@ -120,6 +124,7 @@ package struct RuntimeHostEffects {
         self.networkLocation = networkLocation
         self.networkLocationStoreFactory = networkLocationStoreFactory
         self.vpnStatusMonitor = vpnStatusMonitor
+        self.wake = wake
         self.homeDirectory = homeDirectory
         self.resolverDirectory = resolverDirectory
         self.stateFiles = stateFiles

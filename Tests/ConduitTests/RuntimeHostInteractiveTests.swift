@@ -148,6 +148,7 @@ final class InteractiveHostHarness {
                     networkLocation: FakeNetworkLocationObserver(),
                     networkLocationStoreFactory: { _ in nil },
                     vpnStatusMonitor: { _, _ in vpn },
+                    wake: FakeSystemWakeObserver(),
                     homeDirectory: directory.appendingPathComponent("home", isDirectory: true),
                     resolverDirectory: machine.resolverDirectory.path,
                     stateFiles: stateFiles

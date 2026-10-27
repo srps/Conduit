@@ -15,7 +15,7 @@ import RuntimeEvents
 /// The host is built through its one `effects` input, with each machine effect named here: the `FakeMachine` for the
 /// privilege client, `networksetup` and `launchctl`, an in-memory Keychain, a PAC evaluator, a port-holder probe and a
 /// loopback listener probe that never fetch, look up or connect to anything, a Kerberos stack that refuses every token,
-/// and no-op path and network observers.
+/// no-op path and network observers, and a wake source only the wake exercise fires.
 /// The state root is taken through the production bootstrap over a scratch directory, and the listener is a loopback
 /// port this scenario holds. Nothing reads the machine's proxy, resolver directory, home or Keychain, and no installed
 /// app or helper is reached.
@@ -125,14 +125,21 @@ enum RuntimeHostEffectsScenario {
                 assertions += modules.assertions
                 notes += modules.notes
             }
+            var woken = Shutdown(quiesced: false, assertions: [], notes: [], pinnedHost: nil)
             if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
                 && captured.quiesced && modules.quiesced {
+                woken = await exerciseWake(session: session!, environment: environment, fakes: fakes, home: home)
+                assertions += woken.assertions
+                notes += woken.notes
+            }
+            if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
+                && captured.quiesced && modules.quiesced && woken.quiesced {
                 releaseRoot(&session, environment: environment, scratch: scratch, releaseFailures: releaseFailures,
                             assertions: &assertions, notes: &notes)
             } else {
                 // The host keeps its session, so the root stays claimed for the rest of the process. The slot is the
                 // only reference this scenario keeps, and the scratch directory stays on disk for inspection.
-                unconfirmedHost = modules.pinnedHost ?? captured.pinnedHost ?? respelling.pinnedHost ?? source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
+                unconfirmedHost = woken.pinnedHost ?? modules.pinnedHost ?? captured.pinnedHost ?? respelling.pinnedHost ?? source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
                 assertions.append(.init("the shutdown is confirmed", false))
                 notes.append("shutdown not confirmed: host pinned until process exit; root and scratch kept at \(scratch.path)")
             }
@@ -152,8 +159,11 @@ enum RuntimeHostEffectsScenario {
     }
 
     /// Every machine effect one host run uses, from the run's fakes. Production selects its adapters in `ConduitDaemon`; this is the simulator's
-    /// explicit assembly over fakes and the owned scratch root. `pac` replaces the refusing PAC fake for a run that fetches one.
-    private static func effects(_ fakes: Fakes, home: URL, pac: (any PacEvaluator)? = nil) -> RuntimeHostEffects {
+    /// explicit assembly over fakes and the owned scratch root. `pac` replaces the refusing PAC fake for a run that fetches one. Each host
+    /// gets its own wake fake; only the wake exercise keeps and fires its own.
+    private static func effects(
+        _ fakes: Fakes, home: URL, pac: (any PacEvaluator)? = nil, wake: FakeSystemWakeObserver = FakeSystemWakeObserver()
+    ) -> RuntimeHostEffects {
         let machine = fakes.machine
         return RuntimeHostEffects(
             privilege: { _ in RuntimePrivilegeAdapters(client: machine, helperStatus: fakes.helper) },
@@ -169,6 +179,7 @@ enum RuntimeHostEffectsScenario {
             networkLocation: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil },
             vpnStatusMonitor: { _, _ in FakeVPNStatusObserver() },
+            wake: wake,
             homeDirectory: home,
             resolverDirectory: machine.resolverDirectory.path,
             stateFiles: StateFileAccess.operatingSystem()
@@ -944,6 +955,117 @@ enum RuntimeHostEffectsScenario {
             assertions.append(.init("the source error path settled the host and confirmed its flush", quiesced))
         }
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// System wake through the actual host, the twin of `AppState.handleSystemWake`, over the run's fakes and its own wake fake. The host
+    /// observes wake from open; a wake while stopped runs only the kernel's wake path; a wake while the forwarder runs re-pins the interface
+    /// a simulated VPN client rewrote; a module Stop keeps observing; the quit ends observation in its admission, and a wake already in
+    /// flight then does nothing. The kernel's wake path is read back from the owned events file after a confirmed flush.
+    @MainActor
+    private static func exerciseWake(
+        session: StateRootSession,
+        environment: RuntimeEnvironment,
+        fakes: Fakes,
+        home: URL
+    ) async -> Shutdown {
+        var assertions: [ScenarioAssertion] = []
+        var notes: [String] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+        let machine = fakes.machine
+        let wake = FakeSystemWakeObserver()
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderEnabled = true
+        config.dnsForwarderPort = 0
+        config.localPACEnabled = false
+        config.pacRoutingEnabled = false
+        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        let host: RuntimeHost
+        // The earlier hosts' events share the owned file, so only the records after this count are this host's.
+        let earlier: Int
+        do {
+            earlier = try recordedEvents(in: environment.eventsFile).count
+            try ProxyConfigPersistence.save(config, in: environment)
+            try PlatformConfigPersistence.save(PlatformIntegrationConfig(manageSystemDNS: true), in: environment)
+            host = try await RuntimeHost.open(
+                stateSession: session,
+                logger: DiscardingLogSink(),
+                startupAllowsMissing: false,
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                terminalExit: {},
+                effects: effects(fakes, home: home, wake: wake)
+            )
+        } catch {
+            notes.append("wake host did not open: \(error.localizedDescription)")
+            check("the wake host opened over the saved configuration", false)
+            return Shutdown(quiesced: true, assertions: assertions, notes: notes, pinnedHost: nil)
+        }
+        func dnsServers() throws -> String {
+            try machine.run("/usr/sbin/networksetup", ["-getdnsservers", "Wi-Fi"]).standardOutput
+        }
+        func kernelWakes() throws -> Int {
+            try recordedEvents(in: environment.eventsFile).dropFirst(earlier)
+                .filter { $0.event == "dns.transports_reset" && $0.detail == "source=system_wake" }.count
+        }
+        /// Settles the stopped host's deliveries and confirms a flush, so the file holds what they recorded.
+        func settledAndFlushed() async -> Bool {
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            let flush = await host.flushEvents()
+            return settled == .settled && flush.allConfirmed
+        }
+
+        var quiesced = false
+        do {
+            check("the host observes wake from open", wake.isObserving && wake.startCount == 1)
+
+            let writesBefore = machine.privilege.commands(matching: .setDNSServers).count
+            wake.emitWake()
+            check("a wake while stopped settles and flushes", await settledAndFlushed())
+            check("a wake while stopped runs the kernel's wake path", try kernelWakes() == 1)
+            check("a wake while stopped writes no DNS", machine.privilege.commands(matching: .setDNSServers).count == writesBefore)
+
+            try await host.startRuntime()
+            check("the start pins the interface to the forwarder", try dnsServers() == "127.0.0.1")
+            // A VPN client re-asserts its own resolvers over sleep, through the machine's own DNS write.
+            try machine.execute(.setDNSServers, values: ["Wi-Fi", "10.9.9.9"])
+            wake.emitWake()
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while try dnsServers() != "127.0.0.1", ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            check("a wake while the forwarder runs re-pins the rewritten interface", try dnsServers() == "127.0.0.1")
+
+            await host.stopRuntime()
+            check("a Stop that leaves every module down keeps observing wake", wake.isObserving && wake.stopCount == 0)
+
+            let inFlight = wake.pendingWake()
+            await host.shutdown()
+            check("the quit ends wake observation once", !wake.isObserving && wake.stopCount == 1)
+            let writesAtQuit = machine.privilege.commands(matching: .setDNSServers).count
+            inFlight?()
+            wake.emitWake()
+            quiesced = await settledAndFlushed()
+            check("the wake host settles and its observability flush is confirmed", quiesced)
+            check("the kernel's wake path ran once while stopped and once while running, and not after the quit", try kernelWakes() == 2)
+            check("a wake in flight at the quit writes no DNS", machine.privilege.commands(matching: .setDNSServers).count == writesAtQuit)
+        } catch {
+            // The error path joins the host's work before anything is released: quit, settle, then flush, then judge.
+            notes.append("wake exercise error: \(error.localizedDescription)")
+            await host.shutdown()
+            quiesced = await settledAndFlushed()
+            assertions.append(.init("the wake error path settled the host and confirmed its flush", quiesced))
+        }
+        return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// Every record in the owned events file, typed or legacy, decoded through the canonical decoder. A line that does not decode is an
+    /// error, not a skipped record, so the caller reports it.
+    private static func recordedEvents(in file: URL) throws -> [RuntimeEvent] {
+        let text = try String(contentsOf: file, encoding: .utf8)
+        let decoder = CanonicalJSON.decoder()
+        return try text.split(separator: "\n").map { line in
+            try decoder.decode(RuntimeEvent.self, from: Data(line.utf8))
+        }
     }
 
     /// The typed payloads in the owned events file, decoded through the canonical decoder (decision 0033). A line that does not decode
