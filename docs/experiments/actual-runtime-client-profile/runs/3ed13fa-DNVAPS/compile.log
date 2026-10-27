@@ -1,0 +1,23 @@
+/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/docs/experiments/actual-runtime-client-profile/Probe.swift:3069:92: error: missing argument label 'reason:' in call
+3067 |     }
+3068 |     let causes: [DirectModeCause] = [.none, .transientNetworkChange, .vpnDisconnected, .noUpstreamsConfigured, .upstreamsUnreachable]
+3069 |     let vpnStates: [VPNObservedState] = [.unknown, .connected, .reasserting, .disconnected(.userInitiated), .disconnected(.networkLost),
+     |                                                                                            `- error: missing argument label 'reason:' in call
+3070 |                                          .disconnected(.unknown)]
+3071 |     let authOutcomes: [RuntimeAuthOutcome?] = [nil, .kerberos, .ntlmFallback, .ntlmDirect]
+
+/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/docs/experiments/actual-runtime-client-profile/Probe.swift:3069:123: error: missing argument label 'reason:' in call
+3067 |     }
+3068 |     let causes: [DirectModeCause] = [.none, .transientNetworkChange, .vpnDisconnected, .noUpstreamsConfigured, .upstreamsUnreachable]
+3069 |     let vpnStates: [VPNObservedState] = [.unknown, .connected, .reasserting, .disconnected(.userInitiated), .disconnected(.networkLost),
+     |                                                                                                                           `- error: missing argument label 'reason:' in call
+3070 |                                          .disconnected(.unknown)]
+3071 |     let authOutcomes: [RuntimeAuthOutcome?] = [nil, .kerberos, .ntlmFallback, .ntlmDirect]
+
+/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/docs/experiments/actual-runtime-client-profile/Probe.swift:3070:56: error: missing argument label 'reason:' in call
+3068 |     let causes: [DirectModeCause] = [.none, .transientNetworkChange, .vpnDisconnected, .noUpstreamsConfigured, .upstreamsUnreachable]
+3069 |     let vpnStates: [VPNObservedState] = [.unknown, .connected, .reasserting, .disconnected(.userInitiated), .disconnected(.networkLost),
+3070 |                                          .disconnected(.unknown)]
+     |                                                        `- error: missing argument label 'reason:' in call
+3071 |     let authOutcomes: [RuntimeAuthOutcome?] = [nil, .kerberos, .ntlmFallback, .ntlmDirect]
+3072 |     let choices: [[KernelEdit]] = [

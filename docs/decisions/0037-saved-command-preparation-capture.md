@@ -101,9 +101,13 @@ captures prior component baselines in the sole store capture turn. A submitting
 draft can advance only while it still matches that prior. Private frozen receipt
 encoding, v1 control, helper IPC and schema-two files remain unchanged. The
 unshipped v2 Restart result now reports persisted facts and member outcomes
-instead of generic success.
+instead of generic success. The
+[native-client verification](../verification-runtime-native-client-2026-10-27.md)
+records the 125-history saved-Start model, its executed causal-prior guard,
+focused checks and workflow results.
 
 ## Open questions
 
-Production custody/deadline limits still require actual-adapter measurements.
+The collection count/byte policy is selected in [0038](0038-bounded-runtime-collection-capture.md).
+Remaining custody/deadline limits still require complete actual-adapter measurements.
 Bring only material architecture choices back to the owner.

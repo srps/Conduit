@@ -1,0 +1,95 @@
+Building for production...
+[Computing dependencies]
+[Pre-planning 1 / 1301]
+[Planning 1 / 1301]
+[Planning deferred tasks]
+[Starting]
+[1 / 101]
+[6 / 102] DequeModule
+[31 / 100] ConduitShared
+[43 / 113] CNIOLinux
+[44 / 117] swift-nio_NIOPosix
+[45 / 118] CNIODarwin
+[47 / 119] _NIOBase64
+[51 / 124] CNIOOpenBSD
+[52 / 125] InternalCollectionsUtilities
+[56 / 126] CNIOWASI
+[63 / 131]
+[64 / 130] CNIOLinux
+[66 / 130] CNIODarwin
+[68 / 130] CNIOWASI
+[70 / 131] CNIOAtomics
+[71 / 131] RuntimeEvents
+[72 / 132] _NIOBase64
+[73 / 131] NIOConcurrencyHelpers
+[74 / 133] ConduitShared
+[76 / 134] CNIOLLHTTP
+[78 / 138] CNIODarwin
+[79 / 138] _NIODataStructures
+[84 / 137] _NIODataStructures
+[85 / 134]
+[88 / 140] CNIOLLHTTP
+[89 / 140] CNIOLLHTTP
+[89 / 140] ContainersPreview
+[91 / 141] NIOConcurrencyHelpers
+[97 / 141] ContainersPreview
+[100 / 143] DequeModule
+[102 / 144] RuntimeEvents
+[103 / 143] Atomics
+[105 / 139] DequeModule
+[108 / 141] NIOCore
+[110 / 142] NIOCore
+[114 / 150] NIOEmbedded
+[116 / 151] NIOPosix
+[121 / 156]
+[122 / 156] NIOEmbedded
+[124 / 152] ConduitShared
+[130 / 154] ConduitShared
+[133 / 157] pmctl-product
+[135 / 157] pmctl-product
+[135 / 157] NIOPosix
+[138 / 159] NIO
+[140 / 160] NIO
+[142 / 156] NIO
+[143 / 162] NIOHTTP1
+[145 / 164]
+[146 / 164] NIOHTTP1
+[149 / 166] ProxyKernel
+[156 / 173]
+[157 / 173] ProxyKernel
+[164 / 194] pm-dns-product
+[166 / 195] ProxyPAC
+[169 / 197] ProxyAuth
+[170 / 198] pm-auth-check-product
+[173 / 201] PlatformMac
+[174 / 202] pm-dns-product
+[176 / 202] pm-auth-check-product
+[179 / 201] ProxyControlBridge
+[181 / 197] ProxyControlBridge
+[182 / 198] pm-auth-check-product
+[182 / 198] ProxyAuth
+[191 / 203] ConduitHelper-product
+[193 / 205] pm-tunnel-product
+[195 / 205] pm-tunnel-product
+[195 / 205] pm-proxy-product
+[197 / 205] pm-proxy-product
+[197 / 205] PlatformMac
+[204 / 219] pm-vpn-check-product
+[207 / 222] ConduitUpdater-product
+[209 / 224] pm-vpn-check-product
+[211 / 224] ConduitUpdater-product
+[213 / 224] pm-tls-check-product
+[215 / 224] pm-vpn-check-product
+[215 / 224] ConduitUpdater-product
+[215 / 224] ConduitRuntime
+[219 / 226] pm-sim-product
+[221 / 227] ConduitRuntime
+[221 / 227] ConduitDaemon-product
+[223 / 229] Conduit-product
+[225 / 229] Conduit-product
+[226 / 229] ConduitDaemon-product
+[229 / 230] ConduitDaemon-product
+[229 / 230] Conduit-product
+[232 / 233] ConduitDaemon-product
+[235 / 236] ConduitHelper-product
+[238 / 239] pm-proxy-product

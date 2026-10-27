@@ -1,0 +1,64 @@
+{
+  "head": "011f5898e752f914b110fb41639cb6b76e99357d",
+  "sourceTree": "bdbf1002d3d209472cf7f6718ecf92aecd43c238",
+  "testTree": "5c4f2f7036e6c087335570bca77096a121a2a157",
+  "driver_sha256": "3fed915d25eb86a4c565bb845fc82ee4757de094fc555986df7f592879d2732e",
+  "records": [
+    {
+      "name": "baseline",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "testANewerEligibleReloadDuringTheHeldPassStopsItsUnstartedFlagAction|testAHeldReloadDuringTheHeldPassLeavesItCurrent"
+      ],
+      "exit": 0,
+      "seconds": 9.397,
+      "timeout": false,
+      "intendedAssertion": false,
+      "compileOrCrashFailure": false,
+      "log": "baseline.log",
+      "assertionLines": []
+    },
+    {
+      "name": "reload-view",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "testANewerEligibleReloadDuringTheHeldPassStopsItsUnstartedFlagAction|testAHeldReloadDuringTheHeldPassLeavesItCurrent"
+      ],
+      "exit": 1,
+      "seconds": 8.756,
+      "timeout": false,
+      "intendedAssertion": true,
+      "compileOrCrashFailure": false,
+      "log": "reload-view.log",
+      "assertionLines": [
+        "<repo>/Tests/ConduitTests/RuntimeHostReloadCommandTests.swift:368: error: -[ConduitTests.RuntimeHostReloadCommandTests testANewerEligibleReloadDuringTheHeldPassStopsItsUnstartedFlagAction] : XCTAssertEqual failed: (\"Optional(ConduitShared.ControlReloadResult.adopted(ConduitShared.ControlReloadApply.reconcileAttempted(currentAtEnd: true)))\") is not equal to (\"Optional(ConduitShared.ControlReloadResult.adopted(ConduitShared.ControlReloadApply.reconcileAttempted(currentAtEnd: false)))\") - a newer accepted view replaced B",
+        "<repo>/Tests/ConduitTests/RuntimeHostReloadCommandTests.swift:370: error: -[ConduitTests.RuntimeHostReloadCommandTests testANewerEligibleReloadDuringTheHeldPassStopsItsUnstartedFlagAction] : XCTAssertEqual failed: (\"1\") is not equal to (\"0\") - B's unstarted clear never ran after C was adopted"
+      ]
+    },
+    {
+      "name": "restored",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "testANewerEligibleReloadDuringTheHeldPassStopsItsUnstartedFlagAction|testAHeldReloadDuringTheHeldPassLeavesItCurrent"
+      ],
+      "exit": 0,
+      "seconds": 7.176,
+      "timeout": false,
+      "intendedAssertion": false,
+      "compileOrCrashFailure": false,
+      "log": "restored.log",
+      "assertionLines": []
+    }
+  ],
+  "exactBytesRestored": true,
+  "productCleanAfter": true
+}

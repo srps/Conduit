@@ -31,8 +31,9 @@ remains the serving version. [CHANGELOG](./CHANGELOG.md) records shipped history
 | --- | --- | --- |
 | Contracts and mechanisms | Typed lifecycle/configuration values, framed client/service, bounded observation/replay, verified store and file readers are merged. | Broader event families migrate with their owners. |
 | Shared owner | PR253 converges DNS, tunnels and proxy on one lifecycle/store path, with preparation-time capture, exact freshness and Stop/Quit policy. | Consume that owner from AppState. |
-| Actual client integration | PR254 connects host admission/observation, private frozen updates, receipts, preferences/admin persistence and final Quit saves through the actual framed clients. | Local and exact-head hosted gates pass; finish saved menu Start, helper/credential/wake integration and typed recovery notifications before activation. |
-| AppState, isolation and release | One final activation and deletion is selected (0031); 64 KiB ordinary frames and 8 MiB private frames are selected. | Set the measured composition profile, switch AppState once and delete replaced paths, move the control cluster to RuntimeActor, then complete release acceptance. |
+| Actual client integration | PR254 connects host admission/observation, private frozen updates, receipts, preferences/admin persistence and final Quit saves through the actual framed clients. | Local and exact-head hosted gates pass; consume it through the native-client completion below. |
+| Native client completion | Local follow-up adds saved Start receipts, explicit reload, bounded preflight/credential/wake operations, typed recovery and DNS health. All 41 corrected-source workflow checks, 31 fresh resource trials and independent static review pass. | Complete exact-head PR checks; the production total Quit wait remains proposed in 0039. |
+| AppState, isolation and release | One final activation and deletion is selected (0031); 64 KiB ordinary frames and 8 MiB private frames are selected. | Use the selected 10,000-row / 4 MiB capture / 8 MiB retained collection profile (0038), verify the remaining composition limits, switch AppState once and delete replaced paths, move the control cluster to RuntimeActor, then complete release acceptance. |
 
 The [client-owner checkpoint](./docs/verification-runtime-client-owner-2026-10-27.md)
 records the scoped independent review and all 41 passing local gates: 3,619 tests
@@ -47,7 +48,9 @@ records, 26 clean guard mutations and exact-head hosted evidence for PR253.
 The [physical-ordering verification](./docs/verification-runtime-physical-ordering-2026-10-27.md)
 records its narrower scope. Separate existing limitations remain #250 (shared
 pool Stop isolation), #251 (applied ephemeral endpoints), and #252 (wall-clock
-flap metrics); do not silently fold new architecture into this activation.
+flap metrics), plus [#255](https://github.com/srps/Conduit/issues/255)
+(the apparently unreachable legacy recovery-failure notification). Keep these
+investigations separate from the behavior-preserving activation.
 
 Earlier evidence remains with its owning slice:
 [client/service](./docs/runtime-client-stage1-inventory.md),
@@ -108,106 +111,61 @@ not a requirement to finish every event or property test before extraction:
 
 1. **One runtime host ([#186](https://github.com/srps/Conduit/issues/186)),
    accepted** ([decision 0031](./docs/decisions/0031-incremental-runtime-development-single-activation.md)).
-   **Stage 1:** define AppState's async runtime client, typed commands/outcomes,
-   full presentation snapshots, and bounded cancellable subscriptions over the
-   same versioned contract in memory and later on a socket. Start
-   [#180](https://github.com/srps/Conduit/issues/180) with one complete typed-event
-   family through producer, codec, bridge, consumer and assertions. Define
-   deadlines, unknown outcomes, subscription gaps and config ownership here.
-   The existing synchronous `DaemonClient` is not the finished client.
-   The framed adapter now runs the v2 codec over an injected byte transport behind
-   one `RuntimeClient` factory; its concrete implementation is private. The final
-   combined local workflow passed all 39 checks (2,936 tests, two skips; 95 simulator
-   records and perf). See [adapter evidence](./docs/runtime-framed-client-2026-10-24.md).
-   The adapter is separate from the service engine merged in PR #235; actual host adoption remains open.
-   The owner-selected persistence policy is save-before-apply for durable edits,
-   with Stop/Quit admitted despite save failure. Define separate durable/session/
-   applied outcomes and stop-fenced retries; Quit does not persist a disable.
-   Status (2026-10-24, branch checkpoint): the protocol, value types, frame codec,
-   pages, snapshot projection and typed lifecycle family exist with tests. Not
-   implemented: the production v2 socket, the config commit/start DTO, and AppState
-   adoption. PR #235 now supplies the unadopted in-memory admission, lookup, page and
-   subscription engine behind the existing framed client; actual RuntimeHost adaptation remains open. v1 control and helper IPC are unchanged. Writer lifetime is selected in
-   [0017](./docs/decisions/0017-exclusive-state-directory-writer.md). The OS lease and
-   canonical-layout foundation are merged. App/daemon startup acquisition is implemented
-   in PR #236 with local and hosted checks passing; complete writer/store
-   workflow adoption and installed-app validation remain open. The private configuration shape is selected in
-   [0018](./docs/decisions/0018-private-configuration-request.md): one explicitly
-   encoded request containing full frozen values, with neutral SecretBytes in
-   ConduitShared. Save, runtime admission and apply outcomes remain distinct.
-   The owner selected the eight-MiB private request cap in
-   [0019](./docs/decisions/0019-private-configuration-frame-budget.md), refined by
-   [0021](./docs/decisions/0021-bounded-configuration-at-all-boundaries.md): retain the
-   complete eight-MiB frame, add selected domain counts/byte limits and apply them
-   at startup/import too, with bounded actual reads and rejected files preserved.
-   Tunnels mean native-protocol local forwards: primary performance case 64,
-   hard ceiling 128. Early schema-aware refusal precedes decoded object expansion;
-   one active private body/decode and independent Stop/status capacity remain
-   adoption obligations. String categories and legacy compatibility are completed in
-   [0022](./docs/decisions/0022-configuration-identity-path-and-host-bounds.md).
-   PR #227 merged the private scanner and one shared typed resource traversal
-   at `f427255`, with hosted Swift and CodeQL passing. Automated Codex reviews
-   failed to run and supply no review evidence; Claude and Codex source review
-   accompanied the local workflow checks. Runtime-file startup/import adoption merged in PR #228 through the
-   shared lexical/resource policy. Open gates:
-   measured memory/capacity/latency and complete writer coverage under
-   the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md)
-   and fixed writable layout in [0028](./docs/decisions/0028-fixed-writable-state-filenames.md),
-   listener handoff, and measured bounds and shutdown. Exact legacy duration representability
-   ([#224](https://github.com/srps/Conduit/issues/224)) merged in PR #228. The
-   [review draft](./docs/design-runtime-store-precision-review.md) records the
-   alternatives and revisit triggers. The selected schema-two refusal of inexact
-   saves, whole-millisecond round trips and safe conversions are implemented under
-   [0023](./docs/decisions/0023-exact-schema-two-persistence.md). No schema-three
-   migration is selected.
-   Integration also requires [cohesive ownership](./docs/design-runtime-host-contract.md#cohesion-and-implementation-ownership):
-   retain the single kernel/private typed resource walk, reuse policy across file/wire
-   boundaries, and keep exact representation and commit coordination out of host
-   adapters. Shared constants and parity tests do not complete that requirement.
-   File grammar is selected in [0024](./docs/decisions/0024-strict-configuration-file-grammar.md):
-   strict syntax, UTF-8 and Unicode even in discarded values; valid unknown fields
-   and first-key-wins remain. The shared strict cursor, fixed-cap regular-file
-   reader and filter are adopted by runtime load/migration/import/argv input,
-   preserving rejected originals. The integrated focused suite passed 697 tests;
-   the full Swift suite passed 2846 tests with two skips. See the
-   [verification record](./docs/verification-configuration-boundary-2026-10-24.md).
-   PR #229 merged the bounded runtime replacement/read-back primitive and its
-   independent 432-case classifier model. PR #230 merged the shared 128 KiB
-   sidecar boundary and raw browser-URL check; its complete local workflow passed
-   2,897 tests (two skips) and all 94 simulator records. It merged at `2e75d94`
-   after hosted Swift and CodeQL passed.
-   [PR #232](https://github.com/srps/Conduit/pull/232) merged the unadopted typed store core at `6535fc8`,
-   after all 39 local checks (3,004 tests, two skips, 96 simulator records) and hosted Swift/CodeQL passed.
-   [#233](https://github.com/srps/Conduit/issues/233) tracks the confirmed snapshot/config collision and
-   remaining log protection; its [focused checkpoint](./docs/design-protected-runtime-artifacts.md)
-   precedes startup writer adoption. The owner selected fixed writable filenames in
-   [0028](./docs/decisions/0028-fixed-writable-state-filenames.md): config/platform/preferences/journal
-   use their fixed logical slots; arbitrary read-only tool inputs remain supported.
-   Custom writable-name refusal and migration guidance merged in PR #236;
-   alias protection remains part of the shared layout checks. Complete store/workflow adoption remains open.
-   The next store/client
-   [API checkpoint](./docs/design-runtime-store-workflow.md) keeps one workflow
-   and separates storage from runtime eligibility. The owner selected holding
-   a mixed runtime/platform apply until required inputs verify in
-   [0025](./docs/decisions/0025-hold-mixed-configuration-apply.md); the gate remains
-   planned, with independent effect groups deferred. Exact schema-two
-   staging and safe duration conversions merged in PR #228. External-file edit
-   conflicts must refuse ordinary saves pending explicit reload/review under
-   [0027](./docs/decisions/0027-refuse-external-configuration-edits.md). The internal
-   store core now uses one I/O slot for all three files, private baselines and typed
-   persistence facts, including latched conflicts and legacy-value preservation.
-   Its focused checks pass 193 tests and four simulator scenarios;
-   [the evidence](./docs/verification-configuration-store-2026-10-25.md) separates
-   seeded models, fault matrices and worker-lifetime witnesses. AppState and
-   RuntimeHost adoption, configuration events, apply fences, complete writer coverage
-   and release validation remain open.
-   The owner selected a 128 KiB cap for each platform/preferences sidecar with the
-   same strict reader/filter contract, valid unknown fields and first-key behavior
-   in [0026](./docs/decisions/0026-bounded-platform-and-preferences-files.md).
-   PR #230 implements the existing 16 KiB browser-URL bound before sidecar
-   decode/save and preserves rejected inputs. The journal is separate. No second
-   parser or host persistence path is selected. Verified-store and host adoption
-   remain open.
+   **Stage 1 — contracts and persistence, implemented for the shared host.**
+   The actual framed `RuntimeClient` now reaches the sole host/workflow/store,
+   with typed commands, causal receipts, bounded observation/replay/pages and
+   private frozen editor values. [PR254](https://github.com/srps/Conduit/pull/254)
+   records integration; the [native-client checkpoint](./docs/verification-runtime-native-client-2026-10-27.md)
+   adds saved Start, explicit reload, typed recovery, helper/credential/wake
+   integration and host-owned DNS health. AppState adoption and the measured
+   production composition remain open. Production v2 socket transport is a later
+   milestone; shipped v1 and helper IPC remain compatible.
+
+   Durable edits save before ordinary apply, while Stop/Quit proceed independently
+   of failed saves ([0015](./docs/decisions/0015-save-before-apply.md)). One store
+   holds a mixed runtime/platform apply until its required inputs verify
+   ([0025](./docs/decisions/0025-hold-mixed-configuration-apply.md)). External edits
+   refuse saves until explicit reload; reload verifies and reconciles eligible
+   changes without discarding another client's draft
+   ([0027](./docs/decisions/0027-refuse-external-configuration-edits.md),
+   [0032](./docs/decisions/0032-explicit-reload-and-reconcile.md)). No second
+   loader, writer, compatibility parser or snapshot registry is selected.
+
+   One canonical state root, OS-backed exclusive lease and fixed writable names
+   protect runtime/platform/preferences/journal ownership
+   ([0017](./docs/decisions/0017-exclusive-state-directory-writer.md),
+   [0020](./docs/decisions/0020-canonical-runtime-writer-root.md),
+   [0028](./docs/decisions/0028-fixed-writable-state-filenames.md)). The verified
+   store consumes that session and reports persistence, eligibility and physical
+   settlement separately. Its shared bounded readers preserve rejected files,
+   validate strict syntax/Unicode throughout and retain valid unknown fields and
+   first-key-wins behavior. Schema two refuses inexact saves; no schema upgrade
+   is needed ([0023](./docs/decisions/0023-exact-schema-two-persistence.md),
+   [0024](./docs/decisions/0024-strict-configuration-file-grammar.md)).
+   Platform/preferences files use 128 KiB each; the journal is separate
+   ([0026](./docs/decisions/0026-bounded-platform-and-preferences-files.md)).
+
+   Private requests and replies use separate 8 MiB caps; ordinary reply/stream
+   frames use 64 KiB. Configuration counts/string bounds apply at load/import
+   and wire boundaries through one typed resource traversal. Tunnels are native
+   local forwards: 64 is the primary performance case, 128 the hard ceiling.
+   See [0018](./docs/decisions/0018-private-configuration-request.md),
+   [0019](./docs/decisions/0019-private-configuration-frame-budget.md),
+   [0021](./docs/decisions/0021-bounded-configuration-at-all-boundaries.md),
+   [0022](./docs/decisions/0022-configuration-identity-path-and-host-bounds.md),
+   [0030](./docs/decisions/0030-ordinary-runtime-reply-frame-cap.md) and
+   [0034](./docs/decisions/0034-private-editor-reply-frame-cap.md).
+   Collection observation caps are selected in
+   [0038](./docs/decisions/0038-bounded-runtime-collection-capture.md);
+   the remaining engineering terms have a coherent measured candidate. Select the
+   total Quit wait (0039), then consume one production profile in the app switch.
+
+   Earlier source/test counts are historical checkpoints, kept in the linked
+   [client inventory](./docs/runtime-client-stage1-inventory.md),
+   [store verification](./docs/verification-configuration-store-2026-10-25.md) and
+   [session authority verification](./docs/verification-session-store-authority-2026-10-25.md).
+   Current acceptance still requires the single AppState switch, RuntimeActor,
+   native app checks and applicable installed-machine validation.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, with the daemon as its entry point; AppState remains its twin.
    The move preserves MainActor and existing policy, with the daemon fake-machine

@@ -106,9 +106,11 @@ exercise read-only reload, held/refused inputs, Stop and newer Start fences, and
 required commits. The model covers store I/O and returned eligibility; real-host
 tests cover lifecycle effects separately.
 
-Still open: the private editor observation/request integration, retained
-client-owned draft/token behavior and final AppState activation. The shared host
-has no production reload endpoint yet. The [review proposal](../design-runtime-reload-review.md)
+The [native-client checkpoint](../verification-runtime-native-client-2026-10-27.md)
+adds a payload-free framed reload over this same host primitive, with bounded typed
+results and retained dirty-client token tests. Private editor integration is merged;
+combined review/profile acceptance and final AppState activation remain open. No
+production daemon socket or v1 reload endpoint is introduced. The [review proposal](../design-runtime-reload-review.md)
 retains the alternatives; code/test evidence does not imply release readiness.
 
 Does not prove: installed-app behavior, real VPN/auth/PAC operation or daemon handoff.

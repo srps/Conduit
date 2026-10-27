@@ -86,10 +86,13 @@ Start-plus-apply remains explicitly refused for this release. Ordinary saved
 Start and the remaining helper/credential/wake integration still precede
 activation; none may introduce a direct-host UI fallback.
 
-Launch flags `--port`, `--no-system-proxy` and `--no-env` currently persist at
-launch. Preserve them through one existing private save-only update after host
-open/read, before exposing runtime controls; failed persistence holds that
-startup intent. This needs no override layer or second loader. App-only events
+Legacy app launch flags `--port`, `--no-system-proxy` and `--no-env` change the
+session's in-memory draft; they reach disk with a later save, including some
+lifecycle saves. Launch alone does not persist them. At activation, preserve their
+effect through one existing private save-only update after host open/read, before
+exposing runtime controls; failed persistence holds that startup intent. This
+intentionally persists explicit launch overrides up front, including a session
+with no later edit or Start. This needs no override layer or second loader. App-only events
 remain in their bounded app-local log and `proxy.log`, as today; the host owns
 `events.ndjson`. These retain existing behavior without a new event-ingress API.
 

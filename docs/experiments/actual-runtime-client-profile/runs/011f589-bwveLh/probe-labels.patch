@@ -1,0 +1,45 @@
+--- a/Probe.swift
++++ b/Probe.swift
+@@ -1,4 +1,4 @@
+-// Actual Conduit client/host resource probe. NOT product code, NOT a shipping profile, NOT a benchmark product.
++// Actual Conduit client/host resource probe. NOT product code, NOT a selected profile, NOT a benchmark product.
+ // It links the existing Release objects with `-package-name conduit` and drives the actual `RuntimeHost.open` facade over
+ // explicit fakes (the `pm-sim` runtime-host-effects composition) and an owned scratch state root, then the actual in-memory
+ // framed client and private editor client from `RuntimeHost.makeInMemoryControlClient`. No production adapter default,
+@@ -12,8 +12,7 @@
+ // candidate profile); any mode with `-nosampler` runs without the memory sampler.
+ //
+ // Every host mode runs at ONE measured CANDIDATE profile (`CandidateProfile`), built through the actual `RuntimeServiceLimits`
+-// initializer from codec measurements. It is an experiment profile, not a shipping default; only its collection caps are selected
+-// (decision 0038).
++// initializer from codec measurements. It is an experiment profile, not a shipping default and not an owner selection.
+ // Usage: probe <mode>[-nosampler] <scratch-dir>. The scratch directory is removed only after every release proof agrees.
+ //
+ // `GenericDefaults.shared` is initialized by the actual store decode (`ProxyConfig.init(from:)`), which reads `NSUserName()`
+@@ -1281,12 +1280,12 @@
+ 
+ // MARK: - Candidate profile
+ 
+-/// ONE measured CANDIDATE control-service profile for this experiment, not a shipping default. Its collection caps (10,000 rows, 4 MiB
+-/// capture, 8 MiB retained) are the ones decision 0038 selected; every other term follows the input proposal and is not selected.
+-/// Every byte term that depends on a record is derived from a codec measurement or found by bisecting the actual initializer, whose
+-/// budget and record-size members are internal in a Release build. Nothing here widens product access.
++/// ONE measured CANDIDATE control-service profile for this experiment: not a shipping default, not the product's profile and not an
++/// owner selection. The counts follow the input proposal (itself not approved). Every byte term that depends on a record is derived
++/// from a codec measurement or found by bisecting the actual initializer, whose budget and record-size members are internal in a
++/// Release build. Nothing here widens product access.
+ enum CandidateProfile {
+-    static let label = "CANDIDATE-4K-64K-10K-4M experiment profile; collection caps selected by decision 0038, other terms proposed only"
++    static let label = "CANDIDATE-4K-64K-10K-4M measured experiment profile; not a shipping default or owner selection"
+     static let maxRequestBytes = 4_096
+     static let maxReplyBytes = 65_536
+     static let aliasCapacityPerPartition = 64
+@@ -1772,7 +1771,7 @@
+               "latestSnapshotByteCapacity": terms.latestSnapshot,
+               "baselineFrameOverheadBytesMeasured": CandidateProfile.maxReplyBytes - build.latestSnapshotMaximumBytes,
+               "subscriberRecordBytes": terms.subscriberRecord, "subscriberRecordMinimumAccepted": build.subscriberRecordMinimumBytes,
+-              "collectionRowCapacity": terms.rows, "collectionRowCapacityBasis": "selected by decision 0038; count and byte caps independent; over-budget list unavailable whole",
++              "collectionRowCapacity": terms.rows, "collectionRowCapacityBasis": "experiment only; count and byte caps independent; list behaviour not selected",
+               "widestRowBytes": build.widestRowBytes, "widestRowKind": build.widestRowKind,
+               "collectionCaptureBytes": terms.captureBytes, "collectionRetainedBytes": terms.retainedBytes,
+               "collectionProofsPerKind": CandidateProfile.collectionProofsPerKind,
