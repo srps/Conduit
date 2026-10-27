@@ -42,7 +42,9 @@ executes that corrected error path and exact restoration. Independent final
 review accounts for it separately from the happy-path checks. The [complete local workflow](experiments/runtime-audit-workflow/README.md) passes
 all 41 checks on stable source `bfe8922152d7121489633b72d63c1e7163047f7c`: 3,692
 Swift tests (four skips), all 103 simulator records, perf, packaging, process
-regressions and boundary checks. Exact-head hosted checks remain pending.
+regressions and boundary checks. Rebasing onto merged PR256 changes no source/test/script/workflow/resource bytes;
+[provenance](experiments/runtime-audit-workflow/rebase-provenance.json) records the
+same fingerprint. Exact-head hosted checks remain pending.
 
 The preceding [native-client slice](https://github.com/srps/Conduit/pull/256) merged
 as `462dd4b41dc229bb39a55d0d4519efc30ab7d7b2` after exact-head Swift and CodeQL

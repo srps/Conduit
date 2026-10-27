@@ -1,0 +1,8 @@
+{
+  "tested_source_commit": "bfe8922152d7121489633b72d63c1e7163047f7c",
+  "rebased_code_commit": "f0b878c4bb3e29b55f53cbf0e6de657c985a600c",
+  "rebased_checkpoint": "2c67e0a028c5f37331eb96e6ba930180264f6c7b",
+  "base": "462dd4b41dc229bb39a55d0d4519efc30ab7d7b2",
+  "source_fingerprint": "e391c09cbb06635a7e6d1d34b023513f43c6f8b848982d12e8c17983efefd49e",
+  "unchanged_from_tested_source": true
+}
