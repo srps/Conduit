@@ -86,17 +86,6 @@ final class ConfigurationStoreTests: XCTestCase {
         }
     }
 
-    private func describe(_ outcome: ConfigurationVerifyOutcome?) -> String {
-        switch outcome {
-        case .unchanged: "unchanged"
-        case .unchangedAbsent: "unchangedAbsent"
-        case .changed: "changed"
-        case .notVerified: "notVerified"
-        case .notAttempted(let reason): "notAttempted(\(reason))"
-        case nil: "notRequested"
-        }
-    }
-
     private func adoptedLoad(_ fixture: Fixture) async -> ConfigurationSlots<ConfigurationComponentLoad>? {
         guard case .admitted(let report) = await fixture.store.load(context: Self.context),
               case .adopted(let loaded) = report.outcome else {
@@ -108,6 +97,32 @@ final class ConfigurationStoreTests: XCTestCase {
 
     private func writes(_ fixture: Fixture, at path: String) -> Int {
         fixture.access.observations.filter { if case .write(let written, _) = $0 { written == path } else { false } }.count
+    }
+
+    /// Commits the store's current runtime and platform values at their current tokens, the canonical no-op save. A present file whose
+    /// verified value is the candidate is verified without a write, so an external change is a conflict that latches. Returns the file that
+    /// conflicted, or nil, and fails the test on any write.
+    private func latchByNoOpCommit(_ fixture: Fixture) async -> ConfigurationComponent? {
+        guard let current = fixture.store.values else {
+            XCTFail("the store holds no values")
+            return nil
+        }
+        let before = writes(fixture, at: fixture.plan.config.path) + writes(fixture, at: fixture.plan.platformConfig.path)
+        let tokens = ConfigurationSlots(
+            runtime: fixture.store.baselineToken(for: .runtime),
+            platform: fixture.store.baselineToken(for: .platform),
+            preferences: nil
+        )
+        guard case .admitted(let result) = await fixture.store.commitRuntimeAndPlatform(
+            current.runtime, current.platform, expecting: tokens, context: Self.context
+        ) else {
+            XCTFail("the no-op commit was not admitted")
+            return nil
+        }
+        XCTAssertEqual(writes(fixture, at: fixture.plan.config.path) + writes(fixture, at: fixture.plan.platformConfig.path), before, "a no-op commit writes nothing")
+        if case .conflict = result.platform { return .platform }
+        if case .conflict = result.runtime { return .runtime }
+        return nil
     }
 
     // MARK: - Open and reload
@@ -254,19 +269,23 @@ final class ConfigurationStoreTests: XCTestCase {
         XCTAssertFalse(fixture.access.observations.contains { if case .write = $0 { true } else { false } })
     }
 
-    /// Verification reports an external change and does not adopt it. The change latches the baseline, so no write is authorized.
-    func testVerifyReportsAChangeWithoutAdoptingIt() async throws {
+    /// A no-op commit of the current value reports an external change and does not adopt it or write over it. The change latches the
+    /// baseline, so no write is authorized.
+    func testANoOpCommitReportsAChangeWithoutAdoptingIt() async throws {
         let fixture = try Fixture(preferences: try preferenceBytes(showMenuBarIcon: true))
         defer { fixture.close() }
-        guard await adoptedLoad(fixture) != nil else { return }
+        guard await adoptedLoad(fixture) != nil, let current = fixture.store.values?.preferences else { return XCTFail("the load was not adopted") }
         let token = fixture.store.baselineToken(for: .preferences)
-        fixture.access.externalEdit(.replace(try preferenceBytes(showMenuBarIcon: false)), at: fixture.plan.preferences.path)
+        let external = try preferenceBytes(showMenuBarIcon: false)
+        fixture.access.externalEdit(.replace(external), at: fixture.plan.preferences.path)
 
-        guard case .admitted(let verified) = await fixture.store.verifyUnchanged([.preferences], expecting: ConfigurationSlots(runtime: nil, platform: nil, preferences: token), context: Self.context) else {
-            return XCTFail("the verification was not admitted")
+        guard case .admitted(let noOp) = await fixture.store.commitPreferences(current, expecting: token, context: Self.context) else {
+            return XCTFail("the no-op commit was not admitted")
         }
-        XCTAssertEqual(describe(verified.outcomes.preferences), "changed")
+        XCTAssertEqual(describe(noOp.preferences), "conflict")
         XCTAssertEqual(fixture.store.values?.preferences.showMenuBarIcon, true)
+        XCTAssertEqual(fixture.access.storedBytes(at: fixture.plan.preferences.path), external)
+        XCTAssertEqual(writes(fixture, at: fixture.plan.preferences.path), 0)
         guard case .admitted(let commit) = await fixture.store.commitPreferences(AppPreferences(), expecting: token, context: Self.context) else {
             return XCTFail("the commit was not admitted")
         }
@@ -356,8 +375,8 @@ final class ConfigurationStoreTests: XCTestCase {
         XCTAssertEqual(access.entryPresence(fixture.plan.journal), .success(true))
     }
 
-    /// A component at its maximum version refuses a write before any I/O. Verification still works, a changed file still latches, and a new
-    /// store incarnation recovers. No version wraps.
+    /// A component at its maximum version refuses a write before any I/O. A no-op commit is still verified without a write, a changed file
+    /// still latches, and a new store incarnation recovers. No version wraps.
     func testAComponentAtItsMaximumVersionRefusesWritesBeforeAnyIO() async throws {
         let fixture = try Fixture(preferences: try preferenceBytes(showMenuBarIcon: true))
         defer { fixture.close() }
@@ -374,10 +393,12 @@ final class ConfigurationStoreTests: XCTestCase {
         XCTAssertEqual(describe(refused.preferences), "notAttempted(versionExhausted)")
         XCTAssertEqual(fixture.access.observations.count, before, "the refusal makes no read and no write")
 
-        guard case .admitted(let verified) = await fixture.store.verifyUnchanged(
-            [.preferences], expecting: ConfigurationSlots(runtime: nil, platform: nil, preferences: token), context: Self.context
-        ) else { return XCTFail("the verification was not admitted") }
-        XCTAssertEqual(describe(verified.outcomes.preferences), "unchanged")
+        guard let current = fixture.store.values?.preferences,
+              case .admitted(let verified) = await fixture.store.commitPreferences(current, expecting: token, context: Self.context) else {
+            return XCTFail("the no-op commit was not admitted")
+        }
+        XCTAssertEqual(describe(verified.preferences), "unchanged")
+        XCTAssertEqual(writes(fixture, at: fixture.plan.preferences.path), 0)
 
         fixture.access.externalEdit(.replace(try preferenceBytes(showMenuBarIcon: false)), at: fixture.plan.preferences.path)
         guard case .admitted(let reloaded) = await fixture.store.load(context: Self.context) else {
@@ -555,7 +576,7 @@ final class ConfigurationStoreTests: XCTestCase {
         }
     }
 
-    /// A read held on the worker keeps the store's one slot. Overlapping loads, commits and verifications are refused as busy, queue no I/O,
+    /// A read held on the worker keeps the store's one slot. Overlapping loads and every kind of commit are refused as busy, queue no I/O,
     /// and keep the fake's log unchanged. A cancelled caller detaches only its wait, so the slot stays held until the worker returns.
     func testAHeldWorkerReadKeepsTheSlotAndRefusesOtherOperationsWithoutQueuedIO() async throws {
         let fixture = try Fixture(preferences: try preferenceBytes(showMenuBarIcon: true))
@@ -567,7 +588,8 @@ final class ConfigurationStoreTests: XCTestCase {
         let store = ConfigurationStore(session: fixture.session, access: gated, work: PlatformWork(label: "test.configuration-store.gate"))
         guard case .admitted = await store.load(context: Self.context) else { return XCTFail("the first load was not admitted") }
         let token = store.baselineToken(for: .preferences)
-        let verifyToken = ConfigurationSlots(runtime: nil, platform: nil, preferences: token)
+        guard let platformToken = store.baselineToken(for: .platform) else { return XCTFail("the platform holds no baseline") }
+        let runtimeToken = store.baselineToken(for: .runtime)
 
         gated.armOnNextRead()
         // Queued work is in flight from here until its call is awaited below. A failing wait returns early with the flag clear, so `close`
@@ -585,11 +607,13 @@ final class ConfigurationStoreTests: XCTestCase {
                 GenericDefaults.shared.makeConfig(), PlatformIntegrationConfig(),
                 expecting: ConfigurationSlots(runtime: nil, platform: nil, preferences: nil), context: Self.context
             )
-            let verify = await store.verifyUnchanged([.preferences], expecting: verifyToken, context: Self.context)
+            let launch = await store.commitLaunchAtLogin(enabled: true, expecting: platformToken, context: Self.context, claim: .neverRevoked)
+            let dns = await store.commitDNSLifecycle(enabled: true, expecting: runtimeToken, context: Self.context, claim: .neverRevoked)
             XCTAssertTrue(isBusy(load), "round \(round): a load made while the slot is held is refused as busy")
             XCTAssertTrue(isBusy(preferences), "round \(round): a commit made while the slot is held is refused as busy")
             XCTAssertTrue(isBusy(coupled), "round \(round): a coupled commit made while the slot is held is refused as busy")
-            XCTAssertTrue(isBusy(verify), "round \(round): a verification made while the slot is held is refused as busy")
+            XCTAssertTrue(isBusy(launch), "round \(round): a launch-at-login commit made while the slot is held is refused as busy")
+            XCTAssertTrue(isBusy(dns), "round \(round): a DNS lifecycle commit made while the slot is held is refused as busy")
         }
         XCTAssertEqual(fixture.access.observations.count, loggedWhileHeld, "refused calls make no read or write, so no I/O is queued")
         XCTAssertTrue(store.isBusy, "refusals do not clear the slot")
@@ -835,10 +859,10 @@ final class ConfigurationStoreTests: XCTestCase {
         guard await adoptedLoad(fixture) != nil else { return }
         var renamed = GenericDefaults.shared.makeConfig()
         renamed.profileName = "Renamed"
-        let runtimeTokens = ConfigurationSlots(runtime: fixture.store.baselineToken(for: .runtime), platform: nil, preferences: nil)
         fixture.access.externalEdit(.replace(try ProxyConfigPersistence.stagedFileData(for: renamed)), at: fixture.plan.config.path)
-        // A verification of the changed runtime file latches its baseline, so the runtime is refused while the platform stays valid.
-        _ = await fixture.store.verifyUnchanged([.runtime], expecting: runtimeTokens, context: Self.context)
+        // A no-op commit verifies the platform and finds the runtime file changed, which latches the runtime baseline. The runtime is then
+        // refused while the platform stays valid.
+        guard case .runtime = await latchByNoOpCommit(fixture) else { return XCTFail("the no-op commit did not latch the runtime") }
         let tokens = ConfigurationSlots(
             runtime: fixture.store.baselineToken(for: .runtime),
             platform: fixture.store.baselineToken(for: .platform),
@@ -859,9 +883,8 @@ final class ConfigurationStoreTests: XCTestCase {
         let fixture = try Fixture(platform: try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig()))
         defer { fixture.close() }
         guard await adoptedLoad(fixture) != nil else { return }
-        let platformTokens = ConfigurationSlots(runtime: nil, platform: fixture.store.baselineToken(for: .platform), preferences: nil)
         fixture.access.externalEdit(.replace(Data("{\"launchAtLogin\":true}".utf8)), at: fixture.plan.platformConfig.path)
-        _ = await fixture.store.verifyUnchanged([.platform], expecting: platformTokens, context: Self.context)
+        guard case .platform = await latchByNoOpCommit(fixture) else { return XCTFail("the no-op commit did not latch the platform") }
         let tokens = ConfigurationSlots(
             runtime: fixture.store.baselineToken(for: .runtime),
             platform: fixture.store.baselineToken(for: .platform),
@@ -884,9 +907,8 @@ final class ConfigurationStoreTests: XCTestCase {
         var renamed = GenericDefaults.shared.makeConfig()
         renamed.profileName = "Renamed"
         fixture.access.externalEdit(.replace(try ProxyConfigPersistence.stagedFileData(for: renamed)), at: fixture.plan.config.path)
-        // A valid token verifies the changed runtime file, which latches its baseline: the runtime now has no authority.
-        let runtimeToken = ConfigurationSlots(runtime: fixture.store.baselineToken(for: .runtime), platform: nil, preferences: nil)
-        _ = await fixture.store.verifyUnchanged([.runtime], expecting: runtimeToken, context: Self.context)
+        // A no-op commit at valid tokens finds the changed runtime file, which latches its baseline: the runtime now has no authority.
+        guard case .runtime = await latchByNoOpCommit(fixture) else { return XCTFail("the no-op commit did not latch the runtime") }
         // The runtime is latched (no baseline), and the platform token is missing while the platform still holds its baseline (a mismatch).
         let admission = await fixture.store.commitRuntimeAndPlatform(
             GenericDefaults.shared.makeConfig(), PlatformIntegrationConfig(),
@@ -938,7 +960,7 @@ final class ConfigurationStoreTests: XCTestCase {
 
     // MARK: - Bounded model over runtime and platform
 
-    /// A bounded model of the runtime and platform files through the coupled commit, verification, reload and saved tokens. The model holds
+    /// A bounded model of the runtime and platform files through the coupled commit, the no-op commit, reload and saved tokens. The model holds
     /// each file's external variant, the baseline the store last adopted, the latch, the version, and the parsed value it last adopted or
     /// wrote. Variants: the runtime defaults, the renamed runtime, and the defaults with trailing whitespace; the platform defaults and the
     /// defaults with trailing whitespace. A missing platform sidecar takes the runtime variant the last adopted reload saw as its source, and
@@ -999,13 +1021,13 @@ final class ConfigurationStoreTests: XCTestCase {
                 savedVersion = (0..<2).map { index -> Int? in adopted && !latched[index] ? version[index] : nil }
             }
 
-            // Every seed opens with a fixed scenario: the first load adopts the platform file as missing, a snapshot and a verification
-            // report it unchangedAbsent, the platform then appears (op 6), and the fresh-token commit holds the runtime write behind that
-            // conflict. Then a runtime rename, a verification that latches it, and a fresh-token commit reach heldBehindRuntime. The random
-            // steps follow. Those outcomes are therefore reached on every seed, not only by chance.
-            // The reload re-adopts the platform file that the conflict latched, so the runtime probe below leaves the platform authorized.
-            // The source probe (op 8) follows, so `sourceChanged` is reached on every seed too.
-            var pending: [Int] = [1, 2, 4, 6, 3, 1, 7, 4, 3, 8]
+            // Every seed opens with a fixed scenario: the first load adopts the platform file as missing, and a no-op commit writes it. The
+            // platform then disappears (op 6), and the fresh-token commit holds the runtime write behind that conflict. The reload re-adopts
+            // the missing platform and a no-op commit writes it again, so the runtime probe below leaves the platform present and authorized.
+            // Then a runtime rename, a no-op commit that verifies the platform and latches the runtime, and a fresh-token commit reach
+            // heldBehindRuntime. The source probe (op 8) follows, so `sourceChanged` is reached on every seed too. The random steps follow.
+            // Those outcomes are therefore reached on every seed, not only by chance.
+            var pending: [Int] = [1, 2, 4, 6, 3, 1, 4, 7, 4, 3, 8]
             var forceFresh = true
             var executedSteps = 0
             for step in 0..<stepsPerSeed {
@@ -1058,16 +1080,25 @@ final class ConfigurationStoreTests: XCTestCase {
                     trace.append("snapshot tokens")
                     snapshot()
 
-                case 3:
+                case 3, 4:
                     // Half the commits take fresh tokens, so most of them are authorized and reach the coupled path. The rest keep their
-                    // saved tokens, which go stale as soon as a version moves.
-                    if forceFresh || source.next(2) == 0 {
+                    // saved tokens, which go stale as soon as a version moves. Op 4 is the no-op commit: the store's current runtime value
+                    // under fresh tokens, which verifies each present file and latches a changed one without writing it.
+                    let proposal: Int
+                    if op == 4 {
                         trace.append("fresh tokens")
                         snapshot()
+                        proposal = modelValue[0]
+                        trace.append("commit current runtime-value \(proposal)")
+                    } else {
+                        if forceFresh || source.next(2) == 0 {
+                            trace.append("fresh tokens")
+                            snapshot()
+                        }
+                        forceFresh = false
+                        proposal = source.next(2)
+                        trace.append("commit runtime-value \(proposal)")
                     }
-                    forceFresh = false
-                    let proposal = source.next(2)
-                    trace.append("commit runtime-value \(proposal)")
                     let expectRuntime: String
                     let expectPlatform: String
                     // Each component's authority is decided on its own, as the store decides it. A refused file keeps its own reason. An
@@ -1137,7 +1168,7 @@ final class ConfigurationStoreTests: XCTestCase {
                     trace.append("platform identity \(external[1].map { String($0) } ?? "missing")")
 
                 case 7:
-                    // The runtime identity changes from the adopted baseline, and the next verification latches it. The fresh-token commit then
+                    // The runtime identity changes from the adopted baseline, and the next no-op commit latches it. The fresh-token commit then
                     // refuses the runtime while the platform stays authorized, so the platform is held behind the runtime (`heldBehindRuntime`).
                     external[0] = 1
                     fixture.access.externalEdit(.replace(runtimeFiles[1]), at: fixture.plan.config.path)
@@ -1156,24 +1187,7 @@ final class ConfigurationStoreTests: XCTestCase {
                     forceFresh = true
 
                 default:
-                    trace.append("verify")
-                    var expected = ConfigurationSlots<String?>(runtime: nil, platform: nil, preferences: nil)
-                    for index in 0..<2 {
-                        if let refusal = authorityRefusal(index) {
-                            expected[components[index]] = refusal
-                        } else if external[index] != baseline[index] {
-                            latched[index] = true
-                            expected[components[index]] = "changed"
-                        } else {
-                            expected[components[index]] = external[index] == nil ? "unchangedAbsent" : "unchanged"
-                        }
-                    }
-                    guard case .admitted(let verified) = await fixture.store.verifyUnchanged(
-                        [.runtime, .platform], expecting: tokens, context: Self.context
-                    ) else { return XCTFail("the verification was not admitted, \(label)") }
-                    XCTAssertEqual(describe(verified.outcomes.runtime), expected.runtime, label)
-                    XCTAssertEqual(describe(verified.outcomes.platform), expected.platform, label)
-                    covered.formUnion([expected.runtime, expected.platform].compactMap { $0 })
+                    preconditionFailure("the model has no operation \(op)")
                 }
                 XCTAssertLessThanOrEqual(fixture.access.observations.count, FakeStateFileAccess.observationCapacity, label)
                 executedSteps += 1
@@ -1182,7 +1196,7 @@ final class ConfigurationStoreTests: XCTestCase {
             XCTAssertEqual(executedSteps, stepsPerSeed, "the seed ran its full budget, seed \(seed)")
         }
         let required: Set<String> = [
-            "persisted", "unchanged", "unchangedAbsent", "changed", "conflict", "notAttempted(noAuthoritativeBaseline)",
+            "persisted", "unchanged", "conflict", "notAttempted(noAuthoritativeBaseline)",
             "notAttempted(baselineMismatch)", "notAttempted(heldBehindPlatform)", "notAttempted(heldBehindRuntime)",
             "notAttempted(sourceChanged)",
         ]
@@ -1267,9 +1281,9 @@ final class ConfigurationStoreTests: XCTestCase {
                     // Each step has its own call log, so one step's calls never count against the fake's 16-call budget.
                     fixture.access.clearObservations()
                     let token = fixture.store.baselineToken(for: .preferences)
-                    let tokenValid = adopted && !latched && token?.version == modelVersion
                     // Each seed opens with the value probe, so a reload where only the missing sidecar's value moved is reached on every seed.
-                    switch segment == 0 && step == 0 ? 5 : source.next(5) {
+                    let op = segment == 0 && step == 0 ? 5 : source.next(5)
+                    switch op {
                     case 5:
                         // The value probe: the sidecar is removed and the runtime restored to the defaults, a reload adopts the missing
                         // sidecar, the runtime gains the legacy value outside the store, and a second reload adopts that value.
@@ -1339,11 +1353,24 @@ final class ConfigurationStoreTests: XCTestCase {
                         } else {
                             adoptModel()
                         }
-                    case 2:
+                    case 2, 3:
+                        // Op 3 is the no-op commit: the value the store last adopted or wrote, under the current token. It verifies a present
+                        // file without writing it and latches a changed one, or one that appeared. For a file still missing it would be a
+                        // first write, which op 2 covers, so the step leaves that file as it is.
+                        if op == 3, !latched, modelBaseline == nil, external == nil {
+                            trace.append("no-op commit skipped: missing")
+                            break
+                        }
                         var proposed = AppPreferences()
-                        proposed.showMenuBarIcon = source.next(2) == 0
-                        // One commit in four presents the segment's saved token, which goes stale once the version moves.
-                        let presented = source.next(4) == 0 ? savedToken : token
+                        let presented: ConfigurationBaselineToken?
+                        if op == 3 {
+                            proposed.showMenuBarIcon = adoptedShows
+                            presented = token
+                        } else {
+                            proposed.showMenuBarIcon = source.next(2) == 0
+                            // One commit in four presents the segment's saved token, which goes stale once the version moves.
+                            presented = source.next(4) == 0 ? savedToken : token
+                        }
                         let presentedValid = presented?.version == modelVersion
                         let staged = try AppPreferencesPersistence.stagedData(for: proposed)
                         let expected: String
@@ -1369,7 +1396,7 @@ final class ConfigurationStoreTests: XCTestCase {
                             adoptedShows = proposed.showMenuBarIcon
                             modelVersion += 1
                         }
-                        trace.append("commit prefs \(proposed.showMenuBarIcon ? "shows" : "other") \(presented == token ? "current" : "saved")")
+                        trace.append("\(op == 3 ? "no-op " : "")commit prefs \(proposed.showMenuBarIcon ? "shows" : "other") \(presented == token ? "current" : "saved")")
                         guard case .admitted(let result) = await fixture.store.commitPreferences(proposed, expecting: presented, context: Self.context) else {
                             return XCTFail("the commit was not admitted, \(label)")
                         }
@@ -1377,23 +1404,7 @@ final class ConfigurationStoreTests: XCTestCase {
                         reached.insert(expected)
                         XCTAssertEqual(fixture.access.storedBytes(at: fixture.plan.preferences.path), external, label)
                     default:
-                        let expected: String
-                        if latched {
-                            expected = "notAttempted(noAuthoritativeBaseline)"
-                        } else if !tokenValid {
-                            expected = "notAttempted(baselineMismatch)"
-                        } else if external != modelBaseline {
-                            expected = "changed"
-                            latched = true
-                        } else {
-                            expected = external == nil ? "unchangedAbsent" : "unchanged"
-                        }
-                        guard case .admitted(let verified) = await fixture.store.verifyUnchanged(
-                            [.preferences], expecting: ConfigurationSlots(runtime: nil, platform: nil, preferences: token), context: Self.context
-                        ) else { return XCTFail("the verification was not admitted, \(label)") }
-                        XCTAssertEqual(describe(verified.outcomes.preferences), expected, label)
-                        reached.insert(expected)
-                        trace.append("verify prefs \(expected)")
+                        preconditionFailure("the model has no operation \(op)")
                     }
                 }
             }
@@ -1401,7 +1412,7 @@ final class ConfigurationStoreTests: XCTestCase {
         // The seeds reach every class the model can produce for the preferences file, and at least one refused load. The refusal is the
         // runtime-missing case, which the store refuses at its own boundary (decision 0023).
         let required: Set<String> = [
-            "persisted", "unchanged", "unchangedAbsent", "changed", "conflict",
+            "persisted", "unchanged", "conflict",
             "notAttempted(noAuthoritativeBaseline)", "notAttempted(baselineMismatch)", "notAttempted(sourceChanged)",
         ]
         XCTAssertTrue(reached.isSuperset(of: required), "the seeds did not reach every outcome class; missing \(required.subtracting(reached).sorted())")

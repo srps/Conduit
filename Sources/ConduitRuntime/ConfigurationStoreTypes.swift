@@ -165,20 +165,6 @@ enum ConfigurationWriteOutcome: Equatable, Sendable {
     case notAttempted(ConfigurationNotAttemptedReason)
 }
 
-/// The result of checking one component against its baseline without writing it.
-enum ConfigurationVerifyOutcome: Equatable, Sendable {
-    /// The file still matches its baseline and existed, so the receipt names the version that is current. No bytes were rewritten.
-    case unchanged(ConfigurationReceipt)
-    /// The file is still missing, as its absent baseline says. Absence is never a receipt.
-    case unchangedAbsent
-    /// The file changed since its baseline (decision 0027). The store does not adopt the new bytes.
-    case changed
-    /// The check could not read the file, so it establishes nothing.
-    case notVerified(ConfigurationFileError)
-    /// The check was not made.
-    case notAttempted(ConfigurationNotAttemptedReason)
-}
-
 /// The exact staged pair that verified in one coupled commit (decision 0025). It exists only when both required receipts verified. It
 /// is never assembled from the store's independently updated per-file values, so no mixture of old and new fields can reach the apply.
 struct VerifiedRuntimePlatformInput: Equatable, Sendable {
@@ -227,12 +213,6 @@ struct PreferencesCommitResult: Equatable, Sendable {
 struct DNSLifecycleCommitResult: Equatable, Sendable {
     let context: ConfigurationOperationContext
     let runtime: ConfigurationWriteOutcome
-}
-
-/// The outcomes of one verification. A component that was not requested has no outcome.
-struct ConfigurationVerifyResult: Equatable, Sendable {
-    let context: ConfigurationOperationContext
-    let outcomes: ConfigurationSlots<ConfigurationVerifyOutcome?>
 }
 
 /// Whether an operation ran. `busy` means another operation holds the store's one slot. Nothing is queued, and the caller's

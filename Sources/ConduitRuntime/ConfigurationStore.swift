@@ -418,23 +418,6 @@ final class ConfigurationStore {
         return .success(checks)
     }
 
-    /// Checks the requested components against their baselines without writing. A changed file is reported and latched, not adopted,
-    /// and an unchanged file that existed gets a receipt for its current version.
-    func verifyUnchanged(
-        _ components: Set<ConfigurationComponent>,
-        expecting expected: ConfigurationSlots<ConfigurationBaselineToken?>,
-        context: ConfigurationOperationContext
-    ) async -> ConfigurationStoreAdmission<ConfigurationVerifyResult> {
-        guard !isBusy else { return .busy }
-        isBusy = true
-        defer { isBusy = false }
-        var outcomes = ConfigurationSlots<ConfigurationVerifyOutcome?>(runtime: nil, platform: nil, preferences: nil)
-        for component in ConfigurationComponent.allCases where components.contains(component) {
-            outcomes[component] = await verify(component, expecting: expected[component], context: context)
-        }
-        return .admitted(ConfigurationVerifyResult(context: context, outcomes: outcomes))
-    }
-
     /// Test seam: moves one component's version to its maximum, so the exhaustion path runs without 2^64 writes. It is internal, so only
     /// `@testable` tests reach it.
     func exhaustVersionForTesting(_ component: ConfigurationComponent) {
@@ -677,31 +660,6 @@ final class ConfigurationStore {
             return .notAttempted(.refused(refusal))
         case .notVerified(let error):
             return .notAttempted(.preReadFailed(error))
-        }
-    }
-
-    private func verify(
-        _ component: ConfigurationComponent,
-        expecting token: ConfigurationBaselineToken?,
-        context: ConfigurationOperationContext
-    ) async -> ConfigurationVerifyOutcome {
-        let baseline: ConfigurationFileBaseline
-        switch authority(token, for: component) {
-        case .success(let value):
-            baseline = value
-        case .failure(let reason):
-            return .notAttempted(reason)
-        }
-        switch await verification(component, baseline: baseline) {
-        case .unchanged:
-            return records[component].present ? .unchanged(receipt(component, context: context)) : .unchangedAbsent
-        case .changed:
-            latch(component, .changedSinceBaseline)
-            return .changed
-        case .refused(let refusal):
-            return .notAttempted(.refused(refusal))
-        case .notVerified(let error):
-            return .notVerified(error)
         }
     }
 
