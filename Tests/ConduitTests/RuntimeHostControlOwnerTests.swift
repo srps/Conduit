@@ -2307,6 +2307,10 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
     /// A Test DNS probe waiting out its timeout holds no platform work: held inside the injected probe, off the main thread and off the
     /// platform queue, a DNS Stop's teardown and a quit's both complete through the client meanwhile. A second Test DNS of the same port
     /// joins the held probe rather than queueing its own, and both report that probe's reading once it answers.
+    ///
+    /// The hold is armed on whatever thread the probe runs on, so the test proves the behaviour, not a queue: a probe on the platform queue
+    /// parks that queue and the Stop's teardown with it, and the bounded wait below then fails on its assertion while the probe is still
+    /// held. One reader task alone pulls the stream and records each settlement; the hold is released and the reader drained on every exit.
     func testAHeldTestDNSProbeDelaysNeitherAStopNorAQuitAndARepeatJoinsIt() async throws {
         let composed = try await compose()
         try await composed.host.startRuntime()
@@ -2315,26 +2319,58 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         defer { stream.cancel() }
         _ = try await stream.next(deadline())
 
-        composed.harness.hold.arm(onQueueLabeled: "user-initiated-qos") { name, _ in name == "dns-probe" }
+        // The only puller of the stream from here on. It ends when the stream is cancelled; a settlement it never read shows as missing.
+        let settled = LockedSlot<[ControlOperationID: ControlOperationOutcome]>()
+        settled.set([:])
+        let readUntil = deadline()
+        let reader = Task {
+            do {
+                for _ in 0..<256 {
+                    if case .operationFinished(let done) = try await stream.next(readUntil) {
+                        var seen = settled.value ?? [:]
+                        seen[done.operationID] = done.outcome
+                        settled.set(seen)
+                    }
+                }
+            } catch {
+                // The test cancels the stream once it has read what it needs.
+            }
+        }
+        func outcome(_ operation: ControlOperationID) -> ControlOperationOutcome? { settled.value?[operation] }
+        let hold = composed.harness.hold
+        defer { hold.release() }
+
+        hold.arm { name, _ in name == "dns-probe" }
         let first = try accepted(try await submit(composed, .testDNS))
-        await composed.harness.hold.waitUntilReached()
-        XCTAssertFalse(composed.harness.hold.reachedOnMainThread, "the probe runs off the main actor")
+        await hold.waitUntilReached()
+        XCTAssertFalse(hold.reachedOnMainThread, "the probe runs off the main actor")
         let second = try accepted(try await submit(composed, .testDNS))
 
         let stop = try accepted(try await submit(composed, .stop(.dns)))
-        let stopOutcome = try await finished(stop, on: stream)
-        XCTAssertEqual(completed(stopOutcome), .stop, "the DNS Stop completes while the probe is held: \(stopOutcome)")
+        let stopSettled = try await eventually { outcome(stop) != nil }
+        XCTAssertTrue(stopSettled, "the DNS Stop settles while the probe is held")
+        XCTAssertNil(outcome(first), "the probe was still held when the Stop settled")
+        XCTAssertEqual(outcome(stop).flatMap { completed($0) }, .stop, "the DNS Stop completed: \(String(describing: outcome(stop)))")
         XCTAssertFalse(composed.harness.machine.dnsRelayRunning, "its teardown restored system DNS meanwhile")
+
         let quit = try accepted(try await submit(composed, .quit(total: try ControlWireBudget(30_000), flush: .none)))
-        let quitOutcome = try await finished(quit, on: stream)
-        XCTAssertEqual(completed(quitOutcome), .quit, "the quit completes while the probe is held: \(quitOutcome)")
+        let quitSettled = try await eventually { outcome(quit) != nil }
+        XCTAssertTrue(quitSettled, "the quit settles while the probe is held")
+        XCTAssertNil(outcome(first), "the probe was still held when the quit settled")
+        XCTAssertEqual(outcome(quit).flatMap { completed($0) }, .quit, "the quit completed: \(String(describing: outcome(quit)))")
         let asked = composed.harness.dnsProbes.values.count
 
-        composed.harness.hold.release()
-        let outcomes = try await finishedAll([first, second], on: stream)
+        hold.release()
+        let probesSettled = try await eventually { outcome(first) != nil && outcome(second) != nil }
+        stream.cancel()
+        await reader.value
+        XCTAssertTrue(probesSettled, "each Test DNS settles once the probe answers")
         let reading = ControlCommandResult.dnsLiveness(ControlDNSLivenessProbe(port: try ControlPort(53), answered: false))
         for operation in [first, second] {
-            guard case .completed(let completion)? = outcomes[operation] else { return XCTFail("each Test DNS completes") }
+            guard case .completed(let completion)? = outcome(operation) else {
+                XCTFail("each Test DNS completes: \(String(describing: outcome(operation)))")
+                continue
+            }
             XCTAssertEqual(completion.result, reading)
         }
         XCTAssertEqual(composed.harness.dnsProbes.values.count, asked, "the repeat joined the held probe and asked no port of its own")
