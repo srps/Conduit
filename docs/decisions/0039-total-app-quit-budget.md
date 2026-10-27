@@ -1,7 +1,7 @@
 # 0039: Bound the in-process app's complete Quit wait to ten seconds
 
 - Date: 2026-10-27
-- Decision: proposed
+- Decision: accepted (owner, 2026-10-27, #186: selected “10 seconds total (Recommended)”)
 - Implementation: planned
 - Validation: pending
 - Supersedes: none
@@ -14,15 +14,15 @@ success, without selecting its shipping duration. The legacy app has a five-seco
 platform-drain allowance followed by other work; that is not a five-second total.
 The new client already accepts an explicit total for the entire caller wait.
 
-The latest resource run completed the actual client Quit routine in about one
-second with fake effects and the widest final save. Its 30-second caller budget
-was an experimental value, not a production selection. That run found a separate
-diagnostic guard race and is not complete profile acceptance. Real helper and
-machine teardown timing remains unvalidated.
+The corrected-source resource run completed all 31 trials and the actual client
+Quit routine in about one second with fake effects and the widest final save.
+Its 30-second caller budget was experimental. The owner subsequently selected
+ten seconds total in #186. Real helper and machine teardown timing remains
+unvalidated.
 
 ## Decision
 
-Proposed: use ten seconds total for the in-process app's Quit, counted once when
+Use ten seconds total for the in-process app's Quit, counted once when
 it begins. Fence immediately, then spend only that remaining time on final frozen
 saves, operation observation and cleanup confirmation. Return earlier when the
 Quit settles. No app-owned final work starts under a fresh budget afterwards.
@@ -67,9 +67,10 @@ wait; machine cleanup validation remains separate from fake timing.
 The existing [client Quit routine](../../Sources/ConduitShared/PrivateConfiguration/RuntimeClientQuit.swift)
 and [host flush window](../../Sources/ConduitRuntime/RuntimeQuitFlush.swift) accept
 one explicit total and distinguish deadline outcome from physical quiescence.
-Shipping composition has not selected ten seconds yet. This record is a proposal.
+Shipping composition must now consume the selected ten-second total; the
+existing experimental thirty-second probe is not evidence for that composition.
 
 ## Open questions
 
-Owner selection of ten versus thirty seconds before the affected production
-composition is implemented; complete corrected-source resource and native checks.
+Implement the selected total in the production app composition and verify the
+actual client and AppKit path. Native and real-machine checks remain due.
