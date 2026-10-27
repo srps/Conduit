@@ -480,11 +480,7 @@ package final class RuntimeHost {
         // `onConfigChange` is not wired. The orchestrator fires it only from `applyConfigChange`, which here runs only the reconciler's
         // pushes of inputs this host already adopted, and its delivery lands later. A writer there would move `config` outside
         // `adoptHostView`, which keeps the accepted view, the flap window and `configGeneration` together.
-        orchestrator.onEvent = { [weak self, deliveries] event in
-            deliveries.deliver {
-                self?.handle(orchestratorEvent: event)
-            }
-        }
+        // `onEvent` is not wired either: the kernel records each ladder outcome as a typed `proxy_recovery.*` event and logs it.
         self.networkPathObserver.setOnChange { [weak self, deliveries] change in
             deliveries.deliver {
                 await self?.handleNetworkChange(change)
@@ -917,16 +913,6 @@ package final class RuntimeHost {
                 detail: String(decoding: data, as: UTF8.self)))
         } catch {
             logger.log(.warning, "Failed to encode writer statistics: \(error.localizedDescription)", category: .general)
-        }
-    }
-
-    private func handle(orchestratorEvent event: ProxyOrchestratorEvent) {
-        switch event {
-        case .proxyRecovered(let activeUpstream):
-            logger.log(.notice, "Daemon observed proxy recovery via \(activeUpstream ?? "unknown upstream").", category: .network)
-        case .proxyRecoveryFailed(let summary, let authenticationLikely):
-            let suffix = authenticationLikely ? " authenticationLikely=true" : ""
-            logger.log(.warning, "Daemon observed proxy recovery failure: \(summary)\(suffix)", category: .network)
         }
     }
 

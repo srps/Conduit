@@ -20,12 +20,16 @@ TYPED = 'Sources/RuntimeEvents/LifecycleEvents.swift'
 CONFIG_WORKFLOW = 'Sources/RuntimeEvents/ConfigurationWorkflowEvents.swift'
 RUNTIME_SERVICE = 'Sources/RuntimeEvents/RuntimeServiceEvents.swift'
 WIRE_RUNTIME_SERVICE = 'Sources/ConduitShared/ControlRuntimeServiceEvent.swift'
+PROXY_RECOVERY = 'Sources/RuntimeEvents/ProxyRecoveryEvents.swift'
+WIRE_PROXY_RECOVERY = 'Sources/ConduitShared/ControlProxyRecoveryEvent.swift'
+RECOVERY_SIM = 'Sources/pm-sim/RecoveryLadderScenarios.swift'
 PAYLOAD = 'Sources/RuntimeEvents/RuntimeEventPayload.swift'
 WIRE = 'Sources/ConduitShared/ControlRuntimeEventTyped.swift'
 KERNEL = 'Sources/ProxyKernel/Models/RuntimeEvent.swift'
 UPDATES = 'Sources/PlatformMac/AppUpdates.swift'
 EVENTS = 'docs/events.md'
-MUTATED = (PRODUCT, PM_SIM, LOCATION, MENU_BAR, APP, TYPED, CONFIG_WORKFLOW, RUNTIME_SERVICE, WIRE_RUNTIME_SERVICE, PAYLOAD, WIRE, KERNEL, UPDATES, EVENTS)  # restored after each case
+MUTATED = (PRODUCT, PM_SIM, LOCATION, MENU_BAR, APP, TYPED, CONFIG_WORKFLOW, RUNTIME_SERVICE, WIRE_RUNTIME_SERVICE,
+           PROXY_RECOVERY, WIRE_PROXY_RECOVERY, RECOVERY_SIM, PAYLOAD, WIRE, KERNEL, UPDATES, EVENTS)  # restored after each case
 
 
 def append(path, text):
@@ -77,6 +81,31 @@ rejected = [
     ('runtime service namespace gate removed',
      replace(PAYLOAD, 'name.hasPrefix(runtimeServicePrefix)', 'false'),
      'requiresTypedPayload no longer closes the runtime_service namespace'),
+    ('proxy recovery literal bypasses typed producer',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .health, event: "proxy_recovery.failed", detail: summary)'),
+     'is a typed name'),
+    ('future proxy recovery name bypasses closed namespace',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .health, event: "proxy_recovery.partial")'),
+     'in the closed proxy_recovery namespace'),
+    ('proxy recovery name built at run time',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .health, event: "proxy_recovery" + "." + outcome)'),
+     'in the closed proxy_recovery namespace'),
+    ('pm-sim matches a proxy recovery name as a literal',
+     append(RECOVERY_SIM, 'let probe = events.filter { $0.event == "proxy_recovery.recovered" }'),
+     '`proxy_recovery.recovered` is a typed name'),
+    ('proxy recovery domain inventory drifts',
+     replace(PROXY_RECOVERY, 'case failed = "proxy_recovery.failed"', 'case failed = "proxy_recovery.renamed"'),
+     'ProxyRecoveryEventName lists'),
+    ('proxy recovery inventory widened without a wire case',
+     replace(PROXY_RECOVERY, 'case failed = "proxy_recovery.failed"',
+             'case failed = "proxy_recovery.failed"\n    case partial = "proxy_recovery.partial"'),
+     'ProxyRecoveryEventName lists'),
+    ('proxy recovery wire inventory drifts',
+     replace(WIRE_PROXY_RECOVERY, 'case recovered = "proxy_recovery.recovered"', 'case recovered = "proxy_recovery.renamed"'),
+     'wire spells'),
+    ('proxy recovery namespace gate removed',
+     replace(PAYLOAD, 'name.hasPrefix(proxyRecoveryPrefix)', 'false'),
+     'requiresTypedPayload no longer closes the proxy_recovery namespace'),
 
     ('catalogue entry removed', drop_catalogue_row('auth.upstream_not_trusted'),
      '`auth.upstream_not_trusted` is emitted but not catalogued'),
@@ -246,6 +275,8 @@ accepted = [
     ('human text split across literals', append(PRODUCT, 'let note = "Proxy started. " + "Retry in 5s."')),
     ('lifecycle kind rawValue', append(PRODUCT, 'enum Probe: String { case lifecycle = "lifecycle" }')),
     ('lifecycle words split across literals as human text', append(PRODUCT, 'let note = "lifecycle " + "is idle"')),
+    ('legacy recovery step name keeps its envelope',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .health, event: "recovery.exhausted", detail: "x")')),
 ]
 
 

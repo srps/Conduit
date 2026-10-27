@@ -3,6 +3,7 @@ import Foundation
 import NIOConcurrencyHelpers
 import NIOPosix
 import ProxyKernel
+import RuntimeEvents
 
 /// #147 through a running orchestrator. The only upstream refuses every
 /// connect, so each health check fails as unreachable. The ladder must not
@@ -45,6 +46,14 @@ enum RecoveryLadderScenarios {
         let deadline = ContinuousClock.now + .milliseconds(Int64(timeout * 1000))
         while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
         return condition()
+    }
+
+    /// The typed ladder outcomes the kernel recorded, matched by value: `proxy_recovery.*` is a closed typed namespace.
+    private static func recoveryOutcomes(_ log: RuntimeEventLog) -> [ProxyRecoveryEvent] {
+        log.events.compactMap { event in
+            guard case .proxyRecovery(let outcome)? = event.typed else { return nil }
+            return outcome
+        }
     }
 
     @MainActor
@@ -91,6 +100,7 @@ enum RecoveryLadderScenarios {
         heldProbe.release()
         let cleared = try await until(timeout: 5) { !events("recovery.cooldown_cleared").isEmpty }
         let clearedDetail = events("recovery.cooldown_cleared").first?.detail
+        let outcomes = recoveryOutcomes(orchestrator.eventLog)
 
         return ScenarioResult(name: "recovery-unreachable-ladder", clientCount: 0, clientsOpened: 0,
             clientsWithFirstByte: 0, clientsClosedEarly: 0, totalBytes: 0,
@@ -104,6 +114,7 @@ enum RecoveryLadderScenarios {
                 .init("the cooldown still follows exhaustion", !events("recovery.cooldown_started").isEmpty),
                 .init("a VPN report superseding the post-exhaustion probe clears the cooldown",
                       probeHeld && cleared && clearedDetail == "reason=superseded"),
+                .init("the superseded ladder records no typed recovery outcome", outcomes == []),
             ], notes: ["refusing loopback upstream on port \(deadPort); injected reachable probe; no credentials, helper or settings"])
     }
 
@@ -158,6 +169,7 @@ enum RecoveryLadderScenarios {
         disconnectProbe.release()
         await disconnect.value
         let status = orchestrator.snapshot.runtimeStatus
+        let outcomes = recoveryOutcomes(orchestrator.eventLog)
 
         return ScenarioResult(name: "recovery-superseded-by-disconnect", clientCount: 0, clientsOpened: 0,
             clientsWithFirstByte: 0, clientsClosedEarly: 0, totalBytes: 0,
@@ -168,6 +180,7 @@ enum RecoveryLadderScenarios {
                       disconnectHeld && stoodDown && ladderLeft == .degraded),
                 .init("the disconnect routes DIRECT", orchestrator.snapshot.directModeCause == .vpnDisconnected),
                 .init("the disconnect's verdict owns the status", status.state == .running && status.activeUpstream == "DIRECT"),
+                .init("neither the stood-down ladder nor the disconnect records a typed recovery outcome", outcomes == []),
             ], notes: ["refusing loopback upstream on port \(deadPort); injected probe outcomes, the ladder's and the disconnect's probes held"])
     }
 }

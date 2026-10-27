@@ -14,6 +14,7 @@ package enum ControlTypedRuntimeEvent: Codable, Sendable, Equatable {
     case lifecycle(ControlLifecycleEvent)
     case configWorkflow(ControlConfigWorkflowEvent)
     case runtimeService(ControlRuntimeServiceEvent)
+    case proxyRecovery(ControlProxyRecoveryEvent)
 
     /// The `kind` the outer record must carry for this family.
     package var kind: String {
@@ -21,6 +22,7 @@ package enum ControlTypedRuntimeEvent: Codable, Sendable, Equatable {
         case .lifecycle: "lifecycle"
         case .configWorkflow: "config"
         case .runtimeService: "health"
+        case .proxyRecovery: "health"
         }
     }
 
@@ -30,6 +32,7 @@ package enum ControlTypedRuntimeEvent: Codable, Sendable, Equatable {
         case .lifecycle(let event): event.name
         case .configWorkflow(let event): event.name
         case .runtimeService(let event): event.name
+        case .proxyRecovery(let event): event.name
         }
     }
 
@@ -39,11 +42,12 @@ package enum ControlTypedRuntimeEvent: Codable, Sendable, Equatable {
         case .lifecycle(let event): event.detail
         case .configWorkflow(let event): event.detail
         case .runtimeService(let event): event.detail
+        case .proxyRecovery(let event): event.detail
         }
     }
 
     private enum CodingKeys: String, CodingKey {
-        case family, lifecycle, configWorkflow, runtimeService
+        case family, lifecycle, configWorkflow, runtimeService, proxyRecovery
     }
 
     /// Shared by the codec and record classifier so a new family requires both to handle it.
@@ -51,6 +55,7 @@ package enum ControlTypedRuntimeEvent: Codable, Sendable, Equatable {
         case lifecycle
         case configWorkflow = "config_workflow"
         case runtimeService = "runtime_service"
+        case proxyRecovery = "proxy_recovery"
     }
 
     package init(from decoder: any Decoder) throws {
@@ -63,6 +68,8 @@ package enum ControlTypedRuntimeEvent: Codable, Sendable, Equatable {
             self = .configWorkflow(try container.decode(ControlConfigWorkflowEvent.self, forKey: .configWorkflow))
         case .runtimeService?:
             self = .runtimeService(try container.decode(ControlRuntimeServiceEvent.self, forKey: .runtimeService))
+        case .proxyRecovery?:
+            self = .proxyRecovery(try container.decode(ControlProxyRecoveryEvent.self, forKey: .proxyRecovery))
         case nil:
             throw DecodingError.dataCorruptedError(
                 forKey: .family, in: container, debugDescription: "an unknown typed event family"
@@ -82,6 +89,9 @@ package enum ControlTypedRuntimeEvent: Codable, Sendable, Equatable {
         case .runtimeService(let event):
             try container.encode(Family.runtimeService.rawValue, forKey: .family)
             try container.encode(event, forKey: .runtimeService)
+        case .proxyRecovery(let event):
+            try container.encode(Family.proxyRecovery.rawValue, forKey: .family)
+            try container.encode(event, forKey: .proxyRecovery)
         }
     }
 }

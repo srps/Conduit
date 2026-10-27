@@ -62,6 +62,15 @@ package enum ControlRuntimeEventRecord: Codable, Sendable, Equatable {
         }
     }
 
+    /// Only the type of a `proxy_recovery` value. Its other fields are not read here.
+    private struct ProxyRecoveryProbe: Decodable {
+        let proxyRecovery: TypeProbe
+
+        struct TypeProbe: Decodable {
+            let type: String
+        }
+    }
+
     package init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         // The outer fields are required for both branches, so an unknown record still has
@@ -105,10 +114,14 @@ package enum ControlRuntimeEventRecord: Codable, Sendable, Equatable {
         case .runtimeService?:
             let type = try container.decode(RuntimeServiceProbe.self, forKey: .typed).runtimeService.type
             typedIsKnown = ControlRuntimeServiceEvent.knownWireTypes.contains(type)
+        case .proxyRecovery?:
+            let type = try container.decode(ProxyRecoveryProbe.self, forKey: .typed).proxyRecovery.type
+            typedIsKnown = ControlProxyRecoveryEvent.knownWireTypes.contains(type)
         }
         return !typedIsKnown && !ControlLifecycleEvent.knownEventNames.contains(event)
             && !ControlConfigWorkflowEvent.knownEventNames.contains(event)
             && !ControlRuntimeServiceEvent.knownEventNames.contains(event)
+            && !ControlProxyRecoveryEvent.knownEventNames.contains(event)
     }
 
     package func encode(to encoder: any Encoder) throws {

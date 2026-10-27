@@ -70,7 +70,7 @@ stops the recognised forms from reaching it unreviewed.
 
 Typed families (decisions 0013/0014/0031/0032). TYPED_FAMILIES pins each domain
 and wire name inventory and its closed producer namespace: lifecycle.,
-config.workflow. and runtime_service. Literals outside their domain directory
+config.workflow., runtime_service. and proxy_recovery. Literals outside their domain directory
 or wire spelling are rejected; there is no per-consumer exception list. The
 kernel's legacy envelope must refuse each whole namespace through
 requiresTypedPayload. Types stop untyped producers; this gate detects edits
@@ -160,6 +160,11 @@ RUNTIME_SERVICE_TYPED_NAMES = {'runtime_service.fault', 'runtime_service.snapsho
 RUNTIME_SERVICE_NAMESPACE = 'runtime_service.'
 RUNTIME_SERVICE_INVENTORY = 'Sources/RuntimeEvents/RuntimeServiceEvents.swift'
 WIRE_RUNTIME_SERVICE_FILE = 'Sources/ConduitShared/ControlRuntimeServiceEvent.swift'
+# The recovery ladder's outcomes. Its own prefix: the legacy `recovery.*` step names stay untyped.
+PROXY_RECOVERY_TYPED_NAMES = {'proxy_recovery.recovered', 'proxy_recovery.failed'}
+PROXY_RECOVERY_NAMESPACE = 'proxy_recovery.'
+PROXY_RECOVERY_INVENTORY = 'Sources/RuntimeEvents/ProxyRecoveryEvents.swift'
+WIRE_PROXY_RECOVERY_FILE = 'Sources/ConduitShared/ControlProxyRecoveryEvent.swift'
 # Names, namespace, domain enum/file, wire file, payload prefix and authorization.
 TYPED_FAMILIES = (
     (TYPED_NAMES, LIFECYCLE_NAMESPACE, 'LifecycleEventName', TYPED_INVENTORY,
@@ -168,6 +173,8 @@ TYPED_FAMILIES = (
      WIRE_CONFIG_WORKFLOW_FILE, 'configWorkflowPrefix', 'decisions 0031 and 0032'),
     (RUNTIME_SERVICE_TYPED_NAMES, RUNTIME_SERVICE_NAMESPACE, 'RuntimeServiceEventName', RUNTIME_SERVICE_INVENTORY,
      WIRE_RUNTIME_SERVICE_FILE, 'runtimeServicePrefix', 'decisions 0013 and 0014'),
+    (PROXY_RECOVERY_TYPED_NAMES, PROXY_RECOVERY_NAMESPACE, 'ProxyRecoveryEventName', PROXY_RECOVERY_INVENTORY,
+     WIRE_PROXY_RECOVERY_FILE, 'proxyRecoveryPrefix', 'decision 0013'),
 )
 
 # Names only pm-sim uses: synthetic events it builds to test sinks and
