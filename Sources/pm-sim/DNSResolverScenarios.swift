@@ -386,7 +386,7 @@ private final class SpoofingDNSServer: ChannelInboundHandler, @unchecked Sendabl
 
         let channel = context.channel
         let remote = envelope.remoteAddress
-        func send(_ bytes: [UInt8]) {
+        @Sendable func send(_ bytes: [UInt8]) {
             var out = channel.allocator.buffer(capacity: bytes.count)
             out.writeBytes(bytes)
             channel.writeAndFlush(AddressedEnvelope(remoteAddress: remote, data: out), promise: nil)
