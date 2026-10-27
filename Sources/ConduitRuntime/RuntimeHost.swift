@@ -153,6 +153,8 @@ package final class RuntimeHost {
     let networkLocationObserver: any NetworkLocationObserving
     /// The system wake source, from `effects`: observed from open until the quit (`RuntimeHostWake.swift`).
     let systemWakeObserver: any SystemWakeObserving
+    /// Bounds the work a burst of wakes can start: one running and one pending pass per repair.
+    let wakeDeliveries = SystemWakeDeliveries()
     private let networkLocationLimits: NetworkLocationLimits
     /// At most one pending retry for a drift repair withheld by the contention budget.
     private var proxyRepairRetry: Task<Void, Never>?

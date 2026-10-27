@@ -2347,6 +2347,44 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(kernelWakes(host), 2)
     }
 
+    /// A burst of wakes is bounded before any task exists: one tracked delivery per repair, one coalesced pass each. The repairs are
+    /// independent: a DNS pass held on the machine does not hold the kernel's wake path, and a burst while it is held adds no DNS delivery.
+    /// A quit admitted in the same turn as a burst drops every pass that runs after it, the pending ones included.
+    func testABurstOfWakesIsBoundedPerRepairIndependentAndDroppedByTheQuit() async throws {
+        let host = try await launch(platform: PlatformIntegrationConfig(manageSystemDNS: true), dnsForwarderEnabled: true)
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.deliveries.drain()
+        XCTAssertEqual(host.deliveries.inFlightCount, 0)
+
+        // One synchronous turn: no delivery has run yet.
+        for _ in 0..<100 { harness.wake.emitWake() }
+        XCTAssertEqual(host.deliveries.inFlightCount, 3, "one tracked delivery per repair, not one per wake")
+        await host.deliveries.drain()
+        XCTAssertEqual(kernelWakes(host), 1, "the burst ran the kernel's wake path once")
+
+        // The DNS pass is held on its machine listing; the kernel's pass goes on without it.
+        harness.listings.arm()
+        harness.wake.emitWake()
+        for _ in 0..<5_000 where !harness.listings.isHoldingOne || kernelWakes(host) < 2 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertTrue(harness.listings.isHoldingOne, "the DNS pass is held")
+        XCTAssertEqual(kernelWakes(host), 2, "the kernel's wake path ran while the DNS pass was held")
+
+        // A burst while the DNS pass is held starts at most one delivery for each of the other two repairs and none for DNS, and the
+        // quit admitted in the same turn drops whatever runs after it.
+        let before = host.deliveries.inFlightCount
+        for _ in 0..<100 { harness.wake.emitWake() }
+        XCTAssertLessThanOrEqual(host.deliveries.inFlightCount - before, 2, "no delivery for the held DNS repair, at most one for each other")
+        let quit = host.admitQuit(until: nil, flushing: .none)
+        harness.listings.release()
+        await quit.value
+        await host.deliveries.drain()
+        XCTAssertEqual(host.deliveries.inFlightCount, 0)
+        XCTAssertEqual(kernelWakes(host), 2, "no kernel pass runs after the quit's admission, running or pending")
+    }
+
     /// #98, as in `AppState`: the runtime start reads the saved password
     /// once, and the handshakes after it are answered from that read.
     func testRuntimeStartReadsASavedPasswordOnce() async throws {
