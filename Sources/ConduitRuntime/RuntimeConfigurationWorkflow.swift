@@ -67,7 +67,7 @@ package enum RuntimeReloadApply: Equatable, Sendable {
     /// The current observation may not apply for this reason; the applied view stays.
     case held(ConfigurationWorkflowHeldInput, ConfigurationWorkflowHoldReason)
     /// The host view adopted the observation and its one reconcile pass was submitted and drained: an attempt, not proof of each
-    /// effect. `currentAtEnd` is whether the reload's admission was still the latest, with no Stop fence, once the pass had drained.
+    /// effect. `currentAtEnd` says whether the accepted view and intent still stood, with no Stop fence, after the pass drained.
     case reconcileAttempted(currentAtEnd: Bool)
 }
 

@@ -113,6 +113,6 @@ package enum ControlReloadApply: Sendable, Equatable {
     case held(ControlConfigWorkflowHeldInput, ControlConfigWorkflowHoldReason)
     /// The host view adopted the observation, and one reconcile pass under this reload's admission was submitted and drained. That is
     /// an attempt, not proof that each effect landed: per-surface results stay in the snapshot and the reapply events. `currentAtEnd` is
-    /// false when a newer intent or a Stop fence arrived before the drain ended, so the pass may have stopped early.
+    /// false when a newer accepted view, intent or Stop fence arrived before the drain ended, so the pass may have stopped early.
     case reconcileAttempted(currentAtEnd: Bool)
 }

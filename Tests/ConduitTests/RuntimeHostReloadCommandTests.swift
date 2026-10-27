@@ -46,7 +46,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
         if let stateFiles { harness.stateFiles = stateFiles }
         let host = try await harness.makeHost()
         let composition = RuntimeControlComposition(
-            host: host, limits: try RuntimeServiceFixtures.limits(), timing: .system, scheduling: TaskOwnerScheduling()
+            host: host, limits: try RuntimeServiceFixtures.hostLimits(), timing: .system, scheduling: TaskOwnerScheduling()
         )
         let client = try makeFramedRuntimeClient(
             transport: composition.transport, limits: ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
@@ -353,10 +353,53 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
         XCTAssertEqual(receipt.modules, [ControlModuleReceipt(module: .dns, result: .started)])
     }
 
-    /// A running host whose reload adopts a bypass edit, its pass held on its first platform-queue machine call while `intervening` is
-    /// admitted; both settlements after the release.
+    /// An eligible reload C that adopts a newer accepted view while B's pass is held stops B before its next step (decision 0032): B
+    /// answers not current, and B's flag action, the environment cleared, never runs. C runs from the baseline the machine holds and
+    /// answers current; no intent moved.
+    func testANewerEligibleReloadDuringTheHeldPassStopsItsUnstartedFlagAction() async throws {
+        let (reload, newer, composed) = try await duringHeldPass(
+            platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: false, manageSystemDNS: true),
+            { composed in
+                try PlatformConfigPersistence.save(self.proxyAndDNS, in: composed.environment)
+                return .reload
+            },
+            heldUntil: { $0.host.platformConfig.manageEnvironmentVariables }
+        )
+        XCTAssertEqual(reloaded(reload), .adopted(.reconcileAttempted(currentAtEnd: false)), "a newer accepted view replaced B")
+        XCTAssertEqual(reloaded(newer), .adopted(.reconcileAttempted(currentAtEnd: true)))
+        XCTAssertEqual(environmentClears(composed.host), 0, "B's unstarted clear never ran after C was adopted")
+        XCTAssertTrue(composed.host.platformConfig.manageEnvironmentVariables)
+        XCTAssertTrue(composed.host.completedPlatformBaseline.manageEnvironmentVariables, "the machine's baseline ends at C")
+    }
+
+    /// An ineligible observation during B's pass replaces no accepted view: a start-blocking C is adopted by the store for editing and
+    /// held, so B stays current and its flag action runs.
+    func testAHeldReloadDuringTheHeldPassLeavesItCurrent() async throws {
+        let (reload, held, composed) = try await duringHeldPass(
+            platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: false, manageSystemDNS: true),
+            { composed in
+                _ = try self.editRuntime(composed) { $0.maxConnections = 0 }
+                return .reload
+            },
+            heldUntil: { $0.host.workflow.editorCapture().values.runtime.maxConnections == 0 }
+        )
+        XCTAssertEqual(reloaded(held), .adopted(.held(.runtime, .startBlocking)))
+        XCTAssertEqual(reloaded(reload), .adopted(.reconcileAttempted(currentAtEnd: true)), "a held draft does not stop prior eligible work")
+        XCTAssertEqual(environmentClears(composed.host), 1, "B's flag action ran")
+        XCTAssertFalse(composed.host.completedPlatformBaseline.manageEnvironmentVariables)
+    }
+
+    /// The reconciler's recorded decisions to clear the environment, each made before its action.
+    private func environmentClears(_ host: RuntimeHost) -> Int {
+        host.orchestrator.eventLog.events.filter { $0.event == "config.platform_integration" && $0.detail == "clearEnvironment" }.count
+    }
+
+    /// A running host whose reload B adopts a bypass edit, with `platform` saved beside it when given, its pass held on its first
+    /// platform-queue machine call while `intervening` is admitted. The hold is released once `heldUntil` holds; both settlements follow.
     private func duringHeldPass(
-        _ intervening: (Composed) async throws -> ControlRuntimeCommand
+        platform: PlatformIntegrationConfig? = nil,
+        _ intervening: (Composed) async throws -> ControlRuntimeCommand,
+        heldUntil: @escaping @MainActor (Composed) -> Bool = { _ in true }
     ) async throws -> (reload: ControlOperationOutcome, intervening: ControlOperationOutcome, composed: Composed) {
         let composed = try await compose()
         try await composed.host.startRuntime()
@@ -369,14 +412,19 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
             $0.routing.noProxyHosts.append("reload-pass.example.test")
             hosts = $0.routing.noProxyHosts
         }
+        if let platform { try PlatformConfigPersistence.save(platform, in: composed.environment) }
 
         composed.harness.hold.arm(onQueueLabeled: ".platform-work") { _, _ in true }
         defer { composed.harness.hold.release() }
         let reload = try accepted(try await submit(composed, .reload))
         await composed.harness.hold.waitUntilReached()
-        let adopted = try await eventually { composed.host.config.routing.noProxyHosts == hosts }
+        let adopted = try await eventually {
+            composed.host.config.routing.noProxyHosts == hosts && (platform.map { composed.host.platformConfig == $0 } ?? true)
+        }
         XCTAssertTrue(adopted, "the host view took the edit and submitted its pass")
         let other = try accepted(try await submit(composed, try await intervening(composed)))
+        let ready = try await eventually { heldUntil(composed) }
+        XCTAssertTrue(ready, "the intervening operation reached its point before B's pass resumes")
         composed.harness.hold.release()
 
         var outcomes: [ControlOperationID: ControlOperationOutcome] = [:]

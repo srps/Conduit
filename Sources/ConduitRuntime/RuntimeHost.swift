@@ -791,17 +791,22 @@ package final class RuntimeHost {
             adoptHostView(runtime: runtime, platform: platform)
         }
         logNonBlockingConfigProblems()
+        // The pass acts, and the answer calls it current, only while this reload's observation still stands (decision 0032): no newer
+        // Start or Stop, no fence, and no later adoption of another accepted view, by a reload or an apply, which moves `configGeneration`.
+        // Weak: the reconciler keeps the last admission for its retry.
+        let view = configGeneration
+        let stands: @MainActor () -> Bool = { [weak self, workflow] in
+            guard let self else { return false }
+            return workflow.isLatest(captured) && !workflow.stopFenced && self.configGeneration == view
+        }
         // Queued and then awaited: a caller that reloads and then stops must
         // see the machine the reload left, and the control path has no
         // editor to hand back to while the pass runs. What the pass does is
         // the `RuntimeReconcilerHost` conformance below.
-        // The pass acts only while this reload's observation still stands: no newer Start or Stop, and no fence (decision 0032).
-        reconciler.reconcile(config: config, platformConfig: platformConfig, isCurrent: { [workflow] in
-            workflow.isLatest(captured) && !workflow.stopFenced
-        })
+        reconciler.reconcile(config: config, platformConfig: platformConfig, isCurrent: stands)
         await reconciler.drain()
-        // Read once after the drain: a newer intent or a fence that arrived during the pass may have stopped it early.
-        let currentAtEnd = workflow.isLatest(captured) && !workflow.stopFenced
+        // Read once after the drain, with the same predicate: anything that replaced this observation during the pass may have stopped it.
+        let currentAtEnd = stands()
         logger.log(.notice, "Configuration reloaded.", category: .general)
         // Submitted, not awaited, as in `startRuntime`.
         writeSnapshotFile(snapshot: orchestrator.snapshot)

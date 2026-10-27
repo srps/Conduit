@@ -33,7 +33,7 @@ final class RuntimeHostDNSHealthTests: XCTestCase {
         self.harness = harness
         let host = try await harness.makeHost()
         let composition = RuntimeControlComposition(
-            host: host, limits: try RuntimeServiceFixtures.limits(), timing: .system, scheduling: TaskOwnerScheduling()
+            host: host, limits: try RuntimeServiceFixtures.hostLimits(), timing: .system, scheduling: TaskOwnerScheduling()
         )
         let client = try makeFramedRuntimeClient(
             transport: composition.transport, limits: ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
