@@ -23,6 +23,11 @@ package enum PrivateConfigurationDecoder {
         try decode(body, as: .update, root: PrivateConfigurationSchema.request, WireRequest.self).request
     }
 
+    /// Decodes one preferences update body.
+    package static func decodePreferences(_ body: PrivateConfigurationFrameBody) throws -> PrivatePreferencesRequest {
+        try decode(body, as: .preferences, root: PrivateConfigurationSchema.preferencesRequest, WirePreferencesRequest.self).request
+    }
+
     /// Decodes one read body.
     package static func decodeRead(_ body: PrivateConfigurationFrameBody) throws -> PrivateEditorReadRequest {
         try decode(body, as: .read, root: PrivateConfigurationSchema.readRequest, WireReadRequest.self).request
@@ -158,6 +163,26 @@ private struct WireRequest: Decodable {
             modules: try c.decode(WireModuleIntents.self, forKey: .modules).value,
             runtime: try c.decode(WireRuntime.self, forKey: .runtime).value,
             platform: try c.decode(WirePlatform.self, forKey: .platform).value
+        )
+    }
+}
+
+private struct WirePreferencesRequest: Decodable {
+    let request: PrivatePreferencesRequest
+
+    private enum Keys: String, CodingKey {
+        case requestID, incarnation, budgetMilliseconds, preferencesBaseline, preferences
+    }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.strictContainer(Keys.self)
+        // The initializer refuses a baseline of another file.
+        request = try PrivatePreferencesRequest(
+            requestID: ControlRequestID(rawValue: try WireValue.uuid(c.decode(String.self, forKey: .requestID))),
+            incarnation: ControlHostIncarnation(rawValue: try WireValue.uuid(c.decode(String.self, forKey: .incarnation))),
+            budget: try WireValue.budget(c.decode(Int.self, forKey: .budgetMilliseconds)),
+            preferencesBaseline: try c.decode(WireBaseline.self, forKey: .preferencesBaseline).value,
+            preferences: try c.decode(WirePreferences.self, forKey: .preferences).value
         )
     }
 }
@@ -381,6 +406,8 @@ private struct WireModuleIntents: Decodable {
             dns: try c.decode(WireModuleIntent.self, forKey: .dns).value,
             tunnels: try c.decode(WireModuleIntent.self, forKey: .tunnels).value
         )
+        // A conditional companion outside DNS's slot, or without the proxy Start it accompanies, is refused, never reinterpreted.
+        guard value.isWellFormed else { throw PrivateConfigurationWireError.invalidValue }
     }
 }
 
@@ -394,7 +421,7 @@ private struct WireModuleIntent: Decodable {
     init(from decoder: any Decoder) throws {
         let c = try decoder.strictContainer(Keys.self)
         // `lifecycleRevision` is nullable, not optional: an absent key is refused. A save-only intent carries null, and
-        // the other two carry a revision. Any other pairing is refused, never defaulted.
+        // the others carry a revision. Any other pairing is refused, never defaulted.
         let action = try WireValue.enumValue(c.decode(String.self, forKey: .action), PrivateModuleIntentAction.self)
         let revision = try c.decode(Int?.self, forKey: .lifecycleRevision)
         switch (action, revision) {
@@ -404,7 +431,9 @@ private struct WireModuleIntent: Decodable {
             value = .applyWhileRunning(ifLifecycleRevision: try WireValue.ordinal(raw))
         case (.start, let raw?):
             value = .start(ifLifecycleRevision: try WireValue.ordinal(raw))
-        case (.saveOnly, .some), (.applyWhileRunning, nil), (.start, nil):
+        case (.conditionalStart, let raw?):
+            value = .conditionalStart(ifLifecycleRevision: try WireValue.ordinal(raw))
+        case (.saveOnly, .some), (.applyWhileRunning, nil), (.start, nil), (.conditionalStart, nil):
             throw PrivateConfigurationWireError.invalidValue
         }
     }

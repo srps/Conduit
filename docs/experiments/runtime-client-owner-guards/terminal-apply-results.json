@@ -1,0 +1,78 @@
+{
+  "head": "cbccb4fc22329f97446e8b6cf9a6f2df56baf30c",
+  "source_sha256": {
+    "Sources/ConduitRuntime/RuntimeQuitFlush.swift": "dc6346ccb2176c646148b670b2eaca14ad28b828ce1d72ad8618e60e331c057a",
+    "Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift": "642d72c29a38949d4bd1b2ee15d25b9f72b0ed9c3d238492e02661e66647ec26",
+    "Sources/ConduitRuntime/RuntimeAliasTable.swift": "4b7d5babb33ea23419199d083bf8b980e2c463811eb67b2e83137d81c9303b16"
+  },
+  "tests_sha256": "b249d8e6af892428705e484a7ca89e99553cf252b2b50a7cb7dc16db728bb861",
+  "restored_exactly": true,
+  "checks": [
+    {
+      "name": "baseline",
+      "exit": 0,
+      "seconds": 92.0,
+      "assertions": [],
+      "invalid_markers": [],
+      "summary": [
+        "\t Executed 33 tests, with 0 failures (0 unexpected) in 31.650 (31.661) seconds"
+      ],
+      "assertion_count": 0,
+      "model_records": []
+    },
+    {
+      "name": "expired-flush-claim-survives",
+      "exit": 1,
+      "seconds": 10.66,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:782: error: -[ConduitTests.RuntimeHostControlOwnerTests testAFlushAdmittedButNotStartedBeforeTheQuitDeadlineWritesNothingAfterIt] : XCTAssertEqual failed: (\"2652 bytes\") is not equal to (\"2651 bytes\") - the revoked flush wrote nothing",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:783: error: -[ConduitTests.RuntimeHostControlOwnerTests testAFlushAdmittedButNotStartedBeforeTheQuitDeadlineWritesNothingAfterIt] : XCTAssertEqual failed: (\"finished(ConduitShared.ControlOperationOutcome.configurationSettled(ConduitShared.ControlConfigurationReceipt(requestID: 98BE757C-AEFE-488F-B17A-E357883C05EA, incarnation: 2772FB20-0F41-4AB7-A069-775280A7532E, runtime: ConduitShared.ControlComponentWrite(write: ConduitShared.ControlConfigWorkflowWrite.persisted(reportedError: false), baseline: Optional(PrivateBaseline(runtime v2 in D8587FFD-ED32-4C7E-B5C2-5D02C912604D))), platform: ConduitShared.ControlComponentWrite(write: ConduitShared.ControlConfigWorkflowWrite.unchanged, baseline: Optional(PrivateBaseline(platform v1 in D8587FFD-ED32-4C7E-B5C2-5D02C912604D))), committedDNSForwarderEnabled: Optional(false), modules: [], applied: nil)))\") is not equal to (\"finished(ConduitShared.ControlOperationOutcome.failed(ConduitShared.ControlFailureCode.staleRevision))\")"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true,
+      "assertion_count": 2,
+      "model_records": []
+    },
+    {
+      "name": "apply-claim-ignores-actionable-revisions",
+      "exit": 1,
+      "seconds": 6.72,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:888: error: -[ConduitTests.RuntimeHostControlOwnerTests testAStopAfterAnApplysAdmissionRevokesItsUnstartedWrite] : XCTAssertEqual failed: (\"Revoked\") is not equal to (\"Default\") - the revoked save wrote nothing",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:890: error: -[ConduitTests.RuntimeHostControlOwnerTests testAStopAfterAnApplysAdmissionRevokesItsUnstartedWrite] : XCTAssertEqual failed: (\"finished(ConduitShared.ControlOperationOutcome.configurationSettled(ConduitShared.ControlConfigurationReceipt(requestID: 2315A6C1-8BCD-4486-9D8D-EEDE247924F5, incarnation: 9BBFC54B-3E04-43A8-8C32-323AF5993B31, runtime: ConduitShared.ControlComponentWrite(write: ConduitShared.ControlConfigWorkflowWrite.persisted(reportedError: false), baseline: Optional(PrivateBaseline(runtime v2 in 14EAA701-80F8-41AA-936D-C1C996CE12A6))), platform: ConduitShared.ControlComponentWrite(write: ConduitShared.ControlConfigWorkflowWrite.unchanged, baseline: Optional(PrivateBaseline(platform v1 in 14EAA701-80F8-41AA-936D-C1C996CE12A6))), committedDNSForwarderEnabled: Optional(false), modules: [], applied: Optional(false))))\") is not equal to (\"finished(ConduitShared.ControlOperationOutcome.failed(ConduitShared.ControlFailureCode.staleRevision))\")"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true,
+      "assertion_count": 2,
+      "model_records": []
+    },
+    {
+      "name": "quit-competes-for-ordinary-capacity",
+      "exit": 1,
+      "seconds": 7.24,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:822: error: -[ConduitTests.RuntimeHostControlOwnerTests testAQuitBehindExhaustedOrdinaryCapacityLatchesAtOnceAndAdmitsItsReservedFlush] : failed - expected an accepted admission, got rejected(ConduitShared.ControlRejectionCode.queueFull)"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true,
+      "assertion_count": 1,
+      "model_records": []
+    },
+    {
+      "name": "restored",
+      "exit": 0,
+      "seconds": 36.75,
+      "assertions": [],
+      "invalid_markers": [],
+      "summary": [
+        "\t Executed 33 tests, with 0 failures (0 unexpected) in 31.452 (31.468) seconds"
+      ],
+      "assertion_count": 0,
+      "model_records": []
+    }
+  ],
+  "productEquivalentCommit": "5162ffda99e277fb0e7b31af4387cb119ae2a64f"
+}

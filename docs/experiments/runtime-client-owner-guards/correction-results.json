@@ -1,0 +1,65 @@
+{
+  "head": "2f97e95f9db173d48b8392f1ff1af21ab4522caf",
+  "source_sha256": {
+    "Sources/ConduitRuntime/RuntimeHostControlOwner.swift": "c0ddffd80b6daf972301793844cc42fb3d1938e945ff83e10223c0b475e52b7a",
+    "Sources/ConduitShared/PrivateConfiguration/RuntimeClientQuit.swift": "83daad7bb907cf785abad721af2b28b6b07950a1a216862ee8a445e994665f1e"
+  },
+  "tests_sha256": "88375941f4b5a1349059e3f59346b0a2af198ea4368a449a4098d689172db0e9",
+  "restored_exactly": true,
+  "checks": [
+    {
+      "name": "baseline",
+      "exit": 0,
+      "seconds": 102.2,
+      "assertions": [],
+      "invalid_markers": [],
+      "summary": [
+        "\t Executed 54 tests, with 0 failures (0 unexpected) in 42.375 (42.387) seconds"
+      ]
+    },
+    {
+      "name": "dns-probe-blocks-platform-teardown",
+      "exit": 1,
+      "seconds": 36.3,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:2351: error: -[ConduitTests.RuntimeHostControlOwnerTests testAHeldTestDNSProbeDelaysNeitherAStopNorAQuitAndARepeatJoinsIt] : XCTAssertTrue failed - the DNS Stop settles while the probe is held",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:2353: error: -[ConduitTests.RuntimeHostControlOwnerTests testAHeldTestDNSProbeDelaysNeitherAStopNorAQuitAndARepeatJoinsIt] : XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(ConduitShared.ControlRuntimeCommandKind.stop)\") - the DNS Stop completed: nil",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:2354: error: -[ConduitTests.RuntimeHostControlOwnerTests testAHeldTestDNSProbeDelaysNeitherAStopNorAQuitAndARepeatJoinsIt] : XCTAssertFalse failed - its teardown restored system DNS meanwhile",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:2358: error: -[ConduitTests.RuntimeHostControlOwnerTests testAHeldTestDNSProbeDelaysNeitherAStopNorAQuitAndARepeatJoinsIt] : XCTAssertTrue failed - the quit settles while the probe is held",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:2360: error: -[ConduitTests.RuntimeHostControlOwnerTests testAHeldTestDNSProbeDelaysNeitherAStopNorAQuitAndARepeatJoinsIt] : XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(ConduitShared.ControlRuntimeCommandKind.quit)\") - the quit completed: nil",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:169: error: -[ConduitTests.RuntimeHostControlOwnerTests testAHeldTestDNSProbeDelaysNeitherAStopNorAQuitAndARepeatJoinsIt] : XCTAssertEqual failed: (\"runtimeActive\") is not equal to (\"settled\") - the harness's host settles before its root is released",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:178: error: -[ConduitTests.RuntimeHostControlOwnerTests testAHeldTestDNSProbeDelaysNeitherAStopNorAQuitAndARepeatJoinsIt] : failed - the harness's shutdown is unconfirmed: its host and root are kept"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true
+    },
+    {
+      "name": "lost-stream-quit-returns-before-total-deadline",
+      "exit": 1,
+      "seconds": 11.3,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:1484: error: -[ConduitTests.RuntimeHostControlOwnerTests testTheClientQuitKeepsItsCallerToTheTotalDeadlineWhileAnUnobservedTeardownIsHeld] : XCTAssertGreaterThanOrEqual failed: (\"Instant(_value: 1137384.727332916 seconds)\") is less than (\"Instant(_value: 1137384.909715791 seconds)\") - the caller is kept to the total deadline itself"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true
+    },
+    {
+      "name": "restored",
+      "exit": 0,
+      "seconds": 49.37,
+      "assertions": [],
+      "invalid_markers": [],
+      "summary": [
+        "\t Executed 54 tests, with 0 failures (0 unexpected) in 42.524 (42.536) seconds"
+      ]
+    }
+  ],
+  "implementation_source_equivalent_commit": "4be23991da828f2c04a9da7db40246b631505579",
+  "scope_notes": [
+    "The serial-queue mutation causes five ordering assertions and two harness assertions that shutdown is unconfirmed; the isolated test retains its host/root authority until process exit.",
+    "The early-return mutation causes one deadline lower-bound assertion.",
+    "Both mutations exit with assertion failures and no compiler/crash markers; every source byte is restored."
+  ]
+}

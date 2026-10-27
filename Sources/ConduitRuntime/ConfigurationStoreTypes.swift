@@ -104,6 +104,27 @@ enum ConfigurationNotAttemptedReason: Error, Equatable, Sendable {
     case superseded
 }
 
+/// Why the store holds no baseline for a component (decision 0034's retained state). It is latched at the site that cleared the baseline
+/// and cleared only by an adopted observation. Each case is a closed fact; none carries a value.
+enum ConfigurationLatchReason: Equatable, Sendable {
+    /// The last load was refused, so every component holds its last values for display only.
+    case observationRefused
+    /// A write conflict, a verification that found a change, a changed sidecar during preservation, or a changed runtime source.
+    case changedSinceBaseline
+    /// A write whose read-back could not say which state the file is in.
+    case writeUnknown
+}
+
+/// What the store holds for one component now, read in the caller's turn with no I/O. It is not a fresh verification.
+enum ConfigurationComponentState: Equatable, Sendable {
+    /// The store holds this baseline, and the file was present when it was observed or verified.
+    case verified(ConfigurationBaselineToken)
+    /// The store holds this baseline for an observed absence.
+    case absent(ConfigurationBaselineToken)
+    /// No baseline; the values are the last known ones and authorize no write.
+    case retained(ConfigurationLatchReason)
+}
+
 /// The workflow's permission for one physical replacement. The store checks it on `PlatformWork`, after the source or preservation read
 /// and immediately before the replacement starts. The check reads the workflow's own intent state under a short lock, and no lock is
 /// held across I/O. Once a replacement has started, its read-back and its persistence facts are reported whatever the claim says.
@@ -141,20 +162,6 @@ enum ConfigurationWriteOutcome: Equatable, Sendable {
     /// The file changed after its baseline was observed (decision 0027). Nothing was written, and the file and the draft are kept.
     case conflict
     /// No write was attempted.
-    case notAttempted(ConfigurationNotAttemptedReason)
-}
-
-/// The result of checking one component against its baseline without writing it.
-enum ConfigurationVerifyOutcome: Equatable, Sendable {
-    /// The file still matches its baseline and existed, so the receipt names the version that is current. No bytes were rewritten.
-    case unchanged(ConfigurationReceipt)
-    /// The file is still missing, as its absent baseline says. Absence is never a receipt.
-    case unchangedAbsent
-    /// The file changed since its baseline (decision 0027). The store does not adopt the new bytes.
-    case changed
-    /// The check could not read the file, so it establishes nothing.
-    case notVerified(ConfigurationFileError)
-    /// The check was not made.
     case notAttempted(ConfigurationNotAttemptedReason)
 }
 
@@ -206,12 +213,6 @@ struct PreferencesCommitResult: Equatable, Sendable {
 struct DNSLifecycleCommitResult: Equatable, Sendable {
     let context: ConfigurationOperationContext
     let runtime: ConfigurationWriteOutcome
-}
-
-/// The outcomes of one verification. A component that was not requested has no outcome.
-struct ConfigurationVerifyResult: Equatable, Sendable {
-    let context: ConfigurationOperationContext
-    let outcomes: ConfigurationSlots<ConfigurationVerifyOutcome?>
 }
 
 /// Whether an operation ran. `busy` means another operation holds the store's one slot. Nothing is queued, and the caller's

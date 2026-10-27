@@ -13,6 +13,13 @@ extension PrivateConfigurationRequest {
     }
 }
 
+extension PrivatePreferencesRequest {
+    /// The first approved ceiling the request crosses, or nil.
+    package func resourceViolation() -> DomainResourceViolation? {
+        preferences.resourceViolation()
+    }
+}
+
 extension PrivatePreferences {
     /// The first approved ceiling the preferences cross, or nil. Only the browser URL is bounded, by its byte count.
     package func resourceViolation() -> DomainResourceViolation? {

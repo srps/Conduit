@@ -143,6 +143,17 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
         return Pending(task: task, completion: completion)
     }
 
+    /// Waits until the owner queue holds exactly one first round per admitted call, then returns whether it did. A call reserves its lane and
+    /// later queues that round, in its own task, and those tasks run in parallel with the calls refused. A refusal count or a lane count can
+    /// therefore be reached while an admitted call has reserved and not yet queued its round. A drain made then misses the round, and the call
+    /// stays unanswered until teardown cancels it as `notSent(cancelled)`. That is traced from the source and consistent with the status reads
+    /// seen on 2026-10-27; it was not reproduced deterministically. The failure message names the queue as it was, so a recurrence shows which
+    /// stage was short.
+    private func awaitQueuedRounds(_ harness: RuntimeServiceHarness, _ rounds: Int, _ stage: String) async {
+        let queued = await awaitState { harness.scheduling.pendingCount == rounds }
+        XCTAssertTrue(queued, "\(stage): \(harness.scheduling.pendingCount) owner rounds queued, expected one per admitted call (\(rounds))")
+    }
+
     /// Opens one live subscription through the production transport and consumes its buffered baseline.
     private func openStream(
         _ harness: RuntimeServiceHarness,
@@ -309,6 +320,7 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
         let statusRefused = await awaitState { status.laneBusy == statusAttempts - limits.readLaneCapacity }
         XCTAssertTrue(statusRefused, "the read lane admits only its own free slots, whatever the stream lane holds")
 
+        await awaitQueuedRounds(harness, limits.ordinaryLaneCapacity + modules.count + limits.readLaneCapacity, label)
         harness.scheduling.drainAll()
         let resolved = await awaitState {
             ordinary.resolved == ordinaryAttempts && stops.resolved == modules.count && status.resolved == statusAttempts
@@ -421,6 +433,7 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
         }
         XCTAssertTrue(othersReserved, "the other modules' Stops are admitted while dns holds its lane")
 
+        await awaitQueuedRounds(harness, stopLane + 2, "stop-lane")
         harness.scheduling.drainAll()
         let resolved = await awaitState {
             dns.resolved == attempts && others.resolved == 2

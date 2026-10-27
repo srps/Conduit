@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import ConduitShared
 import Foundation
 import PlatformMac
 @testable import ConduitRuntime
@@ -12,13 +13,23 @@ extension ConfigurationStore {
         await load(context: context, allowMissing: true)
     }
 
+    /// An explicit candidate through the one coupled commit, at the named tokens. The capture ignores the store's values, as a frozen
+    /// editor candidate does, so the store's authority alone decides each file.
     func commitRuntimeAndPlatform(
         _ runtime: ProxyConfig,
         _ platform: PlatformIntegrationConfig,
         expecting expected: ConfigurationSlots<ConfigurationBaselineToken?>,
-        context: ConfigurationOperationContext
+        context: ConfigurationOperationContext,
+        claim: ConfigurationWriteClaim = .neverRevoked
     ) async -> ConfigurationStoreAdmission<RuntimePlatformCommitResult> {
-        await commitRuntimeAndPlatform(runtime, platform, expecting: expected, context: context, claim: .neverRevoked)
+        switch await commitCapturedRuntimeAndPlatform(expecting: expected, context: context, claim: claim, capture: { _ in (runtime, platform) }) {
+        case .busy:
+            return .busy
+        case .admitted(let result?):
+            return .admitted(result)
+        case .admitted(nil):
+            preconditionFailure("an explicit candidate is always committed")
+        }
     }
 
     func commitPreferences(

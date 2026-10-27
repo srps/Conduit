@@ -34,9 +34,33 @@ package final class RuntimeHost {
     /// lease stays open while the host runs, whatever its caller drops. Stop does
     /// not release it; the entry point's own pin does.
     private let stateSession: StateRootSession
+    /// This host's one lifetime (decision 0014): the workflow's store contexts, the control service and every snapshot it projects name
+    /// it. The store's baseline namespace is a separate authority.
+    let incarnation: ControlHostIncarnation
     /// The one configuration owner of this host (decisions 0031 and 0032). It holds the sole store privately, and every reload, Start
     /// and Stop is admitted through it.
     let workflow: RuntimeConfigurationWorkflow
+    /// The presentation revision this host stamps its control snapshots with, and the last body it stamped (`RuntimeHostControlOwner`).
+    /// One value, replaced in place, so it holds no history.
+    var presentation = RuntimeHostPresentation()
+    /// The revision of each collection its control snapshots pin, from the kernel values they were taken from. Four fixed slots.
+    var collections = RuntimeHostCollections()
+    /// Told when the host's safe state may have changed, so the control service composed over it captures a new snapshot. Set only by
+    /// that composition; nil when no service is composed.
+    var onControlStateChange: (@MainActor () -> Void)?
+    /// The control operations this host admitted at the service's fence and has not launched yet. The service bounds them: its ordinary
+    /// capacity, and at most one queued Stop per module, whose replacement is dropped here in the same fence turn.
+    var controlAdmissions: [ControlOperationID: RuntimeControlAdmission] = [:]
+    /// The latest control Stop admitted for each module and the revision its fence took, so a repeated Stop joins it while that fence is
+    /// still the module's latest admission. Three fixed slots.
+    var controlStops = PrivateModuleSlots<RuntimeControlStop?>(proxy: nil, dns: nil, tunnels: nil)
+    /// The private updates admitted and not launched yet, with their frozen inputs. The composition's one frozen-input slot bounds it to one.
+    var privateUpdates: [ControlOperationID: RuntimePrivateUpdate] = [:]
+    /// The quit's one reserved draft flush, once a quit opened it.
+    var quitFlush: RuntimeQuitFlush?
+    /// The latest Test DNS probe, which every later one runs after: its port, an identity of its own, and the probe. Cleared by the probe
+    /// itself in the owner turn it ends, and only while it is still the latest, so a request never joins an answer already given.
+    var dnsLivenessProbe: (port: Int, identity: UUID, answer: Task<Bool, Never>)?
     /// Start, Stop and reload calls begun and not yet finished. A settle reads it, so a call that has not yet reached the lane or the
     /// workflow, still waiting for launch recovery, is seen.
     var pendingAdmissions = 0
@@ -48,7 +72,6 @@ package final class RuntimeHost {
 
     private(set) var config: ProxyConfig
     private(set) var platformConfig: PlatformIntegrationConfig
-    private(set) var appPreferences: AppPreferences
     private(set) var configGeneration = 0
 
     let orchestrator: ProxyOrchestrator
@@ -278,7 +301,9 @@ package final class RuntimeHost {
             access: effects.stateFiles,
             work: PlatformWork(label: "io.github.srps.Conduit.configuration-store")
         )
-        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: startupAllowsMissing)
+        // One incarnation for this host's whole life: its workflow's store contexts, its service, its snapshots and its replies.
+        let incarnation = ControlHostIncarnation(rawValue: UUID())
+        let workflow = RuntimeConfigurationWorkflow(store: store, incarnation: incarnation, startupAllowsMissing: startupAllowsMissing)
         let opened: RuntimeConfigurationWorkflow.Opened
         do {
             opened = try await workflow.open()
@@ -289,6 +314,7 @@ package final class RuntimeHost {
             stateSession: stateSession,
             logger: logger,
             loadedConfiguration: opened,
+            incarnation: incarnation,
             workflow: workflow,
             startedAt: startedAt,
             terminalExit: terminalExit,
@@ -319,6 +345,7 @@ package final class RuntimeHost {
         stateSession: StateRootSession,
         logger: any LogSink,
         loadedConfiguration: RuntimeConfigurationWorkflow.Opened,
+        incarnation: ControlHostIncarnation,
         workflow: RuntimeConfigurationWorkflow,
         startedAt: Date,
         terminalExit: @escaping @MainActor () -> Void,
@@ -328,6 +355,7 @@ package final class RuntimeHost {
         reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
         splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval
     ) {
+        self.incarnation = incarnation
         self.startedAt = startedAt
         self.terminalExit = terminalExit
         self.dnsResponds = effects.dnsResponds
@@ -344,7 +372,6 @@ package final class RuntimeHost {
         self.logger = logger
         self.config = loadedConfiguration.config
         self.platformConfig = loadedConfiguration.platformConfig
-        self.appPreferences = loadedConfiguration.appPreferences
         self.commandRunner = effects.commandRunner
         self.loopbackPortProbe = effects.loopbackPortProbe
         self.homeDirectory = effects.homeDirectory
@@ -447,6 +474,7 @@ package final class RuntimeHost {
             deliveries.deliver {
                 guard let self else { return }
                 self.writeSnapshotFile(snapshot: self.orchestrator.snapshot)
+                self.onControlStateChange?()
             }
         }
         // `onConfigChange` is not wired. The orchestrator fires it only from `applyConfigChange`, which here runs only the reconciler's
@@ -731,11 +759,8 @@ package final class RuntimeHost {
         await awaitLaunchRecovery()
         let outcome = await workflow.reload(capturedAt: captured)
         emitConfigurationEvents(outcome.events)
-        if let preferences = outcome.preferences {
-            appPreferences = preferences
-        }
         // An adopted observation changes the host view a pending settle read, whether or not its runtime input may apply.
-        if outcome.preferences != nil || outcome.applied != nil {
+        if outcome.adopted {
             stoppedEffectsJoin?.finish(.superseded)
         }
         guard let applied = outcome.applied else {
@@ -811,7 +836,7 @@ package final class RuntimeHost {
     /// The one writer of the accepted host view after `open`: the runtime and platform inputs status reports, the VPN monitor's
     /// flap-window timings, and `configGeneration`, which counts adoptions of this view. The view is not a durable or applied counter; the
     /// machine-acting paths read the reconciler's baselines. The caller logs the non-blocking validation problems once.
-    private func adoptHostView(runtime: ProxyConfig, platform: PlatformIntegrationConfig) {
+    func adoptHostView(runtime: ProxyConfig, platform: PlatformIntegrationConfig) {
         config = runtime
         platformConfig = platform
         vpnFlapWindowBox.withLockedValue { window in

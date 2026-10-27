@@ -229,12 +229,20 @@ extension PrivateEditorReply {
     /// The admission of `request`, when this reply answers it. Only an admission answers an update. Only a rejection for
     /// a changed incarnation may name another incarnation than the request's.
     package func admission(answering request: PrivateConfigurationRequest) throws -> ControlAdmission {
+        try admission(requestID: request.requestID, incarnation: request.incarnation)
+    }
+
+    /// The admission of a preferences update, under the same rules.
+    package func admission(answering request: PrivatePreferencesRequest) throws -> ControlAdmission {
+        try admission(requestID: request.requestID, incarnation: request.incarnation)
+    }
+
+    private func admission(requestID: ControlRequestID, incarnation: ControlHostIncarnation) throws -> ControlAdmission {
         guard case .admission(let admission) = answer else {
             throw PrivateEditorReplyMismatch.unpairedAnswer
         }
         try requireCorrelation(
-            requestID: request.requestID, incarnation: request.incarnation,
-            incarnationMayDiffer: admission == .rejected(.changedIncarnation)
+            requestID: requestID, incarnation: incarnation, incarnationMayDiffer: admission == .rejected(.changedIncarnation)
         )
         return admission
     }

@@ -16,8 +16,8 @@ against this document — not against the Swift source.
   never change type or meaning, and existing event names never change
   semantics. Build consumers that ignore unknown fields, kinds, and names.
 - Event `detail` strings are diagnostic text: their *presence* is contract,
-  their exact wording is not. Parse the documented `key=value` tokens, not
-  sentence structure.
+  their exact wording is not. Prefer closed `typed` fields when present; legacy
+  readers may parse the documented `key=value` tokens, not sentence structure.
 
 ## Where events appear
 
@@ -44,7 +44,7 @@ readable by `jq`, Splunk, Datadog, and `date -r`.
 | `kind` | string enum | yes | Coarse category — see below. |
 | `event` | string | yes | Dotted machine name, `<subsystem>.<what_happened>`. The primary dispatch key for consumers. |
 | `detail` | string | no | Diagnostic detail, often `key=value` tokens separated by spaces. **Always credential-sanitized** (`Authorization`/`Proxy-Authorization`/cookies/bearer/long-base64 masked, URL userinfo stripped) before it reaches any sink. |
-| `typed` | object | no | The typed value behind a migrated `lifecycle.*` name: `{"family": "lifecycle", "lifecycle": {…}}`. Absent on legacy records. Its name, kind and sanitized detail must match the record's; see [Typed lifecycle payloads](#typed-lifecycle-payloads). |
+| `typed` | object | no | The typed value behind a migrated `lifecycle.*`, `config.workflow.*` or `runtime_service.*` name. Absent on legacy records. Its name, kind and sanitized detail must match the record's; the sections below define each closed family. |
 
 ### `kind` values (v1)
 
@@ -53,7 +53,7 @@ New kinds may be added; ignore unknown ones.
 
 ## Typed lifecycle payloads
 
-Five `lifecycle.*` names carry a typed value as well as the legacy `event`, `kind` and `detail`. The value is the record's optional `typed` field, written on the file and the control wire as `{"family": "lifecycle", "lifecycle": {"type": …}}`. The field is additive, so a v1 reader that ignores unknown fields is unaffected. Every other name stays legacy, including the rest of the `lifecycle` kind (`daemon.ready`, `init`, `platform.*`, `helper.*`, `update.*`). A record without `typed` decodes as a legacy record, and no typed value is derived from its `event` or `detail`.
+Five `lifecycle.*` names carry a typed value as well as the legacy `event`, `kind` and `detail`. The value is the record's optional `typed` field, written on the file and the control wire as `{"family": "lifecycle", "lifecycle": {"type": …}}`. The field is additive, so a v1 reader that ignores unknown fields is unaffected. Other names of the `lifecycle` kind stay legacy (`daemon.ready`, `init`, `platform.*`, `helper.*`, `update.*`). A record without `typed` decodes as a legacy record, and no typed value is derived from its `event` or `detail`.
 
 ```json
 {"timestamp": 1781136000.123, "kind": "lifecycle", "event": "lifecycle.superseded", "detail": "operation=proxy_start generation=3 current=4 reason=superseded", "typed": {"family": "lifecycle", "lifecycle": {"type": "superseded", "operation": "proxy_start", "generation": 3, "current": 4, "reason": "superseded"}}}
@@ -99,6 +99,25 @@ typed value produces.
 
 Each combination above is checked in the constructor and again on decode and encode, so a value outside
 the table does not reach a record. Other `config.*` names keep their legacy envelope.
+
+## Typed runtime_service payloads
+
+Both `runtime_service.*` names carry a typed value, while keeping the legacy
+`health` kind, event name and derived detail. The payload is
+`{"family": "runtime_service", "runtimeService": {"type": …}}`.
+
+| `type` | Name | Field | Allowed values |
+| --- | --- | --- | --- |
+| `fault` | `runtime_service.fault` | `fault` | The twelve closed invariant sites listed in the [health catalogue](#health). |
+| `snapshot_unavailable` | `runtime_service.snapshot_unavailable` | `reason` | `projection_failed` or `revision_exhausted`. |
+
+These values carry no configuration, URL, error description or other free text.
+The `runtime_service.` producer namespace is closed, including future spellings:
+use a typed value. The catalogue gate pins domain and wire inventories and rejects
+literal producers or consumers outside their defining files. Known malformed
+payloads fail decoding; genuinely unknown bounded informational wire records keep
+the existing unknown-display behavior. Historical files without `typed` still
+read as legacy records; no typed value is inferred from detail text.
 
 ## Event catalogue (v1)
 
@@ -221,6 +240,8 @@ exactly these semantics; do not repurpose them.
 | `upstream.circuit_closed` | The breaker closed (`upstream=`, `endpoint=`, `reason=probe_success`, or `reset_vpn_flap` when the VPN comes back, from a flap or from a disconnect, and the breakers are reset; `reset_daemon_restart` and `reset_manual` are defined but nothing resets with them today). |
 | `upstream.test` | A `test-upstream` command probed the named upstream, enabled for the probe even if it is disabled (`name=`, `reachable=`, `latencyMS=`). |
 | `upstream.test.invalid` / `upstream.test.not_found` / `upstream.test.probe_empty` | `test-upstream` edge outcomes: an empty name (`reason=empty_name`), no upstream with that name or endpoint (`name=`), or the prober returned nothing (`name=`). |
+| `runtime_service.fault` | The runtime control service composed over the shared host found a broken invariant at a named site and reported it to the host, its owner (`fault=` one closed case: `submit_command_not_encodable`, `outcome_not_encodable`, `projection_not_encodable`, `projection_count_mismatch`, `snapshot_incarnation_mismatch`, `revision_total_changed`, `collection_accounting_mismatch`, `quiescence_accounting_mismatch`, `snapshot_not_encodable`, `snapshot_over_bound`, `snapshot_revision_conflict`, `snapshot_revision_regressed`). It carries no command, payload or error text. The affected read or outcome is answered as an internal failure. Typed: see [runtime_service payloads](#typed-runtime_service-payloads). Warning log line. |
+| `runtime_service.snapshot_unavailable` | The shared host could not give its state a control snapshot: the projection failed (`reason=projection_failed`), or a changed snapshot needed a presentation revision past the maximum (`reason=revision_exhausted`). Every read, subscription open or capture fails closed while it lasts rather than answering an older snapshot, and a settlement completed meanwhile names the next revision, which the first snapshot after recovery takes. Emitted once when a failure episode begins, not per read; the next successful snapshot ends the episode. No value or error text is kept. Typed: see [runtime_service payloads](#typed-runtime_service-payloads). Warning log line. |
 | `proxy.listener_recycle_skipped` | The recovery ladder's listener-recycle step found the accept socket active and on the configured address, so it left it alone (`listener=host:port healthy`). Closing a working listener cannot fix an upstream-side failure and would let another process take the port. Debug log line. |
 | `observability.flush_timeout` | The shared diagnostic phase at daemon or `pm-proxy` shutdown, or the daemon's readiness flush, did not confirm the audit or event writer. `detail` carries `auditFlushed=`, `eventsFlushed=` and the exact writer outcomes `audit=` and `events=` (`drained`, `timed_out`, `busy`, `skipped_budget`, `cancelled`, `unavailable`), so a wait that did not time out is not reported as one. The phase spends at most one events confirmation beyond its first events wait, within its remaining time, so the marker can itself be lost when storage stays blocked. |
 | `observability.snapshot_write_failed` | A `snapshot.json` write failed. `detail` carries `stage=` (`encode`, `directory`, `create`, `write`, `close`, `replace`, `other`, `disabled`), `code=` (an errno, or 0) and `leftTemporary=`. Emitted on the transition into failure, not per attempt; repeats are counted in the writer's statistics. The file is not confirmed current, and this event does not say which bytes it holds. Warning log line. |

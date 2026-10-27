@@ -75,6 +75,33 @@ package enum PrivateConfigurationBridge {
         return (proxyConfig(request.runtime), platformConfig(request.platform, launchAtLogin: localLaunchAtLogin))
     }
 
+    /// Builds one preferences update under the exact preferences baseline the caller observed. The approved ceiling runs before
+    /// the value is mapped, and the mapped request then takes the codec's exact count, as `makeRequest` does.
+    package static func makePreferencesRequest(
+        preferences: AppPreferences,
+        requestID: ControlRequestID,
+        incarnation: ControlHostIncarnation,
+        budget: ControlWireBudget,
+        preferencesBaseline: PrivateBaseline
+    ) throws -> PrivatePreferencesRequest {
+        if let violation = DomainResourceCheck.text(preferences.preferredBrowserTestURL, .browserTestURL) {
+            throw PrivateConfigurationBridgeError.resourceLimit(violation)
+        }
+        let request = try PrivatePreferencesRequest(
+            requestID: requestID, incarnation: incarnation, budget: budget,
+            preferencesBaseline: preferencesBaseline, preferences: preferencesValues(preferences)
+        )
+        try requireFrame { try PrivateConfigurationEncoder.measureBody(request) }
+        return request
+    }
+
+    /// Rebuilds the preferences of a decoded request. Like `makeValues(from:)`, a request built in memory takes the format check
+    /// first, and nothing is validated beyond what the wire carries.
+    package static func makePreferences(from request: PrivatePreferencesRequest) throws -> AppPreferences {
+        try requireFrame { try PrivateConfigurationEncoder.measureBody(request) }
+        return appPreferences(request.preferences)
+    }
+
     /// Builds the observation the host answers a read with, from the values, baselines and lifecycle state it captured in
     /// one owner turn. `launchAtLogin` comes from the stored platform value. The approved ceilings run before any value is
     /// mapped, and the mapped observation then passes the codec's format preflight (`requireObservation`). There is no
@@ -137,8 +164,13 @@ package enum PrivateConfigurationBridge {
     /// The codec's exact count of a mapped request. It also runs the approved ceilings on the request, so a
     /// request that bypassed the kernel check is refused here too. A frame past the cap is `tooLarge`.
     private static func requireFrame(_ request: PrivateConfigurationRequest) throws {
+        try requireFrame { try PrivateConfigurationEncoder.measureBody(request) }
+    }
+
+    /// One exact count, with the codec's refusals mapped to the bridge's.
+    private static func requireFrame(_ measure: () throws -> Int) throws {
         do {
-            _ = try PrivateConfigurationEncoder.measureBody(request)
+            _ = try measure()
         } catch PrivateConfigurationWireError.frameTooLarge {
             throw PrivateConfigurationBridgeError.tooLarge
         } catch PrivateConfigurationWireError.resourceLimitExceeded(let violation) {

@@ -92,17 +92,43 @@ final class RuntimeServiceSizingEvidenceTests: XCTestCase {
     /// Eight scalar text fields, each 513 raw bytes, through the Bridge: the escape-heavy sample and its plain twin have the same raw
     /// length, so their difference is the encoding of quote, backslash, NUL and the multi-byte characters. This is not a full maximum: the
     /// collection rows, the tunnel DNS reason and the bindings are absent. Both samples go through the codec.
+    /// The stamp's per-module revisions are additive. Without them the stamp encodes byte for byte as before the field existed, so an
+    /// earlier snapshot or baseline keeps its size; with them at the maximum, the field adds exactly the bytes measured here.
+    func testTheStampModuleRevisionsAreAdditiveAndTheLegacyBytesAreUnchanged() throws {
+        let encoder = ControlRuntimeCodec.makeEncoder()
+        let maxLifecycle = try XCTUnwrap(ControlLifecycleRevision(rawValue: Int.max))
+        var stamp = ControlRuntimeStamp(
+            incarnation: RuntimeServiceFixtures.incarnation(1),
+            presentationRevision: try XCTUnwrap(ControlPresentationRevision(rawValue: Int.max)),
+            configRevision: try XCTUnwrap(ControlConfigRevision(rawValue: Int.max)),
+            lifecycleRevision: maxLifecycle
+        )
+        let legacy = String(decoding: try encoder.encode(stamp), as: UTF8.self)
+        XCTAssertEqual(legacy, #"{"configRevision":9223372036854775807,"incarnation":"00000000-0000-0000-0000-000000000001","#
+            + #""lifecycleRevision":9223372036854775807,"presentationRevision":9223372036854775807}"#)
+        XCTAssertEqual(try ControlRuntimeCodec.makeDecoder().decode(ControlRuntimeStamp.self, from: Data(legacy.utf8)), stamp)
+
+        stamp.modules = ControlModuleRevisions(proxy: maxLifecycle, dns: maxLifecycle, tunnels: maxLifecycle)
+        let widest = try encoder.encode(stamp)
+        let added = #","modules":{"dns":9223372036854775807,"proxy":9223372036854775807,"tunnels":9223372036854775807}"#.utf8.count
+        XCTAssertEqual(widest.count, legacy.utf8.count + added)
+        XCTAssertEqual(try ControlRuntimeCodec.makeDecoder().decode(ControlRuntimeStamp.self, from: widest), stamp)
+        print("RUNTIME-SIZING stamp legacyBytes=\(legacy.utf8.count) widestModulesBytes=\(widest.count) addedBytes=\(added)")
+    }
+
     func testEightScalarTextFieldsAreMeasuredEscapedAndPlainThroughTheBridge() throws {
         let escaped = String(repeating: "\"\\\u{0}é😀", count: 57)
         let plain = String(repeating: "abcdefghi", count: 57)
         XCTAssertEqual(escaped.utf8.count, 513)
         XCTAssertEqual(plain.utf8.count, 513)
         let frameLimits = try ControlFrameLimits(maxFrameBytes: 1 << 20)
+        let maxLifecycle = try XCTUnwrap(ControlLifecycleRevision(rawValue: Int.max))
         let stamp = ControlRuntimeStamp(
             incarnation: RuntimeServiceFixtures.incarnation(1),
             presentationRevision: try XCTUnwrap(ControlPresentationRevision(rawValue: Int.max)),
             configRevision: try XCTUnwrap(ControlConfigRevision(rawValue: Int.max)),
-            lifecycleRevision: try XCTUnwrap(ControlLifecycleRevision(rawValue: Int.max))
+            lifecycleRevision: maxLifecycle,
+            modules: ControlModuleRevisions(proxy: maxLifecycle, dns: maxLifecycle, tunnels: maxLifecycle)
         )
         var payloads: [String: Int] = [:]
         for (label, text) in [("escaped", escaped), ("plain", plain)] {

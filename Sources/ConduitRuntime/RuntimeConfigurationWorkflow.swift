@@ -71,6 +71,9 @@ final class RuntimeConfigurationWorkflow {
     /// holds a member. It carries no configuration value until its preparation captures one (decision 0037).
     struct StartTicket: Equatable, Sendable {
         fileprivate(set) var lifecycle: RuntimeLifecycleTicket
+        /// The client request this Start follows, which every store context of its preparation names. Nil for the host's own facade,
+        /// which has no client request, so each of its store calls names a fresh one.
+        let requestID: ControlRequestID?
 
         var generation: Int { lifecycle.group }
     }
@@ -110,19 +113,58 @@ final class RuntimeConfigurationWorkflow {
     struct StartOutcome {
         let preparation: StartPreparation
         let events: [ConfigurationWorkflowEvent]
+        /// The commit's persistence facts and the DNS bit it staged, when the store ran the commit. A receipt reports them whatever the
+        /// Start then does.
+        var commit: RuntimePlatformCommitResult? = nil
+        var dnsStaged: Bool? = nil
+        /// The store's one slot was taken, so nothing was captured or written.
+        var storeBusy = false
+    }
+
+    /// A frozen editor candidate (decision 0018): the submitted values and the exact baselines its request named. The DNS bit and the
+    /// launch-at-login flag are merged from the store inside the claim, so the request can neither restore an older enable nor override the
+    /// administrative flag.
+    struct FrozenInput: Sendable {
+        let runtime: ProxyConfig
+        let platform: PlatformIntegrationConfig
+        let expected: ConfigurationSlots<ConfigurationBaselineToken?>
+    }
+
+    /// One admitted all-save-only update: no lifecycle admission, no revision change and no fence change. It stands while no terminal stop
+    /// has latched and DNS's durable intent has not moved since it was admitted.
+    struct SaveTicket: Sendable {
+        let dnsIntentRevision: Int?
+        let requestID: ControlRequestID?
+        /// The revision each apply-while-running module was admitted at, nil for a save-only module: actionable intent (decision 0035),
+        /// so a Stop or Start of such a module after admission revokes the unstarted write.
+        var applying = PrivateModuleSlots<Int?>(proxy: nil, dns: nil, tunnels: nil)
+        /// The quit's reserved flush: admitted after the terminal latch, which does not revoke its claim; the window's close does.
+        var quitFlush = false
+    }
+
+    struct SaveOutcome {
+        let commit: RuntimePlatformCommitResult?
+        let dnsStaged: Bool?
+        /// The claim no longer stood, by a terminal stop or a newer DNS intent, so nothing was captured or written.
+        let superseded: Bool
+        let events: [ConfigurationWorkflowEvent]
+        /// The store's one slot was taken, so nothing was captured or written.
+        var storeBusy = false
     }
 
     struct ReloadOutcome {
         let events: [ConfigurationWorkflowEvent]
         /// The runtime and platform inputs the host may apply. `nil` keeps the applied view and the reconciler's baseline as they are.
         let applied: (runtime: ProxyConfig, platform: PlatformIntegrationConfig)?
-        /// The preferences the observation adopted. They are independent of the apply hold, and a stale observation adopts none.
-        let preferences: AppPreferences?
+        /// Whether a current observation was adopted, whatever the apply decision. A stale observation is still the store's durable one,
+        /// but it is not current, so it is not counted here.
+        let adopted: Bool
     }
 
     private let store: ConfigurationStore
     private let startupAllowsMissing: Bool
-    private let incarnation = ControlHostIncarnation(rawValue: UUID())
+    /// The host's one incarnation, the same value its service and observations name. The store's own baseline namespace is separate.
+    private let incarnation: ControlHostIncarnation
     /// The one per-module intent the workflow owns (decisions 0035 and 0036). The write claims read it from the platform queue, so it sits
     /// behind a short lock that no I/O holds.
     private let intent: NIOLockedValueBox<RuntimeModuleIntents>
@@ -153,11 +195,13 @@ final class RuntimeConfigurationWorkflow {
 
     /// - Parameter startupAllowsMissing: the startup's explicit `allowMissing`. A reload uses the same value, so it keeps the combinations
     ///   the loader accepts at startup, and an explicit `--config` start keeps its refusal of a missing runtime file.
+    /// - Parameter incarnation: the host's incarnation, which every store context names.
     /// - Parameter generation: the intent generation before the first admission. The host always starts at 0; a test seeds it near
     ///   `Int.max` to reach the exhausted branches.
-    init(store: ConfigurationStore, startupAllowsMissing: Bool, generation: Int = 0) {
+    init(store: ConfigurationStore, incarnation: ControlHostIncarnation, startupAllowsMissing: Bool, generation: Int = 0) {
         precondition(generation >= 0, "an intent generation is never negative")
         self.store = store
+        self.incarnation = incarnation
         self.startupAllowsMissing = startupAllowsMissing
         // DNS's configured intent is the store's adopted value, set by `open` before any admission.
         self.intent = NIOLockedValueBox(RuntimeModuleIntents(counter: generation, dnsEnabled: false))
@@ -202,6 +246,64 @@ final class RuntimeConfigurationWorkflow {
         }
     }
 
+    // MARK: - Editor observation
+
+    /// One memory observation for the private editor (decisions 0032 and 0034): the store's current values, each component's baseline or
+    /// its closed retained reason, the module intents and the terminal latch, all from this one owner turn, with no disk read and no apply.
+    /// The host's accepted view never enters it, so it confers no persistence authority the store does not hold. It is copy-on-write
+    /// values only: mapping and encoding run off the owner.
+    struct EditorCapture: Sendable {
+        let values: ConfigurationValues
+        let components: PrivateComponentSlots<PrivateComponentState>
+        let modules: PrivateModuleSlots<PrivateModuleState>
+        let terminal: Bool
+    }
+
+    /// Captures the editor observation in this turn. A host exists only after an adopted open, so the store holds values; a later refused
+    /// reload keeps them for display and marks every component retained.
+    func editorCapture() -> EditorCapture {
+        guard let values = store.values else { preconditionFailure("an opened workflow's store holds adopted values") }
+        let state = intent.withLockedValue { $0 }
+        func component(_ component: ConfigurationComponent) -> PrivateComponentState {
+            switch store.componentState(component) {
+            case .verified(let token): .verified(Self.privateBaseline(token))
+            case .absent(let token): .absent(Self.privateBaseline(token))
+            case .retained(let reason): .retained(Self.retained(reason))
+            }
+        }
+        func module(_ module: ControlModule) -> PrivateModuleState {
+            let intent = state.modules[module]
+            guard let revision = ControlLifecycleRevision(rawValue: intent.revision) else {
+                preconditionFailure("a lifecycle revision is never negative")
+            }
+            return PrivateModuleState(lifecycleRevision: revision, enabled: intent.enabled, fenced: intent.fenced)
+        }
+        return EditorCapture(
+            values: values,
+            components: PrivateComponentSlots(runtime: component(.runtime), platform: component(.platform), preferences: component(.preferences)),
+            modules: PrivateModuleSlots(proxy: module(.proxy), dns: module(.dns), tunnels: module(.tunnels)),
+            terminal: state.terminal
+        )
+    }
+
+    /// The wire form of a store token: its namespace, file and exact `UInt64` version, never narrowed.
+    static func privateBaseline(_ token: ConfigurationBaselineToken) -> PrivateBaseline {
+        let file: ControlConfigWorkflowFile = switch token.component {
+        case .runtime: .runtime
+        case .platform: .platform
+        case .preferences: .preferences
+        }
+        return PrivateBaseline(namespace: PrivateBaselineNamespace(rawValue: token.storeIncarnation), component: file, version: token.version)
+    }
+
+    private static func retained(_ reason: ConfigurationLatchReason) -> PrivateRetainedReason {
+        switch reason {
+        case .observationRefused: .observationRefused
+        case .changedSinceBaseline: .changedSinceBaseline
+        case .writeUnknown: .writeUnknown
+        }
+    }
+
     // MARK: - Start and Stop admission
 
     /// Admits the whole-host facade Start: proxy and tunnels Starts and DNS's configured Start, as one group. Synchronous, before any
@@ -217,13 +319,14 @@ final class RuntimeConfigurationWorkflow {
     /// a host bug.
     func admitStart(
         _ actions: PrivateModuleSlots<RuntimeModuleAction>,
-        expecting revisions: PrivateModuleSlots<Int?> = PrivateModuleSlots(proxy: nil, dns: nil, tunnels: nil)
+        expecting revisions: PrivateModuleSlots<Int?> = PrivateModuleSlots(proxy: nil, dns: nil, tunnels: nil),
+        requestID: ControlRequestID? = nil
     ) -> Result<StartTicket, RuntimeStartRefusal> {
         let request = RuntimeLifecycleRequest(actions: actions, expectedRevisions: revisions)
         let admission = intent.withLockedValue { $0.admit(request) }
         switch admission {
         case .success(let ticket):
-            return .success(StartTicket(lifecycle: ticket))
+            return .success(StartTicket(lifecycle: ticket, requestID: requestID))
         case .failure(.terminated):
             return .failure(.terminated)
         case .failure(.exhausted):
@@ -280,8 +383,24 @@ final class RuntimeConfigurationWorkflow {
     /// stager, the legacy-preservation checks and the runtime baseline guard all apply, and no platform file is touched. The write is claimed
     /// only while that Stop's save is still the one owed, and the obligation ends only once the write verifies. It never retries.
     /// An explicit DNS Start pending in the slot may carry the obligation instead: it is still owed, and that Start's own verified write,
-    /// or its end without one, settles it, so this writes nothing.
-    func saveOwedDNSStop() async -> (save: DNSStopSave, events: [ConfigurationWorkflowEvent]) {
+    /// or its end without one, settles it, so this writes nothing. `requestID` is the client request of the Stop that owes it, nil for
+    /// the host's own composition.
+    func saveOwedDNSStop(requestID: ControlRequestID? = nil) async -> (save: DNSStopSave, events: [ConfigurationWorkflowEvent]) {
+        let outcome = await saveOwedDNSStopWrite(requestID: requestID)
+        return (outcome.save, outcome.events)
+    }
+
+    /// The runtime file's facts from one attempted disable save: the exact baseline it was conditional on, nil when the store held none,
+    /// and its write. A client whose draft holds that same baseline knows the write was this Stop's own.
+    struct DNSStopWrite: Equatable {
+        let prior: PrivateBaseline?
+        let write: ConfigurationWriteOutcome
+    }
+
+    /// `saveOwedDNSStop`, with the write facts of the save it attempted, nil when it attempted none.
+    func saveOwedDNSStopWrite(
+        requestID: ControlRequestID? = nil
+    ) async -> (save: DNSStopSave, events: [ConfigurationWorkflowEvent], write: DNSStopWrite?) {
         enum Owed { case save(revision: Int), carried, notOwed }
         let owed = intent.withLockedValue { state -> Owed in
             switch state.modules.dns.pending {
@@ -293,24 +412,27 @@ final class RuntimeConfigurationWorkflow {
         let revision: Int
         switch owed {
         case .save(let owedRevision): revision = owedRevision
-        case .carried: return (.owed, [])
-        case .notOwed: return (.notOwed, [])
+        case .carried: return (.owed, [], nil)
+        case .notOwed: return (.notOwed, [], nil)
         }
         operationsInFlight += 1
         defer { operationsInFlight -= 1 }
         let intent = self.intent
+        // Read in the same turn the commit takes the store's slot, so it is the baseline the write was conditional on.
+        let expected = store.baselineToken(for: .runtime)
         let admission = await store.commitDNSLifecycle(
             enabled: false,
-            expecting: store.baselineToken(for: .runtime),
-            context: context(generation: revision),
+            expecting: expected,
+            context: context(generation: revision, requestID: requestID),
             claim: ConfigurationWriteClaim { intent.withLockedValue { $0.stopSaveIsCurrent(revision: revision) } }
         )
         // A busy slot attempts nothing: the disable stays owed, the fence stays, and the typed hold says why.
-        guard case .admitted(let result) = admission else { return (.owed, [held(.stop, .runtime, .storeBusy)]) }
+        guard case .admitted(let result) = admission else { return (.owed, [held(.stop, .runtime, .storeBusy)], nil) }
         let events = [committed(.runtime, result.runtime)]
-        guard result.runtime.isVerified else { return (.owed, events) }
+        let write = DNSStopWrite(prior: expected.map { Self.privateBaseline($0) }, write: result.runtime)
+        guard result.runtime.isVerified else { return (.owed, events, write) }
         intent.withLockedValue { $0.finishStopSave(revision: revision) }
-        return (.saved, events)
+        return (.saved, events, write)
     }
 
     /// Authorizes a Start whose verified pair the host has adopted: its members gain the permission the facade grants and lose their
@@ -369,6 +491,11 @@ final class RuntimeConfigurationWorkflow {
         intent.withLockedValue { $0.terminal }
     }
 
+    /// Opens or closes the quit's reserved flush window in the intent the flush's write claims read. It opens only after the latch.
+    func setQuitFlush(open: Bool) {
+        intent.withLockedValue { $0.quitFlushOpen = open && $0.terminal }
+    }
+
     /// The typed event for a Start that stopped after it was admitted, with its closed cause: a newer generation, a terminal stop, a Stop at
     /// the maximum that ended the group, or a replacement of the input its members still wait on.
     /// A group whose members still wait on their prepare was ended by its replaced input, whatever an admission on another module did to the
@@ -420,6 +547,11 @@ final class RuntimeConfigurationWorkflow {
     /// Whether the store still holds the pair a prepared Start captured. After authorization the host's lane tokens and member checks
     /// order the Start against newer admissions, and this alone says whether its remaining effects may use the pair. Any later write
     /// replaces it, a DNS Stop's verified disable included (decision 0037).
+    /// Whether the store still holds a verified pair: no observation or write replaced either file since it verified.
+    func stillHolds(_ input: VerifiedRuntimePlatformInput) -> Bool {
+        store.stillHolds(input)
+    }
+
     func holdsInput(_ prepared: PreparedStart) -> Bool {
         store.stillHolds(prepared.input)
     }
@@ -431,7 +563,7 @@ final class RuntimeConfigurationWorkflow {
     /// pair came from. A busy store captures nothing and holds the Start. A runtime input that blocks a start holds without any write.
     /// Absent defaults are persisted here, before the Start, and a present file that verifies is verified without a rewrite. The admission is
     /// checked again after the commit, and the prepared pair is returned only when both receipts verified.
-    func prepareStart(_ ticket: StartTicket) async -> StartOutcome {
+    func prepareStart(_ ticket: StartTicket, frozen: FrozenInput? = nil) async -> StartOutcome {
         operationsInFlight += 1
         defer { operationsInFlight -= 1 }
         guard isCurrent(ticket) else {
@@ -447,7 +579,11 @@ final class RuntimeConfigurationWorkflow {
             let lifecycle = binding.withLockedValue { $0 }
             return intent.withLockedValue { $0.isPending(lifecycle) }
         }
-        let admission = await store.commitCapturedRuntimeAndPlatform(context: context(generation: ticket.generation), claim: claim) { values in
+        let operation = context(generation: ticket.generation, requestID: ticket.requestID)
+        let admission = await store.commitCapturedRuntimeAndPlatform(
+            expecting: frozen?.expected, context: operation, claim: claim
+        ) { values in
+            guard let values else { return nil }
             // The store's adopted DNS bit is a durable fact, observed first, so a reload that adopted it before this point supplies the
             // value and is never written over.
             guard let lifecycle = intent.withLockedValue({ $0.capture(ticket.lifecycle, observedDNS: values.runtime.dnsForwarderEnabled) }),
@@ -455,18 +591,17 @@ final class RuntimeConfigurationWorkflow {
                 capture = .ended
                 return nil
             }
-            var runtime = values.runtime
-            runtime.dnsForwarderEnabled = staged
-            guard !runtime.validate().contains(where: \.blocksProxyStart) else {
+            let candidate = Self.merged(frozen.map { ($0.runtime, $0.platform) } ?? (values.runtime, values.platform), dns: staged, store: values)
+            guard !candidate.runtime.validate().contains(where: \.blocksProxyStart) else {
                 capture = .blocking
                 return nil
             }
             capture = .captured(lifecycle)
             binding.withLockedValue { $0 = lifecycle }
-            return (runtime, values.platform)
+            return candidate
         }
         guard case .admitted(let committed) = admission else {
-            return StartOutcome(preparation: .held, events: [held(.start, .unit, .storeBusy)])
+            return StartOutcome(preparation: .held, events: [held(.start, .unit, .storeBusy)], storeBusy: true)
         }
         let lifecycle: RuntimeLifecycleTicket
         switch capture {
@@ -496,10 +631,12 @@ final class RuntimeConfigurationWorkflow {
         // The admission is checked again after the commit's suspension. A committed file keeps its persistence even if the Start stops.
         guard isCurrent(captured) else {
             events += supersession(of: captured)
-            return StartOutcome(preparation: .superseded, events: events)
+            return StartOutcome(preparation: .superseded, events: events, commit: result, dnsStaged: staged)
         }
         if let verified = result.verifiedInput {
-            return StartOutcome(preparation: .ready(PreparedStart(ticket: captured, input: verified)), events: events)
+            return StartOutcome(
+                preparation: .ready(PreparedStart(ticket: captured, input: verified)), events: events, commit: result, dnsStaged: staged
+            )
         }
         if result.platform.isVerified {
             events.append(held(.start, .runtime, .commitFailed))
@@ -509,7 +646,151 @@ final class RuntimeConfigurationWorkflow {
                 events.append(held(.start, .runtime, .heldBehind))
             }
         }
-        return StartOutcome(preparation: .held, events: events)
+        return StartOutcome(preparation: .held, events: events, commit: result, dnsStaged: staged)
+    }
+
+    /// The candidate a commit stages: `values` with the DNS bit its claim staged and the store's own launch-at-login flag. A saved capture's
+    /// values already hold that flag; a frozen request never carries it (decision 0018), so the administrative value stays the store's.
+    private static func merged(
+        _ values: (runtime: ProxyConfig, platform: PlatformIntegrationConfig),
+        dns staged: Bool,
+        store: ConfigurationValues
+    ) -> (runtime: ProxyConfig, platform: PlatformIntegrationConfig) {
+        var runtime = values.runtime
+        runtime.dnsForwarderEnabled = staged
+        var platform = values.platform
+        platform.launchAtLogin = store.platform.launchAtLogin
+        return (runtime, platform)
+    }
+
+    /// The frozen candidate of an editor request, with the exact tokens its baselines name. The store mints them, and its authority decides.
+    func frozenInput(
+        runtime: ProxyConfig,
+        platform: PlatformIntegrationConfig,
+        runtimeBaseline: PrivateBaseline,
+        platformBaseline: PrivateBaseline
+    ) -> FrozenInput {
+        FrozenInput(
+            runtime: runtime,
+            platform: platform,
+            expected: ConfigurationSlots(
+                runtime: store.token(naming: runtimeBaseline), platform: store.token(naming: platformBaseline), preferences: nil
+            )
+        )
+    }
+
+    /// The wire form of a receipt's baseline: the same namespace, file and exact version.
+    static func privateBaseline(_ receipt: ConfigurationReceipt) -> PrivateBaseline {
+        let file: ControlConfigWorkflowFile = switch receipt.component {
+        case .runtime: .runtime
+        case .platform: .platform
+        case .preferences: .preferences
+        }
+        return PrivateBaseline(namespace: PrivateBaselineNamespace(rawValue: receipt.storeIncarnation), component: file, version: receipt.version)
+    }
+
+    // MARK: - Administration
+
+    /// The login-item administration's platform-only commit under the client's exact platform baseline. It changes no intent and applies
+    /// nothing; a terminal stop revokes it before its replacement. A nil write is a busy store, which attempted nothing.
+    func commitLaunchAtLogin(
+        _ enabled: Bool,
+        expecting baseline: PrivateBaseline,
+        requestID: ControlRequestID
+    ) async -> (write: ConfigurationWriteOutcome?, events: [ConfigurationWorkflowEvent]) {
+        operationsInFlight += 1
+        defer { operationsInFlight -= 1 }
+        let intent = self.intent
+        let admission = await store.commitLaunchAtLogin(
+            enabled: enabled,
+            expecting: store.token(naming: baseline),
+            context: context(generation: generation, requestID: requestID),
+            claim: ConfigurationWriteClaim { intent.withLockedValue { !$0.terminal } }
+        )
+        guard case .admitted(let write) = admission else { return (nil, [held(.start, .unit, .storeBusy)]) }
+        return (write, [committed(.platform, write)])
+    }
+
+    // MARK: - Save
+
+    /// Admits an all-save-only update in one turn. It changes no intent, revision or fence, so it neither clears a Stop fence nor leaves any
+    /// activation behind. After a terminal stop nothing new is admitted, except the quit's one reserved flush, which its caller admitted.
+    func admitSave(
+        requestID: ControlRequestID?,
+        applying: PrivateModuleSlots<Int?> = PrivateModuleSlots(proxy: nil, dns: nil, tunnels: nil),
+        quitFlush: Bool = false
+    ) -> Result<SaveTicket, RuntimeStartRefusal> {
+        let state = intent.withLockedValue { (terminal: $0.terminal, revision: $0.dnsIntentRevision) }
+        guard !state.terminal || quitFlush else { return .failure(.terminated) }
+        return .success(SaveTicket(dnsIntentRevision: state.revision, requestID: requestID, applying: applying, quitFlush: quitFlush))
+    }
+
+    /// Commits a save's frozen candidate through the one coupled commit, with DNS's durable intent merged inside the claim: a session Stop's
+    /// disable stays, and another request's pending enable is never written (decision 0015). The claim holds while DNS's intent has not moved
+    /// and no terminal stop latched; nothing is applied, and a verified disable fulfils the Stop save it matches.
+    func saveFrozen(_ ticket: SaveTicket, _ frozen: FrozenInput) async -> SaveOutcome {
+        operationsInFlight += 1
+        defer { operationsInFlight -= 1 }
+        let intent = self.intent
+        // The quit's latch revokes every save but its own reserved flush, and the flush only while its window is open; a newer DNS intent, or
+        // a moved revision of a module the save applies to, revokes either. One short lock, at the capture and again just before each
+        // replacement. The quit stages no disable, so a Stop's disable owed from before it is still the staged value and is written by the
+        // flush.
+        let claim = ConfigurationWriteClaim {
+            intent.withLockedValue { state in
+                (ticket.quitFlush ? state.quitFlushOpen : !state.terminal) && state.dnsIntentRevision == ticket.dnsIntentRevision
+                    && ControlModule.allCases.allSatisfy { module in
+                        ticket.applying[module].map { state.modules[module].revision == $0 } ?? true
+                    }
+            }
+        }
+        var staged: Bool?
+        let admission = await store.commitCapturedRuntimeAndPlatform(
+            expecting: frozen.expected, context: context(generation: generation, requestID: ticket.requestID), claim: claim
+        ) { values in
+            guard let values, claim.isCurrent() else { return nil }
+            let dns = intent.withLockedValue { $0.stagedDNSForwarderEnabled(for: nil) }
+            staged = dns
+            return Self.merged((frozen.runtime, frozen.platform), dns: dns, store: values)
+        }
+        guard case .admitted(let written) = admission else {
+            return SaveOutcome(commit: nil, dnsStaged: nil, superseded: false, events: [held(.start, .unit, .storeBusy)], storeBusy: true)
+        }
+        guard let result = written, let staged else {
+            // The claim no longer stood when the slot was taken: a terminal stop, or a newer intent the save was admitted under.
+            return SaveOutcome(
+                commit: nil, dnsStaged: nil, superseded: true, events: [held(.start, .unit, isTerminal ? .terminating : .staleRevision)]
+            )
+        }
+        if result.runtime.isVerified {
+            intent.withLockedValue { $0.recordVerifiedDNSWrite(staged, intentRevision: ticket.dnsIntentRevision, ownEnable: false) }
+        }
+        return SaveOutcome(
+            commit: result, dnsStaged: staged, superseded: false,
+            events: [committed(.runtime, result.runtime), committed(.platform, result.platform)]
+        )
+    }
+
+    /// Commits a preferences update through the store's preferences commit, under the exact baseline its request named (decision 0018).
+    /// It is admitted as an all-save-only update, but only the terminal latch revokes it, or, for the quit's flush, the window's close: the
+    /// preferences file holds no lifecycle intent, so no DNS or module admission moves it, and nothing is applied. A nil write is a busy store,
+    /// which attempted nothing.
+    func savePreferences(
+        _ ticket: SaveTicket,
+        _ preferences: AppPreferences,
+        expecting baseline: PrivateBaseline
+    ) async -> (write: ConfigurationWriteOutcome?, events: [ConfigurationWorkflowEvent]) {
+        operationsInFlight += 1
+        defer { operationsInFlight -= 1 }
+        let intent = self.intent
+        let admission = await store.commitPreferences(
+            preferences,
+            expecting: store.token(naming: baseline),
+            context: context(generation: generation, requestID: ticket.requestID),
+            claim: ConfigurationWriteClaim { intent.withLockedValue { ticket.quitFlush ? $0.quitFlushOpen : !$0.terminal } }
+        )
+        guard case .admitted(let result) = admission else { return (nil, [held(.start, .unit, .storeBusy)]) }
+        return (result.preferences, [committed(.preferences, result.preferences)])
     }
 
     // MARK: - Reload
@@ -525,7 +806,7 @@ final class RuntimeConfigurationWorkflow {
             return ReloadOutcome(
                 events: [.observed(ConfigurationWorkflowObserved(phase: .reload, observation: .refused(.busy)))],
                 applied: nil,
-                preferences: nil
+                adopted: false
             )
         }
         switch loaded.outcome {
@@ -533,7 +814,7 @@ final class RuntimeConfigurationWorkflow {
             return ReloadOutcome(
                 events: [.observed(ConfigurationWorkflowObserved(phase: .reload, observation: .refused(Self.refusal(refusal))))],
                 applied: nil,
-                preferences: nil
+                adopted: false
             )
         case .adopted:
             var events: [ConfigurationWorkflowEvent] = [
@@ -543,16 +824,17 @@ final class RuntimeConfigurationWorkflow {
                 preconditionFailure("an adopted observation carries its values")
             }
             // The adopted DNS bit is a durable fact whether or not this observation may apply; the intents keep any fence, pending Start or
-            // owed save, and the observation never raises a permission.
+            // owed save, and the observation never raises a permission. The store's values, the preferences among them, are adopted either
+            // way; only the apply decision below depends on the generation.
             intent.withLockedValue { $0.observeDurableDNS(values.runtime.dnsForwarderEnabled) }
             // A newer intent that landed during the read makes this observation stale. It stays a durable observation, and nothing applies.
             let current = generation
             guard current == captured else {
                 events += staleEvents(.reload, generation: captured, current: current)
-                return ReloadOutcome(events: events, applied: nil, preferences: nil)
+                return ReloadOutcome(events: events, applied: nil, adopted: false)
             }
             let applied = eligibleInput(values, events: &events)
-            return ReloadOutcome(events: events, applied: applied, preferences: values.preferences)
+            return ReloadOutcome(events: events, applied: applied, adopted: true)
         }
     }
 
@@ -581,12 +863,14 @@ final class RuntimeConfigurationWorkflow {
 
     // MARK: - Mapping
 
-    private func context(generation: Int) -> ConfigurationOperationContext {
+    /// The context a store call echoes. A client request names its own ID, so one request ID follows its workflow (decision 0018); the
+    /// host's own compositions, startup, reload and the facade, have no client request and name a fresh one per call.
+    private func context(generation: Int, requestID: ControlRequestID? = nil) -> ConfigurationOperationContext {
         guard let ordinal = PrivateConfigExpectedGeneration(rawValue: generation) else {
             preconditionFailure("an intent generation is never negative")
         }
         return ConfigurationOperationContext(
-            requestID: ControlRequestID(rawValue: UUID()),
+            requestID: requestID ?? ControlRequestID(rawValue: UUID()),
             hostIncarnation: incarnation,
             expectedOwnerGeneration: ordinal
         )

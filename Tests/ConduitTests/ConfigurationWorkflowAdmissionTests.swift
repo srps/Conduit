@@ -39,7 +39,10 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
             access: StateFileAccess.operatingSystem(),
             work: PlatformWork(label: "test.workflow-admission")
         )
-        return RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: startupAllowsMissing, generation: generation)
+        return RuntimeConfigurationWorkflow(
+            store: store, incarnation: ControlHostIncarnation(rawValue: UUID()),
+            startupAllowsMissing: startupAllowsMissing, generation: generation
+        )
     }
 
     // MARK: - Bounded model
@@ -172,7 +175,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         let reload = await workflow.reload(capturedAt: captured)
 
         XCTAssertNil(reload.applied)
-        XCTAssertNil(reload.preferences)
+        XCTAssertFalse(reload.adopted)
         XCTAssertEqual(reload.events.last, .superseded(ConfigurationWorkflowSuperseded(phase: .reload, generation: 0, current: 1)))
     }
 

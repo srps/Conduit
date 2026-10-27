@@ -150,6 +150,50 @@ final class PrivateEditorCodecTests: XCTestCase {
         }
     }
 
+    /// DNS's conditional companion round-trips only in DNS's slot beside a proxy Start, with its revision (decision 0036). Anywhere else,
+    /// without that Start or without a revision, the decoder refuses it, the encoder refuses to write it, and a request cannot be built.
+    func testTheConditionalDNSSlotIsOnlyDNSsCompanionOfAProxyStart() throws {
+        let revision = try PrivateConfigSamples.lifecycleRevision(4)
+        var request = try PrivateConfigSamples.request()
+        request.modules = PrivateModuleSlots(
+            proxy: .start(ifLifecycleRevision: revision), dns: .conditionalStart(ifLifecycleRevision: revision), tunnels: .saveOnly
+        )
+        let text = try bodyText(request)
+        XCTAssertEqual(try decodeText(text), request)
+        let proxy = "\"proxy\":{\"action\":\"start\",\"lifecycleRevision\":4}"
+        let companion = "\"dns\":{\"action\":\"conditionalStart\",\"lifecycleRevision\":4}"
+        XCTAssertTrue(text.contains(companion), companion)
+        let mutations: [(String, String)] = [
+            (proxy, "\"proxy\":{\"action\":\"saveOnly\",\"lifecycleRevision\":null}"),
+            (proxy, "\"proxy\":{\"action\":\"applyWhileRunning\",\"lifecycleRevision\":4}"),
+            (proxy, "\"proxy\":{\"action\":\"conditionalStart\",\"lifecycleRevision\":4}"),
+            (companion, "\"dns\":{\"action\":\"conditionalStart\",\"lifecycleRevision\":null}"),
+            ("\"tunnels\":{\"action\":\"saveOnly\",\"lifecycleRevision\":null}",
+             "\"tunnels\":{\"action\":\"conditionalStart\",\"lifecycleRevision\":4}"),
+        ]
+        for (original, mutated) in mutations {
+            XCTAssertEqual(refusal(replacing(text, original, with: mutated)), .malformedBody, mutated)
+        }
+
+        let misplaced: [PrivateModuleSlots<PrivateModuleIntent>] = [
+            PrivateModuleSlots(proxy: .saveOnly, dns: .conditionalStart(ifLifecycleRevision: revision), tunnels: .saveOnly),
+            PrivateModuleSlots(proxy: .conditionalStart(ifLifecycleRevision: revision), dns: .saveOnly, tunnels: .saveOnly),
+            PrivateModuleSlots(
+                proxy: .start(ifLifecycleRevision: revision), dns: .saveOnly, tunnels: .conditionalStart(ifLifecycleRevision: revision)
+            ),
+        ]
+        for modules in misplaced {
+            var written = try PrivateConfigSamples.request()
+            written.modules = modules
+            XCTAssertThrowsError(try PrivateConfigurationEncoder.encode(written), "\(modules)")
+            XCTAssertThrowsError(try PrivateConfigurationRequest(
+                requestID: written.requestID, incarnation: written.incarnation, budget: written.budget,
+                runtimeBaseline: written.runtimeBaseline, platformBaseline: written.platformBaseline,
+                modules: modules, runtime: written.runtime, platform: written.platform
+            ), "\(modules)")
+        }
+    }
+
     // MARK: - Request shape, reflection and coding
 
     /// The old Int revision members are gone from the wire: the scanner refuses each as an unknown key.
@@ -175,13 +219,23 @@ final class PrivateEditorCodecTests: XCTestCase {
         XCTAssertFalse(described.contains("sample"), "the profile name is a value")
     }
 
-    /// The preconditions have no generic coding path. Only the private codec writes or reads them.
-    func testPreconditionsAreNotCodable() throws {
+    /// The lifecycle intents have no generic coding path; only the private codec writes or reads them. A baseline holds no configuration
+    /// value, so a causal receipt carries it on the ordinary wire too, with the same members and the version as the same exact `UInt64`
+    /// number, at its maximum included. The private codec's own bytes are pinned by the frame tests and do not change.
+    func testIntentsAreNotCodableAndABaselineKeepsItsExactVersionOnTheOrdinaryWire() throws {
         let request = try PrivateConfigSamples.request()
-        XCTAssertNil(request.runtimeBaseline as Any as? any Encodable)
-        XCTAssertNil(request.runtimeBaseline as Any as? any Decodable)
         XCTAssertNil(request.modules as Any as? any Encodable)
         XCTAssertNil(request.modules.proxy as Any as? any Encodable)
+
+        let widest = PrivateConfigSamples.baseline(.runtime, version: UInt64.max)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let encoded = String(decoding: try encoder.encode(widest), as: UTF8.self)
+        XCTAssertEqual(
+            encoded,
+            #"{"component":"runtime","namespace":"\#(widest.namespace.rawValue.uuidString)","version":18446744073709551615}"#
+        )
+        XCTAssertEqual(try JSONDecoder().decode(PrivateBaseline.self, from: Data(encoded.utf8)), widest)
     }
 
     // MARK: - Helpers

@@ -1,0 +1,22 @@
+{"footprintOverBaselineBytes":0,"footprintPeakBytes":2081224,"mallocInUseBytes":144592,"mallocOverBaselineBytes":0,"mode":"cancel","peakRSSBytes":10289152,"phaseMaxFootprintBytes":2081224,"phaseMaxMallocInUseBytes":144592,"phaseMaxResidentBytes":10207232,"phaseSamples":1,"phaseSeconds":0.00013604200000000001,"physicalFootprintBytes":2081224,"record":"stage","residentBytes":10207232,"seconds":0.000147167,"stage":"baseline"}
+{"clientAndHostShareOneProcess":true,"mode":"cancel","outcomePollIntervalMS":1,"record":"measurement-method","samplerEnabled":true,"samplerIntervalMS":1,"samplerTakesMallocZoneLocks":true,"statusSampleIntervalMS":2,"workerOutcomePollIntervalMS":2}
+{"aliasByteCapacityPerPartition":16384,"aliasPartitionAccountingDiscrepancy":false,"aliasPartitionsChargedByInitializer":5,"aliasPartitionsInSource":5,"initializerBudgetBytes":6902606,"initializerBudgetStatus":"alias partitions match source; candidate value, not a default","label":"CANDIDATE experimental profile; not a shipping default","maxReplyBytes":65536,"maxRequestBytes":65536,"mode":"cancel","privateReplyFrameCap":8388608,"privateRequestFrameCap":8388608,"record":"profile","retentionSeconds":300,"runtimeFileBytes":8388608,"sidecarFileBytes":131072}
+{"mode":"cancel","name":"setup.proxyStarted","passed":true,"record":"check"}
+{"acceptedAttemptEndMS":2.413958,"acceptedAttemptStartMS":1.686458,"busyRefusals":1,"case":"read-deadline-main-held","lastBusyRefusalMS":0.069583000000000006,"mode":"cancel","record":"cancel","result":"client.notSent.deadlineExpired","retryIntervalMS":1}
+{"acceptedAttemptEndMS":2.7956249999999998,"acceptedAttemptStartMS":1.464,"busyRefusals":1,"case":"read-cancelled-main-held","lastBusyRefusalMS":0.152083,"mode":"cancel","record":"cancel","result":"client.notSent.cancelled","retryIntervalMS":1}
+{"acceptedAttemptEndMS":0.97016599999999997,"acceptedAttemptStartMS":0.00125,"busyRefusals":0,"case":"update-deadline-main-held","lastBusyRefusalMS":-1,"lookup":"unknown.not_recorded","mode":"cancel","record":"cancel","recoveredOutcome":"none","result":"client.notSent.deadlineExpired","retryIntervalMS":1}
+{"mode":"cancel","name":"cancel.transferAcceptedAgainAfterEachLostWait","passed":true,"record":"check"}
+{"mode":"cancel","name":"cancel.inputSlotFreeForNextUpdate","passed":true,"record":"check"}
+{"footprintOverBaselineBytes":5652696,"footprintPeakBytes":7733920,"mallocInUseBytes":3777744,"mallocOverBaselineBytes":3633152,"mode":"cancel","peakRSSBytes":23478272,"phaseMaxFootprintBytes":7733920,"phaseMaxMallocInUseBytes":3811456,"phaseMaxResidentBytes":23478272,"phaseSamples":327,"phaseSeconds":0.49973266599999999,"physicalFootprintBytes":7733920,"record":"stage","residentBytes":23478272,"seconds":0.49986925000000004,"stage":"cancel-done"}
+{"admission":"accepted","admissionMS":0.69141600000000003,"completionMS":4.9029579999999999,"condition":"after-cancel-cases","lookups":3,"mode":"cancel","module":"proxy","outcome":"completed.stop","record":"stop-latency"}
+{"mode":"cancel","name":"quit.completed","passed":true,"record":"check"}
+{"flushConfirmed":true,"flushMS":0.015375,"mode":"cancel","record":"release-settle","settled":true,"settleMS":0.050250000000000003}
+{"mode":"cancel","name":"release.settled","passed":true,"record":"check"}
+{"mode":"cancel","name":"release.flushConfirmed","passed":true,"record":"check"}
+{"deallocationWaitMS":0.00025000000000000001,"hostDeallocated":true,"mode":"cancel","record":"release-host"}
+{"mode":"cancel","name":"release.hostDeallocated","passed":true,"record":"check"}
+{"attempts":1,"closeFailures":0,"leaseReacquired":true,"leaseWaitMS":0.84524999999999995,"mode":"cancel","probeLeaseReleasedAndReacquired":true,"record":"release-lease"}
+{"mode":"cancel","name":"release.leaseClosed","passed":true,"record":"check"}
+{"mode":"cancel","name":"release.scratchRemoved","passed":true,"record":"check"}
+{"footprintOverBaselineBytes":5751000,"footprintPeakBytes":7832224,"mallocInUseBytes":3646928,"mallocOverBaselineBytes":3502336,"mode":"cancel","peakRSSBytes":23838720,"phaseMaxFootprintBytes":7832224,"phaseMaxMallocInUseBytes":3840608,"phaseMaxResidentBytes":23838720,"phaseSamples":19,"phaseSeconds":0.029540959000000002,"physicalFootprintBytes":7832224,"record":"stage","released":true,"residentBytes":23838720,"seconds":0.52941070899999998,"stage":"after-release"}
+{"failedChecks":0,"failures":[],"inconclusive":[],"mode":"cancel","record":"summary","released":true}

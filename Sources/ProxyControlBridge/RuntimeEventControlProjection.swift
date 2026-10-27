@@ -28,6 +28,45 @@ extension ControlTypedRuntimeEvent {
             self = .lifecycle(ControlLifecycleEvent(event))
         case .configWorkflow(let event):
             self = .configWorkflow(ControlConfigWorkflowEvent(event))
+        case .runtimeService(let event):
+            self = .runtimeService(ControlRuntimeServiceEvent(event))
+        }
+    }
+}
+
+extension ControlRuntimeServiceEvent {
+    package init(_ event: RuntimeServiceEvent) {
+        switch event {
+        case .fault(let fault): self = .fault(ControlRuntimeServiceFault(fault))
+        case .snapshotUnavailable(let reason): self = .snapshotUnavailable(ControlRuntimeServiceSnapshotReason(reason))
+        }
+    }
+}
+
+extension ControlRuntimeServiceFault {
+    package init(_ fault: RuntimeServiceFault) {
+        switch fault {
+        case .submitCommandNotEncodable: self = .submitCommandNotEncodable
+        case .outcomeNotEncodable: self = .outcomeNotEncodable
+        case .projectionNotEncodable: self = .projectionNotEncodable
+        case .projectionCountMismatch: self = .projectionCountMismatch
+        case .snapshotIncarnationMismatch: self = .snapshotIncarnationMismatch
+        case .revisionTotalChanged: self = .revisionTotalChanged
+        case .collectionAccountingMismatch: self = .collectionAccountingMismatch
+        case .quiescenceAccountingMismatch: self = .quiescenceAccountingMismatch
+        case .snapshotNotEncodable: self = .snapshotNotEncodable
+        case .snapshotOverBound: self = .snapshotOverBound
+        case .snapshotRevisionConflict: self = .snapshotRevisionConflict
+        case .snapshotRevisionRegressed: self = .snapshotRevisionRegressed
+        }
+    }
+}
+
+extension ControlRuntimeServiceSnapshotReason {
+    package init(_ reason: RuntimeServiceSnapshotUnavailableReason) {
+        switch reason {
+        case .projectionFailed: self = .projectionFailed
+        case .revisionExhausted: self = .revisionExhausted
         }
     }
 }

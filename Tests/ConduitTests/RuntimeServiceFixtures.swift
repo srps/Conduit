@@ -320,7 +320,7 @@ final class FakeCommandOwner: ControlCommandOwner {
         self.snapshotValue = snapshot
     }
 
-    func snapshot() -> ControlRuntimeSnapshot {
+    func snapshot() -> ControlRuntimeSnapshot? {
         snapshotValue
     }
 
@@ -342,10 +342,11 @@ final class FakeCommandOwner: ControlCommandOwner {
 
     func fence(
         _ command: ControlRuntimeCommand,
+        request: ControlRequestID,
         operation: ControlOperationID,
         candidate: ControlOperationID?
     ) -> ControlOwnerFenceResult {
-        _ = operation
+        _ = (request, operation)
         fenceLog.append((command, candidate))
         return answer(command, candidate)
     }
@@ -358,6 +359,12 @@ final class FakeCommandOwner: ControlCommandOwner {
             report.settled(.failed(.effectFailed))
             report.quiesced()
         }
+    }
+
+    /// The fake admits no private update, so the service never launches one on it.
+    func startPrivateEffect(operation: ControlOperationID, report: ControlEffectReport) {
+        startedOperations.append(operation)
+        reports[operation] = report
     }
 
     /// Reports a logical settlement, the way the real owner does when its work decides an outcome.

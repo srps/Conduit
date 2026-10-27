@@ -24,57 +24,39 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 
 The runtime architecture program ([#186](https://github.com/srps/Conduit/issues/186),
 [#180](https://github.com/srps/Conduit/issues/180),
-[#183](https://github.com/srps/Conduit/issues/183)) is merged in foundations and
-still converging in production. These changes are **unreleased**; 0.5.8 remains
-the serving version. [CHANGELOG](./CHANGELOG.md) records shipped history.
+[#183](https://github.com/srps/Conduit/issues/183)) is **unreleased**. Conduit 0.5.8
+remains the serving version. [CHANGELOG](./CHANGELOG.md) records shipped history.
 
 | Stage | Current state | Remaining work |
 | --- | --- | --- |
-| Contracts and mechanisms | Typed lifecycle values, framed RuntimeClient, bounded admission/observation/replay service, verified-store core and bounded file readers are merged. | Consume them through the real host/client path; broader event families migrate with their owners. |
-| Ownership and isolation seams | App/daemon startup takes root authority before migration/recovery; fixed writable names, diagnostic protection and explicit fake/production effects are implemented. PR243 adds actual-host pm-sim coverage. | The store/workflow now consumes that authority; interactive client adoption remains. |
-| Shared runtime convergence | The host consumes the sole store/workflow, with typed configuration decisions, an independent model and actual-host lifecycle witnesses. | Verify DNS→tunnels→proxy parity, then switch AppState once and delete replaced runtime/save paths (0031). |
-| Client, isolation and release | Display bounds, the 64 KiB ordinary reply/stream ceiling and the 8 MiB private editor reply ceiling (0034) are selected. The headless private editor codec has sizing/lifetime evidence; live host/client adoption remains. | Integrate and measure the private editor/client path; select the remaining production profile, move the whole control cluster to RuntimeActor, and validate the release. |
+| Contracts and mechanisms | Typed lifecycle/configuration values, framed client/service, bounded observation/replay, verified store and file readers are merged. | Broader event families migrate with their owners. |
+| Shared owner | PR253 converges DNS, tunnels and proxy on one lifecycle/store path, with preparation-time capture, exact freshness and Stop/Quit policy. | Consume that owner from AppState. |
+| Actual client integration | Local work connects host admission/observation, private frozen updates, receipts, preferences/admin persistence and final Quit saves through the actual framed clients. | Resolved-source resource run/review and all 41 local gates pass; finish exact-head hosted checks and the remaining native-client commands. |
+| AppState, isolation and release | One final activation and deletion is selected (0031); 64 KiB ordinary frames and 8 MiB private frames are selected. | Set the measured composition profile, switch AppState once and delete replaced paths, move the control cluster to RuntimeActor, then complete release acceptance. |
 
-Current checkpoint: the shared host consumes the sole
-ConfigurationStore/RuntimeConfigurationWorkflow. Next is the actual service/client
-adapter and [private editor contract](./docs/design-runtime-editor-contract-review.md). [0032](./docs/decisions/0032-explicit-reload-and-reconcile.md) selects
-read-only reload-and-reconcile of eligible inputs, retaining Stop fences and
-mixed-input holds. Save-before-apply and the Stop/Quit exceptions remain selected.
-[0034](./docs/decisions/0034-private-editor-reply-frame-cap.md) selects complete private editor replies at 8 MiB. [Actual-codec sizing and allocation-lifetime measurements](./docs/experiments/private-editor-codec/README.md) cover the headless codec; real-adapter Stop/status responsiveness remains an adoption gate. Service-profile defaults remain unselected and must not inherit experimental values.
+The [client-owner checkpoint](./docs/verification-runtime-client-owner-2026-10-27.md)
+records the scoped independent review and all 41 passing local gates: 3,619 tests
+(four skips), 103 simulator records and perf. Hosted checks remain pending. Do not copy test profiles into production.
+The resolved-source actual-client probe passed 29 mode/trials and independent
+review, including the production Quit routine. Whole-probe numbers are not
+installed-app RAM or shipping responsiveness claims.
 
-Prior diagnostic verification: [PR249](https://github.com/srps/Conduit/pull/249),
-fixing final diagnostic marker confirmation beside a retired timer. All 41 local
-workflow checks and exact-head hosted Swift/CodeQL passed: 3,459 tests (four skips),
-103 simulator records and perf. Three actual guard mutations and independent
-subscription-backed reviews are recorded in the [verification](./docs/verification-diagnostic-marker-drain-2026-10-26.md).
-PR248's byte-aware adoption/cache correction and11replayable guards, PR247's source
-authority correction and PR245's private codec are also merged.
+The merged [module-owner verification](./docs/verification-runtime-module-owner-2026-10-27.md)
+records all 41 local workflow checks, 3,551 tests (four skips), 103 simulator
+records, 26 clean guard mutations and exact-head hosted evidence for PR253.
+The [physical-ordering verification](./docs/verification-runtime-physical-ordering-2026-10-27.md)
+records its narrower scope. Separate existing limitations remain #250 (shared
+pool Stop isolation), #251 (applied ephemeral endpoints), and #252 (wall-clock
+flap metrics); do not silently fold new architecture into this activation.
 
-Interactive policies are selected in the [reviewed admission alternatives](./docs/design-runtime-editor-admission-options.md):
-the owner selected whole-request validation ([0035](./docs/decisions/0035-whole-request-lifecycle-validation.md));
-host-checked conditional DNS activation is selected ([0036](./docs/decisions/0036-conditional-dns-activation.md)).
-Both are planned for interactive adoption. Exact revisions and save-only keep their approved meaning.
-Stop/status/private-read adapter work remains independent.
-The [module-owner checkpoint](./docs/verification-runtime-module-owner-2026-10-27.md)
-now develops all three module lanes over one lifecycle/store path, with typed module/companion outcomes and full-start completion joins. The inherited-cleanup checkpoint passed 1,346 focused tests (two skips), 95 actual-host assertions and fresh scoped subscription reviews. Twenty strict source mutations each failed intended assertions; restored module/model/physical tests passed. All 41 local workflow checks passed on stable source: 3,551 tests (four skips), all 103 simulator records and perf. Hosted gates/review are recorded on its PR. Complete actual framed-client/private-editor adoption before the single AppState switch; no shipping claim follows.
-
-Preparation-time capture is selected in [0037](./docs/decisions/0037-saved-command-preparation-capture.md).
-The local saved-command checkpoint replaces the admission pin and passes focused
-workflow/host coverage plus an independent 93-history capture model. Complete actual
-shared module/client ownership, then activate AppState once and delete its old
-runtime/save paths. The combined owner verification is linked above; actual client/private-editor adoption remains incomplete.
-Use one store/load pipeline; no compatibility mode matrix or rebind loop.
-
-Supporting evidence stays with its owning slice:
+Earlier evidence remains with its owning slice:
 [client/service](./docs/runtime-client-stage1-inventory.md),
 [store](./docs/verification-configuration-store-2026-10-25.md),
 [session authority](./docs/verification-session-store-authority-2026-10-25.md),
 [display/profile measurements](./docs/verification-runtime-display-2026-10-25.md),
-[GUI startup correction](./docs/verification-gui-startup-handoff-2026-10-25.md), and
-[adoption checkpoint](./docs/design-runtime-adoption-cut-review.md).
-The GUI callback regression #237 is resolved in PR239. App-log queue/flush work
-remains in #47. No RuntimeActor, installed-app or release-readiness claim follows
-from the foundation checks.
+[diagnostic drain](./docs/verification-diagnostic-marker-drain-2026-10-26.md), and
+[activation decision](./docs/design-runtime-adoption-cut-review.md).
+These checks establish neither RuntimeActor isolation nor installed-app acceptance.
 
 The owner's #205 Settings-path check passed in a dev build before 0.5.8 shipped;
 installed-build validation remains separate.

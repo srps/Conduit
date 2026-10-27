@@ -90,7 +90,7 @@ final class ConfigurationWorkflowPhaseTests: XCTestCase {
 
     private func workflow(_ session: StateRootSession, files: ParkingFiles, work: PlatformWork) -> RuntimeConfigurationWorkflow {
         let store = ConfigurationStore(session: session, access: files, work: work)
-        return RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        return RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
     }
 
     /// Stop admitted while the commit is still queued behind a blocked physical job, so before its claim is checked. A queued commit has
@@ -192,7 +192,7 @@ final class ConfigurationWorkflowPhaseTests: XCTestCase {
         let outcome = await reload.value
 
         XCTAssertNil(outcome.applied)
-        XCTAssertNil(outcome.preferences)
+        XCTAssertFalse(outcome.adopted)
         XCTAssertEqual(outcome.events.last, .superseded(ConfigurationWorkflowSuperseded(phase: .reload, generation: 0, current: 1)))
         XCTAssertEqual(files.replacements, 0, "a reload writes nothing")
     }

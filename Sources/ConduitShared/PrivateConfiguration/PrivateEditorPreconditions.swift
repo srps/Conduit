@@ -70,8 +70,10 @@ extension PrivateModuleSlots: Equatable where Value: Equatable {}
 /// Each case is distinct, and none is implied by another. Stop is not here: an urgent Stop stays an ordinary command,
 /// with its own capacity, and never waits behind a private body.
 package enum PrivateModuleIntent: Sendable, Equatable {
-    /// An ordinary knob save. It persists and changes no lifecycle state: it applies nothing, never clears a Stop fence
-    /// and never enables a stopped module.
+    /// An ordinary knob save. It persists and changes no lifecycle state: on its own it applies nothing, never clears a
+    /// Stop fence and never enables a stopped module. The runtime has one applied input (decisions 0025 and 0037), so when
+    /// another slot of the same request starts or applies, the one verified pair reaches every running module, this one
+    /// included: its values are then applied, not only saved.
     case saveOnly
     /// It persists, then applies only while the module is still running under this lifecycle revision. It never clears a
     /// Stop fence and never enables a stopped module.
@@ -79,4 +81,20 @@ package enum PrivateModuleIntent: Sendable, Equatable {
     /// An explicit enable with these frozen values. It persists them, then starts the module from the verified pair. Only
     /// a Start that is still current, with its revision matching and no newer Start or Stop, may clear the module's fence.
     case start(ifLifecycleRevision: ControlLifecycleRevision)
+    /// DNS's conditional companion of a proxy `start` in the same request (decision 0036): valid only in DNS's slot and only
+    /// beside the proxy's `start`. After the proxy started, DNS starts from the same verified pair when its saved intent is
+    /// enabled and no Stop fence holds it, and otherwise starts nothing. It never clears a fence or writes an enable. The
+    /// revision is the DNS revision the client observed, checked as given with the rest of the request.
+    case conditionalStart(ifLifecycleRevision: ControlLifecycleRevision)
+}
+
+extension PrivateModuleSlots where Value == PrivateModuleIntent {
+    /// Whether every intent sits in a slot that may carry it: a conditional companion only in DNS's slot, beside a proxy Start.
+    package var isWellFormed: Bool {
+        let conditionalElsewhere = [proxy, tunnels].contains { if case .conditionalStart = $0 { true } else { false } }
+        guard !conditionalElsewhere else { return false }
+        if case .conditionalStart = dns, case .start = proxy { return true }
+        if case .conditionalStart = dns { return false }
+        return true
+    }
 }

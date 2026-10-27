@@ -12,6 +12,11 @@ enum RuntimeLane: Hashable, Sendable {
     /// The next-frame pulls of open subscriptions. Each pull holds one reservation until its wait ends.
     case stream
     case stop(ControlModule)
+    /// The process quit's own lane, so a full ordinary lane never holds it. One slot: the host admits one quit.
+    case quit
+    /// The composition's one private transfer (decisions 0021 and 0034). Its counter is the private custody's own, shared by every
+    /// transport of the composition; it is never an ordinary or read slot.
+    case privateTransfer
 }
 
 /// The named parts of one lane reservation. A reservation returns its slot only when every part it holds has ended.
@@ -25,6 +30,8 @@ struct RuntimeTicketParts: OptionSet, Sendable {
     static let timer = RuntimeTicketParts(rawValue: 1 << 1)
     /// A parked wait's registration may still be held by the service until its cleanup hop has run.
     static let waiterCleanup = RuntimeTicketParts(rawValue: 1 << 2)
+    /// A private exchange's client scope: its request mapping and encoding, and its reply decoding and buffer release.
+    static let clientScope = RuntimeTicketParts(rawValue: 1 << 3)
 }
 
 /// Counts reserved slots per lane. Its lock is a leaf: nothing runs under it.
@@ -65,6 +72,8 @@ final class RuntimeLaneCounter: @unchecked Sendable {
         case .read: limits.readLaneCapacity
         case .stream: limits.streamLaneCapacity
         case .stop: limits.stopLaneCapacityPerModule
+        case .quit: RuntimeServiceLimits.quitLaneCapacity
+        case .privateTransfer: RuntimeServiceLimits.privateTransferCapacity
         }
     }
 }
@@ -84,6 +93,8 @@ final class RuntimeLaneTicket: @unchecked Sendable {
     /// The owner hops held: one per queued or running round.
     private var hopHolds = 0
     private var released = false
+    /// One caller waiting for every part but the named ones to end (`settled(leaving:)`).
+    private var settleWaiter: (remaining: RuntimeTicketParts, continuation: CheckedContinuation<Void, Never>)?
 
     fileprivate init(lane: RuntimeLane, counter: RuntimeLaneCounter, onQuiesced: (@Sendable () -> Void)?) {
         self.lane = lane
@@ -112,6 +123,7 @@ final class RuntimeLaneTicket: @unchecked Sendable {
 
     /// Ends the parts it holds. The last one releases the slot, and then the release callback runs outside the lock.
     func end(_ parts: RuntimeTicketParts) {
+        var settled: CheckedContinuation<Void, Never>?
         let releasing = lock.withLock { () -> Bool in
             guard !released else { return false }
             var changed = false
@@ -124,13 +136,33 @@ final class RuntimeLaneTicket: @unchecked Sendable {
                 held.subtract(others)
                 changed = true
             }
+            if let waiter = settleWaiter, hopHolds == 0, held.isSubset(of: waiter.remaining) {
+                settled = waiter.continuation
+                settleWaiter = nil
+            }
             guard changed, held.isEmpty, hopHolds == 0 else { return false }
             released = true
             return true
         }
+        settled?.resume()
         guard releasing else { return }
         counter.release(lane)
         onQuiesced?()
+    }
+
+    /// Returns once no hop is held and every other held part is among `remaining`. A private exchange whose round answered waits here
+    /// for its round's hop and its cancelled timer, both already ending, so its slot is free when its client scope ends. A caller whose
+    /// wait was detached does not wait here: its slot stays held until the work it left behind physically ends. One waiter at a time.
+    func settled(leaving remaining: RuntimeTicketParts) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let ready = lock.withLock { () -> Bool in
+                if released || (hopHolds == 0 && held.isSubset(of: remaining)) { return true }
+                precondition(settleWaiter == nil, "one caller waits on a ticket")
+                settleWaiter = (remaining, continuation)
+                return false
+            }
+            if ready { continuation.resume() }
+        }
     }
 }
 
@@ -141,6 +173,9 @@ enum RuntimeWaitOutcome: Sendable {
     /// A subscription opened. A nil subscriber means the open was refused, and `first` is the refusal frame.
     case opened(subscriber: Int?, first: Data)
     case failed(ControlRuntimeTransportFailure)
+    /// A private exchange's owner turn: copy-on-write values or an admission. The caller maps and encodes it off the owner, so no
+    /// private reply bytes exist inside the round.
+    case privateTurn(RuntimePrivateTurn)
 }
 
 /// The phase of one wait. It is read and changed only under the gate's lock.
@@ -180,7 +215,7 @@ final class RuntimeWaitGate: @unchecked Sendable {
     /// The typed refusal to answer with when the wait's deadline is the request's budget and the budget ends before a claim.
     /// It is nil when the caller's own deadline is the bound, and that end is `notSent`. It is kept until resolution, because a
     /// round that parks can return the wait to open on a wake, and it is cleared at resolution like the round's closure.
-    private var boundRefusal: Data?
+    private var boundRefusal: RuntimeWaitOutcome?
     private var phase = RuntimeGatePhase.open
     private var continuation: CheckedContinuation<RuntimeWaitOutcome, Never>?
     private var resolution: RuntimeWaitOutcome?
@@ -196,7 +231,7 @@ final class RuntimeWaitGate: @unchecked Sendable {
         deadline: RuntimeDeadline,
         timing: RuntimeServiceTiming,
         scheduling: any RuntimeOwnerScheduling,
-        boundRefusal: Data? = nil,
+        boundRefusal: RuntimeWaitOutcome? = nil,
         attempt: @escaping Attempt,
         abandoned: @escaping @MainActor @Sendable (RuntimeWaitOutcome) -> Void
     ) {
@@ -268,7 +303,7 @@ final class RuntimeWaitGate: @unchecked Sendable {
             switch current {
             case .resolved: nil
             case .open, .parked:
-                if let boundRefusal { .reply(boundRefusal) } else { .failed(.notSent(.deadlineExpired)) }
+                boundRefusal ?? .failed(.notSent(.deadlineExpired))
             case .claimed: .failed(.sent(.deadlineExpired))
             }
         }
@@ -416,7 +451,7 @@ final class RuntimeWaitGate: @unchecked Sendable {
     /// The payloads a resolved wait no longer needs. They are moved out under the lock and released after it.
     private struct SpentPayloads {
         var attempt: Attempt?
-        var refusal: Data?
+        var refusal: RuntimeWaitOutcome?
     }
 
     /// Chooses the outcome from the current phase under the lock, and makes it the first resolution when one is returned.

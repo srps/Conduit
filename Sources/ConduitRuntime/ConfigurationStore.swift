@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import ConduitShared
 import Foundation
 import PlatformMac
 import ProxyKernel
@@ -104,6 +105,8 @@ final class ConfigurationStore {
         /// because the defaults depend on those bytes too. A present sidecar and the runtime record have none. The store's own verified runtime
         /// write moves it, and the sidecar's first verified write clears it.
         var source: ConfigurationFileBaseline?
+        /// Why `baseline` is nil, set where it was latched and cleared by an adopted observation.
+        var latchReason: ConfigurationLatchReason?
     }
 
     private let incarnation = UUID()
@@ -123,6 +126,17 @@ final class ConfigurationStore {
         self.session = session
         self.access = access
         self.work = work
+    }
+
+    /// What the store holds for a component, in this turn, with no I/O (decisions 0032 and 0034). Only after an observation was made:
+    /// the open's refusal latches every component with its reason, and an adopted one holds a baseline for each.
+    func componentState(_ component: ConfigurationComponent) -> ConfigurationComponentState {
+        let record = records[component]
+        guard let token = baselineToken(for: component) else {
+            guard let reason = record.latchReason else { preconditionFailure("a component without a baseline was latched with its reason") }
+            return .retained(reason)
+        }
+        return record.present ? .verified(token) : .absent(token)
     }
 
     /// The token for a component's current baseline, or nil when the store holds no authoritative baseline for it.
@@ -166,45 +180,46 @@ final class ConfigurationStore {
         records[component].present
     }
 
-    /// Commits the runtime and platform files as one coupled operation (decisions 0015 and 0025). Both candidates stage before the
-    /// first write, and a staging refusal of either starts no write. The platform file is considered first. A present file whose
-    /// verified value already equals the candidate is verified without a save, and the others are saved only when they differ. The runtime
-    /// file is saved only once the platform file is verified, so a runtime rewrite cannot drop legacy platform values the platform file
-    /// does not yet hold. A rewrite that would drop legacy preference values also waits for the preferences sidecar to verify, in the same
-    /// physical step (decision 0026). Each write is conditional on its own baseline (decision 0027). There is no rollback and no retry.
-    func commitRuntimeAndPlatform(
-        _ runtime: ProxyConfig,
-        _ platform: PlatformIntegrationConfig,
-        expecting expected: ConfigurationSlots<ConfigurationBaselineToken?>,
-        context: ConfigurationOperationContext,
-        claim: ConfigurationWriteClaim
-    ) async -> ConfigurationStoreAdmission<RuntimePlatformCommitResult> {
-        guard !isBusy else { return .busy }
-        isBusy = true
-        defer { isBusy = false }
-        return .admitted(await commitHeldRuntimeAndPlatform(runtime, platform, expecting: expected, context: context, claim: claim))
-    }
-
-    /// The saved-input form of the coupled commit (decision 0037). It takes the store's one slot first and then, in that same synchronous
-    /// turn, hands `capture` the current values; the candidate it returns is committed against the baselines those values came from. A
-    /// busy slot calls nothing. A nil candidate declines the commit and writes nothing; the slot is released either way.
+    /// The one coupled commit of the runtime and platform files (decisions 0015, 0025 and 0037). It takes the store's one slot first and then,
+    /// in that same synchronous turn, hands `capture` the current values, nil before any adopted observation. The candidate it returns is
+    /// committed against `expected`: the exact baselines a frozen editor request names, or, when nil, the baselines the current values came
+    /// from (a saved command's capture). Either way a lifecycle merge made in `capture` sees the store as it is at the claim. A busy slot calls
+    /// nothing. A nil candidate declines the commit and writes nothing; the slot is released either way.
+    ///
+    /// Both candidates stage before the first write, and a staging refusal of either starts no write. The platform file is considered first.
+    /// A present file whose verified value already equals the candidate is verified without a save, and the others are saved only when they
+    /// differ. The runtime file is saved only once the platform file is verified, so a runtime rewrite cannot drop legacy platform values the
+    /// platform file does not yet hold. A rewrite that would drop legacy preference values also waits for the preferences sidecar to verify,
+    /// in the same physical step (decision 0026). Each write is conditional on its own baseline (decision 0027). No rollback and no retry.
     func commitCapturedRuntimeAndPlatform(
+        expecting expected: ConfigurationSlots<ConfigurationBaselineToken?>? = nil,
         context: ConfigurationOperationContext,
         claim: ConfigurationWriteClaim,
-        capture: (ConfigurationValues) -> (runtime: ProxyConfig, platform: PlatformIntegrationConfig)?
+        capture: (ConfigurationValues?) -> (runtime: ProxyConfig, platform: PlatformIntegrationConfig)?
     ) async -> ConfigurationStoreAdmission<RuntimePlatformCommitResult?> {
         guard !isBusy else { return .busy }
         isBusy = true
         defer { isBusy = false }
-        guard let current = values, let candidate = capture(current) else { return .admitted(nil) }
-        let expected = ConfigurationSlots(
+        guard let candidate = capture(values) else { return .admitted(nil) }
+        let tokens = expected ?? ConfigurationSlots(
             runtime: baselineToken(for: .runtime),
             platform: baselineToken(for: .platform),
             preferences: nil
         )
         return .admitted(await commitHeldRuntimeAndPlatform(
-            candidate.runtime, candidate.platform, expecting: expected, context: context, claim: claim
+            candidate.runtime, candidate.platform, expecting: tokens, context: context, claim: claim
         ))
+    }
+
+    /// The token a submitted baseline names: its own namespace, component and exact version, for `authority` to decide. Only this file mints
+    /// tokens, so a decoded baseline gains no authority the store's records do not confirm.
+    func token(naming baseline: PrivateBaseline) -> ConfigurationBaselineToken {
+        let component: ConfigurationComponent = switch baseline.component {
+        case .runtime: .runtime
+        case .platform: .platform
+        case .preferences: .preferences
+        }
+        return ConfigurationBaselineToken(storeIncarnation: baseline.namespace.rawValue, component: component, version: baseline.version)
     }
 
     /// The coupled commit under a slot its caller already took.
@@ -251,6 +266,8 @@ final class ConfigurationStore {
         guard !isBusy else { return .busy }
         isBusy = true
         defer { isBusy = false }
+        // A revoked claim, a late flush after the quit's window, does no I/O and moves no latch, as a configuration capture does not.
+        guard claim.isCurrent() else { return .admitted(PreferencesCommitResult(context: context, preferences: .notAttempted(.superseded))) }
         let baseline: ConfigurationFileBaseline
         switch authority(expected, for: .preferences) {
         case .success(let value):
@@ -278,6 +295,50 @@ final class ConfigurationStore {
             }
             return .admitted(PreferencesCommitResult(context: context, preferences: outcome))
         }
+    }
+
+    /// Commits the launch-at-login administration into the platform file alone (decision 0018 keeps it app administration). The candidate
+    /// is the store's current platform value with only `launchAtLogin` set, staged, compared and written through the same steps as every
+    /// platform write, conditional on `expected`, the exact platform baseline the client named. No runtime or preferences file is touched,
+    /// so a latched runtime file does not hold it, and nothing is applied. A later runtime or platform save merges the flag from the store
+    /// inside its own claim, so no editor draft can restore an older value.
+    func commitLaunchAtLogin(
+        enabled: Bool,
+        expecting expected: ConfigurationBaselineToken,
+        context: ConfigurationOperationContext,
+        claim: ConfigurationWriteClaim
+    ) async -> ConfigurationStoreAdmission<ConfigurationWriteOutcome> {
+        guard !isBusy else { return .busy }
+        isBusy = true
+        defer { isBusy = false }
+        guard claim.isCurrent() else { return .admitted(.notAttempted(.superseded)) }
+        let baseline: ConfigurationFileBaseline
+        switch authority(expected, for: .platform) {
+        case .success(let value):
+            baseline = value
+        case .failure(let reason):
+            return .admitted(.notAttempted(reason))
+        }
+        guard var edited = values?.platform else { preconditionFailure("a platform baseline is held only with adopted values") }
+        edited.launchAtLogin = enabled
+        let candidate = edited
+        let current = values?.platform
+        let source = session.plan.platformConfig.path
+        let file: ConfigurationStagedFile<PlatformIntegrationConfig>
+        switch await work.run({ ConfigurationStoreIO.stagePlatform(candidate, current: current, source: source) }) {
+        case .ready(let value):
+            file = value
+        case .refused(let reason):
+            return .admitted(.notAttempted(.stagingRefused(reason)))
+        }
+        let outcome = await commit(
+            file.bytes, component: .platform, baseline: baseline, sameValue: file.comparison == .same,
+            preservation: [], context: context, claim: claim
+        )
+        if outcome.isVerified {
+            values?.platform = file.value
+        }
+        return .admitted(outcome)
     }
 
     /// Persists DNS's lifecycle intent into the runtime file alone, the Stop exception of decision 0015: a disable must not wait on a
@@ -355,23 +416,6 @@ final class ConfigurationStore {
             ))
         }
         return .success(checks)
-    }
-
-    /// Checks the requested components against their baselines without writing. A changed file is reported and latched, not adopted,
-    /// and an unchanged file that existed gets a receipt for its current version.
-    func verifyUnchanged(
-        _ components: Set<ConfigurationComponent>,
-        expecting expected: ConfigurationSlots<ConfigurationBaselineToken?>,
-        context: ConfigurationOperationContext
-    ) async -> ConfigurationStoreAdmission<ConfigurationVerifyResult> {
-        guard !isBusy else { return .busy }
-        isBusy = true
-        defer { isBusy = false }
-        var outcomes = ConfigurationSlots<ConfigurationVerifyOutcome?>(runtime: nil, platform: nil, preferences: nil)
-        for component in ConfigurationComponent.allCases where components.contains(component) {
-            outcomes[component] = await verify(component, expecting: expected[component], context: context)
-        }
-        return .admitted(ConfigurationVerifyResult(context: context, outcomes: outcomes))
     }
 
     /// Test seam: moves one component's version to its maximum, so the exhaustion path runs without 2^64 writes. It is internal, so only
@@ -536,13 +580,13 @@ final class ConfigurationStore {
         case .held(let hold, let sidecar):
             // Only a changed sidecar latches. An unreadable or absent one keeps its baseline, so a later check can establish it.
             if case .sidecarChanged = hold {
-                latch(sidecar)
+                latch(sidecar, .changedSinceBaseline)
             }
             return .notAttempted(.preservationHeld(hold))
         case .sourceChanged:
             // The runtime bytes differ from the ones the store established, so both files latch, as an observed conflict does.
-            latch(component)
-            latch(.runtime)
+            latch(component, .changedSinceBaseline)
+            latch(.runtime, .changedSinceBaseline)
             return .notAttempted(.sourceChanged)
         case .sourceUnreadable(let error):
             return .notAttempted(.sourceUnreadable(error))
@@ -586,12 +630,12 @@ final class ConfigurationStore {
             return .notPersisted(error)
         case .unknown(let reason, let error):
             // The file may hold the staged bytes, the prior or neither. No baseline may authorize a write until a reload.
-            latch(component)
+            latch(component, .writeUnknown)
             return .unknown(reason, reportedWriteError: error)
         case .conflict:
             // Another party changed the file after its baseline was observed (decision 0027). The latch holds until a reload, even if
             // the file later returns to the old bytes.
-            latch(component)
+            latch(component, .changedSinceBaseline)
             return .conflict
         case .notStarted(let error):
             return .notAttempted(.preReadFailed(error))
@@ -610,37 +654,12 @@ final class ConfigurationStore {
         case .unchanged:
             return .unchanged(receipt(component, context: context))
         case .changed:
-            latch(component)
+            latch(component, .changedSinceBaseline)
             return .conflict
         case .refused(let refusal):
             return .notAttempted(.refused(refusal))
         case .notVerified(let error):
             return .notAttempted(.preReadFailed(error))
-        }
-    }
-
-    private func verify(
-        _ component: ConfigurationComponent,
-        expecting token: ConfigurationBaselineToken?,
-        context: ConfigurationOperationContext
-    ) async -> ConfigurationVerifyOutcome {
-        let baseline: ConfigurationFileBaseline
-        switch authority(token, for: component) {
-        case .success(let value):
-            baseline = value
-        case .failure(let reason):
-            return .notAttempted(reason)
-        }
-        switch await verification(component, baseline: baseline) {
-        case .unchanged:
-            return records[component].present ? .unchanged(receipt(component, context: context)) : .unchangedAbsent
-        case .changed:
-            latch(component)
-            return .changed
-        case .refused(let refusal):
-            return .notAttempted(.refused(refusal))
-        case .notVerified(let error):
-            return .notVerified(error)
         }
     }
 
@@ -668,7 +687,7 @@ final class ConfigurationStore {
     private func adopt(_ observed: ConfigurationLoadObservation) -> ConfigurationLoadOutcome {
         switch observed.outcome {
         case .failure(let refusal):
-            latchAll()
+            latchAll(.observationRefused)
             return .refused(refusal)
         case .success(let frozen):
             // A missing sidecar's value comes from the runtime file, so a change of that value is a change of the sidecar, though its own
@@ -678,7 +697,7 @@ final class ConfigurationStore {
                 records[component].baseline != observed.baselines[component] || observed.valueMoved[component]
             }
             for component in ConfigurationComponent.allCases where advances(component) && !Self.canAdvance(records[component].version) {
-                latchAll()
+                latchAll(.observationRefused)
                 return .refused(.versionExhausted(component))
             }
             let advancing = ConfigurationComponent.allCases.filter(advances)
@@ -713,6 +732,8 @@ final class ConfigurationStore {
                     records[component].version += 1
                 }
                 records[component].baseline = baseline
+                // An adopted observation read every file, so each has a baseline; a missing one would hold no authority all the same.
+                records[component].latchReason = baseline == nil ? .observationRefused : nil
                 records[component].present = loaded[component].present
                 records[component].source = component == .runtime || loaded[component].present ? nil : observed.baselines.runtime
             }
@@ -725,13 +746,14 @@ final class ConfigurationStore {
     /// Ends a component's authority until a reload. A nil baseline authorizes nothing, so every token issued before this point is refused,
     /// and no version changes here. A reload after the latch takes a newer version even when the bytes are the old ones, so those tokens
     /// stay refused for good.
-    private func latch(_ component: ConfigurationComponent) {
+    private func latch(_ component: ConfigurationComponent, _ reason: ConfigurationLatchReason) {
         records[component].baseline = nil
+        records[component].latchReason = reason
     }
 
-    private func latchAll() {
+    private func latchAll(_ reason: ConfigurationLatchReason) {
         for component in ConfigurationComponent.allCases {
-            latch(component)
+            latch(component, reason)
         }
     }
 

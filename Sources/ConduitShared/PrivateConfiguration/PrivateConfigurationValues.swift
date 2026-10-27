@@ -434,14 +434,14 @@ package struct PrivateConfigurationRequest: Sendable, Equatable, CustomStringCon
     package var runtime: PrivateRuntimeConfiguration
     package var platform: PrivatePlatformConfiguration
 
-    /// Throws `invalidValue` when a baseline names another file than its slot.
+    /// Throws `invalidValue` when a baseline names another file than its slot, or an intent sits in a slot that cannot carry it.
     package init(
         requestID: ControlRequestID, incarnation: ControlHostIncarnation, budget: ControlWireBudget,
         runtimeBaseline: PrivateBaseline, platformBaseline: PrivateBaseline,
         modules: PrivateModuleSlots<PrivateModuleIntent>,
         runtime: PrivateRuntimeConfiguration, platform: PrivatePlatformConfiguration
     ) throws {
-        guard runtimeBaseline.component == .runtime, platformBaseline.component == .platform else {
+        guard runtimeBaseline.component == .runtime, platformBaseline.component == .platform, modules.isWellFormed else {
             throw PrivateConfigurationWireError.invalidValue
         }
         self.requestID = requestID
@@ -458,6 +458,39 @@ package struct PrivateConfigurationRequest: Sendable, Equatable, CustomStringCon
     package var description: String {
         "PrivateConfigurationRequest(requestID: \(requestID), runtimeBaseline: \(runtimeBaseline), "
             + "platformBaseline: \(platformBaseline), modules: \(modules), <redacted values>)"
+    }
+    package var debugDescription: String { description }
+    package var customMirror: Mirror { Mirror(self, children: [("description", description)], displayStyle: .struct) }
+}
+
+/// One preferences update (decision 0018): the full frozen preferences under the exact baseline of the preferences file. It
+/// is a save only. It names no module and carries no runtime or platform value, so it starts, applies and fences nothing.
+package struct PrivatePreferencesRequest: Sendable, Equatable, CustomStringConvertible,
+    CustomDebugStringConvertible, CustomReflectable
+{
+    package var requestID: ControlRequestID
+    package var incarnation: ControlHostIncarnation
+    package var budget: ControlWireBudget
+    /// Always a preferences baseline: the initializer refuses another component.
+    package private(set) var preferencesBaseline: PrivateBaseline
+    package var preferences: PrivatePreferences
+
+    /// Throws `invalidValue` when the baseline names another file.
+    package init(
+        requestID: ControlRequestID, incarnation: ControlHostIncarnation, budget: ControlWireBudget,
+        preferencesBaseline: PrivateBaseline, preferences: PrivatePreferences
+    ) throws {
+        guard preferencesBaseline.component == .preferences else { throw PrivateConfigurationWireError.invalidValue }
+        self.requestID = requestID
+        self.incarnation = incarnation
+        self.budget = budget
+        self.preferencesBaseline = preferencesBaseline
+        self.preferences = preferences
+    }
+
+    /// Identifiers and the baseline only. The values never appear in a description.
+    package var description: String {
+        "PrivatePreferencesRequest(requestID: \(requestID), preferencesBaseline: \(preferencesBaseline), <redacted values>)"
     }
     package var debugDescription: String { description }
     package var customMirror: Mirror { Mirror(self, children: [("description", description)], displayStyle: .struct) }

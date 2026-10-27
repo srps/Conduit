@@ -641,6 +641,7 @@ enum ReferenceFrameParser {
     static func letter(_ kind: PrivateConfigurationFrame.Kind) -> Character {
         switch kind {
         case .update: "Q"
+        case .preferences: "P"
         case .read: "G"
         case .editorReply: "R"
         }

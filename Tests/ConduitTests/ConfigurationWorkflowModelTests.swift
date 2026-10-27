@@ -447,7 +447,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
             files: files,
             queue: queue,
             store: store,
-            workflow: RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+            workflow: RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
         )
     }
 
@@ -736,8 +736,8 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         if (outcome.applied != nil) != expected.applied {
             return "\(label): applied is \(outcome.applied != nil) but the reference expects \(expected.applied)"
         }
-        if (outcome.preferences != nil) != expected.preferencesAdopted {
-            return "\(label): preferences adopted is \(outcome.preferences != nil) but the reference expects \(expected.preferencesAdopted)"
+        if outcome.adopted != expected.preferencesAdopted {
+            return "\(label): adopted is \(outcome.adopted) but the reference expects \(expected.preferencesAdopted)"
         }
         if !committedEvents(outcome.events).isEmpty {
             return "\(label): a reload wrote a configuration commit"

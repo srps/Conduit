@@ -258,6 +258,13 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
                 + " subscriberRecordRetainedBytes=\(limits.subscriberRecordRetainedBytes) collectionProofBytes=\(limits.collectionProofBytes)"
                 + " baselineFrameOverheadBytes=\(limits.baselineFrameOverheadBytes) maxEventBytes=\(limits.maxEventBytes)"
         )
+        print(
+            "RUNTIME-SERVICE-PROFILE structural aliasPartitions=\(RuntimePartition.all.count)"
+                + " quitPartitionOperations=\(RuntimeServiceLimits.quitPartitionOperations) quitLane=\(RuntimeServiceLimits.quitLaneCapacity)"
+                + " privateTransfer=\(RuntimeServiceLimits.privateTransferCapacity) privateInput=\(RuntimeServiceLimits.privateInputCapacity)"
+                + " privateTransferRetainedBytes=\(limits.privateTransferRetainedBytes) privateInputRetainedBytes=\(limits.privateInputRetainedBytes)"
+                + " (encoded bytes outside retainedByteBudget; not an RSS bound)"
+        )
         XCTAssertLessThanOrEqual(limits.retainedByteBudget, limits.retainedByteCeiling)
     }
 
@@ -298,6 +305,39 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
         }
     }
 
+    /// The Quit's wire form is strict. The widest legal Quit round-trips; from its own encoding, both final saves naming one request, a
+    /// negative or out-of-range total, and a missing total or flush are each refused on decode. Building a flush that names one request
+    /// twice is refused too.
+    func testTheWidestQuitRoundTripsAndItsMalformedFormsAreRefused() throws {
+        let widest = try XCTUnwrap(try Self.widestCalls().first { $0.label == "submit-quit-both-flushes" })
+        guard case .submit(let request) = widest.call, case .quit(_, let flush) = request.command else {
+            return XCTFail("the widest Quit is a submitted quit")
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let text = String(decoding: try encoder.encode(request.command), as: UTF8.self)
+        XCTAssertEqual(try JSONDecoder().decode(ControlRuntimeCommand.self, from: Data(text.utf8)), request.command)
+
+        let configuration = try XCTUnwrap(flush.configuration)
+        let preferences = try XCTUnwrap(flush.preferences)
+        func quoted(_ id: ControlRequestID) throws -> String { String(decoding: try encoder.encode(id), as: UTF8.self) }
+        let total = "\"totalMilliseconds\":\(Int32.max)"
+        XCTAssertTrue(text.contains(total), text)
+        let flushText = String(decoding: try encoder.encode(flush), as: UTF8.self)
+        let refused = [
+            text.replacingOccurrences(of: try quoted(preferences), with: try quoted(configuration)),
+            text.replacingOccurrences(of: total, with: "\"totalMilliseconds\":-1"),
+            text.replacingOccurrences(of: total, with: "\"totalMilliseconds\":\(Int(Int32.max) + 1)"),
+            text.replacingOccurrences(of: total + ",", with: ""),
+            text.replacingOccurrences(of: "\"flush\":" + flushText + ",", with: ""),
+        ]
+        for mutated in refused {
+            XCTAssertNotEqual(mutated, text, "the mutation applies")
+            XCTAssertThrowsError(try JSONDecoder().decode(ControlRuntimeCommand.self, from: Data(mutated.utf8)), mutated)
+        }
+        XCTAssertThrowsError(try ControlQuitFlush(configuration: configuration, preferences: configuration))
+    }
+
     /// Each current call at its widest legal form. Every identifier is the widest UUID value, every revision and count is `Int.max`, and every
     /// module and collection kind is the one with the longest name or the largest response.
     static func widestCalls() throws -> [(label: String, call: ControlRuntimeCall)] {
@@ -313,12 +353,23 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
             throw RuntimeServiceProfileError.internalFailure
         }
         let upstream = ControlUpstreamReference(configRevision: config, upstreamID: ControlUpstreamID(rawValue: id))
+        // The widest platform baseline: the widest namespace and the full UInt64 version, which the wire carries as an exact number.
+        let platformBaseline = PrivateBaseline(namespace: PrivateBaselineNamespace(rawValue: id), component: .platform, version: .max)
+        // The widest Quit: the protocol's largest total budget, and both final saves named, each by a widest UUID. The two must differ.
+        let flush = try ControlQuitFlush(
+            configuration: ControlRequestID(rawValue: id),
+            preferences: ControlRequestID(rawValue: RuntimeServiceFixtures.uuid(0xFFFF_FFFF_FFFE))
+        )
         let commands: [(label: String, command: ControlRuntimeCommand)] = [
             ("submit-stop", .stop(.tunnels)),
             ("submit-restart", .restart(.tunnels, ifLifecycleRevision: lifecycle)),
+            // Only a proxy Restart may name the companion's DNS revision, so this is the widest Restart now (decision 0036).
+            ("submit-restart-companion", .restart(.proxy, ifLifecycleRevision: lifecycle, conditionalDNSRevision: lifecycle)),
             ("submit-test-dns", .testDNS),
             ("submit-test-upstream", .testUpstream(upstream)),
             ("submit-refresh-preflight", .refreshPreflight),
+            ("submit-set-launch-at-login", .setLaunchAtLogin(false, ifPlatformBaseline: platformBaseline)),
+            ("submit-quit-both-flushes", .quit(total: try ControlWireBudget(Int(Int32.max)), flush: flush)),
         ]
         var calls: [(label: String, call: ControlRuntimeCall)] = []
         for entry in commands {
@@ -340,6 +391,144 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
         }
         calls.append((label: "read-snapshot", call: ControlRuntimeCall.readSnapshot))
         return calls
+    }
+
+    /// Every settled outcome kind at its widest legal form, measured as the service retains it (`RuntimeServiceCore.measureRetained`) and as the
+    /// codec frames its lookup reply and its stream settlement. The candidate's outcome store, control log and reply cap each hold the widest.
+    /// The configuration receipt is measured both with the conditional DNS companion and with all three members, and a DNS Stop completion with
+    /// its causal disable write. Each closed field is the case with the longest encoding, chosen by encoding every case; numbers are at their
+    /// maximum and baselines at the full `UInt64` version. Nothing is promoted to a default: the candidate is the test's own profile.
+    func testTheWidestOutcomeOfEveryKindFitsTheCandidateOutcomeLogAndReplyBounds() throws {
+        let limits = try RuntimeServiceProfileCandidate.limits()
+        let replyLimits = try RuntimeServiceProfileCandidate.frameLimits(limits.maxReplyBytes)
+        let id = RuntimeServiceFixtures.uuid(0xFFFF_FFFF_FFFF)
+        let operation = ControlOperationID(rawValue: id)
+        let correlation = ControlRequestID(rawValue: id)
+        var widestOutcome = 0
+        for (label, outcome) in try Self.widestOutcomes() {
+            let sizes = try RuntimeServiceCore.measureRetained(outcome, operation)
+            let lookup = ControlRuntimeMessage(correlation: correlation, body: .response(.lookup(.finished(outcome))))
+            let lookupFrame = try ControlRuntimeCodec.encodeFrame(lookup, limits: replyLimits)
+            XCTAssertEqual(try ControlRuntimeCodec.decodeFullFrame(lookupFrame, limits: replyLimits), lookup, label)
+            let settled = ControlRuntimeMessage(
+                correlation: correlation, body: .frame(.operationFinished(ControlOperationFinished(operationID: operation, outcome: outcome)))
+            )
+            let streamFrame = try ControlRuntimeCodec.encodeFrame(settled, limits: replyLimits)
+            print(
+                "RUNTIME-SERVICE-PROFILE outcome kind=\(label) outcomeBytes=\(sizes.outcome) finishedBytes=\(sizes.finished)"
+                    + " lookupReplyFrameBytes=\(lookupFrame.count) streamFrameBytes=\(streamFrame.count)"
+                    + " outcomeByteCapacity=\(limits.outcomeByteCapacity) controlLogByteCapacity=\(limits.controlLogByteCapacity)"
+                    + " maxReplyBytes=\(limits.maxReplyBytes) maxEventBytes=\(limits.maxEventBytes)"
+            )
+            XCTAssertLessThanOrEqual(sizes.outcome, limits.outcomeByteCapacity, label)
+            XCTAssertLessThanOrEqual(sizes.finished, limits.controlLogByteCapacity, label)
+            XCTAssertLessThanOrEqual(lookupFrame.count, limits.maxReplyBytes, label)
+            XCTAssertLessThanOrEqual(streamFrame.count, limits.maxReplyBytes, label)
+            widestOutcome = max(widestOutcome, sizes.outcome)
+        }
+        print("RUNTIME-SERVICE-PROFILE outcome widestOutcomeBytes=\(widestOutcome) internalFailureOutcomeBytes=\(limits.internalFailureOutcomeBytes)")
+    }
+
+    /// The candidate with the longest encoding. Every candidate is encoded; a tie keeps the first.
+    static func widest<Value: Encodable>(_ candidates: [Value]) throws -> Value {
+        var best: (value: Value, bytes: Int)?
+        for candidate in candidates {
+            let bytes = try RuntimeWireSize.bytes(of: candidate)
+            if bytes > (best?.bytes ?? -1) { best = (candidate, bytes) }
+        }
+        guard let best else { throw RuntimeServiceProfileError.internalFailure }
+        return best.value
+    }
+
+    /// Every write one file can report, each with its full-version baseline exactly when it verified.
+    static func componentWrites(_ component: ControlConfigWorkflowFile, namespace: PrivateBaselineNamespace) throws -> [ControlComponentWrite] {
+        let baseline = PrivateBaseline(namespace: namespace, component: component, version: .max)
+        var writes: [ControlConfigWorkflowWrite] = [.persisted(reportedError: false), .persisted(reportedError: true), .unchanged, .notPersisted, .conflict]
+        for cause in ControlConfigWorkflowUnknownCause.allCases {
+            writes += [.unknown(cause, reportedError: false), .unknown(cause, reportedError: true)]
+        }
+        writes += ControlConfigWorkflowNotAttemptedCause.allCases.map { .notAttempted($0) }
+        return try writes.map { try ControlComponentWrite(write: $0, baseline: $0.isVerified ? baseline : nil) }
+    }
+
+    /// Each settled outcome kind at its widest legal form, labelled.
+    static func widestOutcomes() throws -> [(label: String, outcome: ControlOperationOutcome)] {
+        let id = RuntimeServiceFixtures.uuid(0xFFFF_FFFF_FFFF)
+        let namespace = PrivateBaselineNamespace(rawValue: id)
+        let requestID = ControlRequestID(rawValue: id)
+        let incarnation = ControlHostIncarnation(rawValue: id)
+        guard let revision = ControlPresentationRevision(rawValue: Int.max),
+              let config = ControlConfigRevision(rawValue: Int.max),
+              let lifecycle = ControlLifecycleRevision(rawValue: Int.max)
+        else {
+            throw RuntimeServiceProfileError.internalFailure
+        }
+        func completed(_ command: ControlRuntimeCommandKind, _ result: ControlCommandResult) throws -> ControlOperationOutcome {
+            .completed(try ControlCompletion(command: command, presentationRevision: revision, result: result))
+        }
+
+        let runtimeWrites = try componentWrites(.runtime, namespace: namespace)
+        let platform = try widest(try componentWrites(.platform, namespace: namespace))
+        let member = try widest(ControlLifecycleModuleResult.allCases)
+        let companion = try widest(ControlLifecycleConditionalDNSResult.allCases)
+        func receipts(_ modules: [ControlModule], conditionalDNS: ControlLifecycleConditionalDNSResult?) throws -> ControlConfigurationReceipt {
+            try widest(try runtimeWrites.map { runtime in
+                try ControlConfigurationReceipt(
+                    requestID: requestID, incarnation: incarnation, runtime: runtime, platform: platform,
+                    committedDNSForwarderEnabled: runtime.write.isVerified ? false : nil,
+                    modules: modules.map { ControlModuleReceipt(module: $0, result: member) },
+                    applied: false, conditionalDNS: conditionalDNS
+                )
+            })
+        }
+        let disable = try widest(try runtimeWrites.map {
+            try ControlDNSDisableWrite(prior: PrivateBaseline(namespace: namespace, component: .runtime, version: .max), runtime: $0)
+        })
+
+        // The probe through the actual Bridge projection: both texts past their caps in NUL, which escapes widest, and the widest numbers.
+        let nul = String(repeating: "\u{0}", count: 2_049)
+        let probe = try RuntimeProbeControlProjection.upstreamProbe(ProbeResult(
+            proxy: UpstreamProxy(name: nul, host: nul, port: 65_535, priority: 0), latencyMS: Int.max, reachable: false
+        ))
+
+        let status = ControlIntegrationStatus(enabled: false, alreadyApplied: false, privilegeLevel: try widest(ControlPrivilegeLevel.allCases))
+        let items = ControlPreflightItems(
+            systemProxy: status, environmentVariables: status, splitDNS: status, helper: try widest(ControlHelperStatus.allCases)
+        )
+        let reading = try widest([ControlPreflightReading.observed(items)] + ControlPreflightUnavailableReason.allCases.map { .unavailable($0) })
+        let observedAt = try widest([
+            try ControlTimestamp(-Double.greatestFiniteMagnitude), try ControlTimestamp(-2.2250738585072014e-308),
+            try ControlTimestamp(-1.2345678901234567e-300),
+        ])
+        let preflight = ControlPreflightObservation(
+            stamp: ControlRuntimeStamp(
+                incarnation: incarnation, presentationRevision: revision, configRevision: config, lifecycleRevision: lifecycle,
+                modules: ControlModuleRevisions(proxy: lifecycle, dns: lifecycle, tunnels: lifecycle)
+            ),
+            observedAt: observedAt, reading: reading
+        )
+
+        let moduleResult = try widest([ControlModuleResult.succeeded, .cleanupPending] + ControlFailureCode.allCases.map { .failed($0) })
+        let partial = try ControlModuleOutcomes(ControlModule.allCases.map { ControlModuleOutcome(module: $0, result: moduleResult) })
+        let preferences = try ControlPreferencesReceipt(
+            requestID: requestID, incarnation: incarnation, preferences: try widest(try componentWrites(.preferences, namespace: namespace))
+        )
+        return [
+            ("configuration-receipt-conditional-dns", .configurationSettled(try receipts([.proxy, .tunnels], conditionalDNS: companion))),
+            ("configuration-receipt-three-members", .configurationSettled(try receipts(ControlModule.allCases, conditionalDNS: nil))),
+            ("preferences-receipt", .preferencesSettled(preferences)),
+            ("stop-dns-disable", try completed(.stop, .dnsDisable(disable))),
+            ("stop-settled", try completed(.stop, .settled)),
+            ("restart-settled", try completed(.restart, .settled)),
+            ("quit-settled", try completed(.quit, .settled)),
+            ("test-dns", try completed(.testDNS, .dnsLiveness(ControlDNSLivenessProbe(port: try ControlPort(65_535), answered: false)))),
+            ("test-upstream", try completed(.testUpstream, .upstreamProbe(probe))),
+            ("refresh-preflight", try completed(.refreshPreflight, .preflight(preflight))),
+            ("set-launch-at-login", try completed(.setLaunchAtLogin, .platformWrite(platform))),
+            ("partially-completed", .partiallyCompleted(partial)),
+            ("failed", .failed(try widest(ControlFailureCode.allCases))),
+            ("superseded", .superseded(by: ControlOperationID(rawValue: id))),
+        ]
     }
 
     /// 64 KiB pages through the actual `ControlPagePacker` and codec, for typical rows, mixed-escape rows and all-NUL rows. Each row lands in

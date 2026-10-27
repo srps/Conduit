@@ -1,5 +1,6 @@
 import ConduitShared
 import Foundation
+import RuntimeEvents
 
 /// `runtime-service-wire` (decision 0014): the v2 representations the service engine answers with, checked
 /// headlessly. It covers the approved refinements: the changed-incarnation and request-conflict rejections, the
@@ -94,6 +95,21 @@ enum RuntimeServiceWireScenario {
             ControlRuntimeMessage(correlation: correlation, body: .response(.failure(.frameTooLarge)))
         )
         check("a frame-too-large refusal names its stable code on the wire", String(decoding: refusalData, as: UTF8.self).contains("frame_too_large"))
+
+        // The service's diagnostics are typed health records (#180). A v1 reader keeps the same kind, name and detail, and a v2 reader
+        // gets the closed value back; a known name with a value this build cannot read is corruption, not an unknown event.
+        let typedFault = ControlTypedRuntimeEvent.runtimeService(.fault(.snapshotOverBound))
+        let faultRecord = ControlRuntimeEvent(
+            timestamp: Date(timeIntervalSince1970: 0), kind: typedFault.kind, event: typedFault.name, detail: typedFault.detail, typed: typedFault
+        )
+        let faultData = try ControlRuntimeCodec.makeEncoder().encode(faultRecord)
+        let faultBack = try ControlRuntimeCodec.makeDecoder().decode(ControlRuntimeEventRecord.self, from: faultData)
+        check("a typed service fault round-trips as a known record", faultBack == .known(faultRecord))
+        check("a typed service fault keeps its v1 health fields", faultRecord.kind == "health"
+              && faultRecord.event == RuntimeServiceEventName.fault.rawValue && faultRecord.detail == "fault=snapshot_over_bound")
+        let unreadable = Data(#"{"timestamp":0,"kind":"health","event":"runtime_service.snapshot_unavailable","detail":"reason=later","typed":{"family":"runtime_service","runtimeService":{"type":"snapshot_unavailable","reason":"later"}}}"#.utf8)
+        check("an unknown snapshot reason under a known name is refused",
+              (try? ControlRuntimeCodec.makeDecoder().decode(ControlRuntimeEventRecord.self, from: unreadable)) == nil)
 
         notes.append("representations only: the service is driven by the ConduitTests runtime-service suites")
         notes.append("no socket, machine, network or helper effects")

@@ -1,0 +1,100 @@
+{
+  "head": "e896bc419f7fabfdd6cca28c7bf1949c2b565b6c",
+  "source_sha256": {
+    "Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift": "b678d2ab868d67a7f52016de1837b44c530f63b04503dbd0e2a4c550c08f31c9",
+    "Sources/ConduitRuntime/RuntimeServiceCore.swift": "34e08589d300ede298f53c58cb2571aa96da313d673bb2114c7cf9d826f1d85c"
+  },
+  "tests_sha256": "0d69d861a0241b33d744f2515299772e3d0d4b5c6a4509a57c7aa73fcfa3505f",
+  "restored_exactly": true,
+  "checks": [
+    {
+      "name": "baseline",
+      "exit": 0,
+      "seconds": 43.91,
+      "assertions": [],
+      "invalid_markers": [],
+      "summary": [],
+      "assertion_count": 0,
+      "model_records": [
+        "PRIVATE-AUTHORITY-MODEL histories=88 transitions=264 depth=3 clients=2"
+      ]
+    },
+    {
+      "name": "model-stale-baseline",
+      "exit": 1,
+      "seconds": 12.2,
+      "assertions": [
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:154: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"persisted(reportedError: false)\") is not equal to (\"notAttempted(ConduitShared.ControlConfigWorkflowNotAttemptedCause.baselineMismatch)\") - readA \u2192 saveA \u2192 saveB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:155: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertNil failed: \"PrivateBaseline(runtime v3 in DEEC3132-B3FE-47B1-8069-A0E314E3764F)\" - readA \u2192 saveA \u2192 saveB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:166: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"Model client 1 edit 1\") is not equal to (\"Model client 0 edit 1\") - readA \u2192 saveA \u2192 saveB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:167: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"Optional(3)\") is not equal to (\"Optional(2)\") - readA \u2192 saveA \u2192 saveB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:154: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"persisted(reportedError: false)\") is not equal to (\"notAttempted(ConduitShared.ControlConfigWorkflowNotAttemptedCause.baselineMismatch)\") - readA \u2192 saveB \u2192 saveA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:155: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertNil failed: \"PrivateBaseline(runtime v3 in A941EEBE-71C3-490F-9BB6-34A3A45C4679)\" - readA \u2192 saveB \u2192 saveA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:166: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"Model client 0 edit 1\") is not equal to (\"Model client 1 edit 1\") - readA \u2192 saveB \u2192 saveA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:167: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"Optional(3)\") is not equal to (\"Optional(2)\") - readA \u2192 saveB \u2192 saveA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:154: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"persisted(reportedError: false)\") is not equal to (\"notAttempted(ConduitShared.ControlConfigWorkflowNotAttemptedCause.baselineMismatch)\") - readB \u2192 saveA \u2192 saveB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:155: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertNil failed: \"PrivateBaseline(runtime v3 in 5E88B36F-E319-4271-9B2B-EE49BCB0F601)\" - readB \u2192 saveA \u2192 saveB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:166: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"Model client 1 edit 1\") is not equal to (\"Model client 0 edit 1\") - readB \u2192 saveA \u2192 saveB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:167: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"Optional(3)\") is not equal to (\"Optional(2)\") - readB \u2192 saveA \u2192 saveB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:154: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"persisted(reportedError: false)\") is not equal to (\"notAttempted(ConduitShared.ControlConfigWorkflowNotAttemptedCause.baselineMismatch)\") - readB \u2192 saveB \u2192 saveA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:155: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertNil failed: \"PrivateBaseline(runtime v3 in 3274052F-FF11-41DD-B64D-2EE069B1EF2E)\" - readB \u2192 saveB \u2192 saveA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:166: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"Model client 0 edit 1\") is not equal to (\"Model client 1 edit 1\") - readB \u2192 saveB \u2192 saveA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:167: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"Optional(3)\") is not equal to (\"Optional(2)\") - readB \u2192 saveB \u2192 saveA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:154: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"persisted(reportedError: false)\") is not equal to (\"notAttempted(ConduitShared.ControlConfigWorkflowNotAttemptedCause.baselineMismatch)\") - saveA \u2192 readA \u2192 saveB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:155: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertNil failed: \"PrivateBaseline(runtime v3 in 9E38104C-23FE-41A1-AB6B-83AB3E5261F6)\" - saveA \u2192 readA \u2192 saveB"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true,
+      "assertion_count": 114,
+      "model_records": [
+        "PRIVATE-AUTHORITY-MODEL histories=88 transitions=264 depth=3 clients=2"
+      ]
+    },
+    {
+      "name": "model-private-id-reuse",
+      "exit": 1,
+      "seconds": 10.93,
+      "assertions": [
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(3AA30958-411B-4C81-B7D5-FE9D1B42B2C6)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - readA \u2192 saveA \u2192 reuseA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(1C0BDAE9-2809-4E79-A59A-3EC7B745AF20)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - readA \u2192 saveB \u2192 reuseB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(CF5D583B-6296-4E4D-B7D7-96DCB9A465F2)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - readB \u2192 saveA \u2192 reuseA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(B75DA265-524B-4240-9736-E278D497A04F)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - readB \u2192 saveB \u2192 reuseB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(99AAC54D-DEA7-4A8E-A90A-B9B8D210BB52)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveA \u2192 readA \u2192 reuseA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(E75016EE-B55D-47E2-B2D6-9A4518CF337A)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveA \u2192 readB \u2192 reuseA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(AD94AE55-CA13-44CC-B81C-E8E92D45FF74)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveA \u2192 saveA \u2192 reuseA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(4C7D2013-80C0-4950-AF33-C95BE1AC225D)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveA \u2192 saveB \u2192 reuseA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(7C75A5F9-A913-4B80-AE4A-CF4A06641B74)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveA \u2192 saveB \u2192 reuseB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(0B016022-A3CD-4B19-9314-C47ACBB32974)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveA \u2192 reuseA \u2192 readA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(600D7B75-171A-4E76-BA2E-5831A0930B84)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveA \u2192 reuseA \u2192 readB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(BE451198-E9EC-4B7E-A462-CEA1D73FEB71)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveA \u2192 reuseA \u2192 saveA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(D2FECA36-6A0C-43FA-A409-D7C155801073)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveA \u2192 reuseA \u2192 saveB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(A69294E7-3BB3-45F7-9C1D-C836CDD8B40A)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveA \u2192 reuseA \u2192 reuseA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(7837DD89-75B6-403F-805F-938251F0BE93)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveA \u2192 reuseA \u2192 reuseA",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(EC66FDF2-7ABC-438C-A19A-94D7C6EA0EEB)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveB \u2192 readA \u2192 reuseB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(1C11E589-3010-4059-ABDC-F261BA034E3B)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveB \u2192 readB \u2192 reuseB",
+        "Tests/ConduitTests/RuntimePrivateEditorAuthorityModelTests.swift:159: error: -[ConduitTests.RuntimePrivateEditorAuthorityModelTests testAllThreeStepTwoClientAuthorityHistories] : XCTAssertEqual failed: (\"accepted(513D54DB-937D-4798-9CD1-A601F916DC90)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.requestReused)\") - saveB \u2192 saveA \u2192 reuseA"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true,
+      "assertion_count": 26,
+      "model_records": [
+        "PRIVATE-AUTHORITY-MODEL histories=88 transitions=264 depth=3 clients=2"
+      ]
+    },
+    {
+      "name": "restored",
+      "exit": 0,
+      "seconds": 9.2,
+      "assertions": [],
+      "invalid_markers": [],
+      "summary": [],
+      "assertion_count": 0,
+      "model_records": [
+        "PRIVATE-AUTHORITY-MODEL histories=88 transitions=264 depth=3 clients=2"
+      ]
+    }
+  ],
+  "productEquivalentCommit": "d97a2cd7dc82a544d39c2d102117efa7196c9736"
+}

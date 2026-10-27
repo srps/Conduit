@@ -14,6 +14,9 @@ package enum ControlRejectionCode: String, Codable, Sendable, Equatable, CaseIte
     case changedIncarnation = "changed_incarnation"
     /// The request ID was recorded with a different payload. The earlier admission is never reused for it.
     case requestConflict = "request_conflict"
+    /// The request ID already names a private editor request, or a private request reuses a recorded ID. A private ID is lookup-only:
+    /// look the admission up and never resend. Nothing derived from a private body is kept to compare.
+    case requestReused = "request_reused"
     /// The command is larger than the request cap the host accepts, so it cannot be recorded. Nothing was admitted.
     case commandTooLarge = "command_too_large"
     /// The host failed to record the command for a reason of its own. Nothing was admitted, and the cause is not reported.
@@ -30,6 +33,7 @@ package enum ControlRejectionCode: String, Codable, Sendable, Equatable, CaseIte
         case .deadlineExpired: "The time budget ended before the command was admitted."
         case .changedIncarnation: "The runtime restarted since the command was read, so it was not applied."
         case .requestConflict: "This request ID was already used for a different command."
+        case .requestReused: "This request ID was already admitted; look it up rather than send it again."
         case .commandTooLarge: "The command is larger than the runtime accepts, so it was not admitted."
         case .internalFailure: "The runtime could not record this command, so it was not admitted."
         }
@@ -85,10 +89,14 @@ package enum ControlFailureCode: String, Codable, Sendable, Equatable, CaseItera
     case cleanupIncomplete = "cleanup_incomplete"
     case staleRevision = "stale_revision"
     case internalFailure = "internal_failure"
+    /// The configuration store's one slot was taken by another operation, so nothing was captured or written. A capacity answer, not a
+    /// persistence failure: a later explicit request may succeed.
+    case storeBusy = "store_busy"
 
     /// Sanitized text for display. The code, not this text, carries the meaning.
     package var humanDescription: String {
         switch self {
+        case .storeBusy: "The configuration store was busy, so nothing was saved; try again."
         case .effectFailed: "The change did not take effect."
         case .cleanupIncomplete: "Cleanup did not finish; recovery work remains."
         case .staleRevision: "The operation was superseded by a newer revision."
@@ -242,10 +250,12 @@ package struct ControlCompletion: Codable, Sendable, Equatable {
     /// Lifecycle commands settle with no payload. Each observation command reports its own.
     private static func pairs(command: ControlRuntimeCommandKind, result: ControlCommandResult) -> Bool {
         switch (command, result) {
-        case (.stop, .settled), (.restart, .settled): true
+        case (.stop, .settled), (.restart, .settled), (.quit, .settled): true
+        case (.stop, .dnsDisable): true
         case (.testUpstream, .upstreamProbe): true
         case (.testDNS, .dnsLiveness): true
         case (.refreshPreflight, .preflight): true
+        case (.setLaunchAtLogin, .platformWrite): true
         default: false
         }
     }
@@ -259,6 +269,11 @@ package enum ControlOperationOutcome: Codable, Sendable, Equatable {
     /// Some modules completed and others did not. See `ControlModuleOutcomes`.
     case partiallyCompleted(ControlModuleOutcomes)
     case failed(ControlFailureCode)
+    /// A private editor update settled: its causal receipt, whatever each file and module came to. It is settlement, never admission,
+    /// and it carries no configuration value.
+    case configurationSettled(ControlConfigurationReceipt)
+    /// A private preferences update settled: its causal receipt. Settlement only, with no configuration value.
+    case preferencesSettled(ControlPreferencesReceipt)
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -266,6 +281,7 @@ package enum ControlOperationOutcome: Codable, Sendable, Equatable {
         case by
         case modules
         case failure
+        case receipt
     }
 
     package init(from decoder: any Decoder) throws {
@@ -279,6 +295,10 @@ package enum ControlOperationOutcome: Codable, Sendable, Equatable {
             self = .partiallyCompleted(try container.decode(ControlModuleOutcomes.self, forKey: .modules))
         case "failed":
             self = .failed(try container.decode(ControlFailureCode.self, forKey: .failure))
+        case "configurationSettled":
+            self = .configurationSettled(try container.decode(ControlConfigurationReceipt.self, forKey: .receipt))
+        case "preferencesSettled":
+            self = .preferencesSettled(try container.decode(ControlPreferencesReceipt.self, forKey: .receipt))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "an unknown outcome")
         }
@@ -299,6 +319,12 @@ package enum ControlOperationOutcome: Codable, Sendable, Equatable {
         case .failed(let code):
             try container.encode("failed", forKey: .type)
             try container.encode(code, forKey: .failure)
+        case .configurationSettled(let receipt):
+            try container.encode("configurationSettled", forKey: .type)
+            try container.encode(receipt, forKey: .receipt)
+        case .preferencesSettled(let receipt):
+            try container.encode("preferencesSettled", forKey: .type)
+            try container.encode(receipt, forKey: .receipt)
         }
     }
 }

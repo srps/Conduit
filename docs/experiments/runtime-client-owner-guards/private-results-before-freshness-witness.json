@@ -1,0 +1,123 @@
+{
+  "head": "24000f1e78c30323902d90d982529b74f1b43bf5",
+  "source_sha256": {
+    "Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift": "f2d5784b51b89b9c9c71bccb5046cc545dc76ab976ce9d74addb2d2efafd6b55",
+    "Sources/ConduitRuntime/RuntimeHostLifecycle.swift": "adc8245fe89e2e5f8eb4f057204a4af7e7c1f74641dec1c42af765daf61faa91",
+    "Sources/ConduitRuntime/RuntimePrivateEditor.swift": "2be3543e75962c802b6e3094a7823014a8a26c14cebd8600329258c509bb704e"
+  },
+  "tests_sha256": "5f81affd92c813cef2fc2cebb08f10bdd7706487f9f5b004a8deca632f84ecf2",
+  "restored_exactly": true,
+  "checks": [
+    {
+      "name": "baseline",
+      "exit": 0,
+      "seconds": 65.77,
+      "assertions": [],
+      "invalid_markers": [],
+      "summary": [
+        "\t Executed 24 tests, with 0 failures (0 unexpected) in 20.308 (20.331) seconds"
+      ],
+      "assertion_count": 0,
+      "model_records": []
+    },
+    {
+      "name": "save-mints-current-baseline",
+      "exit": 1,
+      "seconds": 8.3,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:307: error: -[ConduitTests.RuntimeHostControlOwnerTests testASaveOnlyUpdateSettlesWithItsCausalReceiptAndItsIDIsLookupOnly] : XCTAssertEqual failed: (\"persisted(reportedError: false)\") is not equal to (\"notAttempted(ConduitShared.ControlConfigWorkflowNotAttemptedCause.baselineMismatch)\") - an old baseline never overwrites a newer file",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:308: error: -[ConduitTests.RuntimeHostControlOwnerTests testASaveOnlyUpdateSettlesWithItsCausalReceiptAndItsIDIsLookupOnly] : XCTAssertNil failed: \"PrivateBaseline(runtime v3 in 97DE064E-4301-4156-89D9-E8AE763C0C78)\"",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:309: error: -[ConduitTests.RuntimeHostControlOwnerTests testASaveOnlyUpdateSettlesWithItsCausalReceiptAndItsIDIsLookupOnly] : XCTAssertNil failed: \"true\"",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:310: error: -[ConduitTests.RuntimeHostControlOwnerTests testASaveOnlyUpdateSettlesWithItsCausalReceiptAndItsIDIsLookupOnly] : XCTAssertEqual failed: (\"Older draft\") is not equal to (\"Edited\")"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true,
+      "assertion_count": 4,
+      "model_records": []
+    },
+    {
+      "name": "receipt-discards-lifecycle-results",
+      "exit": 1,
+      "seconds": 26.9,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:496: error: -[ConduitTests.RuntimeHostControlOwnerTests testAFrozenStartsReceiptCarriesTheRecordedSettlementsOfAFailedBind] : XCTAssertEqual failed: (\"[ConduitShared.ControlModuleReceipt(module: ConduitShared.ControlModule.proxy, result: ConduitShared.ControlLifecycleModuleResult.superseded)]\") is not equal to (\"[ConduitShared.ControlModuleReceipt(module: ConduitShared.ControlModule.proxy, result: ConduitShared.ControlLifecycleModuleResult.failed)]\") - combined: false",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:496: error: -[ConduitTests.RuntimeHostControlOwnerTests testAFrozenStartsReceiptCarriesTheRecordedSettlementsOfAFailedBind] : XCTAssertEqual failed: (\"[ConduitShared.ControlModuleReceipt(module: ConduitShared.ControlModule.proxy, result: ConduitShared.ControlLifecycleModuleResult.superseded), ConduitShared.ControlModuleReceipt(module: ConduitShared.ControlModule.dns, result: ConduitShared.ControlLifecycleModuleResult.superseded)]\") is not equal to (\"[ConduitShared.ControlModuleReceipt(module: ConduitShared.ControlModule.proxy, result: ConduitShared.ControlLifecycleModuleResult.failed), ConduitShared.ControlModuleReceipt(module: ConduitShared.ControlModule.dns, result: ConduitShared.ControlLifecycleModuleResult.superseded)]\") - combined: true"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true,
+      "assertion_count": 2,
+      "model_records": []
+    },
+    {
+      "name": "private-input-bound-ignored",
+      "exit": 1,
+      "seconds": 8.13,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:412: error: -[ConduitTests.RuntimeHostControlOwnerTests testABusyUpdateRefusesBeforeItsRequestIsMappedAndAHeldInputLeavesReadsOpen] : XCTAssertEqual failed: (\"localRefusal(ConduitShared.ControlRuntimeErrorCode.invalidValue)\") is not equal to (\"notSent(ConduitShared.RuntimeWaitEnd.transportBusy)\")",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:414: error: -[ConduitTests.RuntimeHostControlOwnerTests testABusyUpdateRefusesBeforeItsRequestIsMappedAndAHeldInputLeavesReadsOpen] : XCTAssertEqual failed: (\"1\") is not equal to (\"-1\")"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true,
+      "assertion_count": 2,
+      "model_records": []
+    },
+    {
+      "name": "private-wire-budget-ignored",
+      "exit": 1,
+      "seconds": 6.71,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:509: error: -[ConduitTests.RuntimeHostControlOwnerTests testAPrivateRequestWhoseBudgetLapsedBeforeAdmissionIsRefusedTyped] : XCTAssertEqual failed: (\"accepted(8E845D2D-D16E-491C-9D0A-991E48FE2500)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.deadlineExpired)\")",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:513: error: -[ConduitTests.RuntimeHostControlOwnerTests testAPrivateRequestWhoseBudgetLapsedBeforeAdmissionIsRefusedTyped] : XCTAssertEqual failed: (\"admission(ConduitShared.ControlAdmission.accepted(8E845D2D-D16E-491C-9D0A-991E48FE2500))\") is not equal to (\"unknown(ConduitShared.ControlUnknownOutcomeReason.notRecorded)\") - a lapsed budget records no alias",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:514: error: -[ConduitTests.RuntimeHostControlOwnerTests testAPrivateRequestWhoseBudgetLapsedBeforeAdmissionIsRefusedTyped] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\")",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:515: error: -[ConduitTests.RuntimeHostControlOwnerTests testAPrivateRequestWhoseBudgetLapsedBeforeAdmissionIsRefusedTyped] : XCTAssertEqual failed: (\"Never\") is not equal to (\"Default\")",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:522: error: -[ConduitTests.RuntimeHostControlOwnerTests testAPrivateRequestWhoseBudgetLapsedBeforeAdmissionIsRefusedTyped] : XCTAssertEqual failed: (\"observation(PrivateEditorObservation(terminal: false, components: PrivateComponentSlots<PrivateComponentState>(runtime: ConduitShared.PrivateComponentState.verified(PrivateBaseline(runtime v1 in D803F973-A1F7-4930-86EB-A10F1AE28353)), platform: ConduitShared.PrivateComponentState.verified(PrivateBaseline(platform v1 in D803F973-A1F7-4930-86EB-A10F1AE28353)), preferences: ConduitShared.PrivateComponentState.verified(PrivateBaseline(preferences v1 in D803F973-A1F7-4930-86EB-A10F1AE28353))), modules: PrivateModuleSlots<PrivateModuleState>(proxy: ConduitShared.PrivateModuleState(lifecycleRevision: ConduitShared.ControlOrdinal<ConduitShared.ControlLifecycleRevisionDomain>(rawValue: 0), enabled: false, fenced: false), dns: ConduitShared.PrivateModuleState(lifecycleRevision: ConduitShared.ControlOrdinal<ConduitShared.ControlLifecycleRevisionDomain>(rawValue: 0), enabled: true, fenced: false), tunnels: ConduitShared.PrivateModuleState(lifecycleRevision: ConduitShared.ControlOrdinal<ConduitShared.ControlLifecycleRevisionDomain>(rawValue: 0), enabled: false, fenced: false)), <redacted values>))\") is not equal to (\"refused(ConduitShared.ControlRejectionCode.deadlineExpired)\")"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true,
+      "assertion_count": 5,
+      "model_records": []
+    },
+    {
+      "name": "frozen-dns-overrides-stop",
+      "exit": 1,
+      "seconds": 6.83,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:552: error: -[ConduitTests.RuntimeHostControlOwnerTests testASaveMergesTheDNSStopsDisableOverTheDraftsEnable] : XCTAssertEqual failed: (\"Optional(true)\") is not equal to (\"Optional(false)\")",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:555: error: -[ConduitTests.RuntimeHostControlOwnerTests testASaveMergesTheDNSStopsDisableOverTheDraftsEnable] : XCTAssertFalse failed - the Stop's disable stands"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true,
+      "assertion_count": 2,
+      "model_records": []
+    },
+    {
+      "name": "apply-pair-freshness-ignored",
+      "exit": 0,
+      "seconds": 5.64,
+      "assertions": [],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": false,
+      "assertion_count": 0,
+      "model_records": []
+    },
+    {
+      "name": "restored",
+      "exit": 0,
+      "seconds": 28.5,
+      "assertions": [],
+      "invalid_markers": [],
+      "summary": [
+        "\t Executed 24 tests, with 0 failures (0 unexpected) in 22.623 (22.633) seconds"
+      ],
+      "assertion_count": 0,
+      "model_records": []
+    }
+  ],
+  "productEquivalentCommit": "88fabc08cf8925da82748c7e34acb97534ff3e8c"
+}

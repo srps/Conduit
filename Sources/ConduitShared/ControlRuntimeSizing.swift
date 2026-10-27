@@ -113,7 +113,9 @@ extension ControlOperationOutcome {
             try completion.result.measure(into: &budget)
         case .partiallyCompleted(let modules):
             try budget.elements(modules.entries.count)
-        case .superseded, .failed:
+        case .configurationSettled(let receipt):
+            try budget.elements(receipt.modules.count)
+        case .superseded, .failed, .preferencesSettled:
             break
         }
     }
@@ -126,7 +128,7 @@ extension ControlCommandResult {
             try budget.text(probe.name)
             try budget.text(probe.endpoint)
             try budget.elements(probe.displayNotices.count)
-        case .settled, .dnsLiveness, .preflight:
+        case .settled, .dnsLiveness, .preflight, .platformWrite, .dnsDisable:
             break
         }
     }
@@ -218,7 +220,7 @@ extension ControlTypedRuntimeEvent {
         switch self {
         case .lifecycle(let lifecycle):
             try lifecycle.measure(into: &budget)
-        case .configWorkflow:
+        case .configWorkflow, .runtimeService:
             // Closed enums and bounded integers only: no free text to count, as the lifecycle's closed cases.
             break
         }

@@ -49,17 +49,19 @@ final class RuntimeEventTypedTests: XCTestCase {
         }
     }
 
-    func testTheTypedInventoryIsTheFiveLifecycleNamesAndTheConfigWorkflowFour() {
+    func testTheTypedInventoryIsTheFiveLifecycleNamesTheConfigWorkflowFourAndTheRuntimeServiceTwo() {
         XCTAssertEqual(
             RuntimeEventPayload.typedNames,
             Set([
                 "lifecycle.superseded", "lifecycle.coalesced", "lifecycle.termination_drain_expired",
                 "lifecycle.version_changed", "lifecycle.module_settled",
                 "config.workflow.observed", "config.workflow.committed", "config.workflow.held", "config.workflow.superseded",
+                "runtime_service.fault", "runtime_service.snapshot_unavailable",
             ])
         )
         XCTAssertEqual(LifecycleEventName.allCases.count, 5)
         XCTAssertEqual(ConfigurationWorkflowEventName.allCases.count, 4)
+        XCTAssertEqual(RuntimeServiceEventName.allCases.count, 2)
     }
 
     /// The settlement's closed sets keep their spelling, and only two spellable combinations are refused: a proxy member that is

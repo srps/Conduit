@@ -53,6 +53,15 @@ package enum ControlRuntimeEventRecord: Codable, Sendable, Equatable {
         }
     }
 
+    /// Only the type of a `runtime_service` value. Its other fields are not read here.
+    private struct RuntimeServiceProbe: Decodable {
+        let runtimeService: TypeProbe
+
+        struct TypeProbe: Decodable {
+            let type: String
+        }
+    }
+
     package init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         // The outer fields are required for both branches, so an unknown record still has
@@ -93,9 +102,13 @@ package enum ControlRuntimeEventRecord: Codable, Sendable, Equatable {
         case .configWorkflow?:
             let type = try container.decode(ConfigWorkflowProbe.self, forKey: .typed).configWorkflow.type
             typedIsKnown = ControlConfigWorkflowEvent.knownWireTypes.contains(type)
+        case .runtimeService?:
+            let type = try container.decode(RuntimeServiceProbe.self, forKey: .typed).runtimeService.type
+            typedIsKnown = ControlRuntimeServiceEvent.knownWireTypes.contains(type)
         }
         return !typedIsKnown && !ControlLifecycleEvent.knownEventNames.contains(event)
             && !ControlConfigWorkflowEvent.knownEventNames.contains(event)
+            && !ControlRuntimeServiceEvent.knownEventNames.contains(event)
     }
 
     package func encode(to encoder: any Encoder) throws {

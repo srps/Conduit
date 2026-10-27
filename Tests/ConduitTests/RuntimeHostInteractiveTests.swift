@@ -18,8 +18,9 @@ private final class RefusingGSS: GSSTokenProvider, @unchecked Sendable {
     func resetContext() {}
 }
 
-/// A UDP socket the test holds on a loopback port it chose, so a DNS forwarder's bind on that port fails as a contended port does.
-private final class HeldUDPPort {
+/// A UDP socket the test holds on a loopback port it chose, so a DNS forwarder's bind on that port fails as a contended port does. The
+/// control-owner tests hold one for a frozen request's forwarder port.
+final class HeldUDPPort {
     let port: Int
     private let descriptor: Int32
 
@@ -83,15 +84,20 @@ private func freeTCPPort() throws -> Int {
 }
 
 /// One scratch root, its fakes and the one host built over it. `tearDown` stops, settles and flushes the host before the root goes.
+/// The control-owner tests build the same harness (`makeInteractiveHarness`).
 @MainActor
-private final class Harness {
+final class InteractiveHostHarness {
         let session: StateRootSession
         let environment: RuntimeEnvironment
         let machine: FakeMachine
         let hold = HeldCall()
+        /// The ports the host's injected DNS probe was asked, in order. Each probe is offered to `hold` first as `("dns-probe", [port])`.
+        let dnsProbes = LockedLog<Int>()
         let vpn = FakeVPNStatusObserver()
         /// The PAC evaluator the orchestrator fetches through; a test that holds a Start before its bind names a `HeldPACFetch`.
         var pacEvaluator: any PacEvaluator = FakePacEvaluator()
+        /// The state-file access the host's store uses; a test that parks a store step names a `HeldStateFileRead`.
+        var stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem()
         private let directory: URL
         private(set) var host: RuntimeHost?
 
@@ -113,6 +119,8 @@ private final class Harness {
             let machine = self.machine
             let hold = self.hold
             let vpn = self.vpn
+            let dnsProbes = self.dnsProbes
+            let dnsProbe = FakeDNSProbe()
             let built = try await RuntimeHost.open(
                 stateSession: session,
                 logger: DiscardingLogSink(),
@@ -131,14 +139,18 @@ private final class Harness {
                         hold.pass(launchPath, arguments)
                         return try machine.run(launchPath, arguments)
                     },
-                    dnsResponds: FakeDNSProbe().responds(onPort:),
+                    dnsResponds: { port in
+                        dnsProbes.append(port)
+                        hold.pass("dns-probe", [String(port)])
+                        return dnsProbe.responds(onPort: port)
+                    },
                     networkPath: FakeNetworkPathObserver(),
                     networkLocation: FakeNetworkLocationObserver(),
                     networkLocationStoreFactory: { _ in nil },
                     vpnStatusMonitor: { _, _ in vpn },
                     homeDirectory: directory.appendingPathComponent("home", isDirectory: true),
                     resolverDirectory: machine.resolverDirectory.path,
-                    stateFiles: StateFileAccess.operatingSystem()
+                    stateFiles: stateFiles
                 ),
                 reapplyRetrySchedule: ConfigReapplyRetry.Schedule(delays: [.seconds(3600)]),
                 splitDNSHelperCheckInterval: .seconds(3600)
@@ -179,6 +191,17 @@ private final class Harness {
         func typedEvents() -> [RuntimeEventPayload] {
             host?.orchestrator.eventLog.events.compactMap(\.typed) ?? []
         }
+}
+
+private typealias Harness = InteractiveHostHarness
+
+/// `makeHarness` for the other suites over the actual host.
+@MainActor
+func makeInteractiveHarness(
+    platform: PlatformIntegrationConfig,
+    dnsForwarderEnabled: Bool
+) throws -> InteractiveHostHarness {
+    try makeHarness(platform: platform, dnsForwarderEnabled: dnsForwarderEnabled)
 }
 
 /// Ephemeral listeners, one split-DNS entry, and the switches a test names.
@@ -1122,7 +1145,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         self.harness = harness
         let store = ConfigurationStore(session: harness.session, access: StateFileAccess.operatingSystem(),
                                        work: PlatformWork(label: "test.owed-disable"))
-        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        let workflow = RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
         _ = try await workflow.open()
         workflow.admitStop([.dns], reason: .session)
 
@@ -1145,7 +1168,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         self.harness = harness
         let files = ParkedReadStateFiles()
         let store = ConfigurationStore(session: harness.session, access: files, work: PlatformWork(label: "test.busy-disable"))
-        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        let workflow = RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
         _ = try await workflow.open()
         let saved = try Data(contentsOf: harness.environment.configFile)
         workflow.admitStop([.dns], reason: .session)
@@ -1179,7 +1202,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         self.harness = harness
         let store = ConfigurationStore(session: harness.session, access: StateFileAccess.operatingSystem(),
                                        work: PlatformWork(label: "test.carried-disable"))
-        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        let workflow = RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
         _ = try await workflow.open()
         workflow.admitStop([.dns], reason: .session)
         let start = try workflow.admitStart(PrivateModuleSlots(proxy: .none, dns: .start, tunnels: .none)).get()
@@ -1205,7 +1228,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         self.harness = harness
         let files = ParkedReadStateFiles()
         let store = ConfigurationStore(session: harness.session, access: files, work: PlatformWork(label: "test.displaced-disable"))
-        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        let workflow = RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
         _ = try await workflow.open()
         workflow.admitStop([.dns], reason: .session)
         files.arm()
@@ -1244,7 +1267,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         self.harness = harness
         let store = ConfigurationStore(session: harness.session, access: StateFileAccess.operatingSystem(),
                                        work: PlatformWork(label: "test.pending-dns-scope"))
-        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        let workflow = RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
         _ = try await workflow.open()
         let dnsStart = try workflow.admitStart(PrivateModuleSlots(proxy: .none, dns: .start, tunnels: .none)).get()
         let proxy = try workflow.admitStart(PrivateModuleSlots(proxy: .start, dns: .conditionalActivation, tunnels: .none)).get()

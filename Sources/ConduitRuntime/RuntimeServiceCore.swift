@@ -13,8 +13,15 @@ private enum RuntimeLogicalState: Sendable, Equatable {
 /// hands to the owner at launch and then releases, or which it releases when the operation is dropped. A running operation
 /// holds no command, and it holds its effect until the owner reports quiescence.
 private enum RuntimePhysicalState {
-    case queued(ControlRuntimeCommand)
+    case queued(RuntimeOwnerWork)
     case running
+}
+
+/// What a queued operation hands to the owner at launch. A private editor update carries no value here: the owner holds its frozen input
+/// under the operation's ID, in the composition's one admitted-input slot.
+enum RuntimeOwnerWork: Sendable {
+    case control(ControlRuntimeCommand)
+    case privateUpdate
 }
 
 /// One live operation, from admission until its physical effect has quiesced.
@@ -201,14 +208,20 @@ final class RuntimeServiceCore {
         guard encoded.count <= limits.maxRequestBytes else { return .rejected(.commandTooLarge) }
         let fingerprint = RuntimeAliasTable.fingerprint(of: encoded)
         if let known = aliasTable.live(request.requestID, now: timing.now()) {
-            return known.fingerprint == fingerprint ? known.admission : .rejected(.requestConflict)
+            switch known.origin {
+            case .ordinary(let recorded):
+                return recorded == fingerprint ? known.admission : .rejected(.requestConflict)
+            case .privateEditor:
+                return .rejected(.requestReused)
+            }
         }
         let partition = RuntimePartition.of(request.command)
         var stopModule: ControlModule?
         var ordinaryNext: Int?
         if case .stop(let module) = request.command {
             stopModule = module
-        } else {
+        } else if partition != .quit {
+            // The quit's partition holds at most the one quit the host's latch admits, so it never waits on ordinary capacity.
             // The ordinary capacity is checked before any owner turn, so a refusal changes nothing and is not recorded.
             guard ordinaryUnquiesced < limits.ordinaryPendingCapacity,
                   let next = RuntimeCounter.successor(ordinaryUnquiesced)
@@ -219,7 +232,7 @@ final class RuntimeServiceCore {
         }
         let operation = makeOperationID()
         let candidate = stopModule.flatMap { candidates[$0] }
-        switch owner.fence(request.command, operation: operation, candidate: candidate) {
+        switch owner.fence(request.command, request: request.requestID, operation: operation, candidate: candidate) {
         case .rejected(let code):
             recordAlias(request, fingerprint: fingerprint, partition: partition, admission: .rejected(code))
             return .rejected(code)
@@ -248,17 +261,59 @@ final class RuntimeServiceCore {
             operations[operation] = RuntimeOperationRecord(
                 partition: partition,
                 logical: .pending,
-                physical: .queued(request.command)
+                physical: .queued(.control(request.command))
             )
             recordAlias(request, fingerprint: fingerprint, partition: partition, admission: .accepted(operation))
             switch partition {
-            case .ordinary: scheduleOrdinaryLaunch(operation)
+            case .ordinary, .quit: scheduleOrdinaryLaunch(operation)
             case .stop(let module): scheduleStopLaunch(module)
             }
             sweepRetention()
             deliver(supersessionFault)
             return .accepted(operation)
         }
+    }
+
+    /// Admits one private editor update (decisions 0018 and 0035). Its request ID is lookup-only: any live alias, of either origin, refuses
+    /// it as reused, and its alias keeps nothing derived from the body. It takes ordinary capacity, which orders it with the other ordinary
+    /// work; its frozen values are bounded by the composition's one admitted-input slot, not by this capacity. `fence` is the owner's
+    /// synchronous admission for the operation, in this turn, before any I/O.
+    func submitPrivate(
+        requestID: ControlRequestID,
+        expectedIncarnation: ControlHostIncarnation,
+        fence: (ControlOperationID) -> ControlOwnerFenceResult
+    ) -> ControlAdmission {
+        guard expectedIncarnation == incarnation else { return .rejected(.changedIncarnation) }
+        let now = timing.now()
+        if aliasTable.live(requestID, now: now) != nil { return .rejected(.requestReused) }
+        // A final save the quit's window reserved by this request ID goes into the quit's partition; every other update takes ordinary
+        // capacity, checked before the owner turn, and its alias stays ordinary.
+        let partition: RuntimePartition = owner.reservesQuitFlush(requestID) ? .quit : .ordinary
+        var next: Int?
+        if partition == .ordinary {
+            guard ordinaryUnquiesced < limits.ordinaryPendingCapacity, let successor = RuntimeCounter.successor(ordinaryUnquiesced) else {
+                return .rejected(.queueFull)
+            }
+            next = successor
+        }
+        let operation = makeOperationID()
+        let admission: ControlAdmission
+        switch fence(operation) {
+        case .rejected(let code):
+            admission = .rejected(code)
+        case .joinedCandidate:
+            // An update has no candidate to join, so this is a fence defect.
+            assertionFailure("the owner joined a private update")
+            admission = .rejected(.internalFailure)
+        case .admitted:
+            if let next { ordinaryUnquiesced = next }
+            operations[operation] = RuntimeOperationRecord(partition: partition, logical: .pending, physical: .queued(.privateUpdate))
+            admission = .accepted(operation)
+            scheduleOrdinaryLaunch(operation)
+        }
+        aliasTable.record(requestID, origin: .privateEditor, partition: partition, admission: admission, now: now)
+        sweepRetention()
+        return admission
     }
 
     /// Reads the admission recorded for one request in this incarnation. An expired alias is removed and reported as not
@@ -284,7 +339,7 @@ final class RuntimeServiceCore {
 
     /// The owner's safe snapshot, when it belongs to this incarnation.
     func currentSnapshot() -> ControlRuntimeSnapshot? {
-        let snapshot = owner.snapshot()
+        guard let snapshot = owner.snapshot() else { return nil }
         return snapshot.stamp.incarnation == incarnation ? snapshot : nil
     }
 
@@ -432,7 +487,9 @@ final class RuntimeServiceCore {
     /// The retention is best effort. No lease is promised, so a retained revision can be evicted by a later capture.
     func pageSource(_ request: ControlPageRequest) -> RuntimePageSource {
         guard request.expectedIncarnation == incarnation else { return .changedIncarnation }
-        guard let snapshot = currentSnapshot() else {
+        // An owner that cannot project its state has reported why itself, so the read fails closed with no fault of the service's.
+        guard let snapshot = owner.snapshot() else { return .internalFailure }
+        guard snapshot.stamp.incarnation == incarnation else {
             // The owner's snapshot names another incarnation than this service. The owner broke its invariant, so nothing is read.
             deliver(.snapshotIncarnationMismatch)
             return .internalFailure
@@ -703,6 +760,9 @@ final class RuntimeServiceCore {
                     scheduleStopLaunch(module)
                 }
             }
+        case .quit:
+            // The quit and its reserved flushes took no ordinary capacity, so none returns.
+            break
         }
         sweepRetention()
         // The capacity is returned above, so the owner sees the operation closed and its slot free. Both faults wait for the whole transaction.
@@ -722,8 +782,10 @@ final class RuntimeServiceCore {
 
     /// Queues one ordinary launch hop. The operation's capacity is already held, so the hop count stays within it.
     private func scheduleOrdinaryLaunch(_ operation: ControlOperationID) {
-        scheduling.hop { [weak self] in
-            self?.launchOrdinary(operation)
+        // Strong: an admitted operation owns its launch. A caller that drops its client after the admission must not leave the owner's
+        // admitted work, and its pending count, stranded; the capacity bounds these hops.
+        scheduling.hop { [self] in
+            launchOrdinary(operation)
         }
     }
 
@@ -737,8 +799,9 @@ final class RuntimeServiceCore {
     private func scheduleStopLaunch(_ module: ControlModule) {
         guard stopSlots[module, default: RuntimeStopSlots()].launchQueued == false else { return }
         stopSlots[module, default: RuntimeStopSlots()].launchQueued = true
-        scheduling.hop { [weak self] in
-            self?.launchStop(module)
+        // Strong, as an ordinary launch: a fenced Stop launches even when its caller has gone. At most one hop per module.
+        scheduling.hop { [self] in
+            launchStop(module)
         }
     }
 
@@ -754,7 +817,7 @@ final class RuntimeServiceCore {
     /// Hands a queued operation's command to the owner, and marks the operation running. The running state is final before
     /// the owner is called, so a report that arrives synchronously finds it. The command is released by that same step.
     private func launch(_ operation: ControlOperationID) {
-        guard var record = operations[operation], case .queued(let command) = record.physical else { return }
+        guard var record = operations[operation], case .queued(let work) = record.physical else { return }
         record.physical = .running
         operations[operation] = record
         let report = ControlEffectReport(
@@ -765,7 +828,10 @@ final class RuntimeServiceCore {
                 self?.quiesce(operation)
             }
         )
-        owner.startEffect(command, operation: operation, report: report)
+        switch work {
+        case .control(let command): owner.startEffect(command, operation: operation, report: report)
+        case .privateUpdate: owner.startPrivateEffect(operation: operation, report: report)
+        }
     }
 
     // MARK: - Aliases
@@ -779,7 +845,7 @@ final class RuntimeServiceCore {
     ) {
         aliasTable.record(
             request.requestID,
-            fingerprint: fingerprint,
+            origin: .ordinary(fingerprint: fingerprint),
             partition: partition,
             admission: admission,
             now: timing.now()
@@ -837,7 +903,11 @@ final class RuntimeServiceCore {
     /// fault only after the slot is complete. Nothing in the slot changes on a refusal.
     @discardableResult
     private func captureOwnerState() -> RuntimeSnapshotOffer {
-        let snapshot = owner.snapshot()
+        guard let snapshot = owner.snapshot() else {
+            // The owner reported why it could not project, so nothing is offered, no fault is delivered back to it, and the slot keeps
+            // its last value for the subscribers that already hold it. A read or an open answers this capture as an internal failure.
+            return .refused(.notEncodable)
+        }
         let offer = snapshotSlot.offer(snapshot, encodedBytes: Self.encodedSize(snapshot))
         switch offer {
         case .unchanged:
