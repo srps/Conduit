@@ -4,6 +4,7 @@ import Foundation
 import ConduitRuntime
 import ConduitShared
 import NIOConcurrencyHelpers
+import NIOPosix
 import PlatformMac
 import ProxyAuth
 import ProxyControlBridge
@@ -21,7 +22,8 @@ import RuntimeEvents
 /// app or helper is reached.
 ///
 /// It checks a failed start on a held port, a restart on the same host, and a stop, against the fakes; then the configuration workflow;
-/// then a stop admitted before a held start binds, and the next start. Every path after
+/// then a stop admitted before a held start binds, and the next start; and, last, the connection audit of one served loopback request.
+/// Every path after
 /// the root is taken ends in one release step: the root's reference is dropped, a fresh acquisition proves the lease
 /// closed, and the scratch directory is removed only when that proof and the close-failure count both agree. A shutdown
 /// whose flush is not confirmed pins the actual host in one slot until the process exits, keeps the root, and fails.
@@ -132,14 +134,21 @@ enum RuntimeHostEffectsScenario {
                 assertions += woken.assertions
                 notes += woken.notes
             }
+            var audited = Shutdown(quiesced: false, assertions: [], notes: [], pinnedHost: nil)
             if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
                 && captured.quiesced && modules.quiesced && woken.quiesced {
+                audited = await exerciseConnectionAudit(session: session!, environment: environment, fakes: fakes, home: home)
+                assertions += audited.assertions
+                notes += audited.notes
+            }
+            if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
+                && captured.quiesced && modules.quiesced && woken.quiesced && audited.quiesced {
                 releaseRoot(&session, environment: environment, scratch: scratch, releaseFailures: releaseFailures,
                             assertions: &assertions, notes: &notes)
             } else {
                 // The host keeps its session, so the root stays claimed for the rest of the process. The slot is the
                 // only reference this scenario keeps, and the scratch directory stays on disk for inspection.
-                unconfirmedHost = woken.pinnedHost ?? modules.pinnedHost ?? captured.pinnedHost ?? respelling.pinnedHost ?? source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
+                unconfirmedHost = audited.pinnedHost ?? woken.pinnedHost ?? modules.pinnedHost ?? captured.pinnedHost ?? respelling.pinnedHost ?? source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
                 assertions.append(.init("the shutdown is confirmed", false))
                 notes.append("shutdown not confirmed: host pinned until process exit; root and scratch kept at \(scratch.path)")
             }
@@ -371,6 +380,7 @@ enum RuntimeHostEffectsScenario {
             check("the lifecycle host's observability flush is confirmed", flush.allConfirmed)
             quiesced = settled == .settled && flush.allConfirmed
         } catch {
+            check("the lifecycle exercise completed without error", false)
             // The error path joins the host's work before anything is released: release the fetch, stop, settle, then flush, then judge.
             notes.append("lifecycle exercise error: \(error.localizedDescription)")
             fetch.release()
@@ -473,6 +483,7 @@ enum RuntimeHostEffectsScenario {
             check("the capture host's observability flush is confirmed", flush.allConfirmed)
             quiesced = settled == .settled && flush.allConfirmed
         } catch {
+            check("the capture exercise completed without error", false)
             notes.append("capture exercise error: \(error.localizedDescription)")
             fetch.release()
             if let heldStart, case .failure(let failure) = await heldStart.result {
@@ -670,6 +681,7 @@ enum RuntimeHostEffectsScenario {
                 .explicit(.dns, .started), .explicit(.tunnels, .started),
             ])
         } catch {
+            check("the module exercise completed without error", false)
             notes.append("module exercise error: \(error.localizedDescription)")
             await host.shutdown()
             // The quit's end ends the witness; a cancel covers a stream that never got one. Joined either way.
@@ -959,6 +971,7 @@ enum RuntimeHostEffectsScenario {
             check("the respelling host's observability flush is confirmed", flush.allConfirmed)
             quiesced = settled == .settled && flush.allConfirmed
         } catch {
+            check("the respelling exercise completed without error", false)
             // The error path joins the host's work before anything is released: stop, settle, then flush, then judge.
             notes.append("respelling exercise error: \(error.localizedDescription)")
             await host.stopRuntime()
@@ -1056,6 +1069,7 @@ enum RuntimeHostEffectsScenario {
             check("the next start finds the runtime latched",
                   typed.contains(.configWorkflow(.committed(ConfigurationWorkflowCommitted(file: .runtime, write: .notAttempted(.noBaseline))))))
         } catch {
+            check("the source exercise completed without error", false)
             // The error path joins the host's work before anything is released: stop, settle, then flush, then judge.
             notes.append("source exercise error: \(error.localizedDescription)")
             await host.stopRuntime()
@@ -1159,12 +1173,115 @@ enum RuntimeHostEffectsScenario {
             check("the kernel's wake path ran once while stopped and once while running, and not after the quit", try kernelWakes() == 2)
             check("a wake in flight at the quit writes no DNS", machine.privilege.commands(matching: .setDNSServers).count == writesAtQuit)
         } catch {
+            check("the wake exercise completed without error", false)
             // The error path joins the host's work before anything is released: quit, settle, then flush, then judge.
             notes.append("wake exercise error: \(error.localizedDescription)")
             await host.shutdown()
             quiesced = await settledAndFlushed()
             assertions.append(.init("the wake error path settled the host and confirmed its flush", quiesced))
         }
+        return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// The connection audit through the actual host, as the app composes it (#222). Audit is on at the root's default path. One loopback
+    /// request, its query carrying a value no row may hold, goes through the host's listener; the default no-proxy list routes it DIRECT
+    /// to an origin this exercise owns, so no upstream or Kerberos token is involved. After the stop and a confirmed flush, the owned
+    /// `audit.ndjson` holds that request's one row, its query redacted.
+    @MainActor
+    private static func exerciseConnectionAudit(
+        session: StateRootSession,
+        environment: RuntimeEnvironment,
+        fakes: Fakes,
+        home: URL
+    ) async -> Shutdown {
+        var assertions: [ScenarioAssertion] = []
+        var notes: [String] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+        let secret = "audit-secret-6f2c"
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderEnabled = false
+        config.localPACEnabled = false
+        config.pacRoutingEnabled = false
+        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.logging.auditLogEnabled = true
+        let auditFile = environment.configDirectory.appendingPathComponent("audit.ndjson")
+        let host: RuntimeHost
+        do {
+            try ProxyConfigPersistence.save(config, in: environment)
+            try PlatformConfigPersistence.save(
+                PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true), in: environment
+            )
+            host = try await RuntimeHost.open(
+                stateSession: session,
+                logger: DiscardingLogSink(),
+                startupAllowsMissing: false,
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                terminalExit: {},
+                effects: effects(fakes, home: home)
+            )
+        } catch {
+            notes.append("audit host did not open: \(error.localizedDescription)")
+            check("the audit host opened over the saved configuration", false)
+            return Shutdown(quiesced: true, assertions: assertions, notes: notes, pinnedHost: nil)
+        }
+
+        var quiesced = false
+        // The origin: without auth, the fake upstream answers any plain GET with a complete 200. Every path stops it after the host.
+        let origin = FakeUpstreamProxy(
+            group: MultiThreadedEventLoopGroup.singleton, originHost: "127.0.0.1", originPort: 9, requireAuth: false
+        )
+        do {
+            try await origin.start()
+            let originPort = origin.port
+            try await host.startRuntime()
+            guard let proxyPort = host.status().bindings.proxyPort else {
+                throw ScenarioExecutionError(message: "the audit host bound no listener")
+            }
+            let response = try await RawHTTPAuditClient.request(
+                group: MultiThreadedEventLoopGroup.singleton, host: "127.0.0.1", port: proxyPort,
+                request: "GET http://127.0.0.1:\(originPort)/v1/resource?token=\(secret) HTTP/1.1\r\n"
+                    + "Host: 127.0.0.1:\(originPort)\r\nConnection: close\r\n\r\n"
+            )
+            check("the host serves the loopback request", response.hasPrefix("HTTP/1.1 200"))
+            // The orchestrator hands the row to its sink in the main-actor step that closes the connection, queued after the request's
+            // completion; both counts mean the row was handed over.
+            var closed = false
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !closed, ContinuousClock.now < deadline {
+                let metrics = host.status().metrics
+                closed = metrics.requestsHandled >= 1 && metrics.openConnections == 0
+                if !closed { try await Task.sleep(for: .milliseconds(1)) }
+            }
+            check("the served request's connection closes", closed)
+
+            await host.stopRuntime()
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            check("the audit host settles before its root is released", settled == .settled)
+            let flush = await host.flushEvents()
+            check("the audit host's observability flush is confirmed", flush.allConfirmed)
+            quiesced = settled == .settled && flush.allConfirmed
+
+            let text = try String(contentsOf: auditFile, encoding: .utf8)
+            let decoder = ConnectionAuditRecord.canonicalDecoder
+            let rows = try text.split(separator: "\n").map { try decoder.decode(ConnectionAuditRecord.self, from: Data($0.utf8)) }
+            notes.append("audit rows: \(rows.count)")
+            check("the owned audit file holds the served request's one row", rows.count == 1)
+            check("the row keeps the target's authority and path and redacts its query",
+                  rows.first?.target == "http://127.0.0.1:\(originPort)/v1/resource?<redacted>")
+            check("the row records the DIRECT route", rows.first?.chosenUpstream == "DIRECT")
+            check("no row carries the query value", !text.contains(secret))
+        } catch {
+            check("the audit exercise completed without error", false)
+            // The error path joins the host's work before anything is released: stop, settle, then flush, then judge.
+            notes.append("audit exercise error: \(error.localizedDescription)")
+            await host.stopRuntime()
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            let flush = await host.flushEvents()
+            quiesced = settled == .settled && flush.allConfirmed
+            assertions.append(.init("the audit error path settled the host and confirmed its flush", quiesced))
+        }
+        await origin.stop()
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
     }
 
@@ -1323,6 +1440,7 @@ enum RuntimeHostEffectsScenario {
             notes.append("joined: startRuntime and stopRuntime returned; settle=\(settled); flushEvents allConfirmed=\(flush.allConfirmed)")
             notes.append("not joined: the environment drift timer (weak self; it ends at its next tick, after the host is gone)")
         } catch {
+            check("the start, restart and stop exercise completed without error", false)
             // The error path joins the host's work before anything is released: stop, settle, then flush, then judge.
             notes.append("scenario error: \(error.localizedDescription)")
             await host.stopRuntime()
