@@ -250,8 +250,9 @@ final class RuntimeClientContractTests: XCTestCase {
         for (helper, implied) in [(ControlHelperStatus.installed, false), (.busy, true), (.notInstalled, false)] {
             let value = try items(helper)
             XCTAssertEqual(value.helperReadBusy, implied, "\(helper)")
-            XCTAssertFalse(try text(value).contains("helperReadBusy"), try text(value))
-            XCTAssertEqual(try JSONDecoder().decode(ControlPreflightItems.self, from: Data(try text(value).utf8)), value)
+            let valueText = try text(value)
+            XCTAssertFalse(valueText.contains("helperReadBusy"), valueText)
+            XCTAssertEqual(try JSONDecoder().decode(ControlPreflightItems.self, from: Data(valueText.utf8)), value)
         }
 
         XCTAssertThrowsError(try items(.busy, busy: false), "a busy verdict comes only from a busy read")
