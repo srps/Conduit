@@ -1,0 +1,34 @@
+{
+  "head": "bfe8922152d7121489633b72d63c1e7163047f7c",
+  "source": "Sources/pm-sim/RuntimeHostEffectsScenarios.swift",
+  "original_sha256": "687fd918e54c1aea08ed5c5d021800e256954bebd269ebea43837e0a56d79d16",
+  "restored_exact": true,
+  "command": [
+    "xcrun",
+    "swift",
+    "run",
+    "pm-sim",
+    "runtime-host-effects"
+  ],
+  "records": [
+    {
+      "name": "forced-audit-read-error",
+      "exit": 1,
+      "seconds": 21.726,
+      "assertions": 130,
+      "failed": [
+        "the audit exercise completed without error"
+      ],
+      "error_path_cleanup_confirmed": true
+    },
+    {
+      "name": "restored",
+      "exit": 0,
+      "seconds": 18.051,
+      "assertions": 132,
+      "failed": [],
+      "error_path_cleanup_confirmed": false
+    }
+  ],
+  "scope": "One forced audit-file read error; eight unexpected-error catches reviewed separately."
+}

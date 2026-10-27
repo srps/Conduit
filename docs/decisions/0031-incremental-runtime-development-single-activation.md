@@ -165,6 +165,11 @@ The [shared module owner](../verification-runtime-module-owner-2026-10-27.md) no
 Does not prove: actual app/client/store integration, RuntimeActor isolation,
 production daemon ownership, real-session auth/PAC or release readiness.
 
+The [audit-parity checkpoint](../verification-runtime-audit-parity-2026-10-27.md)
+adds the shared host's guarded startup audit sink before activation, with actual
+framed-client tests in [RuntimeHostAuditTests.swift](../../Tests/ConduitTests/RuntimeHostAuditTests.swift).
+The legacy app construction remains until the single cut.
+
 ## Open questions
 
 Complete the workflow freshness/private-editor observation API, preserving
