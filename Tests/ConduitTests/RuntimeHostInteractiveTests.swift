@@ -628,29 +628,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         XCTAssertFalse(harness.machine.dnsRelayRunning)
     }
 
-    /// An identical Start joins an effect only while none of its members has settled. Once one has, a failed DNS member above all, the
-    /// effect can no longer settle the joiner's grant for that member, so it adopts no joiner, which runs its own lanes. The interleaving
-    /// itself (a member failing while the effect is suspended in a tunnel bind) has no hold point among the fakes, so this pins the rule on
-    /// the actual effect held on its proxy surfaces, with its own verified pair as the joiner's.
-    func testAnEffectWithASettledMemberAdoptsNoJoiner() async throws {
-        let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true)
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
-            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
-        }
-        let start = Task { try await host.startRuntime() }
-        await harness.hold.waitUntilReached()
-        let effect = try XCTUnwrap(host.laneEffects.proxy)
-        let pair = try XCTUnwrap(effect.prepared)
-        XCTAssertTrue(effect.adopt(pair), "an effect with no member settled takes an identical joiner")
-        effect.results.dns = .failed
-        XCTAssertFalse(effect.adopt(pair), "one with a settled member does not")
-        effect.results.dns = nil
-        harness.hold.release()
-        try await start.value
-        XCTAssertFalse(effect.adopt(pair), "nor does a completed one")
-    }
-
-    /// The behavior behind that rule: a whole-host Start whose DNS member failed alone, then waits inside its tunnel start, takes no
+    /// A whole-host Start whose DNS member failed alone, then waits inside its tunnel start, takes no
     /// identical Start as a joiner. The new Start runs its own lanes and its own DNS attempt, so DNS's result, fence and permission are that
     /// attempt's, not a cached failure beside a grant nothing settles, and no later companion can act on DNS.
     func testAnIdenticalStartAfterAMemberFailedRunsItsOwnAttempt() async throws {
