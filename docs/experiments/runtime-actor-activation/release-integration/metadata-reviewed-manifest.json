@@ -1,0 +1,14 @@
+{
+  "base": "b637ec152430c91e0000103c7f6a17ca8b131691",
+  "product_commit": "f3abd5f710ed683a2f73859e0429d6e5c807e9f9",
+  "files_sha256": {
+    "VERSION": "97a5d6e540a6120d09c39ddb667e0e8e2bac7fcc2ffef813b82e08fd60365bce",
+    "CHANGELOG.md": "9a18e7f0c2f891af2eaeea970da53872f10621569eb9e3c0513fc992e74659e8",
+    "ROADMAP.md": "b5e1ed9c9ef5ed8187c703f63f606a678446671708d99dcdd28dedc15b501124",
+    "docs/verification-runtime-actor-activation-2026-10-28.md": "387fee2ad700ccb824810c742318a2aca2caf4c832377f9caa01b85c13c878a0",
+    "docs/decisions/0037-saved-command-preparation-capture.md": "fad0aa9bf4f68a22b3e81652a9fc3c6fc19a7f86bb90931caeb5012e923549f6",
+    "docs/decisions/README.md": "95aa3cda29eeb36ac9099813bedbf3d0ddc455eb874263992a77ea7952f415b0",
+    "Tests/ConduitTests/ConfigurationResourceCanonicalWidthTests.swift": "1d85559be0adacae26ae8b99fa42f3d1cc203824566162cbc61312947cb6dc1e"
+  },
+  "production_module_diff": ""
+}

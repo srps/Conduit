@@ -1,0 +1,22 @@
+{
+  "base_head": "b637ec152430c91e0000103c7f6a17ca8b131691",
+  "source_sha256": "37dd4ecb0a4c443785e5e9cf358bfd9d70046554f84464cef2539c094c6e5420",
+  "stable": true,
+  "terminal_exit": 0,
+  "checks": 41,
+  "tests": 3768,
+  "skips": 4,
+  "simulator_scenarios": 103,
+  "production_module_diff": "",
+  "logs": {
+    "swift-tests.log": {
+      "sha256": "7150bdcdfca4fb12a8aed2f39ab5e0760a4aa0b1f9391257e9249dfcf44849a3",
+      "bytes": 1403837
+    },
+    "pm-sim-all.log": {
+      "sha256": "10cc4241b43e2fa32b0c26eb16af11d4116bf9a7ba2d280c1e91a3612f8fd520",
+      "bytes": 261542
+    }
+  },
+  "post_review_doc_change": "Applied reviewer optional CHANGELOG qualification: independent models cover lifecycle/admission/replay/verified-store owners; no Source/Tests/VERSION mutation."
+}

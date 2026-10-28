@@ -1,0 +1,37 @@
+{
+  "head": "7d852139004dd67f38d5f53113e6a4f12ae83b09",
+  "integration_merge": "b637ec152430c91e0000103c7f6a17ca8b131691",
+  "production_module_diff": "",
+  "Swift": {
+    "run": 40702811562,
+    "job": 122866868378,
+    "conclusion": "success",
+    "all_steps": "success",
+    "older_compiler": "Swift6.3.3/Xcode26.6",
+    "annotations": [
+      "macOSarm64 runnercapacitynotice"
+    ]
+  },
+  "slow_drain": {
+    "run": 40702811595,
+    "job": 122866868525,
+    "conclusion": "success",
+    "annotations": [
+      "macOSarm64 runnercapacitynotice"
+    ]
+  },
+  "CodeQL": {
+    "summary": 122867184442,
+    "actions": 122866834444,
+    "python": 122866833628,
+    "conclusions": "success",
+    "annotations": [
+      "300changedfiles diffretrievalwarning",
+      "Ubuntu26 image migrationnotice"
+    ]
+  },
+  "all_annotations_read": true,
+  "unresolved_review_threads": 0,
+  "Devin": "skipped; not counted as a review",
+  "PR261": "merged into draft#258, not main; real-machine acceptance remains"
+}

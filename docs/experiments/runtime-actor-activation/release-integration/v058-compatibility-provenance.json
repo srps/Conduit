@@ -1,0 +1,42 @@
+{
+  "baseline": "5e3699c90defb8105a0193c473c9eec1d07d77c9",
+  "head": "7d852139004dd67f38d5f53113e6a4f12ae83b09",
+  "helper_paths": [
+    "Sources/ConduitHelper",
+    "install-helper.sh",
+    "Sources/ConduitShared/HelperLineIO.swift",
+    "Sources/ConduitShared/HelperCallerIdentity.swift",
+    "Sources/ConduitShared/HelperContract.swift",
+    "Sources/ConduitShared/HelperAdmission.swift",
+    "Sources/ConduitShared/HelperSubprocess.swift",
+    "Sources/ConduitShared/NetworkSettingsRequest.swift",
+    "Sources/ConduitShared/NetworkSettingsFields.swift",
+    "Sources/ConduitShared/TCPRelayPlan.swift",
+    "Sources/ConduitShared/DomainNameSyntax.swift",
+    "Sources/ConduitShared/IPAddressSyntax.swift",
+    "Sources/ConduitShared/ProxyBypassSyntax.swift",
+    "Sources/ProxyKernel/Network/UDPRelay.swift",
+    "Sources/ProxyKernel/Network/TCPRelay.swift"
+  ],
+  "state_paths": [
+    "Sources/PlatformMac/PlatformStateJournal.swift",
+    "Sources/ProxyKernel/Support/RuntimeEnvironment.swift",
+    "Sources/ProxyKernel/Models/ProxyConfig.swift",
+    "Sources/ProxyKernel/Models/ConfigSections.swift",
+    "Sources/ProxyKernel/Support/ProxyConfigPersistence.swift"
+  ],
+  "patches": {
+    "state.patch": {
+      "sha256": "f6fca6594149bfde454b36f0512d8d487263a4645a638af708fe558c81f5c818",
+      "bytes": 60837
+    },
+    "helper.patch": {
+      "sha256": "f48c179cda7cffe8de1acc7e0605aa664e03dd919d3060b2178e38dd95b1d244",
+      "bytes": 1932
+    }
+  },
+  "additional_helper_reachable_paths": [
+    "Sources/ConduitShared/DomainResourceLimits.swift"
+  ],
+  "review": "runtime-release-compatibility-actual-baseline-review.md"
+}

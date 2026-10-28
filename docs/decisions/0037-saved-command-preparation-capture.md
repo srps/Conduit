@@ -2,8 +2,8 @@
 
 - Date: 2026-10-26
 - Decision: accepted (owner, 2026-10-26, #186)
-- Implementation: partial
-- Validation: none
+- Implementation: implemented
+- Validation: pending
 - Supersedes: none
 - Superseded by: none
 
@@ -118,9 +118,27 @@ Independent review of the interim app activation confirmed this interpretation
 against the existing host lifecycle; the host policy was not changed by that
 activation. The owner was notified of this user-visible consequence. The app
 must explain the typed input_replaced result, and the actual-client witness
-must cover DNS progress, partial cleanup and no automatic proxy retry. Those
-integration checks remain under verification; this note records no new owner
-decision or completed release acceptance.
+must cover DNS progress, partial cleanup and no automatic proxy retry. The
+RuntimeActor activation evidence below records that witness; this note records
+no new owner decision or completed release acceptance.
+
+### Activation and isolation (2026-10-28)
+
+The single AppState activation (0031) and RuntimeActor isolation complete this
+decision's integration: the app's saved Start and Restart use the sole
+store/workflow capture through its framed clients, and AppState's replaced
+runtime/save paths are deleted. No rebind, retry or admission pin was added.
+[`AppStateActivationParityTests.testADNSStartCommittedWhileAProxyStartAppliesHoldsThatStartAndSaysWhy`](../../Tests/ConduitTests/AppStateActivationParityTests.swift)
+asserts the app's interruption message, the host's `input_replaced` hold, DNS
+running, cleanup of the held Start's surfaces and journal records, no automatic
+retry or login-item repair, and the next explicit Start. It passed in the
+3,768-test workflow recorded in the
+[RuntimeActor activation verification](../verification-runtime-actor-activation-2026-10-28.md).
+The race is covered by this actual-client harness; no second, forced race on
+the installed app or real helper is required. Ordinary real-helper and app
+acceptance of the release remains due and has not been recorded.
+
+Does not prove: installed-app or real-helper behavior, release packaging or release readiness.
 
 ## Open questions
 

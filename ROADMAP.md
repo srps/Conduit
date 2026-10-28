@@ -25,7 +25,9 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 The runtime architecture program ([#186](https://github.com/srps/Conduit/issues/186),
 [#180](https://github.com/srps/Conduit/issues/180),
 [#183](https://github.com/srps/Conduit/issues/183)) is **unreleased**. Conduit 0.5.8
-remains the serving version. [CHANGELOG](./CHANGELOG.md) records shipped history.
+remains the serving version. `VERSION` is prepared as 0.6.0 and its notes stay
+under Unreleased in the [CHANGELOG](./CHANGELOG.md) until acceptance and
+publication.
 
 | Stage | Current state | Remaining work |
 | --- | --- | --- |
@@ -33,9 +35,19 @@ remains the serving version. [CHANGELOG](./CHANGELOG.md) records shipped history
 | Shared owner | PR253 converges DNS, tunnels and proxy on one lifecycle/store path, with preparation-time capture, exact freshness and Stop/Quit policy. PR257 adds guarded host-owned audit parity. | AppState now consumes the single owner; release acceptance is in the final row. |
 | Actual client integration | PR254 connects host admission/observation, private frozen updates, receipts, preferences/admin persistence and final Quit saves through the actual framed clients. | Integrated through AppState; final release gates are in the last row. |
 | Native client completion | PR256 merged saved Start receipts, explicit reload, bounded preflight/credential/wake operations, typed recovery and DNS health after local and hosted checks. | Selected ten-second Quit is integrated and passes the fake production profile; real-machine acceptance remains. |
-| AppState, isolation and release | One final activation and deletion is selected (0031); 64 KiB ordinary frames and 8 MiB private frames are selected. | The selected collection profile (0038), production resource measurements and final-source native Dev checks pass. The final test-maintenance workflow passes; complete hosted compiler compatibility and release integration, then applicable real-machine acceptance. |
+| AppState, isolation and release | The single AppState activation (0031) and RuntimeActor isolation are implemented in draft PR #258. The collection profile (0038), 64 KiB ordinary and 8 MiB private frames, production resource and fairness measurements, native Dev checks and exact-head hosted CI pass. | CI on #258's final release head and its merge to main, applicable real-machine acceptance, then release-signed 0.6.0 packaging and publication. |
 
-The [client-owner checkpoint](./docs/verification-runtime-client-owner-2026-10-27.md)
+The [RuntimeActor activation verification](./docs/verification-runtime-actor-activation-2026-10-28.md)
+is the current evidence. Product source `f3abd5f` passes all 41 local checks
+(3,766 tests, four existing skips, 103 simulator scenarios), the production
+Release profile, optimized fairness and native Dev checks. Test-maintenance head
+`7d85213` passes all 41 checks (3,768 tests, four existing skips, 103 scenarios)
+and exact-head hosted CI, including the older Swift 6.3.3 compiler. PR #261
+merged into draft PR #258 as `b637ec1`, not into main; that merge head also passes hosted CI.
+The 0.6 metadata tree passes all 41 local checks with the same 3,768 tests, four skips
+and 103 scenarios; its final hosted checks remain due. No installed-app acceptance is claimed.
+
+Historical checkpoints follow. The [client-owner checkpoint](./docs/verification-runtime-client-owner-2026-10-27.md)
 records the scoped independent review and all 41 passing local gates: 3,619 tests
 (four skips), 103 simulator records and perf. PR254 merged after exact-head hosted Swift/CodeQL passed. Do not copy test profiles into production.
 The resolved-source actual-client probe passed 29 mode/trials and independent
@@ -117,9 +129,9 @@ not a requirement to finish every event or property test before extraction:
    private frozen editor values. [PR254](https://github.com/srps/Conduit/pull/254)
    records integration; the [native-client checkpoint](./docs/verification-runtime-native-client-2026-10-27.md)
    adds saved Start, explicit reload, typed recovery, helper/credential/wake
-   integration and host-owned DNS health. AppState adoption and the measured
-   production composition remain open. Production v2 socket transport is a later
-   milestone; shipped v1 and helper IPC remain compatible.
+   integration and host-owned DNS health. AppState now consumes it through the
+   measured production composition (stage 3). Production v2 socket transport is a
+   later milestone; shipped v1 and helper IPC remain compatible.
 
    Durable edits save before ordinary apply, while Stop/Quit proceed independently
    of failed saves ([0015](./docs/decisions/0015-save-before-apply.md)). One store
@@ -158,15 +170,15 @@ not a requirement to finish every event or property test before extraction:
    Collection observation caps are selected in
    [0038](./docs/decisions/0038-bounded-runtime-collection-capture.md);
    the app now consumes the measured production profile and selected ten-second
-   total Quit wait (0039). Release/resource trials and hosted CI have passed;
-   native app acceptance is still pending.
+   total Quit wait (0039). Release/resource trials, native Dev checks and hosted
+   CI pass; installed real-machine acceptance is pending.
 
    Earlier source/test counts are historical checkpoints, kept in the linked
    [client inventory](./docs/runtime-client-stage1-inventory.md),
    [store verification](./docs/verification-configuration-store-2026-10-25.md) and
    [session authority verification](./docs/verification-session-store-authority-2026-10-25.md).
-   The single AppState switch is implemented in draft PR #258. Remaining acceptance
-   requires native app checks, RuntimeActor and applicable installed-machine validation.
+   The single AppState switch and RuntimeActor isolation are implemented in draft
+   PR #258; applicable installed-machine acceptance remains.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, first with the daemon as its entry point. The stage-3 activation removes AppState's twin.
    The move preserves MainActor and existing policy, with the daemon fake-machine
@@ -178,7 +190,7 @@ not a requirement to finish every event or property test before extraction:
    and verify DNS, tunnels and proxy in reviewable host increments, then switch
    AppState once and delete its replaced runtime/save paths together (0031).
    The activation is implemented in draft PR #258, with local full workflow and
-   exact-head hosted checks passed. Native isolated Dev lifecycle and focused final-edit Quit checks pass, and the consumed app logger drain is corrected. Final resource/control-fairness and applicable real-machine acceptance remain merge gates; it is not released. AppState retains editor drafts and UI responsibilities. Migrate the event
+   exact-head hosted checks passed. Native isolated Dev lifecycle and focused final-edit Quit checks pass, the consumed app logger drain is corrected, and production resource and control-fairness measurements pass. Applicable real-machine acceptance and versioned packaging remain open; it is not released. AppState retains editor drafts and UI responsibilities. Migrate the event
    families touched by each slice. Bring
    [#183](https://github.com/srps/Conduit/issues/183)'s independent models,
    bounded exhaustive exploration and seeded tests alongside lifecycle,
@@ -204,9 +216,8 @@ not a requirement to finish every event or property test before extraction:
    [diagnostic correction](./docs/verification-runtime-diagnostics-2026-10-28.md)
    passes corrected full workflow and independent review after a write/close
    race found in review; nine fresh Release probe trials and three optimized
-   consumer/logger trials pass. New-head hosted and native checks remain pending. Its first passing workflow alone was not acceptance.
-   The [whole isolation move](./docs/verification-runtime-actor-activation-2026-10-28.md) is implemented and independently reviewed. All 41 checks pass on the product checkpoint (3,766 tests, four existing skips, 103 simulator scenarios), and isolated native Dev lifecycle/final-edit Quit checks pass. The full production profile and optimized fairness pass: status/Stop admission answer during the full projection. The test-maintenance workflow also passes (3,768 tests, four existing skips, 103 scenarios); hosted compiler compatibility and applicable real-machine gates remain. Bound work per turn and prove status/Stop
-   responsiveness under observer load; diagnostics cannot gate control progress.
+   consumer/logger trials pass. Its first passing workflow alone was not acceptance; the activation checkpoint below carries the later hosted and native checks.
+   The [whole isolation move](./docs/verification-runtime-actor-activation-2026-10-28.md) is implemented and independently reviewed. All 41 checks pass on the product checkpoint (3,766 tests, four existing skips, 103 simulator scenarios), and isolated native Dev lifecycle/final-edit Quit checks pass. The full production profile and optimized fairness pass: status/Stop admission answer during the full projection. The test-maintenance workflow also passes (3,768 tests, four existing skips, 103 scenarios), as does its exact-head hosted CI, including the older Swift 6.3.3 compiler; applicable real-machine gates remain. Work per turn stays bounded, and diagnostics cannot gate control progress.
 
 **Stage 5 — strengthen the shared implementation (separately scoped follow-ups).**
 A bounded applied-state slice may join 0.6 once defined and validated; the full
@@ -218,15 +229,17 @@ list below does not gate the core release:
    Use typed surface outcomes and model-based ordering tests. 0.5.7's retries
    are mitigation, not completion. Full process ownership and durable helper
    leases remain the later production-daemon gate (#48).
-   Include save-before-apply, partial durable writes and Stop/Quit exceptions
-   from the review draft as explicit behavior changes, not extraction claims.
+   Save-before-apply and its Stop/Quit exceptions are listed as behavior changes
+   in the core release notes (0015); per-surface applied state and partial
+   durable writes remain here.
 2. **Scheduling primitive ([#181](https://github.com/srps/Conduit/issues/181)).**
    `HealthChecker` is the first consumer. #207 fences stale completions but does
    not finish non-overlap or fence every pool side effect. Define the primitive
    and its bounded model together; migrate other timers only when touched.
 3. **Journal envelope ([#182](https://github.com/srps/Conduit/issues/182)).**
-   0.5.7 reads it; 0.6 writes it. The ISO-8601 reader and the 0.1.x DNS
-   importer go one release later.
+   0.5.7 reads it. The 0.6.0 candidate still writes the format 0.5.8 reads;
+   writing the envelope is this separate follow-up, and the ISO-8601 reader and
+   the 0.1.x DNS importer go one release after it.
 4. **Remaining timeout semantics ([#197](https://github.com/srps/Conduit/issues/197)):** response timeouts and
    the breaker (with the [#184](https://github.com/srps/Conduit/issues/184)
    spike), a health check's first timeout, the prober's slow `CONNECT`, the DNS
@@ -281,7 +294,7 @@ ownership work. Refactor size alone does not require a minor version.
 3. [~] **Owner-death recovery and one mutation authority ([#48](https://github.com/srps/Conduit/issues/48))** — app and daemon launch recovery exist. A separate production-daemon milestone after shared-host convergence, not a gate for the 0.6 core extraction. Remaining: exclusive ownership of platform mutations and durable recovery when no replacement runtime starts. Coordinate journal authority, authenticated helper sessions, and any helper-owned leases; preserve later external changes. This is a production daemon-migration gate. [Rel, Sec, Dmn, Sim]
 4. [~] **Request-body replay bounds and isolation ([#81](https://github.com/srps/Conduit/issues/81))** — per-body bounded spooling exists. Remaining: runtime-owned private spool storage, aggregate disk/queued-write budgets, replay backpressure tied to downstream completion/writability, off-event-loop cleanup, and structured failure reporting. Cover slow origins, disk failures, cancellation, and concurrent runtimes. [Rel, Sec, Eff, Sim]
 5. [~] **Typed event contracts ([#180](https://github.com/srps/Conduit/issues/180))** — begin with #186's client boundary and migrate complete families alongside each host slice. Closed typed payloads derive stable names, categories, fields and human detail; compatibility and redaction cross the same codec/control bridge. Completion of every family is not a prerequisite for host extraction. Status (branch checkpoint): lifecycle, configuration-workflow, runtime-service and proxy-recovery event families have typed producers/codecs/projections alongside the changed owners; the remaining legacy families and hand-maintained catalogue migrate separately. [Obs, Rel, Sim]
-6. [~] **Model-based verification ([#183](https://github.com/srps/Conduit/issues/183))** — independent reference models, bounded exhaustive exploration for small finite state spaces, and seeded/shrunk sequences for larger inputs. Begin with lifecycle/subscription ordering; add applied-state and scheduler models when those owners change. Fail on exhausted exploration budgets and show sensitivity to injected bugs. Status: production lifecycle, admission/replay and verified-store models are implemented. The adopted editor/workflow models and actual-host integration are implemented in the release candidate; the new asynchronous capture races are being verified with that owner. Broader scheduler/applied-state coverage follows its owning changes. [Rel, Sim]
+6. [~] **Model-based verification ([#183](https://github.com/srps/Conduit/issues/183))** — independent reference models, bounded exhaustive exploration for small finite state spaces, and seeded/shrunk sequences for larger inputs. Begin with lifecycle/subscription ordering; add applied-state and scheduler models when those owners change. Fail on exhausted exploration budgets and show sensitivity to injected bugs. Status: production lifecycle, admission/replay and verified-store models are implemented. The adopted editor/workflow models and actual-host integration are implemented in the release candidate; the asynchronous capture flight is verified with RuntimeActor, including unsuppressed TSan over selected actor/host/client tests. Broader scheduler/applied-state coverage follows its owning changes. [Rel, Sim]
 
 ## Next
 

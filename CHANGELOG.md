@@ -7,20 +7,76 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
-The runtime architecture work is under verification; 0.5.8 remains the released
-version.
+Prepared as 0.6.0 and not yet released: real-machine acceptance and signed
+packaging remain. 0.5.8 remains the released version.
+
+The app now runs on the one runtime host that `ConduitDaemon` also uses (#186).
+It is meant as an app-only update: helper protocol v5 and the helper's behaviour
+are unchanged, so it needs no helper reinstall. The schema-two settings files,
+the platform-state journal format and the v1 control protocol are unchanged, so
+0.5.8 can still read what this version writes. The production daemon and its
+socket, the remaining event families and the follow-up hardening work are not
+part of this release.
 
 ### Changed
 
-- Start and Restart use saved settings captured once when preparation begins.
-  A later committed settings change can interrupt an unfinished Start. For
-  example, enabling DNS while a proxy Start is applying can supersede that
-  Start and clear its partial resources; explicitly Start again. Conduit must
-  report the interruption and never retry it automatically. This replaces the
-  legacy app's ability to follow the newer input during that Start.
-- In-process Quit has one ten-second total for final frozen saves and cleanup
-  confirmation, returning earlier when finished. Final saves apply no new
-  settings; unresolved cleanup retains its recovery records.
+- The proxy, DNS forwarder and tunnels run in one shared runtime host instead of
+  the app's own copy. The app reaches it through typed clients; for the runtime
+  it keeps edit drafts, presentation and UI policy, while composition, helper
+  administration and updates stay with the app. Runtime control work runs off
+  the main thread, so the menu, status and Stop stay responsive while the host
+  is busy, for example while it builds a long Connections list. (#47, #79, #186)
+- Lifecycle, configuration, runtime-service and proxy-recovery events come from
+  typed values. Independent models check the lifecycle, admission/replay and
+  verified-store owners; other event families are unchanged for now. (#180, #183)
+- A settings change reaches the running proxy only after its save is confirmed
+  on disk. A save that fails, or cannot be confirmed, is reported
+  (`config.save_rejected`, `config.save_unverified`) and is not applied. A failed
+  save cannot refuse Stop or Quit: Stop never waits for one, and Quit waits only
+  within its ten-second total.
+- If `config.json`, `platform.json` or `preferences.json` is changed outside
+  Conduit, Settings no longer saves over it. It keeps your unsaved edit and asks
+  you to reload. Reload checks the file and applies what it can, without
+  overwriting the file or discarding your edit.
+- Start and Restart use the saved settings as they are when the Start begins
+  preparing. A settings change saved after that can interrupt an unfinished
+  Start. For example, enabling DNS while a proxy Start is applying can supersede
+  that Start: DNS starts, the proxy Start clears what it had set up, and the app
+  says the Start was interrupted. Conduit does not retry it; start the proxy
+  again. 0.5.8 instead let that Start continue with the newer settings.
+- Quit has one ten-second total for final saves and cleanup confirmation, and
+  returns earlier when both finish. Final saves apply no new settings; cleanup
+  that does not finish keeps its recovery records for the next launch.
+
+### Compatibility
+
+- Only one Conduit may use a settings folder at a time. A second app or
+  `ConduitDaemon` on the same folder exits at launch without touching anything
+  (`config.state_root_busy`). 0.5.8 and earlier do not take this lock, so quit
+  the older app completely, and let it restore your proxy settings, before
+  starting this version. Never run the two at once.
+- Settings use fixed file names in the settings folder: `config.json`,
+  `platform.json`, `preferences.json` and `platform-state.json`. The app already
+  used these. `ConduitDaemon --config` still accepts a file named `config.json`,
+  and uses its folder. A config file with any other name, or one outside an
+  explicitly chosen folder, is now refused at launch
+  (`config.state_root_refused`) with a message saying how to move or rename it.
+  Nothing is copied or renamed, and the file is left as it was.
+- Settings files are read strictly at launch and on reload: well-formed UTF-8
+  JSON in the expected shape, at most 8 MiB for `config.json` and 128 KiB each
+  for `platform.json` and `preferences.json`, with every list and value within
+  its limit. Valid unknown fields are still accepted, and the first of a
+  repeated key still wins. A file that fails is refused with a reason and kept unchanged;
+  nothing in it is truncated or silently dropped. Files Conduit writes fit, but
+  a hand-edited file that 0.5.8 accepted can now be refused.
+- A runtime list, such as Connections, is captured whole up to 10,000 rows and
+  4 MiB. A larger list shows as unavailable, with its total, instead of as a
+  partial list.
+- A settings save outside the app's Settings controls, such as a typed
+  submission from a tool, refuses a probe timeout that is not a whole number of
+  milliseconds or a direct-connect cache TTL that is not a whole number of
+  minutes, instead of truncating it. The Settings fields already take whole
+  units and are unchanged.
 
 ## 0.5.8
 
@@ -159,7 +215,7 @@ installed helper keeps the old relay.
 - The platform-state journal reads a versioned format and fails closed on a
   version it does not know: the file is kept as is, and writes and applies are
   refused. This release still writes the old format, so rolling back stays safe;
-  0.6 starts writing the new one. (#182, #208)
+  a later release starts writing the new one. (#182, #208)
 - CONNECT tunnel failure lines name their target. A timeout connecting to a
   cloud metadata address (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`),
   which cloud SDKs probe every few minutes, logs at WARNING instead of ERROR and
