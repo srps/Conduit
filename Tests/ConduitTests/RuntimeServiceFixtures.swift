@@ -255,6 +255,8 @@ final class ManualOwnerScheduling: RuntimeOwnerScheduling, @unchecked Sendable {
     private let lock = NSLock()
     private var queue: [RuntimeOwnerHop] = []
     private var hopsQueued = 0
+    /// The one driver suspended in `untilHopQueued`, if any.
+    private var waitingDriver: CheckedContinuation<Void, Never>?
 
     var pendingCount: Int {
         lock.withLock { queue.count }
@@ -265,10 +267,43 @@ final class ManualOwnerScheduling: RuntimeOwnerScheduling, @unchecked Sendable {
         lock.withLock { hopsQueued }
     }
 
+    /// Whether a driver is suspended waiting for the next hop.
+    var hasWaitingDriver: Bool {
+        lock.withLock { waitingDriver != nil }
+    }
+
     func hop(_ work: @escaping RuntimeOwnerHop) {
-        lock.withLock {
+        let driver = lock.withLock { () -> CheckedContinuation<Void, Never>? in
             hopsQueued += 1
             queue.append(work)
+            defer { waitingDriver = nil }
+            return waitingDriver
+        }
+        driver?.resume()
+    }
+
+    /// Lets a waiting driver look again without queuing a hop. The caller changes what the driver's `ended` reads first.
+    func wakeDriver() {
+        let driver = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            defer { waitingDriver = nil }
+            return waitingDriver
+        }
+        driver?.resume()
+    }
+
+    /// Suspends, on no thread, until a hop is queued or `ended` holds. Both are read in the same locked step that registers the wait,
+    /// so a hop or a `wakeDriver` that lands in between is never missed. Nothing polls meanwhile, so the off-owner work that will queue
+    /// the next hop has the pool. One driver waits at a time. `ended` runs under this queue's lock, so it must not read this queue.
+    @RuntimeActor
+    func untilHopQueued(or ended: () -> Bool) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let ready = lock.withLock { () -> Bool in
+                if !queue.isEmpty || ended() { return true }
+                precondition(waitingDriver == nil, "one driver waits for hops at a time")
+                waitingDriver = continuation
+                return false
+            }
+            if ready { continuation.resume() }
         }
     }
 
@@ -481,34 +516,66 @@ func awaitState(limit: Int = 10_000, _ condition: () -> Bool) async -> Bool {
     return condition()
 }
 
-/// Runs one call that hops to the owner. It waits, bounded, until the call has queued its work, then runs the queued hops
-/// and returns the call's value.
+/// A driven call still pending after its driver ran `hops` hops: a self-rescheduling chain fails the test instead of spinning.
+struct ManualDriveExhausted: Error {
+    let hops: Int
+}
+
+/// Starts one call on its own task. Its end is recorded, then a driver waiting in `untilHopQueued` is woken, so a call that ends
+/// without queuing another hop is seen at once.
+@RuntimeActor
+private func startDrivenCall<T: Sendable>(
+    _ scheduling: ManualOwnerScheduling,
+    _ body: @escaping @Sendable () async throws -> T
+) -> (call: Task<T, any Error>, ended: NIOLockedValueBox<Bool>) {
+    let ended = NIOLockedValueBox(false)
+    let call = Task { () async throws -> T in
+        defer {
+            ended.withLockedValue { $0 = true }
+            scheduling.wakeDriver()
+        }
+        return try await body()
+    }
+    return (call, ended)
+}
+
+/// Runs one call that hops to the owner. It waits, on no thread, until the call has queued its work or ended, then runs the queued hops
+/// and returns the call's value. It assumes an empty queue at the start and drains once: every hop the call needs is queued before it.
 @RuntimeActor
 func runCall<T: Sendable>(
     _ scheduling: ManualOwnerScheduling,
     _ body: @escaping @Sendable () async throws -> T
 ) async throws -> T {
-    let call = Task { try await body() }
-    _ = await awaitState { scheduling.pendingCount > 0 }
+    let (call, ended) = startDrivenCall(scheduling, body)
+    await scheduling.untilHopQueued { ended.withLockedValue { $0 } }
     scheduling.drainAll()
     return try await call.value
 }
 
 /// `runCall` for a page that may wait on the capture flight: it keeps running the hops the call queues, the flight's commit hop from off the
-/// owner and the woken round included, until the call has finished or, bounded, no hop comes.
+/// owner and the woken round included, until the call has ended. Between hops it waits on no thread, so a hop that comes late is still run,
+/// and the call's value is awaited only once the call has ended. Bounded by hops: a call still pending after `limit` of them is cancelled
+/// and fails as `ManualDriveExhausted`. A cancelled driver cancels its call, which ends without a hop.
 @RuntimeActor
 func runDrainingCall<T: Sendable>(
     _ scheduling: ManualOwnerScheduling,
+    limit: Int = 10_000,
     _ body: @escaping @Sendable () async throws -> T
 ) async throws -> T {
-    let finished = NIOLockedValueBox(false)
-    let call = Task { () async throws -> T in
-        defer { finished.withLockedValue { $0 = true } }
-        return try await body()
-    }
-    while await awaitState({ scheduling.pendingCount > 0 || finished.withLockedValue { $0 } }),
-          !finished.withLockedValue({ $0 }) {
-        scheduling.drainAll()
+    let (call, ended) = startDrivenCall(scheduling, body)
+    try await withTaskCancellationHandler {
+        var ran = 0
+        while true {
+            await scheduling.untilHopQueued { ended.withLockedValue { $0 } }
+            if ended.withLockedValue({ $0 }) { return }
+            guard ran < limit else {
+                call.cancel()
+                throw ManualDriveExhausted(hops: ran)
+            }
+            ran += scheduling.drainAll(limit: limit - ran)
+        }
+    } onCancel: {
+        call.cancel()
     }
     return try await call.value
 }

@@ -408,7 +408,7 @@ final class RuntimeActorFairnessTests: XCTestCase {
     /// that capture, current and whole, once it is released.
     func testStatusAndStopAnswerWhileTheCaptureFlightIsHeld() async throws {
         let service = try await Self.flightService()
-        let page = Task { try await Self.readPage(service) }
+        let page = Task { try await RuntimeActorFairnessTests.readPage(service) }
         let heldNow = await service.held.waitUntilHeld()
         XCTAssertTrue(heldNow, "the flight's job is held")
         let status = try await service.client.readSnapshot(deadline: Self.flightDeadline(service))
@@ -432,7 +432,7 @@ final class RuntimeActorFairnessTests: XCTestCase {
     /// the next first page starts a new flight for the current revision.
     func testAFlightWhoseRevisionMovedAnswersItsPageAsAStaleReadOfThatRevision() async throws {
         let service = try await Self.flightService(hosts: ["a.example", "b.example"])
-        let page = Task { try await Self.readPage(service) }
+        let page = Task { try await RuntimeActorFairnessTests.readPage(service) }
         let heldNow = await service.held.waitUntilHeld()
         XCTAssertTrue(heldNow)
         try await Self.advance(service, revision: 2, hosts: ["c.example"])
@@ -442,13 +442,13 @@ final class RuntimeActorFairnessTests: XCTestCase {
         XCTAssertEqual(stale.revision, try Self.flightRevision(1), "the rows are the revision the flight froze")
         XCTAssertEqual(stale.status, .staleRevision(current: try Self.flightRevision(2)))
         XCTAssertEqual(stale.rows.count, 2)
-        let viaCursor = try await Self.readPage(
+        let viaCursor = try await RuntimeActorFairnessTests.readPage(
             service, cursor: ControlPageCursor(revision: try Self.flightRevision(1), offset: try ControlCount(0))
         )
         XCTAssertEqual(viaCursor, reply, "the same answer as an ordinary read with a cursor at that revision")
         XCTAssertEqual(service.held.started, [.tunnelDNSHosts], "answered from its own flight, not captured again")
 
-        guard case .tunnelDNSHosts(let current) = try await Self.readPage(service) else { return XCTFail("the next first page has rows") }
+        guard case .tunnelDNSHosts(let current) = try await RuntimeActorFairnessTests.readPage(service) else { return XCTFail("the next first page has rows") }
         XCTAssertEqual(current.revision, try Self.flightRevision(2))
         XCTAssertEqual(current.status, .current)
         XCTAssertEqual(service.held.started, [.tunnelDNSHosts, .tunnelDNSHosts], "the next first page started a new flight")
@@ -457,8 +457,8 @@ final class RuntimeActorFairnessTests: XCTestCase {
     /// Two first pages of one kind during one flight join it: one job runs, and both are answered with its revision.
     func testFirstPagesOfOneKindJoinTheOneFlight() async throws {
         let service = try await Self.flightService()
-        let first = Task { try await Self.readPage(service) }
-        let second = Task { try await Self.readPage(service) }
+        let first = Task { try await RuntimeActorFairnessTests.readPage(service) }
+        let second = Task { try await RuntimeActorFairnessTests.readPage(service) }
         let joined = await Self.until { Self.flightWaits(service) == 2 }
         XCTAssertTrue(joined, "both pages wait on the flight")
         XCTAssertEqual(service.held.started, [.tunnelDNSHosts], "one job for both")
@@ -474,10 +474,10 @@ final class RuntimeActorFairnessTests: XCTestCase {
     /// outside the ledger at a time.
     func testAPageOfAnotherKindWaitsForTheFlightThenStartsItsOwn() async throws {
         let service = try await Self.flightService()
-        let hosts = Task { try await Self.readPage(service, .tunnelDNSHosts) }
+        let hosts = Task { try await RuntimeActorFairnessTests.readPage(service, .tunnelDNSHosts) }
         let heldNow = await service.held.waitUntilHeld()
         XCTAssertTrue(heldNow)
-        let health = Task { try await Self.readPage(service, .upstreamHealth) }
+        let health = Task { try await RuntimeActorFairnessTests.readPage(service, .upstreamHealth) }
         let waiting = await Self.until { Self.flightWaits(service) == 2 }
         XCTAssertTrue(waiting, "the other kind waits on the one flight")
         XCTAssertEqual(service.held.started, [.tunnelDNSHosts], "its own job has not started while the flight runs")
@@ -494,7 +494,7 @@ final class RuntimeActorFairnessTests: XCTestCase {
     func testAPageThatEndsWhileTheFlightIsHeldLeavesAloneAndTheFlightStillCommits() async throws {
         for ending in ["deadline", "cancel"] {
             let service = try await Self.flightService()
-            let page = Task { try await Self.readPage(service, deadline: .after(.seconds(5), from: service.timing.now)) }
+            let page = Task { try await RuntimeActorFairnessTests.readPage(service, deadline: .after(.seconds(5), from: service.timing.now)) }
             let parked = await Self.until { Self.flightWaits(service) == 1 }
             XCTAssertTrue(parked, ending)
             if ending == "deadline" {
@@ -517,7 +517,7 @@ final class RuntimeActorFairnessTests: XCTestCase {
             service.held.release()
             let committed = await Self.until { Self.proofs(service, .tunnelDNSHosts) == 1 }
             XCTAssertTrue(committed, "\(ending): the flight committed with no page waiting")
-            guard case .tunnelDNSHosts(let later) = try await Self.readPage(service) else { return XCTFail("\(ending): rows") }
+            guard case .tunnelDNSHosts(let later) = try await RuntimeActorFairnessTests.readPage(service) else { return XCTFail("\(ending): rows") }
             XCTAssertEqual(later.status, .current)
             XCTAssertEqual(service.held.started, [.tunnelDNSHosts], "\(ending): served from that capture, with no second job")
         }
@@ -529,7 +529,7 @@ final class RuntimeActorFairnessTests: XCTestCase {
     func testShutdownWakesTheFlightsPageAtOnceAndTheOldCompletionCommitsNothing() async throws {
         let hops = ManualOwnerScheduling()
         let service = try await Self.flightService(coreHops: hops)
-        let page = Task { try await Self.readPage(service) }
+        let page = Task { try await RuntimeActorFairnessTests.readPage(service) }
         let heldNow = await service.held.waitUntilHeld()
         XCTAssertTrue(heldNow)
         await Self.shutDown(service)
@@ -542,7 +542,7 @@ final class RuntimeActorFairnessTests: XCTestCase {
         XCTAssertTrue(completed, "the old job's completion hop came and ran")
         let afterCompletion = await Self.proofs(service, .tunnelDNSHosts)
         XCTAssertEqual(afterCompletion, 0, "the old completion committed nothing")
-        let again = try await Self.readPage(service)
+        let again = try await RuntimeActorFairnessTests.readPage(service)
         XCTAssertEqual(again, .unavailable(.tunnelDNSHosts, .notCaptured, knownTotal: try ControlCount(2)))
         XCTAssertEqual(service.held.started, [.tunnelDNSHosts], "no job starts after shutdown")
     }
@@ -564,7 +564,7 @@ final class RuntimeActorFairnessTests: XCTestCase {
     /// captured again, although the commit was more recent than that age. (The fixture age is 20 s, inside one request's 30 s budget.)
     func testACapturesAgeRunsFromTheFlightsStart() async throws {
         let service = try await Self.flightService(rowAge: .seconds(20))
-        let page = Task { try await Self.readPage(service) }
+        let page = Task { try await RuntimeActorFairnessTests.readPage(service) }
         let heldNow = await service.held.waitUntilHeld()
         XCTAssertTrue(heldNow)
         service.timing.advance(by: .seconds(15))
@@ -572,7 +572,7 @@ final class RuntimeActorFairnessTests: XCTestCase {
         guard case .tunnelDNSHosts(let first) = try await page.value else { return XCTFail("rows") }
         XCTAssertEqual(first.status, .current)
         service.timing.advance(by: .seconds(6))
-        guard case .tunnelDNSHosts(let next) = try await Self.readPage(service) else { return XCTFail("rows") }
+        guard case .tunnelDNSHosts(let next) = try await RuntimeActorFairnessTests.readPage(service) else { return XCTFail("rows") }
         XCTAssertEqual(next.status, .current)
         XCTAssertEqual(service.held.started, [.tunnelDNSHosts, .tunnelDNSHosts],
                        "21 s after the start and 6 s after the commit, the 20 s rows are aged and captured again")
@@ -627,8 +627,8 @@ final class RuntimeActorFairnessTests: XCTestCase {
                 await held.enter(kind)
                 return projection
             }
-            let first = Task { () -> Result<ControlPageReply, RuntimeClientError> in await Self.result { try await Self.readPage(service) } }
-            let second = Task { () -> Result<ControlPageReply, RuntimeClientError> in await Self.result { try await Self.readPage(service) } }
+            let first = Task { () -> Result<ControlPageReply, RuntimeClientError> in await RuntimeActorFairnessTests.result { try await RuntimeActorFairnessTests.readPage(service) } }
+            let second = Task { () -> Result<ControlPageReply, RuntimeClientError> in await RuntimeActorFairnessTests.result { try await RuntimeActorFairnessTests.readPage(service) } }
             let joined = await Self.until { Self.flightWaits(service) == 2 }
             XCTAssertTrue(joined, testCase.name)
             held.release()
@@ -665,7 +665,7 @@ final class RuntimeActorFairnessTests: XCTestCase {
     func testATotalPastTheRowBoundIsRefusedBeforeAnyFlight() async throws {
         let hosts = (1...17).map { "h\($0).example" }
         let service = try await Self.flightService(hosts: hosts)
-        let reply = try await Self.readPage(service)
+        let reply = try await RuntimeActorFairnessTests.readPage(service)
         XCTAssertEqual(reply, .unavailable(.tunnelDNSHosts, .retentionBudgetExceeded, knownTotal: try ControlCount(17)))
         let asked = await Self.projectionCount(service)
         XCTAssertEqual(asked, 0, "no row source was frozen")

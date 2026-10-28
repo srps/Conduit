@@ -47,17 +47,18 @@ final class RuntimeServiceTransportTests: XCTestCase {
         _ harness: RuntimeServiceHarness,
         incarnation: Int = 1,
         cursor: ControlPageCursor? = nil
-    ) async -> Result<ControlPageReply, RuntimeClientError> {
+    ) async throws -> Result<ControlPageReply, RuntimeClientError> {
         let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
         let request = ControlPageRequest(
             expectedIncarnation: RuntimeServiceFixtures.incarnation(incarnation),
             collection: .tunnelDNSHosts,
             cursor: cursor
         )
+        // Only the client's own answer is a result. A driver failure is the test's, and it is thrown as itself.
         do {
             return .success(try await runDrainingCall(harness.scheduling) { try await client.readPage(request, deadline: deadline) })
-        } catch {
-            return .failure(error as? RuntimeClientError ?? .unexpectedReply)
+        } catch let error as RuntimeClientError {
+            return .failure(error)
         }
     }
 
@@ -67,7 +68,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
         try publishHosts(harness, hosts: ["a"])
         harness.owner.projectionOverride = { _, _ in .internalFailure }
         let client = try makeClient(harness, harness.transport())
-        guard case .failure(let error) = await readHosts(client, harness) else {
+        guard case .failure(let error) = try await readHosts(client, harness) else {
             return XCTFail("a failed projection is not a reply")
         }
         XCTAssertEqual(error, .wire(.internalFailure))
@@ -78,7 +79,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
         let harness = try RuntimeServiceHarness()
         try publishHosts(harness, hosts: ["a"])
         let client = try makeClient(harness, harness.transport())
-        guard case .failure(let error) = await readHosts(client, harness, incarnation: 2) else {
+        guard case .failure(let error) = try await readHosts(client, harness, incarnation: 2) else {
             return XCTFail("a read of another incarnation is refused")
         }
         XCTAssertEqual(error, .wire(.changedIncarnation))
@@ -91,7 +92,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
         try publishHosts(harness, hosts: ["a", "b"])
         let client = try makeClient(harness, harness.transport())
         let cursor = ControlPageCursor(revision: try XCTUnwrap(ControlCollectionRevision(rawValue: 1)), offset: try ControlCount(5))
-        guard case .failure(let error) = await readHosts(client, harness, cursor: cursor) else {
+        guard case .failure(let error) = try await readHosts(client, harness, cursor: cursor) else {
             return XCTFail("an offset past the total is refused")
         }
         XCTAssertEqual(error, .wire(.invalidValue))
@@ -105,7 +106,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
         try publishHosts(harness, hosts: [String(repeating: "h", count: 3_000)])
         let small = try ControlFrameLimits(maxFrameBytes: 512)
         let client = try makeClient(harness, harness.transport(), frame: small)
-        guard case .failure(let error) = await readHosts(client, harness) else {
+        guard case .failure(let error) = try await readHosts(client, harness) else {
             return XCTFail("a row larger than the caller's frame is not a page")
         }
         XCTAssertEqual(error, .wire(.frameTooLarge))
@@ -118,7 +119,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
         let hosts = (1...17).map { "h\($0).example" }
         try publishHosts(harness, hosts: hosts)
         let client = try makeClient(harness, harness.transport())
-        guard case .success(let reply) = await readHosts(client, harness) else {
+        guard case .success(let reply) = try await readHosts(client, harness) else {
             return XCTFail("an over-budget refusal is a reply, not a failure")
         }
         XCTAssertEqual(reply, .unavailable(.tunnelDNSHosts, .retentionBudgetExceeded, knownTotal: try ControlCount(17)))
