@@ -126,3 +126,7 @@ workflow and actual-adapter evidence separately from AppState activation.
 Exact command/field inventory, measured frame/page/queue limits and deadline values
 are stage-1 obligations. Config projection and component grouping follow 0015;
 listener handoff policy remains a gate before changing that behavior.
+
+### Collection capture implementation clarification — 2026-10-28
+
+The [shared-host contract](../design-runtime-host-contract.md) and [activation checkpoint](../verification-runtime-actor-activation-2026-10-28.md) record one off-owner capture flight. A first page waiting for its own capture resumes through the existing cursor path for that revision, preserving explicit current/stale/expired status. [The service](../../Sources/ConduitRuntime/RuntimeServiceCore.swift) wakes page waits immediately on shutdown, starts no new captures then, and can still serve retained rows. This clarifies implementation of the existing continuation/staleness contract; it introduces no new wire response, bound or deadline.

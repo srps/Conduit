@@ -2,11 +2,13 @@
 """Actual Conduit client/host resource probe runner: macOS/Xcode layout, no app launch, no product change.
 
 Build the Release products first (`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift build -c release`).
-The probe links the existing Release objects with `-package-name conduit` (the link structure of the private-editor-reply
+The probe compiles in Swift 6 language mode and links the existing Release objects with `-package-name conduit` (the link structure of the private-editor-reply
 runner plus ConduitRuntime, PlatformMac, ProxyAuth and ProxyPAC), so it widens no product access and adds no product,
 dependency or test hook. Each mode runs in a fresh process under its own owned scratch root, with a bounded deadline and a
 bounded output, and prints numeric NDJSON only. The runner refuses any string value that is not a short fixed label.
 Every host mode consumes RuntimeServiceProfile.inProcessApp and compares it to independent codec-derived sizing. The client Quit mode uses the selected ten-second total (0039).
+The host runs on RuntimeActor (0031) and the probe's driver on the main actor. The cancel and pressure-candidate windows hold RuntimeActor
+through a probe-only, bounded, self-ending job that blocks one cooperative-pool thread, so exclude those modes from any strict-pool run.
 """
 import argparse
 import hashlib
@@ -126,7 +128,8 @@ objects_at_start = {name: dict(sha256=sha256(products / name), mtime=(products /
 with tempfile.TemporaryDirectory(prefix='conduit-actual-client-') as scratch_name:
     scratch = Path(scratch_name)
     executable = scratch / 'probe'
-    command = ['xcrun', 'swiftc', '-O', '-parse-as-library', '-module-cache-path', str(scratch / 'modules'),
+    # Swift 6 language mode, the product's own (Package.swift sets no other), so a data-race diagnostic is an error here too.
+    command = ['xcrun', 'swiftc', '-swift-version', '6', '-O', '-parse-as-library', '-module-cache-path', str(scratch / 'modules'),
                '-target', platform.machine() + '-apple-macosx26.0', '-package-name', 'conduit',
                '-I', str(products), str(source)]
     command += [str(products / name) for name in OBJECTS]

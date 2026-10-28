@@ -1,0 +1,20 @@
+{
+  "head": "c8547b7c098e5abcb0d620067b801cadf27247cf",
+  "source_sha256": "dd9d1b25522ca6a67450978b2b602cd7628a75c3b9ed1800a6c34f8be107bea7",
+  "final_source_sha256": "dd9d1b25522ca6a67450978b2b602cd7628a75c3b9ed1800a6c34f8be107bea7",
+  "stable": true,
+  "command": [
+    "xcrun",
+    "swift",
+    "test",
+    "--scratch-path",
+    "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r5-tsan/build",
+    "--sanitize=thread",
+    "--filter",
+    "RuntimeActorPlacementTests|RuntimeActorFairnessTests|RuntimeReconcilerTests|RuntimePhysicalOrderingTests|RuntimeHostControlOwnerTests|DaemonRuntimeHostTests|ObserverDeliveriesTests|HeldCallTests|ConnectionTrackingTests|NetworkMonitorTests|SnapshotCoalescingTests|ConfigSaveGateTests|AppStateHarnessTests.testAHeldDiagnosticWriteKeepsTheRootLeasedAfterEveryOwnerLetGo|AppStateHarnessTests.testTheRootStaysLeasedWhileTheHostsQuitWorkIsHeldAndComesFreeOnceItEnds"
+  ],
+  "exit": 0,
+  "seconds": 181.09246262500528,
+  "tsan_options": "halt_on_error=1",
+  "suppressions_applied": false
+}

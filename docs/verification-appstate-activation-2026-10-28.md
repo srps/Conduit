@@ -1,5 +1,7 @@
 # Single AppState activation checkpoint
 
+This historical checkpoint predates isolation. See the [current whole-owner checkpoint](verification-runtime-actor-activation-2026-10-28.md) for RuntimeActor, native Dev acceptance and remaining gates.
+
 Status: implementation under verification, not merged or released. The installed
 0.5.8 app and helper remain untouched. Official Claude Code implementation and
 independent review used the owner's authenticated claude.ai Max subscription;

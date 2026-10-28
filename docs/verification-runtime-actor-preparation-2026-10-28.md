@@ -1,6 +1,6 @@
 # RuntimeActor preparation — 2026-10-28
 
-This is preparation for [0031](decisions/0031-incremental-runtime-development-single-activation.md). The control cluster still runs on MainActor. The whole RuntimeActor move, native AppKit acceptance and applicable real-machine checks remain due. No release readiness is claimed.
+This records the historical preparation checkpoint for [0031](decisions/0031-incremental-runtime-development-single-activation.md), when the control cluster still ran on MainActor. The subsequent [whole-owner activation checkpoint](verification-runtime-actor-activation-2026-10-28.md) records the RuntimeActor implementation and native Dev checks. Applicable real-machine checks and release acceptance remain separate.
 
 ## Changes
 

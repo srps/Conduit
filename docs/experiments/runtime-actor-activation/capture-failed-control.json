@@ -1,0 +1,12 @@
+{
+  "baseline_source_commit": "c8547b7c098e5abcb0d620067b801cadf27247cf",
+  "run": "runtime-actor-stageb-F8pg8R",
+  "mode": "correction",
+  "exit": 1,
+  "source_diff_before_run": "Parent checked git diff --name-only -- Sources empty at11:54:53 while baseline ran; only stronger fairness assertions changed.",
+  "semantic_failures": [
+    "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/RuntimeActorFairnessTests.swift:262: error: -[ConduitTests.RuntimeActorFairnessTests testStatusAndStopIssuedDuringAFullCaptureAreAnsweredBeforeItEnds] : XCTAssertLessThan failed: (\"Instant(_value: 1239666.801371625 seconds)\") is not less than (\"Instant(_value: 1239666.792375083 seconds)\") - the status read was answered while the capture was still projecting",
+    "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/RuntimeActorFairnessTests.swift:263: error: -[ConduitTests.RuntimeActorFairnessTests testStatusAndStopIssuedDuringAFullCaptureAreAnsweredBeforeItEnds] : XCTAssertLessThan failed: (\"Instant(_value: 1239666.80137225 seconds)\") is not less than (\"Instant(_value: 1239666.792375083 seconds)\") - the Stop was admitted while the capture was still projecting"
+  ],
+  "log_sha256": "a748f81beea02977a015a827c5e06323e13ae47ec1c7d5b97c55c47778b61bce"
+}

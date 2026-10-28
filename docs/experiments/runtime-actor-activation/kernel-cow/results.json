@@ -1,0 +1,84 @@
+{
+  "source_commit": "f3abd5f710ed683a2f73859e0429d6e5c807e9f9",
+  "verified_source_sha256": "dd9d1b25522ca6a67450978b2b602cd7628a75c3b9ed1800a6c34f8be107bea7",
+  "program_sha256": "d4389830afe0b0aaad940e9c9af31c6ec196f782a5eb10ca8388fe6a42e280e4",
+  "compile_exit": 0,
+  "scope": "one-off optimized Swift 6 kernel value-semantics observation at 1000/10000 rows; not the RuntimeHost flight, real connection churn, app RAM or a memory bound",
+  "trials": [
+    {
+      "trial": 1,
+      "exit": 0,
+      "seconds": 0.3871244579786435,
+      "observations": [
+        {
+          "rows": 1000,
+          "stride": 120,
+          "orderedCapacity": 1092,
+          "activityCopyBytes": 131072,
+          "activityCopyNanoseconds": 48000,
+          "removeCopyBytes": 65472,
+          "releasedOnHolderEndBytes": 196336
+        },
+        {
+          "rows": 10000,
+          "stride": 120,
+          "orderedCapacity": 10103,
+          "activityCopyBytes": 1212416,
+          "activityCopyNanoseconds": 161833,
+          "removeCopyBytes": 409536,
+          "releasedOnHolderEndBytes": 1622144
+        }
+      ]
+    },
+    {
+      "trial": 2,
+      "exit": 0,
+      "seconds": 0.06654912501107901,
+      "observations": [
+        {
+          "rows": 1000,
+          "stride": 120,
+          "orderedCapacity": 1092,
+          "activityCopyBytes": 131072,
+          "activityCopyNanoseconds": 20792,
+          "removeCopyBytes": 65472,
+          "releasedOnHolderEndBytes": 196336
+        },
+        {
+          "rows": 10000,
+          "stride": 120,
+          "orderedCapacity": 10103,
+          "activityCopyBytes": 1212416,
+          "activityCopyNanoseconds": 153375,
+          "removeCopyBytes": 409536,
+          "releasedOnHolderEndBytes": 1622144
+        }
+      ]
+    },
+    {
+      "trial": 3,
+      "exit": 0,
+      "seconds": 0.07132108404766768,
+      "observations": [
+        {
+          "rows": 1000,
+          "stride": 120,
+          "orderedCapacity": 1092,
+          "activityCopyBytes": 131072,
+          "activityCopyNanoseconds": 21833,
+          "removeCopyBytes": 65472,
+          "releasedOnHolderEndBytes": 196336
+        },
+        {
+          "rows": 10000,
+          "stride": 120,
+          "orderedCapacity": 10103,
+          "activityCopyBytes": 1212416,
+          "activityCopyNanoseconds": 168125,
+          "removeCopyBytes": 409536,
+          "releasedOnHolderEndBytes": 1622144
+        }
+      ]
+    }
+  ]
+}

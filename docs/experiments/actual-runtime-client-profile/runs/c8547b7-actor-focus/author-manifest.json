@@ -1,0 +1,63 @@
+{
+  "author": "claude-code (claude.ai Max subscription session; verifier/implementer after the Bash-less authoring session)",
+  "date": "2026-10-28",
+  "status": "FROZEN: compiled in Swift 6 language mode and focused Release modes passed on the first attempt; parent runs full31 separately",
+  "sourceCommit": "c8547b7c098e5abcb0d620067b801cadf27247cf",
+  "productSourcesDirty": false,
+  "productSourceFingerprint": "22573d2a041a595feb6dc5ba47ff435ba0502d3d2f1bd71051e1f8170307ce6e",
+  "editedFiles": {
+    "docs/experiments/actual-runtime-client-profile/Probe.swift": {
+      "sha256": "af37b3ce54a5af8c8afaced6a9ca750be26740d21fae22125afb85f3c2bd7113",
+      "thisSession": "unchanged; the initial author's RuntimeActor adaptation compiled under -swift-version 6 with no diagnostic, so no fix was needed"
+    },
+    "docs/experiments/actual-runtime-client-profile/run.py": {
+      "sha256": "2ae0f902e3bb66d9875d8549e169cbf3e195f9099016926850b8906a2879e070",
+      "thisSession": "compile command gains '-swift-version', '6' (the product's own language mode; Package.swift tools 6.2 sets no other) with a one-line comment; docstring says so. No other behaviour change"
+    }
+  },
+  "untouched": ["README.md (sha256 ea12df0ab5217a3068aff0e7e2100b4b23d4353de3ed42e59d5503b5730d5850)", "Sources", "Tests", "Package.swift", "Package.resolved", "wrappers", "verify script", "build-allowed marker"],
+  "attempts": [
+    {
+      "attempt": 1,
+      "command": "bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-profile.sh (after parent created runtime-actor-profile-build-allowed)",
+      "output": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-profile-focused-ppTeAT",
+      "exitCode": 0,
+      "swiftBuildRelease": "Build complete (92.58 s); the script rebuilt warm",
+      "swiftc": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1), target arm64-apple-macosx26.0",
+      "probeCompileLog": "empty: no error and no warning under -swift-version 6",
+      "sourceUnchangedDuringRun": true,
+      "objectsUnchangedDuringRun": true,
+      "modes": [
+        {"kind": "small", "exit": 0, "seconds": 1.192, "records": 48, "labelViolations": 0, "outputTruncated": false, "scratchRemoved": true,
+         "summary": {"failedChecks": 0, "inconclusive": [], "released": true}},
+        {"kind": "client-quit-widest", "exit": 0, "seconds": 3.257, "records": 44, "labelViolations": 0, "outputTruncated": false, "scratchRemoved": true,
+         "summary": {"failedChecks": 0, "inconclusive": [], "released": true},
+         "routine": {"path": "RuntimeClientQuit.quit", "totalDeadlineMS": 10000, "routineMS": 923.7, "releaseToReturnMS": 535.0,
+                     "quit": "settled.completed.quit", "priorUpdate": "settled.configurationSettled", "configuration": "settled.configurationSettled",
+                     "preferences": "settled.preferencesSettled", "producerOrder": "configuration,preferences",
+                     "rebasedRuntimeAndPlatformFromPriorReceipt": true, "finalModuleReceipts": 0, "finalAppliedField": "absent",
+                     "listenerClosed": true, "systemProxyCleared": true, "hostRuntimeProxyDown": true}}
+      ],
+      "isolationLabelsObserved": {"ownerIsolation": "RuntimeActor", "driverIsolation": "MainActor"}
+    }
+  ],
+  "failedAttempts": [],
+  "anticipatedButNotObserved": [
+    "mach_task_self_ shared-mutable-state diagnostic (the test target's comment names it); Swift 6.4 reported nothing for the probe, so MemoryReading is unchanged",
+    "captured var 'edited' in runCancel's Task.detached; not reported"
+  ],
+  "limits": [
+    "Focused run covers small and client-quit-widest only; the other modes, including cancel and pressure-candidate (the RuntimeActor owner-hold windows), were NOT run here; parent full31 covers them",
+    "One trial per mode, sampler enabled; numbers are single-sample timings on this machine, not latency guarantees",
+    "Fakes and loopback only: no installed app, helper, real config, Keychain, GSS, VPN or network dispatch",
+    "No full-capture or over-bound collection witness and no app-RAM claim; pressure-candidate states connectionsOpenedByProbe=0 and fullCaptureWitness=false",
+    "Source full-capture fairness is evidenced by the optimized tests with a fake owner, not by this production probe"
+  ],
+  "parentFollowUp": [
+    "README still names the old *-main-held cancel cases and the main-thread lane-window method (parent owns README, the Source proof snapshot link and the full31 modes)",
+    "Full31 is deferred by the parent until the remaining Source fairness fix (optimized 10k full capture blocks RuntimeActor about 0.48-0.63 s; off-owner projection under the existing caps is being designed). This focused result applies to Source c8547b7c only; full31 on the final Source must rebuild and recompile the probe against it",
+    "Any change to Probe.swift or run.py invalidates this manifest",
+    "The runtime-actor-profile-build-allowed marker is the parent's; this session left it in place"
+  ],
+  "verifierSessionClosed": "after this focused run; no further build or measurement by this session"
+}

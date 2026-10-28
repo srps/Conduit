@@ -1,0 +1,81 @@
+{
+  "product_commit": "f3abd5f710ed683a2f73859e0429d6e5c807e9f9",
+  "production_module_diff": "",
+  "tests": {
+    "files_sha256": {
+      "Tests/ConduitTests/RuntimeServiceFixtures.swift": "7e3d78f6cb836286b49051b265612016529b1c3573fc748870c840a94a16287f",
+      "Tests/ConduitTests/RuntimeServiceTransportTests.swift": "9a01de54857d683f9df2ff4ad47ac9837888e9b47042fdb721236e9613306894",
+      "Tests/ConduitTests/RuntimeManualSchedulerTests.swift": "195ac563b21280a4c53571eb25fa67f28985e87d2911a34c1ba73c93c6059331",
+      "Tests/ConduitTests/RuntimeActorFairnessTests.swift": "c509cbd6a817eb88d064fd9fc155eb4d05fe84c66b99dc38f9d2b3f406e87ed6"
+    },
+    "production_module_diff": ""
+  },
+  "runs": {
+    "late-hop-control": {
+      "directory": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-2HrEh6",
+      "files": {
+        "tests.log": {
+          "sha256": "91db03bdf474cc1caf6099e5be7e0fcb342bba10cd0c2ee5045baf7a3fef327b",
+          "bytes": 9860
+        },
+        "exit-code": {
+          "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+          "bytes": 2,
+          "value": "1"
+        }
+      }
+    },
+    "cancel-control": {
+      "directory": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-IXRdHQ",
+      "files": {
+        "tests.log": {
+          "sha256": "fe79ad0d70f81bde4e9a8e9fb2840d282c009ffe2c800a17c63d74e049e723ea",
+          "bytes": 9972
+        },
+        "exit-code": {
+          "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+          "bytes": 2,
+          "value": "1"
+        }
+      }
+    },
+    "final-transport": {
+      "directory": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-i0sE8L",
+      "files": {
+        "tests.log": {
+          "sha256": "f3820a33a34992f24d6d2f1678fffe8374699855e028c99f3142f31d686f7d1b",
+          "bytes": 9635
+        },
+        "exit-code": {
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "bytes": 2,
+          "value": "0"
+        }
+      }
+    },
+    "final-strict": {
+      "directory": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-uneOcl",
+      "files": {
+        "tests.log": {
+          "sha256": "f6e5486ba93aae9510c02e011e42ab42a43a54da3e48e49b17db93a4ab75c686",
+          "bytes": 33056
+        },
+        "sim.log": {
+          "sha256": "0122e5dc761dda088c934eac5a03b81cccece24c6b15af8a8ad9f15a361d2f26",
+          "bytes": 26108
+        },
+        "exit-code": {
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "bytes": 2,
+          "value": "0"
+        },
+        "relay-sim.log": {
+          "sha256": "aa8df62339a8323f45936ecf46cf5d0b1da09f081076ad80f74184bdb1cc95a1",
+          "bytes": 2328
+        }
+      }
+    }
+  },
+  "control_scope": "late-hop control demonstrates the defect with bounded cleanup; cancel control removes only the handler and fails semantically without hanging",
+  "remaining_test_followup": "Existing #183: harness.page() still polls bounded yields and may fail spuriously; it cannot leave the corrected draining driver permanently waiting."
+}

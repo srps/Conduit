@@ -17,6 +17,10 @@
 // (decision 0038).
 // Usage: probe <mode>[-nosampler] <scratch-dir>. The scratch directory is removed only after every release proof agrees.
 //
+// Isolation (decision 0031): the host, its service and the owner hops run on `RuntimeActor`. The probe's driver stays on the main
+// actor, as the app's client does, and reaches the host only by awaited owner calls; the clients cross by their own transport. The
+// cancel and pressure-candidate windows hold `RuntimeActor` itself through `holdOwner`, a probe-only, bounded, self-ending job.
+//
 // `GenericDefaults.shared` is initialized by the actual store decode (`ProxyConfig.init(from:)`), which reads `NSUserName()`
 // and the host name read-only; every fixture sets every value explicitly, so no default reaches a fixture, and nothing is printed.
 
@@ -371,7 +375,7 @@ final class CountingStateFiles: StateFileAccessing, @unchecked Sendable {
 }
 
 /// The helper-status fake, wrapped so a phase can hold the preflight pass's read-only helper read. The host reads it on a global queue
-/// (`RuntimeHostPreflight`), so a hold never blocks the main actor. This is the fake `HelperLifecycleManaging` seam, not the installed helper.
+/// (`RuntimeHostPreflight`), so a hold never blocks the owner (`RuntimeActor`). This is the fake `HelperLifecycleManaging` seam, not the installed helper.
 final class GatedHelperLifecycle: HelperLifecycleManaging, @unchecked Sendable {
     let base = FakeHelperLifecycle()
     let gate = Gate()
@@ -1589,6 +1593,8 @@ struct CandidateBuild {
 
 // MARK: - Host run
 
+/// The probe's driver, on the main actor as the app's client is. The host is `RuntimeActor`-isolated: every host call here is an
+/// awaited owner call, and nothing of the probe's own bookkeeping runs on the owner.
 @MainActor
 final class HostRun {
     let out: Output
@@ -1640,12 +1646,12 @@ final class HostRun {
         weakHost = opened
     }
 
-    func compose(limits: RuntimeServiceLimits) throws {
+    func compose(limits: RuntimeServiceLimits) async throws {
         guard let host else { throw ProbeError("noHost") }
         let profile = try RuntimeServiceProfile.inProcessApp()
         // Keep independent codec sizing: a changed shipping term must not silently replace the measured candidate.
         guard profile.limits == limits else { throw ProbeError("shippingProfileMismatch") }
-        clients = try host.makeInMemoryControlClient(profile: profile)
+        clients = try await host.makeInMemoryControlClient(profile: profile)
     }
 
     var control: any RuntimeClient { clients!.control }
@@ -1893,7 +1899,6 @@ func privateRequestFrameBytes(
 
 // MARK: - Modes
 
-@MainActor
 func emitProfile(_ out: Output) -> CandidateBuild? {
     let build: CandidateBuild
     do {
@@ -1985,7 +1990,7 @@ func runFlow(_ run: HostRun, limits: RuntimeServiceLimits, fixture: Fixture) asy
     try await run.open()
     stages.stage("host-opened", ["openMS": elapsedMS(since: start)].merging(run.fakes.files.counters) { $1 })
 
-    try run.compose(limits: limits)
+    try await run.compose(limits: limits)
     let (snapshot, snapshotMS) = try await run.readSnapshot()
     run.incarnation = snapshot.stamp.incarnation
     stages.stage("clients-composed", ["firstSnapshotMS": snapshotMS])
@@ -2192,7 +2197,7 @@ func runLifetime(_ run: HostRun, limits: RuntimeServiceLimits, depth: Int) async
     try AppPreferencesPersistence.save(makeSmallPreferences(), in: run.environment)
     try await run.open()
     if depth >= 1 {
-        try run.compose(limits: limits)
+        try await run.compose(limits: limits)
         run.incarnation = try await run.readSnapshot().0.stamp.incarnation
     }
     var observed: PrivateEditorObservation?
@@ -2288,6 +2293,34 @@ final class WorkerState: @unchecked Sendable {
     }
 }
 
+/// PROBE-ONLY owner hold: one `RuntimeActor` job that sleeps `microseconds` and returns, so no owner round can claim until it ends.
+/// It is bounded and self-ending, and it blocks one cooperative-pool thread for that time, which is why these modes are excluded from
+/// a strict-pool run. The product never blocks its owner. `state` is in flight from the job's first step and finished at its last.
+@RuntimeActor
+func holdOwner(microseconds: useconds_t, state: WorkerState) {
+    state.set(inFlight: true)
+    usleep(microseconds)
+    state.finish()
+}
+
+/// Starts `holdOwner` and returns once the owner is held, so callers spawned afterwards start while the owner is held. The caller awaits
+/// the task for the hold's end, and reads `state.snapshot.finished` to show the hold still stood after it spawned its callers. That flag
+/// marks the spawn only; it does not prove each exchange reached the transport during the hold. The overlap is read from each mode's
+/// outputs (the lane-fill flags, the result labels), and a hold that ended before its case marks the run inconclusive.
+@MainActor
+func ownerHeld(microseconds: useconds_t) async throws -> (task: Task<Void, Never>, state: WorkerState) {
+    let state = WorkerState()
+    let task = Task.detached { await holdOwner(microseconds: microseconds, state: state) }
+    guard try await waitUntil(seconds: 5, { state.snapshot.inFlight }) else { throw ProbeError("ownerHoldNotEntered") }
+    return (task, state)
+}
+
+/// The host's runtime proxy fact, read in one owner turn; only the Bool crosses back.
+@RuntimeActor
+func hostProxyIsUp(_ host: RuntimeHost) -> Bool {
+    host.runtimeState().proxyIsUp
+}
+
 /// Large private work: alternating reads and frozen save-only updates of the escape maximum (about 7.4 MB per frame).
 func largePrivateWork(
     _ editor: PrivateEditorClient, control: any RuntimeClient, incarnation: ControlHostIncarnation, config: ProxyConfig,
@@ -2342,7 +2375,7 @@ extension HostRun {
         } else {
             try await open()
         }
-        try compose(limits: limits)
+        try await compose(limits: limits)
         incarnation = try await readSnapshot().0.stamp.incarnation
         let observed = try await read().0
         let start = ContinuousClock.now
@@ -2727,7 +2760,7 @@ func runLoggerHeld(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
     // The host's own flush: nothing in its artifacts is held; its logger drain is.
     guard let host = run.host else { throw ProbeError("noHost") }
     let flushStart = ContinuousClock.now
-    let flush = Task { @MainActor in await host.flushEvents() }
+    let flush = Task { @RuntimeActor in await host.flushEvents() }
     let entered = try await waitUntil(seconds: 10) { logger.drains.calls >= 1 }
     out.check(entered, "logger.hostDrainEntered")
     let artifactPhaseMS = logger.drains.entered.map { milliseconds(flushStart.duration(to: $0)) } ?? -1
@@ -2792,8 +2825,9 @@ func runLoggerHeld(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
     try await run.plainQuit()
 }
 
-/// cancel: lost waits and a cancelled caller, with the actual main actor held so the owner round cannot claim; then physical
-/// cleanup is evidenced by when the composition's one private transfer accepts the next exchange.
+/// cancel: lost waits and a cancelled caller, with the owner (`RuntimeActor`) held by the probe-only `holdOwner` so the owner round
+/// cannot claim; then physical cleanup is evidenced by when the composition's one private transfer accepts the next exchange. Each
+/// hold is entered before its caller is spawned, and each record says whether it still stood after the spawn (or the cancel).
 @MainActor
 func runCancel(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
     let out = run.out
@@ -2829,35 +2863,45 @@ func runCancel(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
     }
 
     // (a) A read whose deadline ends while the owner cannot claim.
+    let readHold = try await ownerHeld(microseconds: 150_000)
     let lostRead = Task.detached { () -> String in
         do {
             _ = try await privateObservation(editor, incarnation: incarnation, deadline: .after(.milliseconds(20), from: .now))
             return "observation"
         } catch { return errorLabel(error) }
     }
-    usleep(150_000)
+    let readHoldStood = !readHold.state.snapshot.finished
+    await readHold.task.value
     let lostReadResult = await lostRead.value
     var afterLostRead = try await transferReleaseBounds()
     afterLostRead["record"] = "cancel"
-    afterLostRead["case"] = "read-deadline-main-held"
+    afterLostRead["case"] = "read-deadline-owner-held"
     afterLostRead["result"] = lostReadResult
+    afterLostRead["ownerHold"] = "RuntimeActor probe-only 150 ms"
+    afterLostRead["ownerHeldAfterCallerSpawned"] = readHoldStood
     out.emit(afterLostRead)
 
-    // (b) A read whose caller task is cancelled while the owner cannot claim.
+    // (b) A read whose caller task is cancelled while the owner cannot claim: one 120 ms hold, started before the read is spawned; the
+    // main actor cancels after a 20 ms wait. `ownerHeldAfterCancel` marks only that the hold still stood at the cancel, not that the send
+    // happened inside it; the overlap is read from the result label, and a hold that ended first marks the run inconclusive.
+    let cancelHold = try await ownerHeld(microseconds: 120_000)
     let cancelled = Task.detached { () -> String in
         do {
             _ = try await privateObservation(editor, incarnation: incarnation, deadline: .after(.seconds(30), from: .now))
             return "observation"
         } catch { return errorLabel(error) }
     }
-    usleep(20_000)
+    try await Task.sleep(for: .milliseconds(20))
     cancelled.cancel()
-    usleep(100_000)
+    let cancelHoldStood = !cancelHold.state.snapshot.finished
+    await cancelHold.task.value
     let cancelledResult = await cancelled.value
     var afterCancel = try await transferReleaseBounds()
     afterCancel["record"] = "cancel"
-    afterCancel["case"] = "read-cancelled-main-held"
+    afterCancel["case"] = "read-cancelled-owner-held"
     afterCancel["result"] = cancelledResult
+    afterCancel["ownerHold"] = "RuntimeActor probe-only 120 ms"
+    afterCancel["ownerHeldAfterCancel"] = cancelHoldStood
     out.emit(afterCancel)
 
     // (c) An update whose deadline ends while the owner cannot claim; recovered by request lookup, never resent.
@@ -2865,6 +2909,7 @@ func runCancel(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
     var edited = config
     edited.logging.verbose = true
     let requestID = ControlRequestID(rawValue: UUID())
+    let updateHold = try await ownerHeld(microseconds: 150_000)
     let lostUpdate = Task.detached { () -> String in
         do {
             let admission = try await privateSubmit(editor, incarnation: incarnation, config: edited, platform: platform,
@@ -2873,7 +2918,8 @@ func runCancel(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
             return admissionLabel(admission)
         } catch { return errorLabel(error) }
     }
-    usleep(150_000)
+    let updateHoldStood = !updateHold.state.snapshot.finished
+    await updateHold.task.value
     let lostUpdateResult = await lostUpdate.value
     var afterUpdate = try await transferReleaseBounds()
     let lookup = try await control.lookupAdmission(of: requestID, expectedIncarnation: incarnation, deadline: run.deadline())
@@ -2886,13 +2932,17 @@ func runCancel(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
         lookupLabel = "unknown.\(reason.rawValue)"
     }
     afterUpdate["record"] = "cancel"
-    afterUpdate["case"] = "update-deadline-main-held"
+    afterUpdate["case"] = "update-deadline-owner-held"
     afterUpdate["result"] = lostUpdateResult
     afterUpdate["lookup"] = lookupLabel
     afterUpdate["recoveredOutcome"] = recovered
+    afterUpdate["ownerHold"] = "RuntimeActor probe-only 150 ms"
+    afterUpdate["ownerHeldAfterCallerSpawned"] = updateHoldStood
     out.emit(afterUpdate)
     let accepted = [afterLostRead, afterCancel, afterUpdate].allSatisfy { ($0["acceptedAttemptEndMS"] as? Double ?? -1) >= 0 }
     out.check(accepted, "cancel.transferAcceptedAgainAfterEachLostWait")
+    // A hold that ended before its caller was spawned (or its cancel issued) did not witness an owner that could not claim.
+    if !(readHoldStood && cancelHoldStood && updateHoldStood) { out.inconclusive("cancel.ownerHoldEndedBeforeItsCase") }
     // A fresh update after the lost one is admitted: the frozen-input slot was released.
     let fresh = try await run.read().0
     let start = ContinuousClock.now
@@ -3110,7 +3160,8 @@ func runClientQuit(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
     // Physical cleanup, read from the fakes and the loopback port, not from the routine's answer.
     let listenerClosed = !loopbackAccepts(port)
     let systemProxyCleared = !run.fakes.machine.service("Wi-Fi").webProxy.enabled
-    let hostProxyDown = run.host?.runtimeState().proxyIsUp == false
+    var hostProxyDown = false
+    if let host = run.host { hostProxyDown = await hostProxyIsUp(host) == false }
     routine["listenerClosed"] = listenerClosed
     routine["systemProxyCleared"] = systemProxyCleared
     routine["hostRuntimeProxyDown"] = hostProxyDown
@@ -3148,7 +3199,6 @@ func runClientQuit(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
 /// codec-bounds: no host. The actual codecs over the widest metadata the types admit, as separate counts from the measured
 /// frames (whose versions are small store versions, not `UInt64.max`); then every final ordinary request, every settled outcome and
 /// every other reply and stream frame at its widest, each checked against the candidate's caps by the codec.
-@MainActor
 func runCodecBounds(_ out: Output, build: CandidateBuild) throws {
     let namespace = PrivateBaselineNamespace(rawValue: syntheticUUID(92, 1))
     let incarnation = ControlHostIncarnation(rawValue: syntheticUUID(91, 1))
@@ -3430,7 +3480,6 @@ func packConnectionRows(_ rows: [ControlConnectionRow], cap: Int) throws
 /// profile-sizing: the candidate's constructor-bound terms, the widest snapshot and its baseline frame, every collection row kind, the
 /// constructor's encoded custody budget for several row bounds, and 1,024-row pages. Nothing here is allocated at those budgets: they are
 /// encoded-byte reservations the initializer computes, not RSS.
-@MainActor
 func runProfileSizing(_ out: Output, build: CandidateBuild) throws {
     let replyCap = CandidateProfile.maxReplyBytes
     let terms = build.terms
@@ -3741,7 +3790,7 @@ func waitUntil(seconds: Int, _ condition: () -> Bool) async throws -> Bool {
 /// The validator-widest configuration is Started by the saved-value Start; four subscribers fill the stream lane; one wide private update
 /// holds the admitted input in its runtime-file replacement (`StateFileAccessing`); one preflight pass holds its read-only helper read
 /// (the fake `HelperLifecycleManaging` seam); preflight joiners fill the ordinary pending capacity until the service refuses one; a
-/// main-held window fills the ordinary and read lanes while a Stop is sent. Status and a proxy Stop are measured under every hold. The
+/// window with the owner held (`holdOwner`, probe-only) fills the ordinary and read lanes while a Stop is sent. Status and a proxy Stop are measured under every hold. The
 /// holds are then released one at a time, quiescence is checked by fresh commands, the busy helper read and the login-item save are
 /// exercised, and the host quits by the hand-composed Quit (not `RuntimeClientQuit`). Every subscriber must have received actual runtime
 /// events, at least one of a typed lifecycle or configuration-workflow family, from those real actions (the probe injects none), and
@@ -3772,7 +3821,7 @@ func runPressure(_ run: HostRun, build: CandidateBuild) async throws {
     try PlatformConfigPersistence.save(platform, in: run.environment)
     try AppPreferencesPersistence.save(makeSmallPreferences(), in: run.environment)
     try await run.open()
-    try run.compose(limits: build.limits)
+    try await run.compose(limits: build.limits)
     let (opened, _) = try await run.readSnapshot()
     run.incarnation = opened.stamp.incarnation
     guard let incarnation = run.incarnation, let modules = opened.stamp.modules else { throw ProbeError("noModuleRevisions") }
@@ -3828,10 +3877,13 @@ func runPressure(_ run: HostRun, build: CandidateBuild) async throws {
     out.check(fifth != "frame.baseline", "pressure.subscriberLimitRefusesAFifth")
 
     // Each collection read through the actual `RuntimeClient.readPage` on this real host. Its lists stay far inside the candidate's
-    // bounds, so this shows the actual answers only. The service's over-bound answer (`retention_budget_exceeded` with the exact
+    // bounds: the probe sends no proxy request, and its one connection to the listener is the connect-only liveness check
+    // (`loopbackAccepts`) in the saved-start check above, closed before these pages without sending anything, so an active-connection
+    // total of 1 here would be that connect, not a collection witness. This shows the actual answers only, never a full capture. The service's over-bound answer (`retention_budget_exceeded` with the exact
     // total) is NOT witnessed: these fixtures cannot exceed the row or byte bound without network dispatch or many sockets.
     var pagesAnswered = true
-    var pageRecord: [String: Any] = ["record": "real-host-pages",
+    var pageRecord: [String: Any] = ["record": "real-host-pages", "proxyRequestsSentByProbe": 0,
+                                     "connectOnlyLivenessCheckBeforePages": true, "fullCaptureWitness": false,
                                      "overBoundWitness": "untested; real-host fixtures cannot exceed the bounds without network dispatch or many sockets"]
     for collection in ControlCollectionKind.allCases {
         let key = collection.rawValue
@@ -3916,9 +3968,11 @@ func runPressure(_ run: HostRun, build: CandidateBuild) async throws {
     out.emit(["record": "pressure-private", "readDuringHold": readDuringHold, "secondUpdateDuringHold": updateDuringHold])
     stages.stage("pressure-private-tried", ["probeHeld": "fixture,prior-draft,subscriber-tallies"])
 
-    // The lane window: the main thread sleeps, so the owner cannot claim and each exchange keeps its lane reservation. Twice each lane's
-    // capacity of reads and ordinary commands is sent, then one Stop. The Stop's own lane must not refuse it.
+    // The lane window: `RuntimeActor` is held by the probe-only `holdOwner`, so the owner cannot claim and each exchange keeps its lane
+    // reservation. Twice each lane's capacity of reads and ordinary commands is sent, then one Stop. The Stop's own lane must not refuse it.
+    // The hold is entered before any exchange is spawned; the main actor stays free throughout.
     let lanes = LaneTally()
+    let laneHold = try await ownerHeld(microseconds: 100_000)
     var burst: [Task<Void, Never>] = []
     for _ in 0..<(2 * CandidateProfile.laneCapacity) {
         burst.append(Task.detached {
@@ -3942,11 +3996,13 @@ func runPressure(_ run: HostRun, build: CandidateBuild) async throws {
                                                            expectedIncarnation: incarnation, deadline: .after(.seconds(10), from: .now)))
         } catch { return errorLabel(error) }
     }
-    usleep(100_000)
+    let laneHoldStood = !laneHold.state.snapshot.finished
+    await laneHold.task.value
     for task in burst { await task.value }
     let stopLabel = await stopInWindow.value
     let counts = lanes.all
-    var laneRecord: [String: Any] = ["record": "lane-window", "method": "main thread slept 100 ms; owner could not claim",
+    var laneRecord: [String: Any] = ["record": "lane-window", "method": "RuntimeActor held 100 ms by a probe-only job; owner could not claim",
+                                     "ownerHeldAfterCallersSpawned": laneHoldStood,
                                      "laneCapacityEach": CandidateProfile.laneCapacity, "requestsPerLane": 2 * CandidateProfile.laneCapacity,
                                      "stopInWindow": stopLabel,
                                      "readLaneFillObserved": counts["read:client.notSent.transportBusy", default: 0] > 0,
@@ -3954,6 +4010,7 @@ func runPressure(_ run: HostRun, build: CandidateBuild) async throws {
     for (key, count) in counts { laneRecord["count " + key] = count }
     out.emit(laneRecord)
     out.check(stopLabel == "accepted" || stopLabel == "joined", "pressure.stopNotRefusedWhileOrdinaryAndReadLanesFull")
+    if !laneHoldStood { out.inconclusive("pressure.ownerHoldEndedBeforeCallersSpawned") }
     stages.stage("pressure-lane-window", ["probeHeld": "fixture,prior-draft,subscriber-tallies"])
 
     // A proxy Stop while the private input, the helper read, the pending capacity and the stream lane are all held.
@@ -4150,7 +4207,9 @@ struct ProbeMain {
         stages.stage("baseline")
         out.emit(["record": "measurement-method", "samplerEnabled": sampling, "samplerIntervalMS": 1,
                   "samplerTakesMallocZoneLocks": sampling, "outcomePollIntervalMS": 1, "workerOutcomePollIntervalMS": 2,
-                  "statusSampleIntervalMS": 2, "clientAndHostShareOneProcess": true, "profile": CandidateProfile.label])
+                  "statusSampleIntervalMS": 2, "clientAndHostShareOneProcess": true, "profile": CandidateProfile.label,
+                  "ownerIsolation": "RuntimeActor", "driverIsolation": "MainActor",
+                  "ownerHeldWindows": "cancel and pressure-candidate lane window only; probe-only bounded RuntimeActor hold"])
         guard let build = emitProfile(out) else {
             finish(out, released: false)
         }

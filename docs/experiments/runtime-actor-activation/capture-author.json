@@ -1,0 +1,69 @@
+{
+  "stage": "Off-owner collection capture (one shared capture flight), over accepted R4 Source c8547b7",
+  "root": "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit",
+  "source_frozen_by_author": true,
+  "authority": "runtime-collection-off-owner-plan.md, as amended by runtime-collection-off-owner-plan-review.md (all five amendments) and the parent's knownTotal correction; runtime-collection-off-owner-review-clarification.md",
+  "hashes": "not computed in this lane: Bash was limited to the fixed verifier. Parent docs, profile files and RuntimePresentationAdapterTests.swift were not edited.",
+  "historical": "The R4 all41/TSan results stay evidence for the R4 tree only; nothing here claims them for this tree.",
+  "files_changed": {
+    "Sources/ConduitRuntime/RuntimeCaptureFlight.swift (new, internal)": "RuntimeRowSource alias (async pure job); RuntimeCaptureResolution (revision / refused / failed / retry); RuntimeCaptureWait (token, kind, resolution, wake); RuntimeCaptureFlight (kind, revision, total, startedAt, waits; identity is the object's). No queue or registry beyond the one flight's waits, which are bounded by the read lane.",
+    "Sources/ConduitRuntime/ControlCommandOwner.swift": "projectedRows(for:within:) replaced by rowSource(for:) -> RuntimeRowSource, frozen in the turn that named the revision and total",
+    "Sources/ConduitRuntime/RuntimeHostControlOwner.swift": "rowSource freezes the whole orchestrator.snapshot (an O(1) copy-on-write retain) and projects it with the existing RuntimeSnapshotControlProjection.projectRows. No per-kind overloads. The closure captures only that value and the kind. Doc of RuntimeHostCollections updated.",
+    "Sources/ConduitRuntime/RuntimeServiceCore.swift": [
+      "new RuntimePageSource.awaitingCapture;",
+      "pageSource(_:resuming:): a resolved revision(R) re-runs the ordinary path with cursor R (amendment 1); refused and failed answer once; retry reads again from the start;",
+      ".needsCapture now calls awaitCapture: the row-bound early refusal comes before any freeze; after shutdown the answer is notCaptured with the current reference's exact total; a page joins the running flight of its kind or waits on another kind's; otherwise one flight starts as a detached .utility task that hops back to commit;",
+      "finishCapture commits only if captureFlight === flight (object identity, amendment 5), with capturedAt = startedAt, and maps each ledger or projection outcome to the waiters' resolution, delivering a fault once;",
+      "hostDidShutDown sets captureClosed, drops the flight, and wakes its waits at once (amendment 2);",
+      "parkCaptureWait and releaseCaptureWait (by token, current flight only);",
+      "introspection captureFlightWaitCount, beside parkedWaiterCount"
+    ],
+    "Sources/ConduitRuntime/RuntimeCollectionLedger.swift": "capture(... capturedAt:) is explicit and defaults to now; docs say a capture stores the revision its start turn named",
+    "Sources/ConduitRuntime/RuntimeInMemoryTransport.swift": "a page attempt returns nil after parking on the flight. One generalized installRegistration(gate:park:release:) serves stream pulls (the subscriber form is now a thin wrapper) and capture waits. RuntimePageRound carries the wait between a page's rounds.",
+    "Sources/ConduitRuntime/RuntimeServiceLimits.swift": "comment only: the one staging capture coexists with the retained rows for the one shared flight's life (amendment 4)",
+    "Sources/pm-sim/RuntimeHostEffectsScenarios.swift": "the actual-host module scenario now reads a first tunnel-bindings page through the framed client (served by the flight, current and whole); after the quit, a never-captured upstream-health page is refused notCaptured with its exact total, and the retained tunnel rows still serve their revision. New firstPage helper.",
+    "Tests/ConduitTests/RuntimeServiceFixtures.swift": "FakeCommandOwner.rowSource freezes its hostnames; projectionOverride becomes @Sendable async; new projectionGate. RuntimeServiceHarness.page(_:) runs a flight's commit hop and resumes. New runDrainingCall; runCall is unchanged.",
+    "Tests/ConduitTests/RuntimeCollectionLedgerTests.swift": "the page helper is async through harness.page; every assertion is unchanged",
+    "Tests/ConduitTests/RuntimeServiceTransportTests.swift": "readHosts uses runDrainingCall",
+    "Tests/ConduitTests/RuntimeActorFairnessTests.swift": "the 10k capture test is flipped to assert statusAt < exited and stopAt < exited, and renamed testStatusAndStopIssuedDuringAFullCaptureAreAnsweredBeforeItEnds. Ten new causal flight tests use the HeldProjection fixture (suspending, on no thread)."
+  },
+  "test_first_baseline": {
+    "run": "runtime-actor-stageb-F8pg8R",
+    "mode": "correction",
+    "tree": "R4 Source plus only the flipped test",
+    "result": "exit 1; 42 tests, 2 failures, both in the flipped test: status answered at ...6666.801371625 and Stop at ...6666.80137225, after the projection ended at ...6666.792375083. Every other test passed."
+  },
+  "causal_tests_added": [
+    "testStatusAndStopAnswerWhileTheCaptureFlightIsHeld",
+    "testAFlightWhoseRevisionMovedAnswersItsPageAsAStaleReadOfThatRevision (churn: the stale answer equals an ordinary cursor-R read; no re-flight; the next first page starts a new flight)",
+    "testFirstPagesOfOneKindJoinTheOneFlight",
+    "testAPageOfAnotherKindWaitsForTheFlightThenStartsItsOwn",
+    "testAPageThatEndsWhileTheFlightIsHeldLeavesAloneAndTheFlightStillCommits (deadline and cancel)",
+    "testShutdownWakesTheFlightsPageAtOnceAndTheOldCompletionCommitsNothing (answered before release; the old completion hop observed and run; no commit; no job after shutdown)",
+    "testACapturesAgeRunsFromTheFlightsStart",
+    "testALateCleanupOfAnEndedFlightsWaitLeavesTheNewFlightsWaitIntact",
+    "testAFlightsClosedAnswerReachesEveryWaitingPageOnce (overBudget, internalFailure, count mismatch)",
+    "testATotalPastTheRowBoundIsRefusedBeforeAnyFlight"
+  ],
+  "runs": [
+    {"run": "runtime-actor-stageb-T58HmW", "mode": "test-build", "result": "exit 1: missing import ProxyKernel in RuntimeCaptureFlight.swift; fixed"},
+    {"run": "runtime-actor-stageb-jdfduZ", "mode": "test-build", "result": "exit 0; no warnings in changed files"},
+    {"run": "runtime-actor-stageb-qNuA3Y", "mode": "correction", "result": "exit 0; 52 tests, 0 failures. All 14 RuntimeActorFairnessTests pass, and the flipped 10k test was conclusive. security-boundaries, status-stream and catalogue pass."},
+    {"run": "runtime-actor-stageb-OzMzEW", "mode": "focused", "result": "exit 0; 798 tests, 2 skipped (existing opt-in resource probes), 0 failures. pm-sim runtime-host-effects PASS, including the 3 new page checks; relay PASS; catalogue (230) and decisions pass."},
+    {"run": "runtime-actor-stageb-rLh2R6", "mode": "strict", "result": "exit 0; 57 tests, 0 failures, including all flight tests; both pm-sim scenarios PASS. The flipped 10k test was conclusive here too (see limits)."},
+    {"run": "runtime-actor-stageb-jNH0wb", "mode": "release-build", "result": "exit 0, no warnings"}
+  ],
+  "preserved": "One projection path for all kinds; one shared flight; no budget reservation or eager eviction; 0038 bounds, deadlines, lanes and wire unchanged; logger-first / one artifact flush and the R4 authority wrapper are untouched.",
+  "contract_clarification_for_parent_docs": "A first page that waited on its own capture is answered as a request for that capture's revision: current if still current, otherwise staleRevision(current: R'), or the existing expired / notCaptured answers. After shutdown a page that would need a capture is refused notCaptured with the exact total the current reference names; retained rows still serve.",
+  "limits": [
+    "Encoded custody: the peak is unchanged (8 MiB retained plus one 4 MiB capture), but that capture now lives for the flight's duration. Object memory is not measured here: the frozen kernel snapshot, which after the next mutation keeps one older connection storage alive, plus the row values, until commit, shutdown or job end.",
+    "Read lanes: parked pages hold read-lane slots, so with every read slot parked a further read, a status read included, is transportBusy. Stop has its own lane. No capacity was added.",
+    "Strict pool: the 10k measurement was conclusive and passed in the strict run (the projection runs at .utility priority). That is an observation from this run, not a guarantee; one-thread serialization may still make it inconclusive elsewhere. The causal tests suspend rather than block, so they are deterministic either way.",
+    "The probe-only print 'statusAfterProjection' in the 10k test now prints a negative duration when status answers first. It is observational and asserts nothing.",
+    "Not exercised by tests, and believed unreachable: the transport's defensive branches when a capture wait cannot be parked (subscriberGone or alreadyParked for a wait made in the same turn, and ticketReleased).",
+    "The flight's precondition (waits < readLaneCapacity) assumes one transport per core, which holds for every composition.",
+    "Unchanged product limit: under churn faster than one capture plus paging, a complete list still won't display, and each pass costs one off-owner projection. No throttle was added.",
+    "Existing owner cost, untouched: minting a collection revision compares the connection arrays in snapshot().",
+    "Not run here: full41, TSan, optimized fairness/consumer runs, Profile31, probes and native checks. The mode file is left at release-build."
+  ]
+}

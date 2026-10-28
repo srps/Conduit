@@ -1,0 +1,18 @@
+{
+  "head": "c8547b7c098e5abcb0d620067b801cadf27247cf",
+  "review_base": "c8547b7c098e5abcb0d620067b801cadf27247cf",
+  "snapshot_sha256": "56cabbd403f8ca9fab4f2d9fcc9e09fbc69c50b5fbeed5a48c2acbe666a807f7",
+  "files": 799,
+  "author_manifest": "/private/tmp/conduit-runtime-stage1-20261024/runtime-collection-off-owner-manifest.json",
+  "new_files_in_patch": [
+    "Sources/ConduitRuntime/RuntimeCaptureFlight.swift",
+    "docs/experiments/actual-runtime-client-profile/runs/c8547b7-actor-focus/README.md",
+    "docs/experiments/actual-runtime-client-profile/runs/c8547b7-actor-focus/author-manifest.json",
+    "docs/experiments/actual-runtime-client-profile/runs/c8547b7-actor-focus/client-quit-widest.ndjson",
+    "docs/experiments/actual-runtime-client-profile/runs/c8547b7-actor-focus/metadata.json",
+    "docs/experiments/actual-runtime-client-profile/runs/c8547b7-actor-focus/small.ndjson",
+    "docs/experiments/actual-runtime-client-profile/runs/c8547b7-actor-focus/verification-report.md"
+  ],
+  "patch_sha256": "52169ba7f46aaf1745b8bef632559360e6b7e4ab254f362f60483fd2c9153f59",
+  "stable": true
+}

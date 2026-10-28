@@ -1,0 +1,15 @@
+{
+  "source_commit": "f3abd5f710ed683a2f73859e0429d6e5c807e9f9",
+  "product_source_fingerprint": "732c7d60e7136e2ee1ff3f79512c3beea6e1f8c40be87f8ca6ca782fc27a2326",
+  "product_sources_clean": true,
+  "source_and_objects_stable": true,
+  "trials": 31,
+  "checks": 481,
+  "failed_checks": 0,
+  "label_violations": 0,
+  "scratch_removed": 31,
+  "host_release_records": 29,
+  "probe_hash_full31": "af37b3ce54a5af8c8afaced6a9ca750be26740d21fae22125afb85f3c2bd7113",
+  "probe_hash_label_corrected": "c69ec9521c31819a9e1337c892411d5321da7cf62c6187a23932fc726a86d288",
+  "erratum": "Full31 real-host-pages connectionsOpenedByProbe:0 is incorrect: one connect-only liveness check occurred before empty pages. Corrected pressure-only rerun reports zero proxy requests and that liveness check explicitly; no method/timing/instrumentation changes."
+}

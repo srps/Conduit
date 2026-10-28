@@ -1,0 +1,9 @@
+{
+  "files_sha256": {
+    "Tests/ConduitTests/RuntimeServiceFixtures.swift": "7e3d78f6cb836286b49051b265612016529b1c3573fc748870c840a94a16287f",
+    "Tests/ConduitTests/RuntimeServiceTransportTests.swift": "9a01de54857d683f9df2ff4ad47ac9837888e9b47042fdb721236e9613306894",
+    "Tests/ConduitTests/RuntimeManualSchedulerTests.swift": "195ac563b21280a4c53571eb25fa67f28985e87d2911a34c1ba73c93c6059331",
+    "Tests/ConduitTests/RuntimeActorFairnessTests.swift": "c509cbd6a817eb88d064fd9fc155eb4d05fe84c66b99dc38f9d2b3f406e87ed6"
+  },
+  "production_module_diff": ""
+}

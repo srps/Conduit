@@ -1,0 +1,21 @@
+{
+  "recorded_at_utc": "2026-10-28T12:50:28.092790+00:00",
+  "source_commit": "f3abd5f710ed683a2f73859e0429d6e5c807e9f9",
+  "source_sha256": "dd9d1b25522ca6a67450978b2b602cd7628a75c3b9ed1800a6c34f8be107bea7",
+  "bundle": "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Conduit Dev.app",
+  "binary_sha256": "f89893c18a8cfed980c87e014ae58e4a510b49ac0e9b770fb2f88c61fc430db5",
+  "scratch_root": "/private/tmp/cdt-r5-ui",
+  "actions": [
+    "FreshlaunchProxyListenPort0, OverviewStartRunningloopback60434",
+    "OwnedlocalCONNECTtoecho60782 HTTP200andpayload echoed; ConnectionsAX1active/1tunnel/DIRECT127.0.0.1:60782 throughpagedclient",
+    "Proxyfieldtyped18083 remainedfocused/pendingApply; diskLocalPort0 beforeandwhilefocused",
+    "NoReturn/Apply/navigation/focuschange;CmdQwhiletunnelactive;CUAAppquit5379msinclusiveUItooloverhead",
+    "Ownedloopbackfixtureexit0:echoverified,closedByProxytrue,serverThreadendedtrue,noerrors",
+    "RelaunchAXListenPort18083,ProxyStopped;Connections0active/Noactiverequests",
+    "SecondQuitfinalDevcompleted,onlyisolatedDevclosed"
+  ],
+  "saved_localPort": 18083,
+  "listenerClosedAfterQuit": true,
+  "scope": "FinalSource FakeMachine nativeUI+realownloopback proxy; no installedhelper/VPN/auth/machine-setting acceptance; tooltime isnotexactworstcaseQuitmeasurement",
+  "result": "PASS final-source native paged connection, focused edit active-tunnel Quit, physical own-loopback close and relaunch"
+}

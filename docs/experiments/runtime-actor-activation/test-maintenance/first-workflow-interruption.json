@@ -1,0 +1,13 @@
+{
+  "reason": "Owned XCTest stopped after idle hang at manual-scheduler transport tests; fixture runDrainingCall bounded poll can fall through to unbounded task.value. Hypothesis pending causal repro; do not classify as production or infrastructure defect yet.",
+  "processes": {
+    "93764": "93764 93458 11:24 /Applications/Xcode.app/Contents/Developer/usr/bin/xctest",
+    "93458": "93458 80299 11:28 /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift-test",
+    "80299": "80299 11271 14:39 python3"
+  },
+  "last_tests_log_line": "Test Case '-[ConduitTests.RuntimeServiceTransportTests testAChangedIncarnationReadIsAStableWireErrorAndNothingIsProjected]' pas",
+  "sample": "testcompat-xctest-sample.txt",
+  "sample_sha256": "42dccd9578dd753c03c4148d320f481c623bda55e1f916d84191b4ffcd416e37",
+  "signal": "SIGTERM only exact owned test/runner PIDs",
+  "serving_app_touched": false
+}

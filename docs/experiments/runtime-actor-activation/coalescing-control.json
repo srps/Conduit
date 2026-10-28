@@ -1,0 +1,34 @@
+{
+  "command": [
+    "xcrun",
+    "swift",
+    "test",
+    "--filter",
+    "SnapshotCoalescingTests.testAStaleCoalesceHopAfterAnImmediateEmitAndRearmFlushesNothingEarly"
+  ],
+  "original_source_sha256": "2d0a3edf3e76c4a6ff60a21c8a565f82ef83dd7eaff1a73a4737cde9ab1bcc67",
+  "restored_exactly": true,
+  "runs": [
+    {
+      "name": "guard-removed",
+      "exit": 1,
+      "seconds": 44.82159874995705,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/SnapshotCoalescingTests.swift:225: error: -[ConduitTests.SnapshotCoalescingTests testAStaleCoalesceHopAfterAnImmediateEmitAndRearmFlushesNothingEarly] : XCTAssertGreaterThanOrEqual failed: (\"0.000432084 seconds\") is less than (\"0.1 seconds\") - the flush came no sooner than the newer timer's window, so the stale hop flushed nothing",
+        "\t Executed 1 test, with 1 failure (0 unexpected) in 2.337 (2.338) seconds",
+        "\t Executed 1 test, with 1 failure (0 unexpected) in 2.337 (2.338) seconds",
+        "\t Executed 1 test, with 1 failure (0 unexpected) in 2.337 (2.345) seconds"
+      ]
+    },
+    {
+      "name": "guard-restored",
+      "exit": 0,
+      "seconds": 10.721330749918707,
+      "assertions": [
+        "\t Executed 1 test, with 0 failures (0 unexpected) in 0.688 (0.689) seconds",
+        "\t Executed 1 test, with 0 failures (0 unexpected) in 0.688 (0.689) seconds",
+        "\t Executed 1 test, with 0 failures (0 unexpected) in 0.688 (0.695) seconds"
+      ]
+    }
+  ]
+}

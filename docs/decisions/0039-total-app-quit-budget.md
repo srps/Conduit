@@ -98,3 +98,5 @@ or release readiness. Those checks remain separate from focused fake-effect test
 
 Verify the selected-total actual-client probe and native AppKit path on the
 frozen activation. Real-machine cleanup timing remains due.
+
+Validation checkpoint — 2026-10-28: [native isolated Dev checks](../verification-runtime-actor-activation-2026-10-28.md) save a focused final numeric edit while the proxy is running, exit and show it on relaunch. UI-tool elapsed is not a precise worst-case deadline measurement. Real helper/machine timing remains due, so validation stays pending.

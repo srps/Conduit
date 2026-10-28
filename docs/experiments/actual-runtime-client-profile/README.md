@@ -1,12 +1,8 @@
 # Actual runtime client profile probe
 
-The last complete app-composition profile before the isolation work was measured at clean source `673e53a` using
-`RuntimeServiceProfile.inProcessApp()` and the selected ten-second Quit total.
-[The lifetime-corrected run](runs/673e53a-lifetime/README.md) passes all 31 fresh trials and
-481 checks on stable source and linked objects. These are fake/scratch/loopback
-observations, separate from native/real-machine acceptance and app RAM bounds.
+The current probe drives RuntimeActor from a MainActor driver and compiles in Swift 6 mode. The [final f3abd5f run](runs/f3abd5f-runtime-actor/README.md) passes all 31 fresh trials and 481 checks on clean, stable production source/objects. The corrected pressure-only run qualifies its label erratum. Probe-only owner-held windows deliberately block one pool thread: run them without strict-pool mode; the runner does not enforce that exclusion.
 
-The later [diagnostic checkpoint](../../verification-runtime-diagnostics-2026-10-28.md) records selected additional Release modes and optimized consumer tests on source `464e316`; these are narrower runs, not a replacement full profile. The [RuntimeActor preparation](../../verification-runtime-actor-preparation-2026-10-28.md) and whole-owner move require fresh source-qualified checks.
+The [focused c8547b7 run](runs/c8547b7-actor-focus/README.md), [prior lifetime run](runs/673e53a-lifetime/README.md), [diagnostic checkpoint](../../verification-runtime-diagnostics-2026-10-28.md) and [isolation preparation](../../verification-runtime-actor-preparation-2026-10-28.md) are historical checkpoints, not substitutes for the final-source evidence.
 
 The older `ef3e4df` measurements below remain historical. Their exact probe and
 runner are recoverable from the immutable Git links in that run's README;
@@ -125,7 +121,7 @@ The profile label is `CANDIDATE-4K-64K-10K-4M`. Every mode builds it through the
 | Latest snapshot; subscriber record | 65,233 B (the initializer's largest beside a 64 KiB reply); 1,024 B | derived; stated |
 | Collection revisions; proofs; row retention | 2 per kind; 4 per kind; 60 s | reviewed engineering values |
 | Retained-byte budget | 17,082,600 B, the initializer's own budget for these terms, found by bisection | derived |
-| Quit total in the recorded `ef3e4df` `client-quit-widest` | 30 s | **historical experimental caller budget.** The current probe uses the selected ten seconds (0039); its new run is still pending |
+| Quit total in the recorded `ef3e4df` `client-quit-widest` | 30 s | **historical experimental caller budget.** The [f3abd5f run](runs/f3abd5f-runtime-actor/README.md) uses the selected ten seconds (0039) and returns in 907.1 ms with fake effects |
 
 **Encoded reservations are not process memory.** The 17,082,600 B budget and the private custody terms (one transfer and one
 admitted input) are encoded-byte ceilings checked by the initializer, not preallocations or application-memory bounds. Actual

@@ -1,0 +1,6 @@
+	 Executed 14 tests, with 0 failures (0 unexpected) in 1.105 (1.107) seconds
+/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/RuntimeManualSchedulerTests.swift:76: error: -[ConduitTests.RuntimeManualSchedulerTests testBaselineALateCommitHopIsRunByTheDriver] : XCTAssertTrue failed - the late commit hop is run by the driver, so the page can be answered
+	 Executed 1 test, with 1 failure (0 unexpected) in 1.824 (1.824) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 0.016 (0.017) seconds
+	 Executed 28 tests, with 1 failure (0 unexpected) in 2.945 (2.949) seconds
+	 Executed 28 tests, with 1 failure (0 unexpected) in 2.945 (2.957) seconds

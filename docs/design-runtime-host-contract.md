@@ -347,6 +347,12 @@ ability to inspect records. Do not silently replace the connection view with a
 sample. Stage 1 must inventory every RuntimePresentationAdapter field and every
 AppState-only read used by views/preflight against the replacement contract.
 
+The shared host now freezes one value snapshot, collection revision and exact total in the same owner turn. Its internal `rowSource(for:)` returns a pure Sendable job; sorting, row mapping and byte measurement run off RuntimeActor. One shared capture flight across all kinds uses the existing capture staging charge. Pages park through the existing transport wait/cleanup path, within the existing read-lane capacity. Completion commits on the owner with the capture-start instant. No configuration-store mode, registry, new wire value or second projection path is involved.
+
+A first page that waited for its capture is answered as an ordinary request for that capture's revision. It is current when that revision remains current, otherwise explicitly stale, expired or not captured. Reusing the cursor path avoids a second decision table and prevents endless recapture of a superseded first page. Shutdown wakes parked readers immediately, prevents new captures and rejects late results; retained rows can still be read. A needed post-shutdown capture reports not-captured with the exact total when the current reference supplies it.
+
+The selected 8 MiB is retained encoded rows; the existing separate staging term allows one capture of up to 4 MiB. Object/string storage is outside those encoded accounts. A frozen whole snapshot can keep older copy-on-write storage of any snapshot collection, including an unselected larger one, alive across mutations until its job ends; there is no whole-value RAM bound. Parked pages use read slots, so exhausted slots can make another status read busy; Stop retains its own lane. A complete current list can remain unavailable under churn faster than capture plus paging. Neither a latency guarantee nor new refresh policy is selected by this implementation. The [activation checkpoint](verification-runtime-actor-activation-2026-10-28.md) records source review, causal tests and measurements.
+
 ```swift
 package enum ControlRuntimeFrame: Codable, Sendable {
     case baseline(ControlBaseline)
