@@ -123,6 +123,9 @@ installed over the serving daily-driver app for verification.
 
 ## Implementation evidence
 
+The milestones below record their state at each checkpoint; the later AppState
+activation entry records current adoption.
+
 Partial: [`StateRootSession`](../../Sources/PlatformMac/StateRootSession.swift)
 now owns the exhaustive component-to-file mapping and delegates replacement to
 the existing primitive with its private lease.
@@ -212,14 +215,17 @@ unchanged.
 
 ## Open questions
 
-Complete the workflow freshness/private-editor observation API, preserving
-client-observed prior component preconditions separately from runtime views and
-intent fences. [0034](0034-private-editor-reply-frame-cap.md) selects the private
-reply ceiling; actual-adapter custody and responsiveness still need verification.
-Select the remaining coherent profile from measurements before
-the affected adoption. [0032](0032-explicit-reload-and-reconcile.md) selects
-read-only reload-and-reconcile of eligible inputs; that policy is resolved. Revisit the
-activation sequence if a demonstrated delivery/compatibility need outweighs the
-cost of temporary capabilities; return the concrete ownership/deletion plan for
-owner review before changing this sequence. Subsystem actors or broad module
-splits still require measured contention or dependency evidence.
+The workflow freshness/private-editor observation API, private reply ceiling
+(0034), collection limits (0038), production profile and total Quit budget (0039)
+are selected and consumed by the AppState candidate. Local full-workflow,
+actual-adapter resource checks and exact-head hosted CI have passed. Native
+edit/Quit acceptance remains pending. [0032](0032-explicit-reload-and-reconcile.md)
+settles reload-and-reconcile policy; no configuration-store policy choice remains
+open here.
+
+Complete the remaining blocking-effect prerequisites and whole RuntimeActor move,
+then verify owner fairness and applicable real-machine/release acceptance.
+Subsystem actors or broad module splits still require measured contention or
+dependency evidence. Revisit activation sequencing only if a demonstrated
+compatibility need outweighs temporary capabilities, with a concrete ownership
+and deletion plan for owner review.

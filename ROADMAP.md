@@ -157,15 +157,16 @@ not a requirement to finish every event or property test before extraction:
    [0034](./docs/decisions/0034-private-editor-reply-frame-cap.md).
    Collection observation caps are selected in
    [0038](./docs/decisions/0038-bounded-runtime-collection-capture.md);
-   the remaining engineering terms have a coherent measured candidate. Consume the selected ten-second total Quit wait (0039) and one production
-   profile in the app switch.
+   the app now consumes the measured production profile and selected ten-second
+   total Quit wait (0039). Release/resource trials and hosted CI have passed;
+   native app acceptance is still pending.
 
    Earlier source/test counts are historical checkpoints, kept in the linked
    [client inventory](./docs/runtime-client-stage1-inventory.md),
    [store verification](./docs/verification-configuration-store-2026-10-25.md) and
    [session authority verification](./docs/verification-session-store-authority-2026-10-25.md).
-   Current acceptance still requires the single AppState switch, RuntimeActor,
-   native app checks and applicable installed-machine validation.
+   The single AppState switch is implemented in draft PR #258. Remaining acceptance
+   requires native app checks, RuntimeActor and applicable installed-machine validation.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, first with the daemon as its entry point. The stage-3 activation removes AppState's twin.
    The move preserves MainActor and existing policy, with the daemon fake-machine
@@ -176,7 +177,9 @@ not a requirement to finish every event or property test before extraction:
 3. **Stage 3 — incremental host development, one AppState activation.** Develop
    and verify DNS, tunnels and proxy in reviewable host increments, then switch
    AppState once and delete its replaced runtime/save paths together (0031).
-   The activation is implemented on the current branch and under verification; it is not released. AppState retains editor drafts and UI responsibilities. Migrate the event
+   The activation is implemented in draft PR #258, with local full workflow and
+   exact-head hosted checks passed. Native acceptance remains pending; it is not
+   released. AppState retains editor drafts and UI responsibilities. Migrate the event
    families touched by each slice. Bring
    [#183](https://github.com/srps/Conduit/issues/183)'s independent models,
    bounded exhaustive exploration and seeded tests alongside lifecycle,
@@ -190,7 +193,11 @@ not a requirement to finish every event or property test before extraction:
    The owner selected one shared RuntimeActor declared in ProxyKernel for the
    full runtime control-owner cluster. UI remains MainActor, NIO stays on its
    loops, and blocking effects stay on PlatformWork. Preserve serialized platform
-   operations and bounded total termination. Bound work per turn and prove status/Stop
+   operations and bounded total termination. Reconciler flag effects now use the
+   existing PlatformWork queue, with Stop quiescence and actual-client witnesses
+   ([prerequisite checkpoint](./docs/verification-runtime-actor-prerequisites-2026-10-28.md)).
+   Remaining split-DNS/helper/diagnostic effects and the whole isolation move are
+   still in progress. Bound work per turn and prove status/Stop
    responsiveness under observer load; diagnostics cannot gate control progress.
 
 **Stage 5 — strengthen the shared implementation (separately scoped follow-ups).**
