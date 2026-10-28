@@ -1,0 +1,5 @@
+Test Suite 'All tests' started at 2026-10-28 04:11:40.621.
+/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/AppStateActivationParityTests.swift:417: error: -[ConduitTests.AppStateActivationParityTests testANewFailureGetsAFreshHelperCheckRatherThanAnEarlierBackOff] : XCTAssertGreaterThanOrEqual failed: ("5") is less than ("6") - the back-off is at its limit
+	 Executed 3713 tests, with 4 tests skipped and 1 failure (0 unexpected) in 266.259 (266.572) seconds
+Test Suite 'All tests' failed at 2026-10-28 04:16:07.202.
+	 Executed 3713 tests, with 4 tests skipped and 1 failure (0 unexpected) in 266.259 (266.580) seconds

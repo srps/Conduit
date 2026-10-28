@@ -226,9 +226,25 @@ final class AppStateActivationParityTests: XCTestCase {
 
     // MARK: Split DNS and VPN
 
-    /// The host's own `events.ndjson` lines naming `event`, as written so far.
+    /// The host's own `events.ndjson` lines naming `event`, as written so far. A disk read: the host's event writer appends on its own
+    /// queue after the event is recorded, so a read meant to cover everything the host did follows `quitJoiningHostDiagnostics`.
     private func hostEvents(_ harness: AppStateHarness, _ event: String) -> [String] {
         harness.hostEventsText.split(separator: "\n").map(String.init).filter { $0.contains("\"\(event)\"") }
+    }
+
+    /// Quits through the app's own Quit and returns whether it settled completed. The host settles it only after its quit's bounded
+    /// diagnostic flush attempt has been joined; that attempt does not guarantee the events writer's queue emptied, and records may remain
+    /// queued or their writes fail. The file assertions read after this detect any missing record.
+    /// That is logical quiescence, not a claim that every diagnostic writer confirmed its records: a drain that timed out, or a record the
+    /// writer dropped or failed, leaves the file short, and the assertions read after this still catch it. Runtime, listener and machine
+    /// assertions belong before it, since the Quit tears the modules down.
+    private func quitJoiningHostDiagnostics(_ state: AppState, file: StaticString = #filePath, line: UInt = #line) async -> Bool {
+        XCTAssertTrue(state.beginQuit(), "the test's Quit is the first", file: file, line: line)
+        guard case .settled(.completed)? = await state.finishQuit()?.quit else {
+            XCTFail("the Quit completed", file: file, line: line)
+            return false
+        }
+        return true
     }
 
     private static let refusing = HelperToolPrivilegeClient.Status.callerNotAccepted(message: "caller identity is not the pinned one")
@@ -394,6 +410,7 @@ final class AppStateActivationParityTests: XCTestCase {
         await startWithTheTunnelUp(state, harness)
         harness.machine.privilege.failingDomains = ["corp.example"]
         harness.vpn.emit(.disconnected(reason: .networkLost))
+        await harness.settle("the drop's removal was refused") { !self.hostEvents(harness, "platform.split_dns_failed").isEmpty }
         for _ in 0..<5 {
             let before = hostEvents(harness, "platform.split_dns_failed").count
             state.refreshPreflight()
@@ -470,11 +487,12 @@ final class AppStateActivationParityTests: XCTestCase {
         state.commitPendingEdit(trigger: .submit)
         await state.awaitPendingSave()
         await harness.settle("the listener moved") { state.runtime.bindings.proxyHost == "::1" }
-        XCTAssertEqual(hostEvents(harness, "config.proxy_restart").count, 1)
-        XCTAssertTrue(hostEvents(harness, "config.dns_restart").isEmpty)
         XCTAssertEqual(state.runtime.dnsRunState, .running)
         XCTAssertEqual(state.runtime.bindings.dnsHost, "127.0.0.1")
         XCTAssertEqual(state.runtime.bindings.dnsPort, dnsPort)
+        guard await quitJoiningHostDiagnostics(state) else { return }
+        XCTAssertEqual(hostEvents(harness, "config.proxy_restart").count, 1)
+        XCTAssertTrue(hostEvents(harness, "config.dns_restart").isEmpty)
     }
 
     // MARK: Saves while modules run, and the causal chain
@@ -553,6 +571,7 @@ final class AppStateActivationParityTests: XCTestCase {
         XCTAssertFalse(try harness.savedConfig.dnsForwarderEnabled, "the save carried the Stop's disable, not the stale draft bit")
         XCTAssertFalse(editor.ledger.saved.config.dnsForwarderEnabled)
         XCTAssertEqual(state.runtime.dnsRunState, .stopped)
+        guard await quitJoiningHostDiagnostics(state) else { return }
         XCTAssertFalse(harness.hostEventsText.contains("config.dns_restart"))
     }
 
@@ -721,9 +740,10 @@ final class AppStateActivationParityTests: XCTestCase {
             await harness.settle("its own receipt cleaned the draft") { !state.hasUnsavedEdit }
         }
         XCTAssertFalse(state.eventLog.events.contains { $0.event == "config.autosave_held" }, "no pause was held")
-        try await Task.sleep(for: .milliseconds(100))
-        XCTAssertTrue(hostEvents(harness, "config.proxy_restart").isEmpty, "nothing rebound")
         XCTAssertEqual(state.runtime.bindings.proxyPort, port)
+        // Each save's receipt followed its runtime apply, where a rebind records its event, so the drain covers any rebind.
+        guard await quitJoiningHostDiagnostics(state) else { return }
+        XCTAssertTrue(hostEvents(harness, "config.proxy_restart").isEmpty, "nothing rebound")
     }
 
     /// A persisted duration the runtime cannot hold (written past the save's refusal, as an older build or a hand edit could) opens, and
@@ -748,6 +768,7 @@ final class AppStateActivationParityTests: XCTestCase {
         XCTAssertNil(state.runtime.bindings.proxyPort)
         XCTAssertTrue(harness.machine.privilege.commands(matching: .setWebProxyEndpoint).isEmpty)
         XCTAssertFalse(harness.machine.service("Wi-Fi").routesThroughAProxy)
+        guard await quitJoiningHostDiagnostics(state) else { return }
         XCTAssertFalse(harness.hostEventsText.contains("10000000000"), "the value is in no host event")
     }
 
@@ -897,9 +918,8 @@ final class AppStateActivationParityTests: XCTestCase {
         state.commitPendingEdit(trigger: .submit)
         await harness.settle("the commit rebound the listener") { state.runtime.bindings.proxyPort == next }
         await harness.settle("its own receipt cleaned the draft") { !state.hasUnsavedEdit }
-        await harness.settle("the restart was recorded") { !self.hostEvents(harness, "config.proxy_restart").isEmpty }
         XCTAssertEqual(try harness.savedConfig.localPort, next)
-        try await Task.sleep(for: .milliseconds(100))
+        guard await quitJoiningHostDiagnostics(state) else { return }
         XCTAssertEqual(hostEvents(harness, "config.proxy_restart").count, 1, "one rebind")
     }
 
@@ -911,12 +931,13 @@ final class AppStateActivationParityTests: XCTestCase {
         state.config.routing.pacURL = "https://user:TOKEN-HOST-7@pac.example.test/p.pac"
         state.commitPendingEdit(trigger: .submit)
         await state.awaitPendingSave()
-        await harness.settle("the host recorded the save") { harness.hostEventsText.contains("config.workflow") }
-        XCTAssertFalse(harness.hostEventsText.contains("TOKEN-HOST-7"))
         let snapshot = (try? String(contentsOf: harness.environment.snapshotFile, encoding: .utf8)) ?? ""
         XCTAssertFalse(snapshot.contains("TOKEN-HOST-7"))
         XCTAssertTrue(try String(contentsOf: harness.environment.configFile, encoding: .utf8).contains("pac.example.test"),
                       "the value was saved, so the absence is not vacuous")
+        guard await quitJoiningHostDiagnostics(state) else { return }
+        XCTAssertTrue(harness.hostEventsText.contains("config.workflow"), "the host recorded the save, so the absence is not vacuous")
+        XCTAssertFalse(harness.hostEventsText.contains("TOKEN-HOST-7"))
     }
 }
 

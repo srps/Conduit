@@ -222,6 +222,14 @@ attempts preserved separately. It preserves
 files-before-orchestrator ordering and records its latency tradeoff and revisit
 condition. This is still preparation under MainActor, not completed isolation.
 
+The [relay prerequisite](../verification-runtime-relay-effects-2026-10-28.md)
+replaces the kernel's direct helper with an async command on the host's existing
+PlatformWork, orders reassert through the DNS physical slot and bounds it to one
+in flight. It deletes unused termination/queue-drain paths while retaining audit
+assertions on the consumed diagnostic path. Focused and all 41 workflow checks
+pass after causal test-fixture corrections; independent review accepts Source.
+Diagnostic/logger work and the whole RuntimeActor move remain open.
+
 ## Open questions
 
 The workflow freshness/private-editor observation API, private reply ceiling

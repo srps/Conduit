@@ -1735,6 +1735,61 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertNil(host.splitDNSRepair.pending)
     }
 
+    /// The DNS module's transparent-proxy relay start is a helper call, sent through the host's own platform queue and never run on the
+    /// owner (#47). Held there, exactly, the framed snapshot answers and a DNS Stop is admitted; the Stop's relay stop lands after every
+    /// start, so the relay ends stopped. A relay command run anywhere else is recorded, not held, and fails the placement check.
+    func testAHeldTransparentRelayStartIsOnThePlatformQueueAndAStopEndsTheRelayAfterIt() async throws {
+        let composed = try await compose(dnsForwarderEnabled: true) { harness in
+            var config = try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false)
+            config.transparentProxyEnabled = true
+            config.transparentProxyIP = "127.0.0.1"
+            config.transparentProxyPort = 0
+            config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.relay.test", interceptIP: "127.0.0.1")]
+            try ProxyConfigPersistence.save(config, in: harness.environment)
+        }
+        let machine = composed.harness.machine
+        let hold = composed.harness.hold
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await composed.client.readSnapshot(deadline: deadline())
+        let modules = try XCTUnwrap(observed.stamp.modules)
+
+        hold.arm(onQueueLabeled: "io.github.srps.Conduit.daemon.platform-work", otherQueues: .recorded) { name, _ in
+            name == PrivilegedOperation.startTCPRelay.rawValue
+        }
+        let start = try accepted(try await submit(composed, .start(.dns, ifModuleRevision: modules.dns)))
+        let reached = await hold.waitUntilReached(within: .seconds(10))
+        XCTAssertTrue(reached, "the DNS Start reached its relay start")
+        XCTAssertFalse(hold.reachedOnMainThread, "the relay start is not run on the owner")
+        XCTAssertTrue(hold.reachedOnArmedQueue,
+                      "the relay start is held on the host's platform queue, not \(hold.reachedQueueLabel ?? "nowhere")")
+
+        let snapshot = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertNotNil(snapshot.stamp.modules, "the framed snapshot answers while the relay start is held")
+        let stop = try accepted(try await submit(composed, .stop(.dns)))
+        XCTAssertFalse(machine.privilege.commands.contains { $0.command == .stopTCPRelay }, "no relay stop ran ahead of the held start")
+        hold.release()
+
+        // Both settle, in whichever order the stream carries them.
+        var outcomes: [ControlOperationID: ControlOperationOutcome] = [:]
+        for _ in 0..<128 where outcomes[start] == nil || outcomes[stop] == nil {
+            if case .operationFinished(let finished) = try await stream.next(deadline()) {
+                outcomes[finished.operationID] = finished.outcome
+            }
+        }
+        XCTAssertNotNil(outcomes[start], "the Start settled")
+        let stopped = try XCTUnwrap(outcomes[stop], "the Stop settled")
+        XCTAssertEqual(completed(stopped), .stop)
+        await composed.host.deliveries.drain()
+        let relay = machine.privilege.commands.map(\.command).filter { $0 == .startTCPRelay || $0 == .stopTCPRelay }
+        XCTAssertEqual(relay.first, .startTCPRelay)
+        XCTAssertEqual(relay.last, .stopTCPRelay, "the Stop's relay stop landed after every start: \(relay)")
+        XCTAssertEqual(relay.filter { $0 == .stopTCPRelay }.count, 1)
+        XCTAssertNotEqual(composed.host.orchestrator.snapshot.dnsRunState, .running)
+        XCTAssertNil(composed.host.orchestrator.snapshot.bindings.transparentProxyPort)
+    }
+
     /// An apply that moves the proxy onto an occupied port: the runtime takes the new input though its listener cannot bind. The receipt says
     /// the runtime took it, the accepted view follows it rather than lagging behind, and the snapshot shows the listener down.
     func testAnApplyOntoAnOccupiedPortReportsTheInputTakenAndTheListenerDown() async throws {

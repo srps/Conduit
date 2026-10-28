@@ -200,8 +200,9 @@ package final class RuntimeHost {
     let deliveries = ObserverDeliveries()
     private let proxySettingsNotifications = CoalescedObserverDelivery()
     /// Blocking platform work that needs no answer on the spot: serial, so a
-    /// Stop's clear lands after the apply of a Start it overtook.
-    let platformWork = PlatformWork(label: "io.github.srps.Conduit.daemon.platform-work")
+    /// Stop's clear lands after the apply of a Start it overtook. The
+    /// orchestrator's TCP relay commands run here too (`init`).
+    let platformWork: PlatformWork
     private var dnsRelayRestartInFlight = false
     private var dnsReconcileInFlight = false
     private var dnsReconcileWanted = false
@@ -465,10 +466,19 @@ package final class RuntimeHost {
             logger: logger,
             eventLog: diagnosticsEventLog
         )
+        // The relay's helper commands go through the same queue as the surface work, off the owner (#47). The DNS module's slot orders
+        // them, so their place in the queue only delays them.
+        let platformWork = PlatformWork(label: "io.github.srps.Conduit.daemon.platform-work")
+        self.platformWork = platformWork
+        let relayClient = auditedPrivilegeClient
         let orchestrator = ProxyOrchestrator(
             config: loadedConfiguration.config,
             logger: logger,
-            privilegeClient: auditedPrivilegeClient,
+            relayCommand: { step in
+                try await platformWork.run {
+                    Result { try relayClient.execute(step.operation, values: step.values) }
+                }.get()
+            },
             authenticatorProvider: nil,
             pacEvaluator: effects.pacEvaluator,
             auditSink: auditSink,

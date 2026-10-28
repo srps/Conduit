@@ -13,11 +13,26 @@ import ProxyKernel
 /// failing it. It is recorded instead (`reachedOnMainThread`), and anyone
 /// waiting for the hold is let go so the test's assertions can run.
 final class HeldCall: @unchecked Sendable {
+    /// What a matching call made on another queue than the armed one does. The main thread is never such a queue: a call there is
+    /// always taken and let through.
+    enum OtherQueues {
+        /// It does not count, as if it had not matched. A host's activation preflight reads the same services from a global queue at
+        /// moments a scenario does not control, and must not be the call that gets held.
+        case ignored
+        /// It is taken as the armed call, with its queue recorded, and let through rather than held. For an effect that has no
+        /// legitimate caller on another queue: one that runs on the generic executor, say, fails the test's placement assertion
+        /// instead of leaving the test waiting for a call that never comes.
+        case recorded
+    }
+
     private let lock = NSLock()
     private var matcher: (@Sendable (_ name: String, _ values: [String]) -> Bool)?
     private var queueSuffix: String?
+    private var otherQueues = OtherQueues.ignored
     private var reached = false
     private var onMainThread = false
+    private var onArmedQueue = false
+    private var label: String?
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private let reachedSignal = DispatchSemaphore(value: 0)
     private let gate = DispatchSemaphore(value: 0)
@@ -26,19 +41,22 @@ final class HeldCall: @unchecked Sendable {
     /// subprocess and the operation's raw value for a privileged write.
     ///
     /// - Parameter queueSuffix: only a call made on a dispatch queue whose
-    ///   label ends with this counts, or one made on the main thread (the
-    ///   inline case this exists to catch). A host's activation preflight
-    ///   reads the same services from a global queue at moments a scenario
-    ///   does not control, and must not be the call that gets held.
+    ///   label ends with this is held. One made on the main thread (the
+    ///   inline case this exists to catch) is taken and let through.
+    /// - Parameter otherQueues: what a matching call on any other queue does.
     func arm(
         onQueueLabeled queueSuffix: String? = nil,
+        otherQueues: OtherQueues = .ignored,
         _ matcher: @escaping @Sendable (_ name: String, _ values: [String]) -> Bool
     ) {
         lock.withLock {
             self.matcher = matcher
             self.queueSuffix = queueSuffix
+            self.otherQueues = otherQueues
             reached = false
             onMainThread = false
+            onArmedQueue = false
+            label = nil
         }
     }
 
@@ -46,23 +64,32 @@ final class HeldCall: @unchecked Sendable {
     /// through instead of held.
     var reachedOnMainThread: Bool { lock.withLock { onMainThread } }
 
+    /// Whether the call was held on the queue it was armed for: off the main thread, and on the named queue when one was named.
+    var reachedOnArmedQueue: Bool { lock.withLock { onArmedQueue } }
+
+    /// The label of the dispatch queue the taken call was made on, nil until one is taken.
+    var reachedQueueLabel: String? { lock.withLock { label } }
+
     /// Called by the fakes on every machine call.
     func pass(_ name: String, _ values: [String]) {
         let isMain = Thread.isMainThread
         let queueLabel = String(cString: __dispatch_queue_get_label(nil))
-        let resumed: [CheckedContinuation<Void, Never>]? = lock.withLock {
+        let taken: (waiters: [CheckedContinuation<Void, Never>], holds: Bool)? = lock.withLock {
             guard let matcher, matcher(name, values) else { return nil }
-            if let queueSuffix, !isMain, !queueLabel.hasSuffix(queueSuffix) { return nil }
+            let armedQueue = !isMain && (queueSuffix.map { queueLabel.hasSuffix($0) } ?? true)
+            if !isMain, !armedQueue, otherQueues == .ignored { return nil }
             self.matcher = nil
             reached = true
             onMainThread = isMain
+            onArmedQueue = armedQueue
+            label = queueLabel
             defer { waiters = [] }
-            return waiters
+            return (waiters, armedQueue)
         }
-        guard let resumed else { return }
-        for waiter in resumed { waiter.resume() }
+        guard let taken else { return }
+        for waiter in taken.waiters { waiter.resume() }
         reachedSignal.signal()
-        if !isMain { gate.wait() }
+        if taken.holds { gate.wait() }
     }
 
     /// Waits, off the main actor's turn, until the armed call has arrived.

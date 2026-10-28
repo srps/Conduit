@@ -1,0 +1,10 @@
+{
+  "head": "791e314248e0630a448ceb00275fccaa46bed29c",
+  "review_base": "791e314248e0630a448ceb00275fccaa46bed29c",
+  "snapshot_sha256": "f0bd283fb1b5a4256717977c5dbea230326be320bee7de061a3b0a45a38f4f56",
+  "files": 790,
+  "author_manifest": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-relay-r2-manifest.json",
+  "new_files_in_patch": [],
+  "patch_sha256": "f5867a2d6e9d05688b4f86fd8a83352a41520266c9dff330bc3d8e47d390a27a",
+  "stable": true
+}

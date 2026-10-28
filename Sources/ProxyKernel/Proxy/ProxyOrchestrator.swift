@@ -351,9 +351,8 @@ package final class ProxyOrchestrator {
     private var snapshotCoalescePending = false
 
     /// Active timer awaiting the next coalesced flush. Owned here so
-    /// `emitSnapshotImmediate()` can cancel a pending flush, and so
-    /// teardown paths (`stopProxy`, `performTerminationCleanup`) can
-    /// release it.
+    /// `emitSnapshotImmediate()` can cancel a pending flush. The timer
+    /// captures `[weak self]`, so one that fires after a teardown is safe.
     private var snapshotCoalesceTimer: DispatchSourceTimer?
 
     /// State-transition emit. Bypasses the throttle, cancels any pending
@@ -394,17 +393,6 @@ package final class ProxyOrchestrator {
         guard snapshotCoalescePending else { return }
         snapshotCoalescePending = false
         onSnapshotChange?(snapshot)
-    }
-
-    /// Teardown helper. Cancels any pending coalesced flush WITHOUT emitting.
-    /// Called from `performTerminationCleanup` to drop pending main-queue
-    /// work before process exit. The timer captures `[weak self]` so a
-    /// fired-then-deallocated path is also safe, but explicit cancellation
-    /// keeps the queue clean.
-    private func stopSnapshotCoalesceTimer() {
-        snapshotCoalesceTimer?.cancel()
-        snapshotCoalesceTimer = nil
-        snapshotCoalescePending = false
     }
 
     /// Test seam — drives the same `emitSnapshotCoalesced` path the
@@ -983,7 +971,10 @@ package final class ProxyOrchestrator {
         authenticatorHolder.set(provider)
     }
     private static let localPACListenHost = "127.0.0.1"
-    private let privilegeClient: PrivilegeClient?
+    /// Sends one relay command to the privileged helper, off this actor: the host runs it on its platform queue. Nil where no helper is
+    /// configured (pm-proxy, agent runs): the relay is then unavailable and nothing is sent. Every command is sent from inside a
+    /// `dnsLifecycle` effect, so the slot orders them, not the moment they were queued.
+    private let relayCommand: (@Sendable (PrivilegedBatchStep) async throws -> Void)?
     /// Whether this process has a TCP relay up in the helper. Gates the
     /// stop command and its log line — 42 of the 73 `stop-tcp-relay`
     /// commands in the field log were issued with no relay running — and
@@ -996,6 +987,8 @@ package final class ProxyOrchestrator {
     private var tcpRelayGeneration: UInt64 = 0
     /// See `startTransparentRelayTimer`.
     private var transparentRelayTimer: DispatchSourceTimer?
+    /// Whether a reassert is in flight, from its tick to its reissue's end. One at a time (`beginRelayReassert`).
+    private var transparentRelayReassertInFlight = false
     private static let transparentRelayProbeInterval: TimeInterval = 30
     /// Injectable only so the reassert path is testable without a listener.
     private let relayAcceptProbe: @Sendable (String, Int) -> Bool
@@ -1277,7 +1270,7 @@ package final class ProxyOrchestrator {
     package init(
         config: ProxyConfig,
         logger: any LogSink = DiscardingLogSink(),
-        privilegeClient: PrivilegeClient? = nil,
+        relayCommand: (@Sendable (PrivilegedBatchStep) async throws -> Void)? = nil,
         authenticatorProvider: (@Sendable (UpstreamProxy) throws -> ProxyAuthenticator)? = nil,
         pacEvaluator: (any PacEvaluator)? = nil,
         auditSink: any ConnectionAuditSink = DiscardingConnectionAuditSink(),
@@ -1312,7 +1305,7 @@ package final class ProxyOrchestrator {
         // `current` property is one lock acquire and one struct copy.
         self.configSnapshotProvider = { [configBox] in configBox.current }
         self.logStore = logger
-        self.privilegeClient = privilegeClient
+        self.relayCommand = relayCommand
         // See `authenticatorHolder` doc: a reference-type holder (class +
         // `NIOLock`) reads the factory into a local `let` for invocation,
         // which avoids `NIOLockedValueBox`'s inout copy-in/copy-out
@@ -2661,50 +2654,6 @@ package final class ProxyOrchestrator {
         await refreshPACRouting(force: true, honorBackoff: true)
     }
 
-    package func performTerminationCleanup() {
-        // AppKit termination is synchronous. Drain already accepted audit rows
-        // within a deadline; final channel-close callbacks remain asynchronous.
-        if !auditSink.flush(timeout: 2) {
-            let event = RuntimeEvent(kind: .health, event: "observability.audit_flush_timeout",
-                                     detail: "Queued audit records did not drain before termination deadline.")
-            eventLog.append(event)
-            logStore.log(.warning, event.detail ?? event.event, category: .general)
-        }
-        healthChecker.stop()
-        stopDirectModeReprobeTimer()
-        stopSnapshotCoalesceTimer()
-        tunnelHealthProber.stop()
-        stopTransparentRelayTimer()
-        stopTCPRelay()
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.transparentProxy.stop()
-            await self.dnsForwarder.stop()
-            await self.tunnelForwarder.stop()
-            self.tunnelConnectionPool.closeAll()
-            await self.localProxyServer.stop()
-            self.mutateSnapshot {
-                $0.activeConnections.removeAll()
-                $0.upstreamStatuses.removeAll()
-                $0.runtimeStatus.state = .stopped
-                $0.runtimeStatus.activeUpstream = nil
-                $0.runtimeStatus.lastHealthSummary = "Stopped"
-                $0.runtimeStatus.metrics.openConnections = 0
-                $0.runtimeStatus.metrics.inboundConnections = 0
-                $0.dnsRunState = .stopped
-                $0.dnsQueryCount = 0
-                $0.dnsDoHFallbackCount = 0
-                $0.dnsCacheHitCount = 0
-                $0.tunnelsRunState = .stopped
-                $0.tunnelActiveCount = 0
-                $0.tunnelSessionCount = 0
-                $0.tunnelsError = nil
-                $0.tunnelDNSOverrideStatus = .notNeeded
-                $0.bindings = .init()
-            }
-        }
-    }
-
     private func startHealthLoop() {
         guard isProxyLive, snapshot.directModeCause.runsUpstreamHealthLoop else { return }
         // `HealthChecker.start` fires a check immediately. A loop that is
@@ -3235,7 +3184,7 @@ package final class ProxyOrchestrator {
         // ephemeral": point the relay at a provisional target so the alias
         // still gets created, then re-point it once the real port is known.
         let relayTarget = port != 0 ? port : 10443
-        let relayStarted = startTCPRelay(listenPort: 443, targetPort: relayTarget, host: ip)
+        let relayStarted = await startTCPRelay(listenPort: 443, targetPort: relayTarget, host: ip)
 
         do {
             try await transparentProxy.start(host: ip, port: port)
@@ -3246,13 +3195,13 @@ package final class ProxyOrchestrator {
                 category: .proxy
             )
             if relayStarted {
-                stopTCPRelay()
+                await stopTCPRelay()
             }
             return
         }
 
         if relayStarted, let boundPort = transparentProxy.listeningPort, boundPort != relayTarget,
-           !startTCPRelay(listenPort: 443, targetPort: boundPort, host: ip) {
+           !(await startTCPRelay(listenPort: 443, targetPort: boundPort, host: ip)) {
             // The listener is up but the relay still points at the
             // provisional port. Publishing would hand every intercepted
             // domain an address that refuses; stop instead, and say so.
@@ -3261,7 +3210,7 @@ package final class ProxyOrchestrator {
                 "Transparent proxy bound \(ip):\(boundPort) but the relay could not be re-pointed at it; not publishing.",
                 category: .proxy
             )
-            stopTCPRelay()
+            await stopTCPRelay()
             await transparentProxy.stop()
             return
         }
@@ -3280,7 +3229,7 @@ package final class ProxyOrchestrator {
 
     private func stopTransparentProxy() async {
         stopTransparentRelayTimer()
-        if tcpRelayActive { stopTCPRelay() }
+        if tcpRelayActive { await stopTCPRelay() }
         await transparentProxy.stop()
         mutateSnapshot {
             $0.bindings.transparentProxyHost = nil
@@ -3291,15 +3240,15 @@ package final class ProxyOrchestrator {
     /// Returns true when the helper accepted the relay start (which also
     /// aliases the intercept IP onto lo0 — see `startTransparentProxy`).
     @discardableResult
-    private func startTCPRelay(listenPort: Int, targetPort: Int, host: String) -> Bool {
-        // The kernel no longer downcasts to the concrete
-        // `HelperToolPrivilegeClient` — that class lives in `PlatformMac`
-        // and the import fence forbids referencing it here. Instead
-        // we call the protocol's `execute` and let the impl decide: the real
-        // helper socket handles the relay commands; `AppleScriptPrivilegeClient`
-        // throws `PrivilegeClientError.executionFailed("Relay commands require
-        // the privileged helper")`, which we downgrade to an info log.
-        guard let privilegeClient else {
+    private func startTCPRelay(listenPort: Int, targetPort: Int, host: String) async -> Bool {
+        // The kernel never names the concrete `HelperToolPrivilegeClient`
+        // (it lives in `PlatformMac`, behind the import fence). The host's
+        // `relayCommand` hands the command to its privilege client, and the
+        // impl decides: the real helper socket handles the relay commands;
+        // `AppleScriptPrivilegeClient` throws
+        // `PrivilegeClientError.executionFailed("Relay commands require the
+        // privileged helper")`, which we downgrade to an info log.
+        guard let relayCommand else {
             logStore.log(
                 .info,
                 "TCP relay unavailable: no privileged helper configured.",
@@ -3307,12 +3256,10 @@ package final class ProxyOrchestrator {
             )
             return false
         }
+        // Advanced in the deciding turn, before the command is sent: a reassert that began before it is stale from here.
         tcpRelayGeneration &+= 1
         do {
-            try privilegeClient.execute(
-                .startTCPRelay,
-                values: [String(listenPort), String(targetPort), host]
-            )
+            try await relayCommand(PrivilegedBatchStep(.startTCPRelay, [String(listenPort), String(targetPort), host]))
             tcpRelayActive = true
             logStore.log(
                 .notice,
@@ -3331,23 +3278,20 @@ package final class ProxyOrchestrator {
     }
 
     /// Best-effort: the AppleScript fallback cannot run the command and a
-    /// missing helper is fine. `performTerminationCleanup` calls this
-    /// without consulting `tcpRelayActive` on purpose — the relay is helper
-    /// state that outlives this process, and a previous run that crashed
-    /// may have left one; quitting is the one moment a blind stop is cheap
-    /// and worth it. Every other caller gates on the flag.
-    private func stopTCPRelay() {
+    /// missing helper is fine. Every caller runs inside a `dnsLifecycle`
+    /// effect.
+    private func stopTCPRelay() async {
         let wasActive = tcpRelayActive
         // Advanced whether or not the stop succeeds: the caller wants the
         // relay gone, so no reassert started before it may restart it.
         tcpRelayGeneration &+= 1
         do {
-            try privilegeClient?.execute(.stopTCPRelay, values: [])
+            try await relayCommand?(PrivilegedBatchStep(.stopTCPRelay, []))
             tcpRelayActive = false
             logStore.log(wasActive ? .notice : .debug, "TCP relay stopped.", category: .proxy)
         } catch {
             // The helper may still own the listener and the alias. The flag
-            // stays so the next stop — or termination — tries again; clearing
+            // stays so the next stop tries again; clearing
             // it here gated every later stop off while logging a stop that
             // never happened.
             logStore.log(
@@ -3390,43 +3334,69 @@ package final class ProxyOrchestrator {
         transparentRelayTimer = nil
     }
 
-    /// The timer's tick, synchronously, for callers and tests that want the
-    /// probe now rather than at the next 30 s.
-    package func reassertTransparentRelay() {
+    /// What a reassert captured in the turn it began. Its verdict applies only if nothing it captured has moved by the time it acts.
+    private struct RelayReassertFence {
+        /// The relay generation, which every relay start and stop advances.
+        let generation: UInt64
+        /// The DNS module's epoch, taken while a start was its latest operation. The reissue runs as an effect in the module's slot
+        /// under it, so a DNS stop admitted since supersedes the reissue rather than being undone by it, as a restart is
+        /// (`PhysicalLifecycle`).
+        let epoch: Int
+    }
+
+    /// The timer's tick, now, for callers and tests that want the probe now
+    /// rather than at the next 30 s.
+    package func reassertTransparentRelay() async {
         guard tcpRelayActive,
               let host = snapshot.bindings.transparentProxyHost,
               let port = snapshot.bindings.transparentProxyPort else { return }
-        reassertTransparentRelay(host: host, targetPort: port)
+        await reassertTransparentRelay(host: host, targetPort: port)
     }
 
-    /// The probe-and-restart step on its own, for the test that cannot bind
-    /// a transparent proxy.
-    package func reassertTransparentRelay(host: String, targetPort: Int) {
-        let generation = tcpRelayGeneration
+    /// The probe-and-restart step on its own, with the probe run inline, for
+    /// the tests that cannot bind a transparent proxy.
+    package func reassertTransparentRelay(host: String, targetPort: Int) async {
+        guard let fence = beginRelayReassert() else { return }
+        defer { endRelayReassert() }
         guard !relayAcceptProbe(host, 443) else { return }
-        reissueTransparentRelay(host: host, targetPort: targetPort, probedUnder: generation)
+        await reissueTransparentRelay(host: host, targetPort: targetPort, under: fence)
     }
 
-    /// The timer's path. The generation is captured now, in the tick's own
-    /// turn, together with the bindings it read: a stop that runs before the
+    /// The timer's path. The fence is captured now, in the tick's own turn,
+    /// together with the bindings it read: a stop that runs before the
     /// returned task starts, or while its probe is out, makes the verdict
-    /// stale.
+    /// stale. Nil when no reassert begins.
     @discardableResult
-    package func beginTransparentRelayReassert(host: String, targetPort: Int) -> Task<Void, Never> {
-        let generation = tcpRelayGeneration
+    package func beginTransparentRelayReassert(host: String, targetPort: Int) -> Task<Void, Never>? {
+        guard let fence = beginRelayReassert() else { return nil }
         return Task { @MainActor [weak self] in
-            await self?.reassertTransparentRelayOffMain(host: host, targetPort: targetPort, probedUnder: generation)
+            await self?.probeAndReissueTransparentRelay(host: host, targetPort: targetPort, under: fence)
+            self?.endRelayReassert()
         }
     }
 
     /// The probe's connect can sit out its timeout, so it runs off the main
     /// actor, and a relay start or stop can land before it returns. The
-    /// generation captured here decides whether its verdict still applies.
+    /// fence captured here decides whether its verdict still applies.
     package func reassertTransparentRelayOffMain(host: String, targetPort: Int) async {
-        await reassertTransparentRelayOffMain(host: host, targetPort: targetPort, probedUnder: tcpRelayGeneration)
+        guard let fence = beginRelayReassert() else { return }
+        defer { endRelayReassert() }
+        await probeAndReissueTransparentRelay(host: host, targetPort: targetPort, under: fence)
     }
 
-    private func reassertTransparentRelayOffMain(host: String, targetPort: Int, probedUnder generation: UInt64) async {
+    /// Begins a reassert, or answers nil when none may: one is in flight already, so a tick taken meanwhile is dropped and the slot
+    /// never holds more than one reassert waiting; or the DNS module's latest operation is a stop, so there is nothing to reassert.
+    private func beginRelayReassert() -> RelayReassertFence? {
+        guard !transparentRelayReassertInFlight, dnsLifecycle.admitsRunning else { return nil }
+        transparentRelayReassertInFlight = true
+        return RelayReassertFence(generation: tcpRelayGeneration, epoch: dnsLifecycle.epoch)
+    }
+
+    private func endRelayReassert() {
+        transparentRelayReassertInFlight = false
+    }
+
+    private func probeAndReissueTransparentRelay(host: String, targetPort: Int, under fence: RelayReassertFence) async {
         let probe = relayAcceptProbe
         let accepting = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             DispatchQueue.global(qos: .utility).async {
@@ -3434,32 +3404,46 @@ package final class ProxyOrchestrator {
             }
         }
         guard !accepting else { return }
-        reissueTransparentRelay(host: host, targetPort: targetPort, probedUnder: generation)
+        await reissueTransparentRelay(host: host, targetPort: targetPort, under: fence)
     }
 
-    private func reissueTransparentRelay(host: String, targetPort: Int, probedUnder generation: UInt64) {
-        guard generation == tcpRelayGeneration else {
-            // A start or stop ran while the probe was out. A stop means the
-            // relay is meant to be gone; a start already put up the relay
-            // the current bindings want. Either way this verdict is stale.
-            emitEvent(
-                .health,
-                "tcp_relay.reassert_superseded",
-                detail: "host=\(host) target=\(targetPort) relay_active=\(tcpRelayActive)"
-            )
-            logStore.log(
-                .info,
-                "Dropped a stale TCP relay reassert for \(host):443: the relay was started or stopped while the probe ran.",
-                category: .proxy
-            )
-            return
+    /// The probe ran outside the slot, so a slow connect never holds up a stop's teardown. The reissue runs inside it: a DNS stop admitted
+    /// since then supersedes it, and one admitted while it runs tears down after it and stops the relay it raised. Inside, the generation
+    /// is checked again, for a relay start or stop that ran between, a restart's teardown included.
+    private func reissueTransparentRelay(host: String, targetPort: Int, under fence: RelayReassertFence) async {
+        let ran = await runInfallibleEffect(dnsLifecycle, epoch: fence.epoch, category: .proxy) {
+            guard fence.generation == self.tcpRelayGeneration else {
+                self.reportStaleRelayReassert(host: host, targetPort: targetPort)
+                return
+            }
+            await self.restartTCPRelay(host: host, targetPort: targetPort)
         }
+        if !ran { reportStaleRelayReassert(host: host, targetPort: targetPort) }
+    }
+
+    /// A start or stop ran, or DNS was stopped, while the probe was out. A
+    /// stop means the relay is meant to be gone; a start already put up the
+    /// relay the current bindings want. Either way the verdict is stale.
+    private func reportStaleRelayReassert(host: String, targetPort: Int) {
+        emitEvent(
+            .health,
+            "tcp_relay.reassert_superseded",
+            detail: "host=\(host) target=\(targetPort) relay_active=\(tcpRelayActive)"
+        )
+        logStore.log(
+            .info,
+            "Dropped a stale TCP relay reassert for \(host):443: the relay was started or stopped, or DNS was stopped, while the probe ran.",
+            category: .proxy
+        )
+    }
+
+    private func restartTCPRelay(host: String, targetPort: Int) async {
         logStore.log(
             .warning,
             "Nothing accepts on \(host):443 — the helper's TCP relay is gone (helper restarted?). Re-issuing relay start.",
             category: .proxy
         )
-        if startTCPRelay(listenPort: 443, targetPort: targetPort, host: host) {
+        if await startTCPRelay(listenPort: 443, targetPort: targetPort, host: host) {
             emitEvent(.health, "tcp_relay.reasserted", detail: "host=\(host) target=\(targetPort)")
         } else {
             emitEvent(.health, "tcp_relay.unresponsive", detail: "host=\(host) target=\(targetPort)")
