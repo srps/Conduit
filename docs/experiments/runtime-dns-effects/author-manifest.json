@@ -1,0 +1,85 @@
+{
+  "task": "RuntimeActor prerequisite phase1b: split-DNS gate/file effects and residue reads off the owner",
+  "worktree": "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit",
+  "branch": "codex/runtime-actor-prep",
+  "base": "8a75aba (docs-only, after phase1a 4696a62)",
+  "status": "FOCUSED GREEN (attempt 2); Source frozen. Parent's all41, CI, docs/events wording and review still required.",
+  "isolation": "control cluster still MainActor; no actor retag; no new queue, PlatformWork API, delivery, store, dependency, public access or event name",
+
+  "files_changed": {
+    "production": [
+      "Sources/PlatformMac/SplitDNSVPNGate.swift: entryFileOperation(runtimeStarted:) (decision) and static perform(_:config:dnsManager:logger:) (execution); reconcileEntryFiles kept as their composition for pm-sim and the unit tests; docs no longer state the old 'decide and write synchronously' rule",
+      "Sources/PlatformMac/SplitDNSEntryFileRepair.swift: queue() hands out monotonic places in queue order; record drops an outcome only when startedAt < generation (the place of the newest recorded); an unplaced record takes the next place; Observation {outcome, residue} with Observation.after(_:config:dnsManager:); retry split into planRetry (owner: decision plus split_dns_retry event) and static runRetry (queue), with retry() kept as their composition",
+      "Sources/PlatformMac/DNSManager.swift: lock doc comment only (queue/lock ordering)",
+      "Sources/ConduitRuntime/RuntimeHost.swift: see design",
+      "Sources/ConduitRuntime/RuntimeHostLifecycle.swift (authorized): tearDownProxy takes its place with queue(), returns an Observation from inside its resolver lock (residue read merged with the existing failure-branch read) and awaits recordSplitDNS; the start path's 'runtimeStarted = true' after applyProxySurfaces is removed (now set inside applyProxySurfaces)"
+    ],
+    "unchanged_in_ownership": "Sources/PlatformMac/DNSResolverReconciliation.swift (already a pure helper; it now runs whole inside one platformWork block under the resolver lock)",
+    "pm_sim": "Sources/pm-sim/RuntimeHostEffectsScenarios.swift: effects() gains a vpn: parameter; exerciseHeldFlagAction now manages resolvers with one entry and emits a VPN drop while the env apply is parked",
+    "tests": [
+      "Tests/ConduitTests/DaemonRuntimeHostTests.swift",
+      "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift",
+      "Tests/ConduitTests/SplitDNSEntryFileRepairTests.swift"
+    ]
+  },
+
+  "design": {
+    "one_flow": "Every entry-file operation follows one pattern. Decide and take splitDNSRepair.queue() in the owner turn, then platformWork.run in that same turn. Inside the block, run the operation and Observation.after (the residue read) in one resolvers.serialized scope, against the operation's own config. Then record on the owner with await recordSplitDNS(observation, source:, startedAt: place). Gate-driven work (VPN transitions and the two post-write corrections) goes through the single host helper reconcileEntryFiles(config:runtimeStarted:).",
+    "sites_moved_off_owner": {
+      "handleVPNStateChange": "gate update, decision and enqueue in one turn. The proxy-repair delivery is requested before the await (it queues in a later turn regardless). The orchestrator VPN handling runs after the entry files land (files-before-orchestrator kept, as directed).",
+      "applyProxySurfaces_tail": "residue read in the start's resolver lock; runtimeStarted = true set in the turn after continueStart, before the correction is decided (review risk 2); the correction goes through reconcileEntryFiles",
+      "recordSplitDNS": "async; reads no disk (the residue comes from the Observation); schedules the helper check before awaiting the settle",
+      "settleResolverSwitchBaseline": "async; markResolverSwitchLanded in the deciding turn (it never depended on the refresh result); the owed intercept refresh is captured (interceptRefresh) and queued in that turn; its result is applied through recordInterceptRefresh(failed:place:), which keeps the newest-queued result (review risk 4); a failure always emits platform.split_dns_intercept_refresh_failed",
+      "retrySplitDNSEntryFiles": "planRetry and the enqueue in one turn after the lane wait; runRetry under the resolver lock; recorded with residue false (a retry sweeps the residue itself, as before)",
+      "config_change_DNSResolverReconciliation": "vpnConnected, the operation and the intercept bindings captured in the pass turn; the reconcile, refresh and residue run in one block under the resolver lock; still inside the reconciler's runEffect, so quiesce covers it",
+      "switch_on_and_switch_off_flag_actions": "residue read inside the serialized scope against the action's config; the switch-on correction goes through reconcileEntryFiles"
+    },
+    "removed": "the inline refreshInterceptFiles(for:platform:) helper. Replaced by interceptRefresh(for:platform:), which captures the bindings in the deciding turn and returns the @Sendable work; used by the flag refresh, the settle refresh and the config-change block.",
+    "freshness": "Stamps are per operation and monotonic in queue order, not a count of recorded outcomes. So an earlier-queued success recording first never discards a later-queued failure, such as a refused VPN-down removal (review risk 1). Out-of-order completion (possible after an actor retag) drops only an outcome queued before one already recorded. The 'newer=' detail of platform.split_dns_outcome_superseded now means the gap in queue places; its wording in docs/events.md is parent-owned.",
+    "residue_semantics_change": "The residue is now read against the operation's own config, inside its lock, where it used to be the host's accepted view at record time. They differ only for reapply (pass.new) and teardown (heldRuntimeConfig) while a newer view is adopted.",
+    "quiescence_and_cleanup": "Nothing new is needed. VPN and retry work are deliveries (settle drains them). Lifecycle tails are inside their lanes. Reapply and flag actions are inside runEffect/runFlagEffect. A Stop's clears queue behind everything decided before its runtimeStarted = false."
+  },
+
+  "verification": {
+    "wrapper": "bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-actor-prep.sh (filter extended by parent to the split-DNS suites)",
+    "attempts": [
+      {
+        "n": 1,
+        "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-GMTsnV",
+        "result": "exit 1: product build passed; test-target compile failed",
+        "cause": "RuntimeHostControlOwnerTests.swift:1721: 'async' call in an autoclosure (XCTAssertEqual(completed(try await finished(...)), .stop)). The only error. Fix: hoisted the await into 'let stopped'."
+      },
+      {
+        "n": 2,
+        "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-0gXmmy",
+        "result": "exit 0; 'Focused actor-prerequisite verification passed; parent full workflow still required.'",
+        "tests": "260 tests, 0 failures: ConfigReapplyRetryTests 10, DNSResolverReconciliationTests 4, DaemonRuntimeHostTests 93, RuntimeHostControlOwnerTests 64, RuntimeHostInteractiveTests 29, RuntimePhysicalOrderingTests 15, RuntimeReconcilerTests 23, SplitDNSEntryFileRepairTests 15, SplitDNSVPNGateTests 7",
+        "pm_sim": "runtime-host-effects PASS, 147 [pass], 0 [fail]; the new checks pass: entry file at start; VPN drop's removal queued behind the held action; no entry file after the Stop",
+        "imports": "passed (109 Swift files)",
+        "catalogue": "PASS (230 event names; no new name)",
+        "decisions": "PASS",
+        "warnings_in_changed_files": "none"
+      }
+    ]
+  },
+
+  "tests": {
+    "new_or_changed": {
+      "RuntimeHostControlOwnerTests.testAHeldVPNEntryFileWriteLeavesTheOwnerFreeAndLandsBeforeTheNextTransitionAndAStop": "framed: a VPN-up applyDNS held on .platform-work (off main). While held: framed snapshot answers, the next VPN drop is taken (gate flips), a proxy Stop is admitted and takes its lane, no removeDNS runs, and the system proxy clear waits. After: order applyDNS < drop removeDNS < Stop's proxy clear; nothing routed; no entry file; no superseded or failed event; nothing pending. An inline VPN write would fail the off-main assertion; before 1b it would also block main on the resolver lock.",
+      "DaemonRuntimeHostTests.testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending": "replaces the phase1a superseded-event witness (review risk 5). A switch-on write queued behind a held drift pass; the drop's removal queued behind it, not run inline; removeDNS refused. Both refused removals (the drop and the correction) are recorded (attempt=1, attempt=2, source=vpn_transition); none superseded; pending is remove/vpn_transition. The old count-based rule would have dropped attempt=1.",
+      "DaemonRuntimeHostTests.testAVPNFlapAndAStopDuringAStartsHeldEntryFileTailEndInOrderAndStopped": "review risk 2. The start applies with the tunnel up; a drop's removal is held behind it; runtimeStarted becomes true before the tail; a reconnect during the hold writes (applyDNS after the drop's removal); a Stop admitted after it clears last; runtimeStarted stays false after the overtaken start returns. The old placement would never set runtimeStarted during the hold, and the old Lifecycle assignment would revive it.",
+      "DaemonRuntimeHostTests.testAVPNDropDuringAHeldSplitDNSRetryQueuesItsRemovalBehindIt": "the retry's applyDNS is held off main and split_dns_retry is reported before it; a drop queues its removal behind it; the commands are exactly [applyDNS, removeDNS]; repaired by=retry; no entry file.",
+      "SplitDNSEntryFileRepairTests.testOperationsInFlightTogetherAreRecordedInQueueOrder": "the queue-place rule: two in flight both recorded; a late older outcome is dropped with newer=1",
+      "pm-sim runtime-host-effects exerciseHeldFlagAction": "extended with resolvers and a VPN drop while the env apply is parked: no removeDNS and the file still present while parked (an inline removal would be visible); no entry file after the Stop"
+    },
+    "existing_kept": "testAVPNDropWhileTheStartAppliesLeavesNoEntryFile and testEntryFilesFollowTheVPN pass unchanged (the latter is in all41 only); the existing gate and repair unit tests compile and pass on the kept compositions"
+  },
+
+  "risks_and_remaining": [
+    "Head-of-line latency (accepted by parent): the orchestrator's VPN handling now waits behind unrelated queued platformWork (for example a held helper call, up to the helper transaction budget per item), because the entry files must land first. The owner stays free. Not measured in this run; a perf figure for VPN-report-to-orchestrator latency under a held queue is left to parent.",
+    "Redundant correction writes: both post-write corrections (start tail, switch-on) still run when the gate moved, although the VPN handler's own queued work already lands after them. An extra idempotent helper call per flip, kept for behaviour preservation.",
+    "recordInterceptRefresh takes places from splitDNSRepair.queue(); those places are never recorded as entry-file outcomes, so they leave gaps in the stamp order (harmless). The flag value is the newest-queued refresh's result.",
+    "Readers on other queues (the activation preflight) still take the DNSManager lock, but nothing on the owner does after 1b.",
+    "Not run here: all41, AppState parity suites (testEntryFilesFollowTheVPN, the VPN burst, testHeldResolverWritesWaitOffTheMainActor), TSan, docs/events.md wording for newer=."
+  ]
+}

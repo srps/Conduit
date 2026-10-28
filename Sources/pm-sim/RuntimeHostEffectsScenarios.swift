@@ -182,7 +182,7 @@ enum RuntimeHostEffectsScenario {
     /// gets its own wake fake; only the wake exercise keeps and fires its own.
     private static func effects(
         _ fakes: Fakes, home: URL, pac: (any PacEvaluator)? = nil, wake: FakeSystemWakeObserver = FakeSystemWakeObserver(),
-        hold: HeldSetenv? = nil
+        hold: HeldSetenv? = nil, vpn: FakeVPNStatusObserver = FakeVPNStatusObserver()
     ) -> RuntimeHostEffects {
         let machine = fakes.machine
         return RuntimeHostEffects(
@@ -201,7 +201,7 @@ enum RuntimeHostEffectsScenario {
             networkPath: FakeNetworkPathObserver(),
             networkLocation: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil },
-            vpnStatusMonitor: { _, _ in FakeVPNStatusObserver() },
+            vpnStatusMonitor: { _, _ in vpn },
             wake: wake,
             homeDirectory: home,
             resolverDirectory: machine.resolverDirectory.path,
@@ -1302,8 +1302,9 @@ enum RuntimeHostEffectsScenario {
     /// A reload's flag action held on the host's platform queue, through the actual host and its framed client (#47). The saved platform
     /// file turns the environment switch on while the proxy runs, so the reload's pass applies it; the apply's first `launchctl setenv` is
     /// parked. While it is out, the client's snapshot answers and a proxy Stop is admitted, and the listener is still bound: the Stop's
-    /// teardown waits for the action already running. Released, the Stop's clears land after the apply, so no variable is left, and the
-    /// reload reports its pass not current.
+    /// teardown waits for the action already running. A VPN drop taken meanwhile queues its entry-file removal behind the parked work
+    /// rather than running it on the owner. Released, the Stop's clears land after the apply, so no variable is left, no entry file
+    /// outlives the tunnel, and the reload reports its pass not current.
     @MainActor
     private static func exerciseHeldFlagAction(
         session: StateRootSession,
@@ -1316,26 +1317,28 @@ enum RuntimeHostEffectsScenario {
         func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
         let machine = fakes.machine
         let held = HeldSetenv()
+        let vpn = FakeVPNStatusObserver()
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderEnabled = false
         config.localPACEnabled = false
         config.pacRoutingEnabled = false
         config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
         let host: RuntimeHost
         // The earlier hosts' events share the owned file, so only the events after this count are this host's.
         let earlier: Int
         do {
             earlier = try recordedEvents(in: environment.eventsFile).count
             try ProxyConfigPersistence.save(config, in: environment)
-            try PlatformConfigPersistence.save(PlatformIntegrationConfig(manageSystemProxy: true), in: environment)
+            try PlatformConfigPersistence.save(PlatformIntegrationConfig(manageSystemProxy: true, manageDNSResolvers: true), in: environment)
             host = try await RuntimeHost.open(
                 stateSession: session,
                 logger: DiscardingLogSink(),
                 startupAllowsMissing: false,
                 startedAt: Date(timeIntervalSince1970: 1_700_000_000),
                 terminalExit: {},
-                effects: effects(fakes, home: home, hold: held)
+                effects: effects(fakes, home: home, hold: held, vpn: vpn)
             )
         } catch {
             notes.append("flag host did not open: \(error.localizedDescription)")
@@ -1346,25 +1349,30 @@ enum RuntimeHostEffectsScenario {
         var quiesced = false
         do {
             try await host.startRuntime()
-            check("the flag host starts with the system proxy and no environment",
-                  machine.service("Wi-Fi").routesThroughAProxy && machine.launchdEnvironment.isEmpty)
+            check("the flag host starts with the system proxy, the entry file and no environment",
+                  machine.service("Wi-Fi").routesThroughAProxy && machine.launchdEnvironment.isEmpty
+                      && machine.resolverFile(for: "corp.example") != nil)
             try PlatformConfigPersistence.save(
-                PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true), in: environment
+                PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true, manageDNSResolvers: true),
+                in: environment
             )
             let clients = try host.makeInMemoryControlClient(
                 limits: try controlProfile(), clientFrameLimits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
             )
             held.arm()
-            let seen = try await reloadAndStopWhileHeld(clients.control, host: host, held: held)
+            let seen = try await reloadAndStopWhileHeld(clients.control, host: host, held: held, vpn: vpn, machine: machine)
             notes.append("environment writes by the held apply: \(held.writes); hold timed out: \(held.timedOut)")
             check("the flag action's write reaches the platform queue, not the main thread", seen.reached && !held.reachedOnMainThread)
             check("the framed snapshot answers while the flag action is held", seen.snapshotAnswered)
             check("a proxy Stop is admitted while the flag action is held", seen.stopAdmitted)
             check("the listener stays bound after the Stop's admission while the action is held", seen.listenerBoundWhileHeld)
+            check("a VPN drop taken while the action is held queues its removal behind it", seen.dropQueuedBehindHeldWork)
             check("the held apply wrote the environment", held.writes > 0 && !held.timedOut)
             check("the Stop completes once the action is released", seen.stopCompleted)
+            check("once released, the drop's removal lands before the Stop's system proxy restore", seen.dropLandedBeforeStopRestore)
             check("the Stop's clears land after the apply: no variable is left", machine.launchdEnvironment.isEmpty)
             check("the Stop clears the system proxy", !machine.service("Wi-Fi").routesThroughAProxy)
+            check("no entry file outlives the tunnel or the Stop", machine.resolverFile(for: "corp.example") == nil)
             check("the reload reports its pass not current", seen.reload == .adopted(.reconcileAttempted(currentAtEnd: false)))
 
             // The process quit ends the composed service before the root is released.
@@ -1397,15 +1405,17 @@ enum RuntimeHostEffectsScenario {
         var snapshotAnswered = false
         var stopAdmitted = false
         var listenerBoundWhileHeld = false
+        var dropQueuedBehindHeldWork = false
+        var dropLandedBeforeStopRestore = false
         var stopCompleted = false
         var reload: ControlReloadResult?
     }
 
-    /// A reload through the framed client whose flag action `held` parks, then a proxy Stop while it is parked, then the release and both
-    /// settlements. Every wait is bounded, and the hold is released on every path.
+    /// A reload through the framed client whose flag action `held` parks, then a VPN drop and a proxy Stop while it is parked, then the
+    /// release and both settlements. Every wait is bounded, and the hold is released on every path.
     @MainActor
     private static func reloadAndStopWhileHeld(
-        _ client: any RuntimeClient, host: RuntimeHost, held: HeldSetenv
+        _ client: any RuntimeClient, host: RuntimeHost, held: HeldSetenv, vpn: FakeVPNStatusObserver, machine: FakeMachine
     ) async throws -> HeldFlagWitness {
         defer { held.release() }
         var witness = HeldFlagWitness()
@@ -1428,10 +1438,17 @@ enum RuntimeHostEffectsScenario {
         }
         witness.reached = held.isHeld
         guard witness.reached else { return witness }
+        // The drop's delivery is queued on the main actor before the snapshot's round trip, so it has run by the time the snapshot
+        // answers: an inline removal would be on the machine by then.
+        let removalsBefore = machine.privilege.commands(matching: .removeDNS).count
+        let commandsBefore = machine.privilege.commands.count
+        vpn.emit(.disconnected(reason: .userInitiated))
         witness.snapshotAnswered = try await client.readSnapshot(deadline: deadline).proxyState == .running
         let stop = try await submit(.stop(.proxy))
         witness.stopAdmitted = stop != nil
         witness.listenerBoundWhileHeld = stop != nil && host.status().bindings.proxyPort != nil
+        witness.dropQueuedBehindHeldWork = machine.privilege.commands(matching: .removeDNS).count == removalsBefore
+            && machine.resolverFile(for: "corp.example") != nil
         held.release()
         var outcomes: [ControlOperationID: ControlOperationOutcome] = [:]
         for _ in 0..<128 where outcomes[reload] == nil || stop.map({ outcomes[$0] == nil }) == true {
@@ -1441,6 +1458,16 @@ enum RuntimeHostEffectsScenario {
         }
         witness.reload = reloadResult(outcomes[reload])
         if let stop, case .completed(let completion)? = outcomes[stop] { witness.stopCompleted = completion.command == .stop }
+        // The drop's removal ran, and it ran before the Stop's system proxy restore, which was queued after it: the check above holds
+        // only while the work is parked, and alone it would also pass for a drop that never queued anything. The restore is a batch of
+        // setters, recorded one by one; nothing else here writes the system proxy after the drop.
+        let systemProxyWrites: Set<PrivilegedOperation> = [
+            .applySystemProxy, .clearSystemProxy, .setProxyBypass, .setAutoproxyURL, .disableAutoproxy, .setWebProxyEndpoint, .setAutoproxy,
+        ]
+        let landed = machine.privilege.commands.dropFirst(commandsBefore)
+        let removal = landed.firstIndex { $0.command == .removeDNS && $0.values.first == "corp.example" }
+        let restore = landed.firstIndex { systemProxyWrites.contains($0.command) }
+        if let removal, let restore { witness.dropLandedBeforeStopRestore = removal < restore }
         return witness
     }
 

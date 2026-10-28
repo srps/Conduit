@@ -3606,10 +3606,11 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertNotEqual(host.orchestrator.snapshot.dnsRunState, .running)
     }
 
-    /// The resolver switch-on's entry write is queued with the VPN gate of its decision. Queued behind a held shell-environment drift pass,
-    /// which takes no resolver lock, a VPN drop is handled first and removes nothing. Released, the write lands from the stale gate; its
-    /// outcome is dropped as superseded, and the files are put where the gate is now, so no entry file outlives the tunnel.
-    func testAVPNDropWhileAResolverSwitchOnIsQueuedLeavesNoEntryFile() async throws {
+    /// The resolver switch-on's entry write is queued with the VPN gate of its decision, behind a held shell-environment drift pass. A VPN
+    /// drop taken meanwhile decides its removal in its own turn and queues it behind the write, running nothing on the owner (#47).
+    /// Released, the work lands in the order it was decided: the write from the stale gate succeeds, then the drop's removal is refused.
+    /// The earlier success recording first must not discard that later failure: it stays pending for the repair, with none superseded.
+    func testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
         await host.awaitLaunchRecovery()
         try await host.startRuntime()
@@ -3643,16 +3644,212 @@ final class DaemonRuntimeHostTests: XCTestCase {
         }
         XCTAssertFalse(host.splitDNSGate.entriesWanted, "the drop was handled while the write is queued")
         XCTAssertTrue(harness.machine.privilege.commands(matching: .applyDNS).isEmpty, "nothing was written yet")
+        XCTAssertTrue(harness.machine.privilege.commands(matching: .removeDNS).isEmpty, "the drop's removal is queued, not run inline")
+        harness.machine.privilege.failing = [.removeDNS]
         harness.hold.release()
         try await reload.value
         await host.deliveries.drain()
 
-        XCTAssertFalse(harness.machine.privilege.commands(matching: .applyDNS).isEmpty, "the queued write landed from its stale gate")
-        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "and the files were put where the gate is now")
-        XCTAssertTrue(events.events.contains {
-            $0.event == "platform.split_dns_outcome_superseded" && ($0.detail ?? "").contains("source=switch_on")
-        }, "the stale write's outcome does not overwrite the drop's")
+        let resolverWrites = harness.machine.privilege.commands.map { $0.command }.filter { $0 == .applyDNS || $0 == .removeDNS }
+        XCTAssertEqual(resolverWrites.first, .applyDNS, "the queued write landed first, from its stale gate")
+        XCTAssertEqual(resolverWrites.last, .removeDNS, "and the drop's removal after it")
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "the removal was refused")
+        XCTAssertFalse(events.events.contains { $0.event == "platform.split_dns_outcome_superseded" },
+                       "outcomes are recorded in the order they were queued")
+        // The drop's own removal and the switch-on's correction behind it, both refused and both recorded.
+        XCTAssertEqual(events.events.filter { $0.event == "platform.split_dns_failed" }.compactMap { $0.detail?.split(separator: " ").prefix(3).joined(separator: " ") },
+                       ["operation=remove source=vpn_transition attempt=1", "operation=remove source=vpn_transition attempt=2"])
+        XCTAssertEqual(host.splitDNSRepair.pending?.operation, .remove, "the refused removal stays pending for the repair")
+        XCTAssertEqual(host.splitDNSRepair.pending?.source, .vpnTransition)
         XCTAssertTrue(host.completedPlatformBaseline.manageDNSResolvers, "the switch-on landed at its save's value")
+        harness.machine.privilege.failing = []
+        await host.stopRuntime()
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "the Stop removes it once the helper accepts")
+    }
+
+    /// The entry-file commands for the configured domain, in the order the helper took them.
+    private func entryFileCommands() -> [PrivilegedOperation] {
+        harness.machine.privilege.commands.filter { $0.values.first == "corp.example" }.map { $0.command }
+    }
+
+    /// A start marks its surfaces up in the turn that decides its entry-file correction (#47). Applied with the tunnel up, the start
+    /// meets a drop whose removal is then held behind it; its tail queues another removal. A reconnect taken during that hold acts for a
+    /// running proxy and queues the write, and a Stop admitted after it clears behind all of it. The start the Stop overtook does not
+    /// mark the stopped proxy up again.
+    func testAVPNFlapAndAStopDuringAStartsHeldEntryFileTailEndInOrderAndStopped() async throws {
+        let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageDNSResolvers: true))
+        await host.awaitLaunchRecovery()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let start = Task { try await host.startRuntime() }
+        await harness.hold.waitUntilReached()
+        harness.vpn.start()
+        harness.vpn.emit(.disconnected(reason: .userInitiated))
+        for _ in 0..<5_000 where host.splitDNSGate.entriesWanted {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertFalse(host.splitDNSGate.entriesWanted, "the drop is taken while the start's block is out")
+        // The drop's removal is queued behind the start's block: hold it there.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, values in
+            name == PrivilegedOperation.removeDNS.rawValue && values.first == "corp.example"
+        }
+        harness.hold.release()
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+        for _ in 0..<5_000 where !host.runtimeStarted {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(host.runtimeStarted, "the start marked its surfaces up before its tail, whose work waits in the queue")
+        harness.vpn.emit(.connected)
+        for _ in 0..<5_000 where !host.splitDNSGate.entriesWanted {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let stop = Task { await host.stopRuntime() }
+        for _ in 0..<5_000 where host.runtimeStarted {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertFalse(host.runtimeStarted, "the Stop's teardown began while the removal is held")
+        harness.hold.release()
+        _ = await start.result
+        await stop.value
+        await host.deliveries.drain()
+
+        XCTAssertFalse(host.runtimeStarted, "the start the Stop overtook did not mark the stopped proxy up")
+        let commands = entryFileCommands()
+        let drop = try XCTUnwrap(commands.firstIndex(of: .removeDNS))
+        let reconnect = try XCTUnwrap(commands.lastIndex(of: .applyDNS))
+        XCTAssertGreaterThan(reconnect, drop, "the reconnect during the tail wrote the entry, as for a running proxy")
+        XCTAssertEqual(commands.last, .removeDNS, "the Stop's clear landed last")
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"))
+    }
+
+    /// A proxy start beside a running DNS module, whose observers are already up, meets a drop and a reconnect while its block is out.
+    /// The drop queues its removal behind the start's write; the reconnect, taken before the proxy's surfaces are up, writes nothing.
+    /// The gate then wants what the start captured, but it took reports since: the start's tail must put the entry back after the drop's
+    /// removal, or the tunnel stays up with no entry file and no failure for a retry to repair.
+    func testADropAndReconnectDuringAStartsHeldBlockLeaveTheEntryFile() async throws {
+        let host = try await launch(
+            platform: PlatformIntegrationConfig(manageSystemProxy: true, manageDNSResolvers: true), dnsForwarderEnabled: true
+        )
+        await host.awaitLaunchRecovery()
+        _ = try await host.startDNS()
+        // The DNS module's start ran the observers: a report reaches the gate before the proxy starts.
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        XCTAssertEqual(host.splitDNSGate.lastVPNState, .connected, "the VPN observer runs before the proxy start")
+        XCTAssertFalse(host.runtimeStarted)
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "no entry file without the proxy")
+        let before = entryFileCommands().count
+
+        // The start's system proxy apply, ahead of its resolver write in the same block.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let start = Task { try await host.startProxy(conditionalDNS: false) }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+        harness.vpn.emit(.disconnected(reason: .userInitiated))
+        for _ in 0..<5_000 where host.splitDNSGate.entriesWanted {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertFalse(host.splitDNSGate.entriesWanted, "the drop is taken while the start's block is out")
+        harness.vpn.emit(.connected)
+        for _ in 0..<5_000 where host.splitDNSGate.lastVPNState != .connected {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertEqual(host.splitDNSGate.lastVPNState, .connected, "the reconnect is taken while the start's block is out")
+        XCTAssertFalse(host.runtimeStarted, "so it acted as for a stopped proxy")
+        XCTAssertTrue(entryFileCommands().dropFirst(before).isEmpty, "nothing ran ahead of the held block")
+        harness.hold.release()
+        _ = try await start.value
+        await host.deliveries.drain()
+
+        XCTAssertTrue(host.runtimeStarted)
+        XCTAssertEqual(Array(entryFileCommands().dropFirst(before)), [.applyDNS, .removeDNS, .applyDNS],
+                       "the start's write, the drop's removal, then the tail's write for the tunnel that came back")
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "the entry file is there for the tunnel that is up")
+        XCTAssertFalse(host.orchestrator.eventLog.events.contains { $0.event == "platform.split_dns_failed" })
+        XCTAssertNil(host.splitDNSRepair.pending)
+    }
+
+    /// A pending repair whose only residue is a recorded file for a disabled intercept rule, which a start's intercept sweep removes.
+    /// The start reads its residue after that sweep, under the same lock, so its success settles the repair there and then, as before
+    /// the start's resolver work moved off the main actor.
+    func testAStartsInterceptSweepSettlesARepairWhoseOnlyResidueItRemoved() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsForwarderEnabled = false
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
+        config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.intercept.test", enabled: false)]
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageDNSResolvers: true))
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"))
+        // The Stop's removal of the entry file is refused, so the repair is still pending at the next start.
+        harness.machine.privilege.failingDomains = ["corp.example"]
+        await host.stopRuntime()
+        XCTAssertEqual(host.splitDNSRepair.pending?.operation, .remove, "the Stop's removal was refused")
+        XCTAssertEqual(host.splitDNSRepair.pending?.source, .stop)
+        harness.machine.privilege.failingDomains = []
+        // A run that had the rule enabled left its file, recorded as ours.
+        var enabled = config
+        enabled.transparentProxyEnabled = true
+        enabled.dnsInterceptRules[0].enabled = true
+        try host.dnsManager.applyInterceptFiles(config: enabled, logger: nil)
+        XCTAssertNotNil(harness.machine.resolverFile(for: "intercept.test"))
+        XCTAssertTrue(harness.journal.scopes(for: .resolverFile).contains("intercept.test"))
+        XCTAssertTrue(host.dnsManager.unconfiguredRecordedFilesPresent(config: config), "the disabled rule's file is residue")
+
+        try await host.startRuntime()
+        await host.deliveries.drain()
+
+        XCTAssertNil(harness.machine.resolverFile(for: "intercept.test"), "the start's sweep removed the disabled rule's file")
+        XCTAssertFalse(harness.journal.scopes(for: .resolverFile).contains("intercept.test"))
+        XCTAssertNil(host.splitDNSRepair.pending, "the start settled the repair: its sweep left no residue")
+        let repaired = host.orchestrator.eventLog.events.filter { $0.event == "platform.split_dns_repaired" }.compactMap(\.detail)
+        XCTAssertEqual(repaired.count, 1, "\(repaired)")
+        XCTAssertEqual(repaired.first?.hasPrefix("operation=apply by=start "), true, "\(repaired)")
+        await host.stopRuntime()
+    }
+
+    /// A retry decides its write in the turn it reads the gate, and queues it there (#47). Held, it has been reported and nothing has
+    /// been written; a VPN drop taken meanwhile queues its removal behind it. The work lands in that order and the repair settles, so the
+    /// files end where the last report wants.
+    func testAVPNDropDuringAHeldSplitDNSRetryQueuesItsRemovalBehindIt() async throws {
+        let host = try await launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
+        await host.awaitLaunchRecovery()
+        harness.machine.privilege.failingDomains = ["corp.example"]
+        try await host.startRuntime()
+        XCTAssertEqual(host.splitDNSRepair.pending?.operation, .apply, "the start's write was refused")
+        harness.machine.privilege.failingDomains = []
+        let before = entryFileCommands().count
+
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, values in
+            name == PrivilegedOperation.applyDNS.rawValue && values.first == "corp.example"
+        }
+        XCTAssertTrue(host.observeHelperForSplitDNS(available: true, trigger: "helper_available"))
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread, "the retry's write is off the main actor")
+        let events = host.orchestrator.eventLog
+        XCTAssertEqual(events.events.filter { $0.event == "platform.split_dns_retry" }.map(\.detail),
+                       ["operation=apply trigger=helper_available managed=true attempt=2"], "reported before its write")
+        harness.vpn.emit(.disconnected(reason: .userInitiated))
+        for _ in 0..<5_000 where host.splitDNSGate.entriesWanted {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertFalse(host.splitDNSGate.entriesWanted)
+        XCTAssertFalse(entryFileCommands().dropFirst(before).contains(.removeDNS), "the drop's removal waits behind the retry")
+        harness.hold.release()
+        await host.deliveries.drain()
+
+        XCTAssertEqual(Array(entryFileCommands().dropFirst(before)), [.applyDNS, .removeDNS], "the retry's write, then the drop's removal")
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "no entry file with the tunnel down")
+        XCTAssertNil(host.splitDNSRepair.pending)
+        XCTAssertEqual(events.events.filter { $0.event == "platform.split_dns_repaired" }.map(\.detail),
+                       ["operation=apply by=retry failed=apply attempts=1"])
         await host.stopRuntime()
     }
 

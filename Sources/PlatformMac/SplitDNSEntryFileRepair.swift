@@ -69,6 +69,24 @@ package struct SplitDNSEntryFileRepair: Sendable {
         }
     }
 
+    /// An operation's outcome with what it left on disk, both read on the platform queue right after it, so the host records it without
+    /// reading the disk itself.
+    package struct Observation: Sendable, Equatable {
+        package let outcome: Outcome
+        /// Whether a recorded file for a domain the config no longer names is still on disk, which only a retry sweeps.
+        package let residue: Bool
+
+        package init(outcome: Outcome, residue: Bool) {
+            self.outcome = outcome
+            self.residue = residue
+        }
+
+        /// Reads the residue after `outcome`, against `config`. Only a success can settle a repair, so a failure reads nothing.
+        package static func after(_ outcome: Outcome, config: ProxyConfig, dnsManager: DNSManager) -> Observation {
+            Observation(outcome: outcome, residue: outcome.failure == nil && dnsManager.unconfiguredRecordedFilesPresent(config: config))
+        }
+    }
+
     package struct Pending: Sendable, Equatable {
         package let operation: Operation
         package let source: Source
@@ -115,22 +133,28 @@ package struct SplitDNSEntryFileRepair: Sendable {
         pending != nil && helperAvailable
     }
 
-    /// Counts recorded outcomes. A host reads it before queueing a start's or
-    /// stop's entry-file work off the actor and passes it back as
-    /// `startedAt`, so a VPN transition recorded meanwhile is not overwritten
-    /// by the older operation's result.
+    /// The place of the newest outcome recorded, in the order operations were queued. A host takes each operation's place with `queue()`
+    /// in the turn it queues the work on its one platform queue, and passes it back as `startedAt`.
     package private(set) var generation = 0
+    /// The last place `queue()` handed out.
+    private var queued = 0
+
+    /// The next place in queue order, for an operation queued now. Outcomes land in this order on the host's serial platform queue, so
+    /// two operations in flight at once are both recorded, the later one last.
+    package mutating func queue() -> Int {
+        queued = max(queued, generation) + 1
+        return queued
+    }
 
     /// Records what an entry-file operation did. A failure is reported and
     /// remembered; a success while something was pending reports the repair
     /// and forgets it, unless `residue` says a recorded file for a domain the
     /// config no longer names is still on disk, which only a retry sweeps.
     ///
-    /// `startedAt` is the `generation` the operation was queued at. When an
-    /// outcome was recorded since, this one is older than the state on disk
-    /// and is dropped with `platform.split_dns_outcome_superseded` (STYLE
-    /// rule 11): a start's success landing after a VPN-down removal failed
-    /// would otherwise forget that failure.
+    /// `startedAt` is the operation's place (`queue()`), taken in the turn it was queued. When an outcome queued after it
+    /// was recorded already, this one is older than the state on disk and is dropped with `platform.split_dns_outcome_superseded` (STYLE
+    /// rule 11): a start's success landing after a VPN-down removal failed would otherwise forget that failure. An outcome with no place
+    /// takes the next one as it is recorded.
     package mutating func record(
         _ outcome: Outcome,
         source: Source,
@@ -138,7 +162,7 @@ package struct SplitDNSEntryFileRepair: Sendable {
         residue: Bool = false,
         report: (RuntimeEvent, LogLevel) -> Void
     ) {
-        if let startedAt, startedAt != generation {
+        if let startedAt, startedAt < generation {
             report(
                 RuntimeEvent(
                     kind: .config,
@@ -149,7 +173,7 @@ package struct SplitDNSEntryFileRepair: Sendable {
             )
             return
         }
-        generation += 1
+        generation = startedAt ?? queue()
         if let failure = outcome.failure {
             let attempts = (pending?.attempts ?? 0) + 1
             pending = Pending(operation: outcome.operation, source: source, attempts: attempts)
@@ -175,14 +199,14 @@ package struct SplitDNSEntryFileRepair: Sendable {
         )
     }
 
-    /// One retry of what is pending, against the state now. Call it on the
-    /// same actor as the gate's `update(_:)`, synchronously, for the reason
-    /// `SplitDNSVPNGate.reconcileEntryFiles` gives: a VPN report landing
-    /// between the decision and the write would make it act on a stale one,
-    /// and an apply landing after a VPN-down removal leaves entry files with
-    /// the tunnel gone. And only with no start or stop in flight: a start's
-    /// apply runs off the actor, and its run state is not settled until it
-    /// returns.
+    /// One retry of what is pending, against the state now. Decide it on the
+    /// same actor as the gate's `update(_:)`, in the turn that queues the
+    /// write, for the reason `SplitDNSVPNGate.entryFileOperation` gives: a
+    /// VPN report landing between the decision and the queueing would make
+    /// it act on a stale one, and an apply landing after a VPN-down removal
+    /// leaves entry files with the tunnel gone. And only with no start or
+    /// stop in flight: a start's run state is not settled until it returns.
+    /// This runs the halves together; `RuntimeHost` queues `runRetry`.
     ///
     /// With the resolver switch off, the retry is the switch-off teardown,
     /// `clearRecorded`, and it is repaired once the journal names no file of
@@ -200,7 +224,23 @@ package struct SplitDNSEntryFileRepair: Sendable {
         runtimeStarted: Bool,
         report: (RuntimeEvent, LogLevel) -> Void
     ) {
-        guard let pending else { return }
+        guard let operation = planRetry(
+            trigger: trigger, gate: gate, resolversManaged: resolversManaged, runtimeStarted: runtimeStarted, report: report
+        ) else { return }
+        let outcome = Self.runRetry(operation, resolversManaged: resolversManaged, config: config, dnsManager: dnsManager, logger: logger)
+        record(outcome, source: .retry, report: report)
+    }
+
+    /// The decision half of `retry`: the operation it runs against the state now, reported first, or `nil` with nothing pending. Take it
+    /// in the turn the gate is read, and queue `runRetry` in that turn.
+    package func planRetry(
+        trigger: String,
+        gate: SplitDNSVPNGate,
+        resolversManaged: Bool,
+        runtimeStarted: Bool,
+        report: (RuntimeEvent, LogLevel) -> Void
+    ) -> Operation? {
+        guard let pending else { return nil }
         let operation = resolversManaged ? Self.desiredOperation(gate: gate, runtimeStarted: runtimeStarted) : .remove
         report(
             RuntimeEvent(
@@ -210,7 +250,18 @@ package struct SplitDNSEntryFileRepair: Sendable {
             ),
             .notice
         )
-        let outcome: Outcome
+        return operation
+    }
+
+    /// The execution half of `retry`, for the host's platform queue: blocks on the helper. A retry sweeps the residue itself, so its
+    /// outcome is recorded with none.
+    package static func runRetry(
+        _ operation: Operation,
+        resolversManaged: Bool,
+        config: ProxyConfig,
+        dnsManager: DNSManager,
+        logger: any LogSink
+    ) -> Outcome {
         do {
             if !resolversManaged {
                 try dnsManager.clearRecorded(configs: [config], logger: logger)
@@ -222,11 +273,10 @@ package struct SplitDNSEntryFileRepair: Sendable {
                 }
                 try dnsManager.clearUnconfiguredRecordedFiles(config: config, logger: logger)
             }
-            outcome = .succeeded(operation)
+            return .succeeded(operation)
         } catch {
-            outcome = .failed(operation, error)
+            return .failed(operation, error)
         }
-        record(outcome, source: .retry, report: report)
     }
 
     /// Why a switch-off teardown that threw nothing still failed.

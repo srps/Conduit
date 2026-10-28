@@ -1681,6 +1681,60 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertTrue(composed.host.reconciler.requestLags)
     }
 
+    /// A VPN transition's entry-file write runs on the host's platform queue, never inline, so a held resolver write leaves the owner free
+    /// (#47): the framed snapshot answers, the next transition is taken and queues its removal behind the write, and a proxy Stop is
+    /// admitted and takes its lane while its clears wait in the same queue. Released, the work lands in the order it was decided: the
+    /// tunnel's write, the drop's removal, then the Stop's clears, with each split-DNS outcome recorded and none superseded.
+    func testAHeldVPNEntryFileWriteLeavesTheOwnerFreeAndLandsBeforeTheNextTransitionAndAStop() async throws {
+        let composed = try await compose(
+            dnsForwarderEnabled: false, platform: PlatformIntegrationConfig(manageSystemProxy: true, manageDNSResolvers: true)
+        )
+        try await composed.host.startRuntime()
+        let machine = composed.harness.machine
+        let host = composed.host
+        composed.harness.vpn.emit(.disconnected(reason: .userInitiated))
+        await host.deliveries.drain()
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "no entry file with the tunnel down")
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let before = machine.privilege.commands.count
+
+        composed.harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.applyDNS.rawValue }
+        composed.harness.vpn.emit(.connected)
+        await composed.harness.hold.waitUntilReached()
+        XCTAssertFalse(composed.harness.hold.reachedOnMainThread, "the tunnel's entry write is off the main actor")
+
+        let snapshot = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertEqual(snapshot.proxyState, .running, "the framed snapshot answers while the resolver write is held")
+        composed.harness.vpn.emit(.disconnected(reason: .networkLost))
+        let taken = try await eventually { !host.splitDNSGate.entriesWanted }
+        XCTAssertTrue(taken, "the next transition is taken while the write is held")
+        let stop = try accepted(try await submit(composed, .stop(.proxy)))
+        let stopping = try await eventually { !host.lanes.proxy.isIdle }
+        XCTAssertTrue(stopping, "the Stop took its lane while the write is held")
+        XCTAssertFalse(machine.privilege.commands.dropFirst(before).contains { $0.command == .removeDNS },
+                       "neither the drop's removal nor the Stop's clear ran ahead of the held write")
+        XCTAssertTrue(machine.service("Wi-Fi").routesThroughAProxy, "the Stop's system proxy clear waits in the queue")
+        composed.harness.hold.release()
+
+        let stopped = try await finished(stop, on: stream)
+        XCTAssertEqual(completed(stopped), .stop)
+        await host.deliveries.drain()
+        let landed = machine.privilege.commands.dropFirst(before).map { $0.command }
+        let write = try XCTUnwrap(landed.firstIndex(of: .applyDNS))
+        let removal = try XCTUnwrap(landed.firstIndex(of: .removeDNS))
+        XCTAssertLessThan(write, removal, "the tunnel's write landed before the drop's removal")
+        // The only other helper writes here are the Stop's system proxy clear.
+        let clear = try XCTUnwrap(landed.firstIndex { $0 != .applyDNS && $0 != .removeDNS })
+        XCTAssertGreaterThan(clear, removal, "the Stop's clears landed after the drop's removal")
+        XCTAssertFalse(machine.service("Wi-Fi").routesThroughAProxy)
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "no entry file outlives the tunnel or the Stop")
+        let events = host.orchestrator.eventLog.events
+        XCTAssertFalse(events.contains { $0.event == "platform.split_dns_outcome_superseded" || $0.event == "platform.split_dns_failed" })
+        XCTAssertNil(host.splitDNSRepair.pending)
+    }
+
     /// An apply that moves the proxy onto an occupied port: the runtime takes the new input though its listener cannot bind. The receipt says
     /// the runtime took it, the accepted view follows it rather than lagging behind, and the snapshot shows the listener down.
     func testAnApplyOntoAnOccupiedPortReportsTheInputTakenAndTheListenerDown() async throws {

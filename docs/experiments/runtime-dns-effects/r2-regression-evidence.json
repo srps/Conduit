@@ -1,0 +1,72 @@
+[
+  {
+    "label": "first-fixture",
+    "source_run": "runtime-actor-prep-focused-467rOz",
+    "meaning": "flap valid; residue fixture invalid",
+    "test_summary": [
+      "\t Executed 262 tests, with 4 failures (0 unexpected) in 87.078 (87.115) seconds"
+    ],
+    "test_assertions_failed": [
+      "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3769: error: -[ConduitTests.DaemonRuntimeHostTests testADropAndReconnectDuringAStartsHeldBlockLeaveTheEntryFile] : XCTAssertEqual failed: (\"[ProxyKernel.PrivilegedOperation.applyDNS, ProxyKernel.PrivilegedOperation.removeDNS]\") is not equal to (\"[ProxyKernel.PrivilegedOperation.applyDNS, ProxyKernel.PrivilegedOperation.removeDNS, ProxyKernel.PrivilegedOperation.applyDNS]\") - the start's write, the drop's removal, then the tail's write for the tunnel that came back",
+      "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3771: error: -[ConduitTests.DaemonRuntimeHostTests testADropAndReconnectDuringAStartsHeldBlockLeaveTheEntryFile] : XCTAssertNotNil failed - the entry file is there for the tunnel that is up",
+      "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3793: error: -[ConduitTests.DaemonRuntimeHostTests testAStartsInterceptSweepSettlesARepairWhoseOnlyResidueItRemoved] : XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(PlatformMac.SplitDNSEntryFileRepair.Operation.remove)\") - the Stop's removal was refused",
+      "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3812: error: -[ConduitTests.DaemonRuntimeHostTests testAStartsInterceptSweepSettlesARepairWhoseOnlyResidueItRemoved] : XCTAssertEqual failed: (\"Optional(false)\") is not equal to (\"Optional(true)\") - [\"operation=remove by=stop failed=apply attempts=1\"]"
+    ],
+    "sim_results": []
+  },
+  {
+    "label": "valid-test-first",
+    "source_run": "runtime-actor-prep-focused-sb1zk7",
+    "meaning": "both intended old-code failures; setup passed",
+    "test_summary": [
+      "\t Executed 262 tests, with 5 failures (0 unexpected) in 86.451 (86.484) seconds"
+    ],
+    "test_assertions_failed": [
+      "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3769: error: -[ConduitTests.DaemonRuntimeHostTests testADropAndReconnectDuringAStartsHeldBlockLeaveTheEntryFile] : XCTAssertEqual failed: (\"[ProxyKernel.PrivilegedOperation.applyDNS, ProxyKernel.PrivilegedOperation.removeDNS]\") is not equal to (\"[ProxyKernel.PrivilegedOperation.applyDNS, ProxyKernel.PrivilegedOperation.removeDNS, ProxyKernel.PrivilegedOperation.applyDNS]\") - the start's write, the drop's removal, then the tail's write for the tunnel that came back",
+      "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3771: error: -[ConduitTests.DaemonRuntimeHostTests testADropAndReconnectDuringAStartsHeldBlockLeaveTheEntryFile] : XCTAssertNotNil failed - the entry file is there for the tunnel that is up",
+      "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3811: error: -[ConduitTests.DaemonRuntimeHostTests testAStartsInterceptSweepSettlesARepairWhoseOnlyResidueItRemoved] : XCTAssertNil failed: \"Pending(operation: PlatformMac.SplitDNSEntryFileRepair.Operation.remove, source: PlatformMac.SplitDNSEntryFileRepair.Source.stop, attempts: 1)\" - the start settled the repair: its sweep left no residue",
+      "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3813: error: -[ConduitTests.DaemonRuntimeHostTests testAStartsInterceptSweepSettlesARepairWhoseOnlyResidueItRemoved] : XCTAssertEqual failed: (\"0\") is not equal to (\"1\") - []",
+      "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3814: error: -[ConduitTests.DaemonRuntimeHostTests testAStartsInterceptSweepSettlesARepairWhoseOnlyResidueItRemoved] : XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(true)\") - []"
+    ],
+    "sim_results": []
+  },
+  {
+    "label": "first-fixed",
+    "source_run": "runtime-actor-prep-focused-JTRfxu",
+    "meaning": "tests pass; simulator generic-clear matcher invalid",
+    "test_summary": [
+      "\t Executed 262 tests, with 0 failures (0 unexpected) in 85.729 (85.772) seconds"
+    ],
+    "test_assertions_failed": [],
+    "sim_results": [
+      {
+        "scenario": "runtime-host-effects",
+        "passed": false,
+        "assertions": 148,
+        "failed": [
+          {
+            "name": "once released, the drop's removal lands before the Stop's system proxy clear",
+            "passed": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "label": "final-focused",
+    "source_run": "runtime-actor-prep-focused-v8xHqV",
+    "meaning": "262 tests and148sim assertions pass",
+    "test_summary": [
+      "\t Executed 262 tests, with 0 failures (0 unexpected) in 85.542 (85.584) seconds"
+    ],
+    "test_assertions_failed": [],
+    "sim_results": [
+      {
+        "scenario": "runtime-host-effects",
+        "passed": true,
+        "assertions": 148,
+        "failed": []
+      }
+    ]
+  }
+]

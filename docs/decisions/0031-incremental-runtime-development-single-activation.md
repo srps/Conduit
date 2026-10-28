@@ -213,6 +213,15 @@ is current-isolation preparation, not the whole RuntimeActor move or its
 acceptance. The single owner/store/workflow and selected Stop/Quit policy remain
 unchanged.
 
+The [split-DNS prerequisite](../verification-runtime-dns-effects-2026-10-28.md)
+queues gate/file, retry, residue and intercept-refresh work through the same
+PlatformWork, with queue-order freshness and Start-tail Stop protection. Focused
+checks, all 41 workflow checks and independent corrected-source review pass.
+Two review findings have test-first regressions, with invalid fixture/check
+attempts preserved separately. It preserves
+files-before-orchestrator ordering and records its latency tradeoff and revisit
+condition. This is still preparation under MainActor, not completed isolation.
+
 ## Open questions
 
 The workflow freshness/private-editor observation API, private reply ceiling

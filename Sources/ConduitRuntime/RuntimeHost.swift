@@ -270,6 +270,16 @@ package final class RuntimeHost {
     /// The resolver flag's baseline covers it too, and a split-DNS retry
     /// writes no intercept files, so a repair does not stand in for it.
     private var resolverSwitchInterceptRefreshFailed = false
+    /// The queue place (`SplitDNSEntryFileRepair.queue()`) of the refresh that last set the flag above. A refresh's result lands only if
+    /// no refresh queued after it has landed, so a late completion never erases a newer failure.
+    private var resolverSwitchInterceptRefreshPlace = 0
+
+    /// Records an intercept refresh's result for the switch, unless a refresh queued after it already landed.
+    private func recordInterceptRefresh(failed: Bool, place: Int) {
+        guard place > resolverSwitchInterceptRefreshPlace else { return }
+        resolverSwitchInterceptRefreshPlace = place
+        resolverSwitchInterceptRefreshFailed = failed
+    }
     /// Where the helper check and the preflight read the helper's status, from `effects`. `nil`
     /// makes no observation, so a test never reaches the installed helper.
     let helperStatusSource: (any HelperLifecycleManaging)?
@@ -649,10 +659,11 @@ package final class RuntimeHost {
         let logger = self.logger
         let localPACURL = orchestrator.snapshot.bindings.localPACURL
         let vpnConnected = splitDNSGate.entriesWanted
-        let entryGeneration = splitDNSRepair.generation
+        let gateReportSeen = splitDNSGateOrder.applied
         let interceptReadyAtStart = orchestrator.snapshot.bindings.dnsInterceptReady
         let forwarderRunningAtStart = orchestrator.snapshot.dnsRunState == .running
-        let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Outcome? in
+        let entryPlace = splitDNSRepair.queue()
+        let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Observation? in
             if platform.manageSystemProxy {
                 systemProxy.serialized {
                     guard !token.isSuperseded else { return }
@@ -673,17 +684,18 @@ package final class RuntimeHost {
                     }
                 }
             }
-            var entryFiles: SplitDNSEntryFileRepair.Outcome?
+            var entryFiles: SplitDNSEntryFileRepair.Observation?
             if platform.manageDNSResolvers {
                 resolvers.serialized {
                     guard !token.isSuperseded else { return }
                     // With the VPN down, `apply` sweeps the entry files rather than writing them.
                     let operation: SplitDNSEntryFileRepair.Operation = vpnConnected ? .apply : .remove
+                    let outcome: SplitDNSEntryFileRepair.Outcome
                     do {
                         try resolvers.apply(config: config, logger: logger, vpnConnected: vpnConnected)
-                        entryFiles = .succeeded(operation)
+                        outcome = .succeeded(operation)
                     } catch {
-                        entryFiles = .failed(operation, error)
+                        outcome = .failed(operation, error)
                         logger.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
                     }
                     // Refreshed from the DNS module's state at the start: with no
@@ -700,26 +712,32 @@ package final class RuntimeHost {
                     } catch {
                         logger.log(.warning, "Could not sweep stale intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
                     }
+                    // Under the same lock, against the input the operation wrote, and after the sweep: a file it removed is no residue.
+                    entryFiles = SplitDNSEntryFileRepair.Observation.after(outcome, config: config, dnsManager: resolvers)
                 }
             }
             return entryFiles
         }
-        recordSplitDNS(entryFiles, source: .start, startedAt: entryGeneration)
+        await recordSplitDNS(entryFiles, source: .start, startedAt: entryPlace)
         // A stop issued while the apply was out queued its clears behind
         // it, so the machine ends cleared; what must not happen now is the
         // rest of a start for a runtime that is down.
         try continueStart(start)
-        // A VPN transition handled while the apply was out reconciled the
-        // entry files then, possibly before the apply wrote them from the
-        // gate it was queued with; put them where the gate is now.
-        if platform.manageDNSResolvers, splitDNSGate.entriesWanted != vpnConnected {
-            let outcome = splitDNSGate.reconcileEntryFiles(
-                config: config,
-                dnsManager: dnsManager,
-                logger: logger,
-                runtimeStarted: true
-            )
-            recordSplitDNS(outcome, source: .vpnTransition)
+        // The proxy's surfaces are up from this turn, the one that decides
+        // the correction below: a VPN transition taken while it is out then
+        // acts as for a running proxy, and a Stop's teardown, which clears
+        // this, is never undone by the start that it overtook.
+        runtimeStarted = true
+        // A VPN transition handled while the apply was out could act only
+        // as a stopped runtime does, so it wrote nothing for a tunnel that
+        // came up; put the entry files where the gate is now. A drop and a
+        // reconnect leave the gate where the apply saw it, with the drop's
+        // removal queued behind the apply, so any report the gate took since
+        // writes them again.
+        let gateMoved = splitDNSGate.entriesWanted != vpnConnected
+            || (splitDNSGate.entriesWanted && splitDNSGateOrder.applied != gateReportSeen)
+        if platform.manageDNSResolvers, gateMoved {
+            await reconcileEntryFiles(config: config, runtimeStarted: true)
         }
     }
 
@@ -929,18 +947,19 @@ package final class RuntimeHost {
         }
     }
 
-    /// Intercept resolver files for the reconciler's passes, which still run
-    /// on this actor. The rule is `DNSManager.refreshInterceptFiles`.
-    /// The platform is the caller's: a pass refreshes with the flags it is applying, and a retry with the flags the machine holds. It is
-    /// never read live from the host, because the host's flags can be ahead of the pass.
-    private func refreshInterceptFiles(for config: ProxyConfig, platform: PlatformIntegrationConfig) throws {
-        guard platform.manageDNSResolvers else { return }
-        try dnsManager.refreshInterceptFiles(
-            config: config,
-            interceptReady: orchestrator.snapshot.bindings.dnsInterceptReady,
-            forwarderRunning: orchestrator.snapshot.dnsRunState == .running,
-            logger: logger
-        )
+    /// The intercept resolver file refresh for `config`, with the DNS module's bindings read in this turn, to run on `platformWork`. The
+    /// rule is `DNSManager.refreshInterceptFiles`. The platform is the caller's: a pass refreshes with the flags it is applying, and a
+    /// settle with the flags it is landing. It is never read live from the host, because the host's flags can be ahead of the pass.
+    private func interceptRefresh(for config: ProxyConfig, platform: PlatformIntegrationConfig) -> @Sendable () throws -> Void {
+        guard platform.manageDNSResolvers else { return {} }
+        let resolvers = dnsManager, logger = self.logger
+        let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
+        let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
+        return {
+            try resolvers.refreshInterceptFiles(
+                config: config, interceptReady: interceptReady, forwarderRunning: forwarderRunning, logger: logger
+            )
+        }
     }
 
     /// Event first, log line derived from it.
@@ -1070,53 +1089,70 @@ package final class RuntimeHost {
     }
 
     private func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String?, sequence: UInt64) async {
-        // Gate update and reconcile must stay on the same side of any await:
-        // reconcileEntryFiles reads the gate's current state, and a second
-        // VPN transition interleaving at a suspension point would make this
-        // handler act on the newer flip instead of its own (the gate's
-        // documented contract). Entry files live and die with the tunnel —
-        // see `SplitDNSVPNGate`. `runtimeStarted` is passed rather than used
-        // as a guard: it gates *applying* files, never removing them, because
-        // a runtime that died with its files applied is exactly the case that
-        // strands them against unreachable servers.
+        // Gate update and decision must stay in one turn, and the entry-file
+        // work is queued in it: the decision reads the gate's current state,
+        // and a second VPN transition interleaving at a suspension point
+        // would make this handler act on the newer flip instead of its own
+        // (the gate's documented contract). Queued in that turn, each flip's
+        // work lands on `platformWork` in the order the flips were taken.
+        // Entry files live and die with the tunnel — see `SplitDNSVPNGate`.
+        // `runtimeStarted` is passed rather than used as a guard: it gates
+        // *applying* files, never removing them, because a runtime that died
+        // with its files applied is exactly the case that strands them
+        // against unreachable servers.
         // A report older than one the gate already took is not the tunnel's
         // state; the orchestrator still sees it and drops it itself.
         let entriesWantedChanged = splitDNSGateOrder.admit(sequence) ? splitDNSGate.update(state) : false
-        if platformConfig.manageDNSResolvers, entriesWantedChanged {
-            let outcome = splitDNSGate.reconcileEntryFiles(
-                config: config,
-                dnsManager: dnsManager,
-                logger: logger,
-                runtimeStarted: runtimeStarted
-            )
-            recordSplitDNS(outcome, source: .vpnTransition)
-        }
-
+        // Its own delivery, which queues its work in a later turn whatever this one awaits, so it is asked for here.
         deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
+        if platformConfig.manageDNSResolvers, entriesWantedChanged {
+            await reconcileEntryFiles(config: config, runtimeStarted: runtimeStarted)
+        }
+        // The orchestrator hears of the transition after its entry files landed, as it did when they were written inline.
         await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName, sequence: sequence)
         await reconcileSystemDNSIfRunning()
     }
 
+    /// Puts the entry files where the gate wants them now (`SplitDNSVPNGate.entryFileOperation`). Decided, given its place in the repair's
+    /// order and queued on `platformWork` in this turn, so work decided after it lands after it; recorded once it returns. The VPN
+    /// transitions and the corrections after a write queued with an older gate state all come through here.
+    func reconcileEntryFiles(config: ProxyConfig, runtimeStarted: Bool) async {
+        guard let operation = splitDNSGate.entryFileOperation(runtimeStarted: runtimeStarted) else { return }
+        let resolvers = dnsManager, logger = self.logger
+        let place = splitDNSRepair.queue()
+        let observed = await platformWork.run {
+            // The operation and its residue under one lock, against the input it wrote.
+            resolvers.serialized {
+                SplitDNSEntryFileRepair.Observation.after(
+                    SplitDNSVPNGate.perform(operation, config: config, dnsManager: resolvers, logger: logger),
+                    config: config, dnsManager: resolvers
+                )
+            }
+        }
+        await recordSplitDNS(observed, source: .vpnTransition, startedAt: place)
+    }
+
     // MARK: - Split-DNS entry-file repair (#165)
 
-    /// Feeds an entry-file outcome to `splitDNSRepair`, event first, and keeps the helper check running while something is pending.
+    /// Feeds an entry-file outcome to `splitDNSRepair`, event first, and keeps the helper check running while something is pending. The
+    /// observation was read on `platformWork` beside the operation, so recording reads no disk here. `startedAt` is the operation's place
+    /// (`SplitDNSEntryFileRepair.queue()`), taken in the turn it was queued.
     func recordSplitDNS(
-        _ outcome: SplitDNSEntryFileRepair.Outcome?,
+        _ observed: SplitDNSEntryFileRepair.Observation?,
         source: SplitDNSEntryFileRepair.Source,
-        startedAt: Int? = nil
-    ) {
-        guard let outcome else { return }
-        let residue = outcome.failure == nil && splitDNSRepair.pending != nil
-            && dnsManager.unconfiguredRecordedFilesPresent(config: config)
+        startedAt: Int
+    ) async {
+        guard let observed else { return }
+        let residue = observed.outcome.failure == nil && splitDNSRepair.pending != nil && observed.residue
         let wasPending = splitDNSRepair.pending != nil
-        splitDNSRepair.record(outcome, source: source, startedAt: startedAt, residue: residue, report: recordSplitDNSEvent)
+        splitDNSRepair.record(observed.outcome, source: source, startedAt: startedAt, residue: residue, report: recordSplitDNSEvent)
         // A new episode starts its check at the first interval, not at the
         // back-off a check left over from the last episode is sleeping on.
         if !wasPending, splitDNSRepair.pending != nil { endSplitDNSHelperCheck() }
+        scheduleSplitDNSHelperCheck()
         // Settled by something other than a retry (a VPN flip, a start, a
         // config change): the switch's action has landed all the same.
-        if wasPending { settleResolverSwitchBaseline(platform: platformConfig) }
-        scheduleSplitDNSHelperCheck()
+        if wasPending { await settleResolverSwitchBaseline(platform: platformConfig) }
     }
 
     private func recordSplitDNSEvent(_ event: RuntimeEvent, level: LogLevel) {
@@ -1145,21 +1181,21 @@ package final class RuntimeHost {
         await awaitLaunchRecovery()
         // Entry files are the proxy module's surface.
         await waitUntilIdle([.proxy])
-        // Nothing suspends from here on: the decision and the write see the
-        // same gate state (`SplitDNSEntryFileRepair.retry`).
-        guard splitDNSRepair.pending != nil else { return }
-        splitDNSRepair.retry(
-            trigger: trigger,
-            gate: splitDNSGate,
-            config: config,
-            resolversManaged: platformConfig.manageDNSResolvers,
-            dnsManager: dnsManager,
-            logger: logger,
-            runtimeStarted: runtimeStarted,
-            report: recordSplitDNSEvent
-        )
-        settleResolverSwitchBaseline(platform: platformConfig)
-        scheduleSplitDNSHelperCheck()
+        // The decision and the queueing in one turn: the write acts on the
+        // gate state it was decided from (`SplitDNSEntryFileRepair.retry`).
+        let managed = platformConfig.manageDNSResolvers
+        guard let operation = splitDNSRepair.planRetry(
+            trigger: trigger, gate: splitDNSGate, resolversManaged: managed, runtimeStarted: runtimeStarted, report: recordSplitDNSEvent
+        ) else { return }
+        let resolvers = dnsManager, logger = self.logger, config = self.config
+        let place = splitDNSRepair.queue()
+        let outcome = await platformWork.run {
+            resolvers.serialized {
+                SplitDNSEntryFileRepair.runRetry(operation, resolversManaged: managed, config: config, dnsManager: resolvers, logger: logger)
+            }
+        }
+        // A retry sweeps the residue itself.
+        await recordSplitDNS(SplitDNSEntryFileRepair.Observation(outcome: outcome, residue: false), source: .retry, startedAt: place)
     }
 
     /// A settled repair did what the resolver switch's action had to, so the
@@ -1172,25 +1208,29 @@ package final class RuntimeHost {
     /// again is reported (`platform.split_dns_intercept_refresh_failed`),
     /// and the next DNS start or DNS-affecting config change rewrites them.
     /// `platform` is the desired flags the switch is landing, carried by the caller. The baseline has not moved yet at this point, so it
-    /// cannot say whether the switch is on.
-    private func settleResolverSwitchBaseline(platform: PlatformIntegrationConfig) {
+    /// cannot say whether the switch is on. The baseline follows in this turn, since no refresh result changes it; the refresh is queued
+    /// on `platformWork` in this turn too, with a queue place, so its result never replaces a newer refresh's (`recordInterceptRefresh`).
+    /// A failure is reported either way.
+    private func settleResolverSwitchBaseline(platform: PlatformIntegrationConfig) async {
         guard splitDNSRepair.pending == nil else { return }
-        if platform.manageDNSResolvers, resolverSwitchInterceptRefreshFailed {
+        reconciler.markResolverSwitchLanded(manageDNSResolvers: platform.manageDNSResolvers)
+        guard platform.manageDNSResolvers, resolverSwitchInterceptRefreshFailed else { return }
+        let refresh = interceptRefresh(for: heldRuntimeConfig, platform: platform)
+        let place = splitDNSRepair.queue()
+        let failure = await platformWork.run { () -> String? in
             do {
-                try refreshInterceptFiles(for: heldRuntimeConfig, platform: platform)
-                resolverSwitchInterceptRefreshFailed = false
+                try refresh()
+                return nil
             } catch {
-                recordSplitDNSEvent(
-                    RuntimeEvent(
-                        kind: .config,
-                        event: "platform.split_dns_intercept_refresh_failed",
-                        detail: "reason=\(error.localizedDescription)"
-                    ),
-                    level: .warning
-                )
+                return error.localizedDescription
             }
         }
-        reconciler.markResolverSwitchLanded(manageDNSResolvers: platform.manageDNSResolvers)
+        recordInterceptRefresh(failed: failure != nil, place: place)
+        guard let failure else { return }
+        recordSplitDNSEvent(
+            RuntimeEvent(kind: .config, event: "platform.split_dns_intercept_refresh_failed", detail: "reason=\(failure)"),
+            level: .warning
+        )
     }
 
     /// While a repair is pending, one backed-off helper read at a time: a
@@ -1611,31 +1651,41 @@ extension RuntimeHost: RuntimeReconcilerHost {
             // With the tunnel up the reconcile writes the new entries; either
             // way it removes the files the new config no longer names, and a
             // refused removal there leaves a file only the journal names.
-            let operation: SplitDNSEntryFileRepair.Operation = splitDNSGate.entriesWanted ? .apply : .remove
-            var entryFiles: SplitDNSEntryFileRepair.Outcome?
-            DNSResolverReconciliation.run(
-                after: "config reload",
-                logger: logger,
-                reconcile: {
-                    do {
-                        try dnsManager.reconcile(old: old, new: new, logger: logger, vpnConnected: splitDNSGate.entriesWanted)
-                        entryFiles = .succeeded(operation)
-                    } catch {
-                        entryFiles = .failed(operation, error)
-                        throw error
-                    }
-                },
-                // `applyConfigChange` restarted the forwarder if the DNS
-                // section changed, possibly onto a different port, and
-                // `reconcile` does not rewrite intercept files. Re-point them
-                // at the listeners that came back, or remove them if none did.
-                // Runs whatever the reconcile did: see
-                // `DNSResolverReconciliation`.
-                refreshInterceptFiles: {
-                    try refreshInterceptFiles(for: new, platform: platform)
+            // Decided, and queued on `platformWork`, in this turn: the gate
+            // state and the DNS bindings are the ones this pass read.
+            let vpnConnected = splitDNSGate.entriesWanted
+            let operation: SplitDNSEntryFileRepair.Operation = vpnConnected ? .apply : .remove
+            let resolvers = dnsManager, resolverLog = logger
+            // `applyConfigChange` restarted the forwarder if the DNS
+            // section changed, possibly onto a different port, and
+            // `reconcile` does not rewrite intercept files. Re-point them
+            // at the listeners that came back, or remove them if none did.
+            // Runs whatever the reconcile did: see
+            // `DNSResolverReconciliation`.
+            let refresh = interceptRefresh(for: new, platform: platform)
+            let place = splitDNSRepair.queue()
+            let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Observation? in
+                // The reconcile, the refresh and the residue under one lock, so no other resolver write lands between them.
+                resolvers.serialized { () -> SplitDNSEntryFileRepair.Observation? in
+                    var entryFiles: SplitDNSEntryFileRepair.Outcome?
+                    DNSResolverReconciliation.run(
+                        after: "config reload",
+                        logger: resolverLog,
+                        reconcile: {
+                            do {
+                                try resolvers.reconcile(old: old, new: new, logger: resolverLog, vpnConnected: vpnConnected)
+                                entryFiles = .succeeded(operation)
+                            } catch {
+                                entryFiles = .failed(operation, error)
+                                throw error
+                            }
+                        },
+                        refreshInterceptFiles: refresh
+                    )
+                    return entryFiles.map { SplitDNSEntryFileRepair.Observation.after($0, config: new, dnsManager: resolvers) }
                 }
-            )
-            recordSplitDNS(entryFiles, source: .configChange)
+            }
+            await recordSplitDNS(entryFiles, source: .configChange, startedAt: place)
         }
 
         // The listener endpoint is in every advertised surface; the bypass
@@ -1720,8 +1770,8 @@ extension RuntimeHost: RuntimeReconcilerHost {
     /// they land in the order the pass decided them, beside the lifecycle's
     /// own blocks, and never hold this actor (#47). What the host records
     /// after the block returns names the run it was decided under: a retry
-    /// carries that run's proxy token, and a split-DNS outcome the repair
-    /// generation it was queued at.
+    /// carries that run's proxy token, and a split-DNS outcome its place in
+    /// the repair's queue order, with the residue read beside it.
     package func perform(
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
@@ -1760,16 +1810,16 @@ extension RuntimeHost: RuntimeReconcilerHost {
             // this pass skips the config-change reconcile.
             let resolvers = dnsManager
             let vpnConnected = splitDNSGate.entriesWanted
-            let entryGeneration = splitDNSRepair.generation
             let operation: SplitDNSEntryFileRepair.Operation = vpnConnected ? .apply : .remove
-            let (outcome, applied) = await platformWork.run { () -> (SplitDNSEntryFileRepair.Outcome, Bool) in
-                // One operation: a VPN transition's write cannot land between the check and the write.
-                resolvers.serialized { () -> (SplitDNSEntryFileRepair.Outcome, Bool) in
+            let entryPlace = splitDNSRepair.queue()
+            let (observed, applied) = await platformWork.run { () -> (SplitDNSEntryFileRepair.Observation, Bool) in
+                // One operation under the manager's lock, as the lifecycle's resolver blocks take it, with its residue read in it.
+                resolvers.serialized { () -> (SplitDNSEntryFileRepair.Observation, Bool) in
                     if resolvers.isApplied(config: config, vpnConnected: vpnConnected) {
                         // The write is skipped; the record must not be. See `adoptAppliedFiles`.
                         resolvers.adoptAppliedFiles(config: config, vpnConnected: vpnConnected)
                         logger.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
-                        return (.succeeded(operation), true)
+                        return (SplitDNSEntryFileRepair.Observation.after(.succeeded(operation), config: config, dnsManager: resolvers), true)
                     }
                     var outcome = SplitDNSEntryFileRepair.Outcome.succeeded(operation)
                     let applied = attemptFlagStep("Could not apply DNS resolvers after the setting changed", logger: logger) {
@@ -1780,39 +1830,27 @@ extension RuntimeHost: RuntimeReconcilerHost {
                             throw error
                         }
                     }
-                    return (outcome, applied)
+                    return (SplitDNSEntryFileRepair.Observation.after(outcome, config: config, dnsManager: resolvers), applied)
                 }
             }
-            recordSplitDNS(outcome, source: .switchOn, startedAt: entryGeneration)
-            // A VPN transition handled while the apply was out reconciled the
-            // entry files then, possibly before the apply wrote them from the
-            // gate it was queued with; put them where the gate is now, as
-            // `applyProxySurfaces` does.
+            await recordSplitDNS(observed, source: .switchOn, startedAt: entryPlace)
+            // A VPN transition taken while the apply was out queued its own
+            // entry-file work behind it; put the files where the gate is now
+            // all the same, as `applyProxySurfaces` does.
             if splitDNSGate.entriesWanted != vpnConnected {
-                let corrected = splitDNSGate.reconcileEntryFiles(
-                    config: config,
-                    dnsManager: dnsManager,
-                    logger: logger,
-                    runtimeStarted: runtimeStarted
-                )
-                recordSplitDNS(corrected, source: .vpnTransition)
+                await reconcileEntryFiles(config: config, runtimeStarted: runtimeStarted)
             }
             return applied
         case .refreshInterceptFiles:
-            // The rule is `DNSManager.refreshInterceptFiles`, over the DNS
-            // module's bindings when the pass decided this action.
-            let resolvers = dnsManager
-            let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
-            let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
-            let refreshed = await platformWork.run { () -> Bool in
-                guard platform.manageDNSResolvers else { return true }
-                return attemptFlagStep("Could not apply intercept resolver files after the setting changed", logger: logger) {
-                    try resolvers.refreshInterceptFiles(
-                        config: config, interceptReady: interceptReady, forwarderRunning: forwarderRunning, logger: logger
-                    )
+            // Over the DNS module's bindings when the pass decided this action.
+            let refresh = interceptRefresh(for: config, platform: platform)
+            let place = splitDNSRepair.queue()
+            let refreshed = await platformWork.run {
+                attemptFlagStep("Could not apply intercept resolver files after the setting changed", logger: logger) {
+                    try refresh()
                 }
             }
-            resolverSwitchInterceptRefreshFailed = !refreshed
+            recordInterceptRefresh(failed: !refreshed, place: place)
             return refreshed
         case .clearResolvers:
             // Only what the journal names as ours. The switch is off now, so
@@ -1821,9 +1859,9 @@ extension RuntimeHost: RuntimeReconcilerHost {
             // off, so a failed one is recorded for it: a later VPN drop no
             // longer touches entry files with the switch off.
             let resolvers = dnsManager
-            let entryGeneration = splitDNSRepair.generation
-            let (cleared, failure) = await platformWork.run { () -> (Bool, String?) in
-                resolvers.serialized { () -> (Bool, String?) in
+            let entryPlace = splitDNSRepair.queue()
+            let (observed, cleared) = await platformWork.run { () -> (SplitDNSEntryFileRepair.Observation, Bool) in
+                resolvers.serialized { () -> (SplitDNSEntryFileRepair.Observation, Bool) in
                     var failure: String?
                     let cleared = attemptFlagStep("Could not clear DNS resolvers after the setting changed", logger: logger) {
                         do {
@@ -1833,17 +1871,14 @@ extension RuntimeHost: RuntimeReconcilerHost {
                             throw error
                         }
                     } && !resolvers.hasManagedState()
-                    return (cleared, failure)
+                    let outcome = SplitDNSEntryFileRepair.Outcome(
+                        operation: .remove,
+                        failure: cleared ? nil : failure ?? SplitDNSEntryFileRepair.recordedFilesRemainReason
+                    )
+                    return (SplitDNSEntryFileRepair.Observation.after(outcome, config: config, dnsManager: resolvers), cleared)
                 }
             }
-            recordSplitDNS(
-                SplitDNSEntryFileRepair.Outcome(
-                    operation: .remove,
-                    failure: cleared ? nil : failure ?? SplitDNSEntryFileRepair.recordedFilesRemainReason
-                ),
-                source: .switchOff,
-                startedAt: entryGeneration
-            )
+            await recordSplitDNS(observed, source: .switchOff, startedAt: entryPlace)
             return cleared
         case .applySystemDNS:
             // The same three steps as `startRuntime`, in the same order: the

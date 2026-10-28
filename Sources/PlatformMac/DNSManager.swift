@@ -54,11 +54,14 @@ package final class DNSManager: @unchecked Sendable {
     /// One operation at a time, as `SystemDNSManager` has had since #72. The
     /// writers record a domain in the journal and then write its file; the
     /// removers remove and then forget, and release the surface once nothing
-    /// is recorded. The hosts run the start and stop surface work on their
-    /// `PlatformWork` queue while the reconciler and the VPN gate still call
-    /// in from the main actor, so without this a `clear` could forget a
-    /// domain between an `apply`'s record and its write, leaving a file on
-    /// disk that nothing names. Recursive because the operations call one
+    /// is recorded. `RuntimeHost` runs every resolver write on its serial
+    /// `PlatformWork` queue (#47), but launch recovery's own job and direct
+    /// callers of this type still overlap it, so without this a `clear`
+    /// could forget a domain between an
+    /// `apply`'s record and its write, leaving a file on disk that nothing
+    /// names. The host also wraps an operation and the reads that judge it
+    /// (`SplitDNSEntryFileRepair.Observation`) in one `serialized` scope.
+    /// Recursive because the operations call one
     /// another (`reconcile` ends in `apply`, `apply` may `clearEntryFiles`)
     /// and because `serialized` wraps them.
     private let operations = NSRecursiveLock()

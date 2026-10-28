@@ -63,8 +63,10 @@ is preserved separately. The authorized run exited zero. This single baseline
 does not close the older continuation investigation (#118), establish a soak,
 or verify the later actor change.
 
-## Remaining prerequisites
+## Remaining at the phase-1a checkpoint
 
+The subsequent [DNS prerequisite](verification-runtime-dns-effects-2026-10-28.md)
+records the current candidate for the inline paths below.
 The control cluster remains MainActor. Inline VPN/split-DNS gate and retry writes
 can still block on the resolver lock held by physical work; this slice claims no
 fix for that contention. Push/re-apply still have their existing one-turn
