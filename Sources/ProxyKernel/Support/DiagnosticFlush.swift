@@ -12,8 +12,11 @@ package struct DiagnosticFlushPhase: Sendable {
 
     private let deadline: ContinuousClock.Instant
 
-    package init(budget: Duration = DiagnosticFlushPhase.defaultBudget) {
-        deadline = ContinuousClock.now.advanced(by: budget)
+    /// `cap` is an absolute deadline the phase may not outlast, such as a quit's one total (decision 0039). It only cuts the envelope:
+    /// a cap already passed leaves no wait, and none extends it. Writes already started are not cancelled.
+    package init(budget: Duration = DiagnosticFlushPhase.defaultBudget, cappedAt cap: ContinuousClock.Instant? = nil) {
+        let envelope = ContinuousClock.now.advanced(by: budget)
+        deadline = cap.map { min($0, envelope) } ?? envelope
     }
 
     /// The absolute deadline for the next writer: the existing per-writer cap measured from now, or the phase

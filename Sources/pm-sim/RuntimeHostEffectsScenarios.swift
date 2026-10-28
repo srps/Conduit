@@ -285,7 +285,8 @@ enum RuntimeHostEffectsScenario {
         check("the workflow host settles before its root is released", settlement == .settled)
 
         // The host's own logger drain, held at its file's open. The flush awaits it to the existing bounded wait and records the typed
-        // fact, apart from the artifacts. A flush whose cap has already passed gives the logger no fresh wait at all.
+        // fact, apart from the artifacts. A flush whose cap has already passed gives the logger, and the artifact phase after it, no
+        // fresh wait at all (decision 0039); the next ordinary flush confirms what that one skipped.
         logger.holdNextOpen()
         logger.log(.notice, "held logger witness")
         check("the logger's file open is held", logger.joinHeld())
@@ -296,6 +297,8 @@ enum RuntimeHostEffectsScenario {
         let capped = await host.flushEvents(loggerUntil: capStarted)
         check("a passed cap skips the logger drain without waiting",
               capped.logger == .skippedBudget && capStarted.duration(to: .now) < DiagnosticFlushPhase.writerWait)
+        check("a passed cap gives the artifact phase no fresh wait either",
+              capped.audit == .skippedBudget && capped.events == .skippedBudget && capped.snapshot == .skippedBudget)
         logger.release()
         // The flush drains the logger first, so it is not given the time the artifacts took to retire the timed-out wait's notify.
         let retired = await logger.joinDrained()
@@ -308,7 +311,7 @@ enum RuntimeHostEffectsScenario {
             check("both unconfirmed logger drains are typed host facts in the owned events file",
                   typed.contains(.lifecycle(.logFlushUnconfirmed(LifecycleLogFlushUnconfirmed(source: .host, outcome: .timedOut))))
                       && typed.contains(.lifecycle(.logFlushUnconfirmed(LifecycleLogFlushUnconfirmed(source: .host, outcome: .skippedBudget)))))
-            notes.append("held logger: drain timed_out at its bounded wait, passed cap skipped_budget, released drain drained; both facts persisted")
+            notes.append("held logger: drain timed_out at its bounded wait, passed cap skipped_budget for the logger and every artifact, released drain drained; both facts persisted")
         } catch {
             notes.append("the owned events file did not decode: \(error.localizedDescription)")
             check("the owned events file decodes", false)
@@ -1773,12 +1776,15 @@ enum RuntimeHostEffectsScenario {
         let pac = fakes.pac
         let gss = fakes.gss
         let terminalExits = NIOLockedValueBox(0)
+        // Warnings only, bounded, and like the discarding sink it replaces: nothing pending, so its drain is `drained` at once. It keeps
+        // the writers' refusal and flush lines, which a refused events file cannot hold, for an unconfirmed flush's note.
+        let warnings = RecordingLogSink(minLevel: .warning, capacity: 256)
 
         let host: RuntimeHost
         do {
             host = try await RuntimeHost.open(
                 stateSession: session,
-                logger: DiscardingLogSink(),
+                logger: warnings,
                 startupAllowsMissing: true,
                 startedAt: Date(timeIntervalSince1970: 1_700_000_000),
                 terminalExit: { terminalExits.withLockedValue { $0 += 1 } },
@@ -1857,6 +1863,7 @@ enum RuntimeHostEffectsScenario {
             check("the fake machine refuses an unplanned command", refusal.exitCode != 0)
             quiesced = settled == .settled && flush.allConfirmed
             notes.append("joined: startRuntime and stopRuntime returned; settle=\(settled); flushEvents allConfirmed=\(flush.allConfirmed)")
+            if !flush.allConfirmed { notes.append(unconfirmedFlushFacts(flush, warnings)) }
             notes.append("not joined: the environment drift timer (weak self; it ends at its next tick, after the host is gone)")
         } catch {
             check("the start, restart and stop exercise completed without error", false)
@@ -1865,6 +1872,7 @@ enum RuntimeHostEffectsScenario {
             await host.stopRuntime()
             let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
             let flush = await host.flushEvents()
+            if !flush.allConfirmed { notes.append(unconfirmedFlushFacts(flush, warnings)) }
             quiesced = settled == .settled && flush.allConfirmed
             assertions.append(.init("the error path settled the host and confirmed its flush", quiesced))
         }
@@ -1873,6 +1881,23 @@ enum RuntimeHostEffectsScenario {
         }
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes,
                         pinnedHost: quiesced ? nil : host)
+    }
+
+    /// An unconfirmed flush's fixed facts: each artifact outcome, both writers' counters, the destination gate's refusal codes and the
+    /// flush's own markers. A failed write's text can name a path, so only the number of those lines is kept.
+    private static func unconfirmedFlushFacts(_ flush: DiagnosticFlushReport, _ warnings: RecordingLogSink) -> String {
+        func counters(_ s: RecordWriterStatistics) -> String {
+            "written=\(s.writtenRecords) failed=\(s.failedRecords) dropped=\(s.droppedRecords) timeouts=\(s.flushTimeouts) "
+                + "pending=\(s.pendingRecords)/\(s.pendingBytes)B"
+        }
+        let lines = warnings.entries().map(\.message)
+        let fixed = lines.filter { $0.hasPrefix(RecordFileDestinationGate.eventName) || $0.hasPrefix("observability.") }
+        let failedWrites = lines.filter { $0.hasPrefix("Failed to write events.ndjson") }.count
+        return "unconfirmed flush: audit=\(flush.audit.rawValue) events=\(flush.events.rawValue) "
+            + "eventsRetry=\(flush.eventsRetry?.rawValue ?? "none") snapshot=\(flush.snapshot.rawValue) "
+            + "snapshotEvent=\(flush.snapshotEvent.rawValue); events \(counters(flush.eventsStatistics)); "
+            + "audit \(counters(flush.auditStatistics)); failed events writes logged=\(failedWrites); "
+            + "warnings kept=\(lines.count) lost=\(warnings.droppedRecords); fixed warnings=\(fixed)"
     }
 
     /// Drops this run's reference to the root, then proves the lease closed with a fresh acquisition. The scratch

@@ -989,7 +989,8 @@ package final class RuntimeHost {
     /// The readiness and shutdown flush. First the logger's own drain, awaited so the owner never blocks on it: the existing
     /// per-writer wait from now, cut to `loggerUntil`, the quit's absolute deadline when there is one. A deadline already passed
     /// waits for nothing. Its outcome is the report's `logger`, apart from `allConfirmed`. Then audit, events and the snapshot,
-    /// inside one `DiagnosticFlushPhase` (see `DiagnosticFlush`), every writer awaited. The drain's own unconfirmed fact is
+    /// inside one `DiagnosticFlushPhase` (see `DiagnosticFlush`) cut to the same deadline, every writer awaited; with none, the
+    /// phase keeps its ordinary envelope. The drain's own unconfirmed fact is
     /// recorded before the artifact flush starts, so a confirmed events flush covers it and nothing this flush records is left
     /// for the events writer after it. Lines logged by the artifact flush itself are not drained; nothing claims them.
     @discardableResult
@@ -997,7 +998,7 @@ package final class RuntimeHost {
         let loggerOutcome = await drainLogger(until: cap)
         reportWriterLoss()
         var report = await DiagnosticFlush.run(
-            phase: DiagnosticFlushPhase(),
+            phase: DiagnosticFlushPhase(cappedAt: cap),
             audit: orchestrator.auditSink,
             events: eventWriter,
             snapshot: snapshotWriter,

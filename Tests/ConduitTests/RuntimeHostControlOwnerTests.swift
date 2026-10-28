@@ -756,6 +756,30 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
                        observed.runtime.profileName)
     }
 
+    /// The quit's one total deadline bounds its diagnostic flush whole (decision 0039): the artifact phase, not only the logger drain. A
+    /// quit whose deadline has passed when its work reaches the flush gives the audit, events and snapshot writers no fresh wait, and each
+    /// says so with the existing skipped outcome, while an ordinary flush with no deadline keeps its own phase. The checks read outcomes the
+    /// flush computed, so nothing is timed.
+    @RuntimeActor func testAQuitPastItsDeadlineGivesTheArtifactFlushNoFreshWait() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        try await composed.host.startRuntime()
+        let ordinary = await composed.host.flushEvents()
+        XCTAssertEqual(ordinary.events, .drained, "with no deadline the artifact phase waits as before")
+
+        await composed.host.shutdown(reservingFlushUntil: ContinuousClock.now.advanced(by: .seconds(-1)))
+        let events = composed.host.orchestrator.eventLog.events
+        XCTAssertEqual(
+            events.last { $0.event == "observability.flush_timeout" }?.detail,
+            "auditFlushed=false eventsFlushed=false audit=skipped_budget events=skipped_budget",
+            "the quit's audit and events waits were skipped at its passed deadline"
+        )
+        XCTAssertEqual(events.last { $0.event == "observability.snapshot_flush_unconfirmed" }?.detail, "outcome=skipped_budget")
+        XCTAssertTrue(composed.harness.typedEvents().contains(.lifecycle(.logFlushUnconfirmed(
+            LifecycleLogFlushUnconfirmed(source: .host, outcome: .skippedBudget)
+        ))), "the logger drain was skipped at the same deadline")
+        XCTAssertFalse(composed.host.runtimeState().proxyIsUp, "the quit's teardown still ran")
+    }
+
     /// A preferences update through the actual client: the preferences file alone is written under its exact baseline, its safe receipt
     /// names the new baseline, nothing starts or applies, the request ID stays lookup-only, and a draft at the old baseline is refused.
     @RuntimeActor func testAPreferencesUpdateWritesOnlyThePreferencesFileAndSettlesWithItsReceipt() async throws {
@@ -1379,8 +1403,9 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
     /// The earlier update is parked in its store step, so the one wait for it finds it pending. Both declared saves are still attempted:
     /// the configuration save waits for the held input, its producer is handed the receipt the one lookup after the release found, and the
     /// preferences save, attempted though no stream reports the configuration save, flushes after that save's release. With no stream to
-    /// report the Quit, the routine keeps its caller to the end of the short total and reads the Quit completed there, so it never returns
-    /// while the host's teardown may still run.
+    /// report the Quit, the routine keeps its caller to the end of its total and reads the Quit completed there, so it never returns
+    /// while the host's teardown may still run. The total is the selected ten seconds (0039), not a shorter one the host's work could
+    /// outlast on a loaded machine; the deadline bound itself is witnessed by `testAQuitPastItsDeadlineGivesTheArtifactFlushNoFreshWait`.
     @RuntimeActor func testTheClientQuitFlushesBothDeclaredSavesWhenItsSubscriptionIsRefused() async throws {
         let files = HeldStateFileRead()
         let composed = try await compose(dnsForwarderEnabled: false, stateFiles: files)
@@ -1409,7 +1434,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         )
         let quitting = Task { [client = composed.client, editor = editor(composed)] in
             await RuntimeClientQuit.quit(
-                control: client, editor: editor, incarnation: incarnation, total: .seconds(3), priorUpdate: prior.requestID,
+                control: client, editor: editor, incarnation: incarnation, total: .seconds(10), priorUpdate: prior.requestID,
                 configuration: configuration,
                 preferences: { requestID, _ in
                     var preferences = values.preferences
@@ -1454,7 +1479,8 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
 
     /// The client quit's stream ends before the earlier update settles. Its declared save is still attempted under the same capacity wait,
     /// rebases only from the receipt the one lookup after the release reads, and is written. With the stream gone, the routine keeps its
-    /// caller to the end of the short total and reads the Quit completed there, so it never returns while the host's teardown may run.
+    /// caller to the end of its total and reads the Quit completed there, so it never returns while the host's teardown may run. The
+    /// total is the selected ten seconds (0039), as in the refused-subscription case above.
     @RuntimeActor func testTheClientQuitFlushesItsDeclaredSaveWhenItsStreamEndsEarly() async throws {
         let files = HeldStateFileRead()
         let composed = try await compose(dnsForwarderEnabled: false, stateFiles: files)
@@ -1476,7 +1502,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         )
         let quitting = Task { [client = EarlyEndingClient(inner: composed.client), editor = editor(composed)] in
             await RuntimeClientQuit.quit(
-                control: client, editor: editor, incarnation: incarnation, total: .seconds(3), priorUpdate: prior.requestID,
+                control: client, editor: editor, incarnation: incarnation, total: .seconds(10), priorUpdate: prior.requestID,
                 configuration: configuration
             )
         }
