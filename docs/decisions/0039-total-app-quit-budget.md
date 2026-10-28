@@ -100,3 +100,10 @@ Verify the selected-total actual-client probe and native AppKit path on the
 frozen activation. Real-machine cleanup timing remains due.
 
 Validation checkpoint — 2026-10-28: [native isolated Dev checks](../verification-runtime-actor-activation-2026-10-28.md) save a focused final numeric edit while the proxy is running, exit and show it on relaunch. UI-tool elapsed is not a precise worst-case deadline measurement. Real helper/machine timing remains due, so validation stays pending.
+
+
+### Artifact-phase deadline correction (2026-10-28)
+
+The [correction checkpoint](../verification-runtime-quit-deadline-2026-10-28.md) records 66c411d implementing this existing policy: the logger cap now also clips the one artifact phase. Ordinary nil-cap flushes keep six seconds; started physical writes retain authority until completion or process exit. The prior implementation and reviews clipped only the logger despite stronger checkpoint wording. Causal unit, actual-host and simulator guards fail when propagation/clamping is removed and pass when restored. The selected total and wire policy are unchanged.
+
+The final local workflow passes all 41 checks (3,770 tests / four skips / 103 scenarios), focused/optimized guards and seven production Release trials/162 checks. An earlier unconfirmed ordinary simulator flush remains recorded without a proven cause; diagnostic-only bounded evidence was added, with all assertions and budgets intact. Final hosted and real-machine validation remain pending.

@@ -2,6 +2,8 @@
 
 The app and daemon compose one RuntimeHost. AppState holds framed clients, drafts and UI policy; its replaced runtime/save paths remain deleted. The complete control-owner cluster runs on RuntimeActor. Source and resource reviews accept the implementation, and exact-head hosted CI passes on the test-maintenance head. This is an unreleased candidate: CI on #258's final release head, applicable real-machine acceptance and versioned packaging remain gates.
 
+The [subsequent Quit correction](verification-runtime-quit-deadline-2026-10-28.md) is the current local source checkpoint: 66c411d passes 3,770 tests / four skips and 103 scenarios. It fixes artifact deadline propagation and explicit local model isolation; the earlier f3 measurements below remain qualified to unchanged paths, not the entire corrected product. Final hosted and real-machine acceptance remain.
+
 ## Architecture and boundaries
 
 RuntimeActor is a package global actor in ProxyKernel's abstractions. It supplies isolation; each host owns its resources explicitly. Orchestrator, lifecycle, recovery, lanes, reconciler, workflow/store, service core and command coordination share it. UI/AppKit and client presentation stay MainActor, NIO stays on its event loops, and blocking effects use the injected PlatformWork or bounded diagnostic writers.
@@ -10,7 +12,7 @@ RuntimeActor is a package global actor in ProxyKernel's abstractions. It supplie
 
 Diagnostic writers retain the root session through one private destination-guard wrapper. Queued physical writes therefore keep authority until they end or the process exits. No new lease protocol, queue or budget is introduced. This implements decision 0017 rather than changing its policy.
 
-## Final product evidence
+## RuntimeActor checkpoint evidence (f3 product sources)
 
 Product source [`f3abd5f7`](https://github.com/srps/Conduit/commit/f3abd5f710ed683a2f73859e0429d6e5c807e9f9) is identified by the [commit linkage](experiments/runtime-actor-activation/capture-source-commit.json), [snapshot](experiments/runtime-actor-activation/capture-snapshot.json), [author manifest](experiments/runtime-actor-activation/capture-author.json) and [independent source review](experiments/runtime-actor-activation/capture-source-review.md). The stable source/test/script fingerprint is `dd9d1b25522ca6a67450978b2b602cd7628a75c3b9ed1800a6c34f8be107bea7`.
 

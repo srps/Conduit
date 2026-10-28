@@ -1,0 +1,24 @@
+{
+  "controls": [
+    {
+      "name": "without-host-cap",
+      "exit": 1,
+      "seconds": 12.7
+    },
+    {
+      "name": "without-host-cap-sim",
+      "exit": 1,
+      "seconds": 15.18
+    },
+    {
+      "name": "without-phase-cap",
+      "exit": 1,
+      "seconds": 10.07
+    }
+  ],
+  "restored": true,
+  "original_sha256": {
+    "Sources/ConduitRuntime/RuntimeHost.swift": "32899ac91d52881d4880ee61b84a8e65e9f90ee241c4e42a747ceb7830461f3e",
+    "Sources/ProxyKernel/Support/DiagnosticFlush.swift": "50d456a3259513f5399347b9be33fa97cea42b78d52d04296c8b2e5b4b50b817"
+  }
+}

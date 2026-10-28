@@ -1,0 +1,6 @@
+{
+  "source_commit": "66c411d4e91823db8eeb255d55d615f22b4e6f82",
+  "verified_source_sha256": "f6297e557e25684dba974c631ae0dfbb0b42530cb900574b30310aae1be5378d",
+  "matches_completed_r2_full_workflow": true,
+  "scope": "Fingerprint covers relevant Source/Tests/scripts/workflows/Resources/Package/VERSION content; evidence prose was added afterwards."
+}

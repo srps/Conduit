@@ -38,7 +38,7 @@ publication.
 | AppState, isolation and release | The single AppState activation (0031) and RuntimeActor isolation are implemented in draft PR #258. The collection profile (0038), 64 KiB ordinary and 8 MiB private frames, production resource and fairness measurements, native Dev checks and exact-head hosted CI pass. | CI on #258's final release head and its merge to main, applicable real-machine acceptance, then release-signed 0.6.0 packaging and publication. |
 
 The [RuntimeActor activation verification](./docs/verification-runtime-actor-activation-2026-10-28.md)
-is the current evidence. Product source `f3abd5f` passes all 41 local checks
+records the RuntimeActor evidence. The [Quit deadline correction](./docs/verification-runtime-quit-deadline-2026-10-28.md) is the current local checkpoint: all 41 checks pass (3,770 tests / four skips / 103 scenarios), with seven affected production Release trials/162 checks. Final hosted and normal real-machine acceptance remain. Product source `f3abd5f` passes all 41 local checks
 (3,766 tests, four existing skips, 103 simulator scenarios), the production
 Release profile, optimized fairness and native Dev checks. Test-maintenance head
 `7d85213` passes all 41 checks (3,768 tests, four existing skips, 103 scenarios)

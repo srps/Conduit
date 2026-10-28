@@ -1,0 +1,25 @@
+{
+  "checks": [
+    {
+      "name": "scoped-strict",
+      "exit": 0,
+      "seconds": 5.9
+    },
+    {
+      "name": "restored-sim",
+      "exit": 0,
+      "seconds": 17.56
+    },
+    {
+      "name": "optimized-build-tests",
+      "exit": 0,
+      "seconds": 215.89
+    },
+    {
+      "name": "optimized-targeted",
+      "exit": 0,
+      "seconds": 69.56
+    }
+  ],
+  "stable": true
+}

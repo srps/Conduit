@@ -1,0 +1,17 @@
+{
+  "head": "d038381fb63b8845d42e1aa65a47379415380fd1",
+  "run": 40710786307,
+  "job": 122895172505,
+  "standard_suite": "success",
+  "optimized_build": "failure",
+  "compiler": "Swift6.3.3",
+  "diagnostics": [
+    "2026-10-28T15:12:55.6180900Z /Users/runner/work/Conduit/Conduit/Tests/ConduitTests/ConfigurationStoreTests.swift:1261:21: error: sending 'external' risks causing data races [#SendingRisksDataRace]",
+    "2026-10-28T15:12:55.6189410Z      |                     |- error: sending 'external' risks causing data races [#SendingRisksDataRace]",
+    "2026-10-28T15:12:55.6192530Z /Users/runner/work/Conduit/Conduit/Tests/ConduitTests/ConfigurationStoreTests.swift:1261:39: error: sending 'runtimeVariant' risks causing data races [#SendingRisksDataRace]",
+    "2026-10-28T15:12:55.6195920Z      |                                       |- error: sending 'runtimeVariant' risks causing data races [#SendingRisksDataRace]",
+    "2026-10-28T15:12:55.6199360Z /Users/runner/work/Conduit/Conduit/Tests/ConduitTests/ConfigurationStoreTests.swift:1261:61: error: sending 'externalShows' risks causing data races [#SendingRisksDataRace]",
+    "2026-10-28T15:12:55.6202600Z      |                                                             |- error: sending 'externalShows' risks causing data races [#SendingRisksDataRace]"
+  ],
+  "scope": "Bounded connected-tool log excerpt; full compiler log was not downloaded for this job."
+}

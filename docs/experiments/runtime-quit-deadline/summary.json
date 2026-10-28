@@ -1,0 +1,34 @@
+{
+  "source_commit": "66c411d4e91823db8eeb255d55d615f22b4e6f82",
+  "full_workflow": {
+    "checks": 41,
+    "tests": 3770,
+    "skips": 4,
+    "scenarios": 103,
+    "stable": true,
+    "source_sha256": "f6297e557e25684dba974c631ae0dfbb0b42530cb900574b30310aae1be5378d"
+  },
+  "normal_focused": {
+    "tests": 115,
+    "exit": 0
+  },
+  "scoped_strict": {
+    "tests": 2,
+    "exit": 0
+  },
+  "optimized": {
+    "tests": 148,
+    "exit": 0
+  },
+  "production_profile": {
+    "trials": 7,
+    "checks": 162,
+    "all_passed": true,
+    "source_objects_stable": true,
+    "scratch_removed": 7,
+    "client_quit_ms": 929.302791,
+    "client_quit_total_ms": 10000
+  },
+  "r1_full_sim_failure": "Retained, ordinary nil flush unconfirmed; exact failure mechanism not classified. R2 adds bounded diagnostics without changing assertions, waits or budgets. R2 full103 scenarios pass; this is non-reproduction, not a diagnosis.",
+  "strict_scope_correction": "Overbroad run included old deliberately blocking timer fixtures:16tests8assertionfailures. Normal full diagnostic class passes. Corrected strict scope is only the2new guards and passes."
+}
