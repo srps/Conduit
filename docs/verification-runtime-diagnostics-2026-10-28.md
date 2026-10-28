@@ -115,3 +115,10 @@ framed clients over explicit fakes and owned scratch state. Encoded pending byte
 are custody limits, not preallocated or measured app RAM. Native UI history,
 AppKit final-edit/Quit and real-helper timing remain separate. These changes do
 not complete the whole RuntimeActor move or establish release readiness.
+
+[Commit provenance](experiments/runtime-diagnostics/commit-provenance.json) links
+Source to `464e316338a06013289f578236c2e5c519d96843` and the passing workflow
+fingerprint. [Snapshot/Git comparison](experiments/runtime-diagnostics/snapshot-commit-link.json)
+checks included review files against actual committed blobs; omitted build
+resources are listed with hashes. Subsequent evidence-only updates do not change
+that tested Source.
