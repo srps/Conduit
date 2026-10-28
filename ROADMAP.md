@@ -178,8 +178,8 @@ not a requirement to finish every event or property test before extraction:
    and verify DNS, tunnels and proxy in reviewable host increments, then switch
    AppState once and delete its replaced runtime/save paths together (0031).
    The activation is implemented in draft PR #258, with local full workflow and
-   exact-head hosted checks passed. Native acceptance remains pending; it is not
-   released. AppState retains editor drafts and UI responsibilities. Migrate the event
+   exact-head hosted checks passed. Native acceptance and correction of the consumed
+   app logger drain remain merge gates; it is not released. AppState retains editor drafts and UI responsibilities. Migrate the event
    families touched by each slice. Bring
    [#183](https://github.com/srps/Conduit/issues/183)'s independent models,
    bounded exhaustive exploration and seeded tests alongside lifecycle,
@@ -196,8 +196,12 @@ not a requirement to finish every event or property test before extraction:
    operations and bounded total termination. Reconciler flag effects now use the
    existing PlatformWork queue, with Stop quiescence and actual-client witnesses
    ([prerequisite checkpoint](./docs/verification-runtime-actor-prerequisites-2026-10-28.md)).
-   Remaining split-DNS/helper/diagnostic effects and the whole isolation move are
-   still in progress. Bound work per turn and prove status/Stop
+   The split-DNS gate/file prerequisite also passes independent review and all
+   41 checks (3,710 tests, four existing skips, 103 simulator records), with
+   [test-first regression evidence](./docs/verification-runtime-dns-effects-2026-10-28.md).
+   [PR #259](https://github.com/srps/Conduit/pull/259) carries these verified
+   prerequisites. Relay/helper/diagnostic effects and the whole isolation move
+   remain in progress. Bound work per turn and prove status/Stop
    responsiveness under observer load; diagnostics cannot gate control progress.
 
 **Stage 5 — strengthen the shared implementation (separately scoped follow-ups).**
