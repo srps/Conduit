@@ -789,6 +789,8 @@ final class RuntimeClientCodecTests: XCTestCase {
             .coalesced(operation: .proxyStart, joined: 2),
             .terminationDrainExpired(deadlineMilliseconds: 500),
             .versionChanged(from: "1.0", to: "1.1"),
+            .logFlushUnconfirmed(source: .host, outcome: .timedOut),
+            .logFlushUnconfirmed(source: .app, outcome: .skippedBudget),
         ]
         for lifecycle in cases {
             let typed = ControlTypedRuntimeEvent.lifecycle(lifecycle)
@@ -842,6 +844,22 @@ final class RuntimeClientCodecTests: XCTestCase {
             guard case .unknown(let display) = try decodeRecord(json) else { return XCTFail("an unknown type must be a display record") }
             XCTAssertTrue(display.event.hasSuffix(".future_thing"))
         }
+    }
+
+    /// The unconfirmed logger drain is a known type to this build, so its closed sets are enforced: a `drained` or an unknown source is a
+    /// malformed record, not a display one. A newer lifecycle type beside it stays informational.
+    func testAnUnconfirmedLogFlushIsKnownAndItsClosedSetsAreEnforced() throws {
+        let known = #"{"timestamp":0,"kind":"lifecycle","event":"lifecycle.log_flush_unconfirmed","detail":"source=app outcome=busy","typed":{"family":"lifecycle","lifecycle":{"type":"log_flush_unconfirmed","source":"app","outcome":"busy"}}}"#
+        guard case .known(let event) = try decodeRecord(known) else { return XCTFail("a known type decodes as known") }
+        XCTAssertEqual(event.typed, .lifecycle(.logFlushUnconfirmed(source: .app, outcome: .busy)))
+        for (source, outcome) in [("host", "drained"), ("helper", "busy")] {
+            XCTAssertThrowsError(try decodeRecord(
+                #"{"timestamp":0,"kind":"lifecycle","event":"lifecycle.log_flush_unconfirmed","detail":"source=\#(source) outcome=\#(outcome)","typed":{"family":"lifecycle","lifecycle":{"type":"log_flush_unconfirmed","source":"\#(source)","outcome":"\#(outcome)"}}}"#
+            ), "\(source) \(outcome)")
+        }
+        let newer = #"{"timestamp":0,"kind":"lifecycle","event":"lifecycle.log_flush_retried","detail":"later","typed":{"family":"lifecycle","lifecycle":{"type":"log_flush_retried","source":"host"}}}"#
+        guard case .unknown(let display) = try decodeRecord(newer) else { return XCTFail("a newer type stays a display record") }
+        XCTAssertEqual(display.event, "lifecycle.log_flush_retried")
     }
 
     func testAnEventWithNoTypedValueIsTheKnownV1Layout() throws {

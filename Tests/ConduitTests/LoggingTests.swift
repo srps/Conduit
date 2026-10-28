@@ -143,12 +143,134 @@ final class LoggingTests: XCTestCase {
         store.logFileURL = logFile
         store.log(.info, "file-logged-message")
 
-        try await Task.sleep(for: .milliseconds(200))
+        let drained = await store.drain(until: deadline(in: 5))
+        XCTAssertEqual(drained, .drained, "the admitted line left the file writer's queue")
 
         store.logFileURL = nil
 
         let contents = try String(contentsOf: logFile, encoding: .utf8)
         XCTAssertTrue(contents.contains("file-logged-message"))
+    }
+
+    // MARK: - Physical outputs off MainActor
+
+    private func scratchLog(_ name: String) -> URL {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ConduitLogTest-\(UUID().uuidString)")
+        addTeardownBlock { removeScratch([directory]) }
+        return directory.appendingPathComponent(name)
+    }
+
+    /// The bounded join in a synchronous function, so a test can park the main thread on it: the compiler rejects the wait inside
+    /// async code.
+    private static func parked(_ signal: DispatchSemaphore) -> DispatchTimeoutResult {
+        signal.wait(timeout: .now() + 10)
+    }
+
+    /// A burst from off main while the main thread is parked. The file takes every line and drains without main; the UI history is
+    /// handed off through one bounded buffer and one scheduled drain, and shows the newest lines once main is free. What did not fit
+    /// was evicted from the UI history only: no physical record was lost.
+    @MainActor func testABurstWhileMainIsParkedReachesTheFileAndOneDrainBringsTheNewestHistory() async throws {
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
+        store.minBufferedLevel = .info
+        let logFile = scratchLog("burst.log")
+        store.logFileURL = logFile
+        let count = 3_000
+        let finished = DispatchSemaphore(value: 0)
+        let fileDrained = NIOLockedValueBox(false)
+        DispatchQueue.global().async {
+            for index in 0..<count { store.log(.info, "burst \(index)") }
+            fileDrained.withLockedValue { $0 = store.flushFileLog(timeout: 5) }
+            finished.signal()
+        }
+        XCTAssertEqual(Self.parked(finished), .success, "the burst and its file drain finished while main was parked")
+        XCTAssertTrue(fileDrained.withLockedValue { $0 }, "the physical file drained without the main thread")
+        XCTAssertTrue(store.entries.isEmpty, "no history reached main while it was parked")
+        XCTAssertEqual(store.historyDrainsScheduled, 1, "one scheduled drain for the whole burst")
+
+        for _ in 0..<5_000 where store.entries.last?.message != "burst \(count - 1)" {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(store.entries.last?.message, "burst \(count - 1)", "the newest history arrived once main was free")
+        XCTAssertTrue((2_000...2_256).contains(store.entries.count), "bounded like the ring: \(store.entries.count)")
+        XCTAssertEqual(store.historyEvicted, count - store.entries.count, "the rest was UI history evicted, counted apart")
+        let lines = try String(contentsOf: logFile, encoding: .utf8).split(separator: "\n").filter { $0.contains("burst ") }
+        XCTAssertEqual(lines.count, count, "every line reached the file")
+        XCTAssertEqual(store.statistics.droppedRecords, 0, "UI eviction is not record loss")
+        XCTAssertEqual(store.statistics.failedRecords, 0)
+        store.logFileURL = nil
+    }
+
+    /// An entry still in the hand-off is appended before the next main-thread entry, so the history keeps emission order, and a
+    /// main-thread caller still reads its own entry right after logging it.
+    @MainActor func testAnOffMainEntryStillHandedOffPrecedesTheNextMainEntry() {
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
+        store.minBufferedLevel = .info
+        let logged = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            store.log(.info, "off main first")
+            logged.signal()
+        }
+        XCTAssertEqual(Self.parked(logged), .success)
+        store.log(.info, "main second")
+        XCTAssertEqual(store.entries.map(\.message), ["off main first", "main second"])
+    }
+
+    /// A wait registered on the file writer before a Settings toggle times out while the toggle is closing that writer. It is counted
+    /// once, by the store, before and after the swap, and the closed writer's own count of it is not added again. The held line is
+    /// written by the close and folded in, so no counter goes back.
+    @MainActor func testATimeoutAcrossAToggleIsCountedOnceAndNoCounterGoesBack() async throws {
+        let held = HeldDestinationGuard(holds: 1)
+        let store = AppLogStore(destinationGuard: held, eventLog: RuntimeEventLog())
+        store.minBufferedLevel = .info
+        store.logFileURL = scratchLog("first.log")
+        // `.info` stays off stderr, so only the file counts these lines.
+        store.log(.info, "held line")
+        XCTAssertEqual(Self.parked(held.entered), .success, "the file's open is held")
+        let before = store.statistics
+
+        let timedOut = DispatchSemaphore(value: 0)
+        let wait = Task.detached {
+            let outcome = await store.drain(until: deadline(in: 0.3))
+            timedOut.signal()
+            return outcome
+        }
+        DispatchQueue.global().async {
+            _ = timedOut.wait(timeout: .now() + 10)
+            held.release()
+        }
+        // The close blocks here until the held write ends, which is after the wait timed out.
+        store.logFileURL = scratchLog("second.log")
+        let outcome = await wait.value
+        XCTAssertEqual(outcome, .timedOut)
+        let after = store.statistics
+        XCTAssertEqual(after.flushTimeouts, before.flushTimeouts + 1, "the late timeout is counted once, across the swap")
+        XCTAssertEqual(after.writtenRecords, before.writtenRecords + 1, "the close wrote the held line, and it was folded in")
+        XCTAssertEqual(after.droppedRecords, before.droppedRecords)
+
+        store.log(.info, "next line")
+        let drained = await store.drain(until: deadline(in: 5))
+        XCTAssertEqual(drained, .drained)
+        let last = store.statistics
+        XCTAssertEqual(last.flushTimeouts, after.flushTimeouts)
+        XCTAssertEqual(last.writtenRecords, after.writtenRecords + 1)
+        store.logFileURL = nil
+    }
+
+    /// A sink that cannot say whether its lines left its queues answers `unavailable`; the stock sinks with nothing pending answer
+    /// `drained`, and the store tries the file and stderr both.
+    func testAnUnknownSinkCannotClaimADrainAndTheStockSinksAnswerTheirOwn() async {
+        struct Unknown: LogSink {
+            var minLevel: LogLevel { .debug }
+            func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {}
+        }
+        let unknown = await Unknown().drain(until: deadline(in: 1))
+        XCTAssertEqual(unknown, .unavailable)
+        let discarding = await DiscardingLogSink().drain(until: deadline(in: 1))
+        XCTAssertEqual(discarding, .drained)
+        let recording = await RecordingLogSink().drain(until: deadline(in: 1))
+        XCTAssertEqual(recording, .drained)
+        let console = await ConsoleLogSink().drain(until: deadline(in: 5))
+        XCTAssertEqual(console, .drained)
     }
 
     func testLogLevelComparable() {

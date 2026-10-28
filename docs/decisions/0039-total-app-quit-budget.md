@@ -81,6 +81,16 @@ in 974.47 ms with fake effects, verified final saves and confirmed cleanup. Nati
 acceptance remains pending because UI inspection is blocked by the locked Mac. The historical
 thirty-second probe does not establish the shipping composition.
 
+
+The [diagnostic prerequisite](../verification-runtime-diagnostics-2026-10-28.md)
+adds the app's final log drain under that same deadline. Actual AppState harness
+tests hold the protected log destination: a four-second injected budget returns
+in about 2.26 seconds with an honest host timeout/app busy outcome; a one-second
+budget returns in about 1.03 seconds with skipped-budget tail work. These are
+fake-effect correctness observations, not shipping real-helper timing. The host
+can retain diagnostic custody after logical caller expiry; it grants no fresh
+app wait and exit may cut unconfirmed output short.
+
 Does not prove: native AppKit termination timing, real-helper teardown latency,
 or release readiness. Those checks remain separate from focused fake-effect tests.
 

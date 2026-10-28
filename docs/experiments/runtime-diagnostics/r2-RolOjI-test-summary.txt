@@ -1,0 +1,5 @@
+Test Case '-[ConduitTests.RuntimeHostControlOwnerTests testAHeldLoggerDrainLeavesStatusReadsAndStopAdmissionAnswered]' started.
+Test Case '-[ConduitTests.RuntimeHostControlOwnerTests testAHeldLoggerDrainLeavesStatusReadsAndStopAdmissionAnswered]' passed (2.095 seconds).
+	 Executed 1 test, with 0 failures (0 unexpected) in 2.095 (2.095) seconds
+	 Executed 1 test, with 0 failures (0 unexpected) in 2.095 (2.095) seconds
+	 Executed 1 test, with 0 failures (0 unexpected) in 2.095 (2.102) seconds

@@ -106,6 +106,35 @@ package enum LifecycleEventName: String, Sendable, CaseIterable {
     case terminationDrainExpired = "lifecycle.termination_drain_expired"
     case versionChanged = "lifecycle.version_changed"
     case moduleSettled = "lifecycle.module_settled"
+    case logFlushUnconfirmed = "lifecycle.log_flush_unconfirmed"
+}
+
+/// Whose final logger drain went unconfirmed: the runtime host's diagnostic flush, or the app's own Quit tail.
+package enum LifecycleLogFlushSource: String, Codable, Sendable, Equatable, CaseIterable {
+    case host
+    case app
+}
+
+/// How a logger drain that did not confirm its lines ended. There is no `drained`: a drained logger records nothing.
+package enum LifecycleLogFlushOutcome: String, Codable, Sendable, Equatable, CaseIterable {
+    case timedOut = "timed_out"
+    case busy
+    case skippedBudget = "skipped_budget"
+    case cancelled
+    case unavailable
+}
+
+/// `lifecycle.log_flush_unconfirmed`: a bounded logger drain at a readiness, shutdown or Quit ended without confirming
+/// that the lines handed to the logger left its queues. Neither this event nor its derived line is claimed persisted, and
+/// nothing waits after it.
+package struct LifecycleLogFlushUnconfirmed: Equatable, Sendable {
+    package let source: LifecycleLogFlushSource
+    package let outcome: LifecycleLogFlushOutcome
+
+    package init(source: LifecycleLogFlushSource, outcome: LifecycleLogFlushOutcome) {
+        self.source = source
+        self.outcome = outcome
+    }
 }
 
 /// `lifecycle.superseded`: an operation stopped after its last suspension.
@@ -239,6 +268,7 @@ package enum LifecycleEvent: Equatable, Sendable {
     case terminationDrainExpired(LifecycleTerminationDrainExpired)
     case versionChanged(LifecycleVersionChanged)
     case moduleSettled(LifecycleModuleSettled)
+    case logFlushUnconfirmed(LifecycleLogFlushUnconfirmed)
 
     /// The stable event name.
     package var name: String {
@@ -248,6 +278,7 @@ package enum LifecycleEvent: Equatable, Sendable {
         case .terminationDrainExpired: LifecycleEventName.terminationDrainExpired.rawValue
         case .versionChanged: LifecycleEventName.versionChanged.rawValue
         case .moduleSettled: LifecycleEventName.moduleSettled.rawValue
+        case .logFlushUnconfirmed: LifecycleEventName.logFlushUnconfirmed.rawValue
         }
     }
 
@@ -264,6 +295,8 @@ package enum LifecycleEvent: Equatable, Sendable {
             "from=\(event.from) to=\(event.to)"
         case .moduleSettled(let event):
             "module=\(event.settlement.module.rawValue) source=\(event.settlement.source) outcome=\(event.settlement.outcome) group=\(event.group)"
+        case .logFlushUnconfirmed(let event):
+            "source=\(event.source.rawValue) outcome=\(event.outcome.rawValue)"
         }
     }
 }
@@ -279,6 +312,7 @@ extension LifecycleEvent: Codable {
         case terminationDrainExpired = "termination_drain_expired"
         case versionChanged = "version_changed"
         case moduleSettled = "module_settled"
+        case logFlushUnconfirmed = "log_flush_unconfirmed"
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -359,6 +393,12 @@ extension LifecycleEvent: Codable {
                 )
             }
             self = .moduleSettled(LifecycleModuleSettled(settlement: settlement, group: group))
+        case .logFlushUnconfirmed:
+            // Both fields are closed sets, so a `drained` outcome or an unknown source throws here.
+            self = .logFlushUnconfirmed(LifecycleLogFlushUnconfirmed(
+                source: try container.decode(LifecycleLogFlushSource.self, forKey: .source),
+                outcome: try container.decode(LifecycleLogFlushOutcome.self, forKey: .outcome)
+            ))
         }
     }
 
@@ -419,6 +459,10 @@ extension LifecycleEvent: Codable {
             try container.encode(event.settlement.source, forKey: .source)
             try container.encode(event.settlement.outcome, forKey: .outcome)
             try container.encode(event.group, forKey: .group)
+        case .logFlushUnconfirmed(let event):
+            try container.encode(WireType.logFlushUnconfirmed, forKey: .type)
+            try container.encode(event.source, forKey: .source)
+            try container.encode(event.outcome, forKey: .outcome)
         }
     }
 }

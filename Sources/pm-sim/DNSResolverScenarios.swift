@@ -481,6 +481,9 @@ private final class RecordingConsoleLogSink: LogSink, @unchecked Sendable {
         self.console = ConsoleLogSink(minLevel: minLevel)
     }
 
+    /// Retention is synchronous, so only the console can have lines pending.
+    func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome { await console.drain(until: deadline) }
+
     func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
         stored.withLockedValue { $0.append(Entry(level: level, message: message)) }
         guard level >= console.minLevel else { return }

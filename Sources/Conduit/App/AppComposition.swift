@@ -13,6 +13,8 @@ import ProxyPAC
 struct AppComposition {
     /// The host's machine effects.
     let effects: RuntimeHostEffects
+    /// What the app's file log is judged by, over the authoritative protected-destination guard.
+    let appLogGuard: AppLogGuardEffect
     /// Install and uninstall from Settings. The helper's status is the host's preflight reading.
     let helperLifecycle: any HelperLifecycleManaging
     /// Where Settings saves and clears the proxy password. The same store the host's effects read.
@@ -28,6 +30,16 @@ struct AppComposition {
     let launchOverrides: AppLaunchOverrides
     let timing: AppTiming
     let hostSchedules: AppHostSchedules
+}
+
+/// Wraps the authoritative destination guard the app's file log is built with: the one `diagnosticDestinationGuard(for:
+/// .appLog, …)` maps from the held state root. A wrapper must delegate every admission to it, so it can add a wait but
+/// never admit what the authoritative guard refuses. Production and the dev instance name `.identity`; the harness names
+/// a delegating hold, so a scenario can hold the app's own final drain.
+struct AppLogGuardEffect: Sendable {
+    let wrap: @Sendable (any RecordFileDestinationGuarding) -> any RecordFileDestinationGuarding
+
+    static let identity = AppLogGuardEffect { $0 }
 }
 
 /// The app's own waits. Production values by default; a harness shortens the one a scenario waits on.
@@ -123,6 +135,7 @@ extension AppComposition {
                 resolverDirectory: "/etc/resolver",
                 stateFiles: StateFileAccess.operatingSystem()
             ),
+            appLogGuard: .identity,
             helperLifecycle: HelperToolPrivilegeClient(),
             credentialStore: KeychainStore(),
             loginItemManager: LoginItemManager(),

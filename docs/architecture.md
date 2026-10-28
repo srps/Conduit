@@ -397,9 +397,9 @@ The popover is shown in a clear `NSPanel` hosting `StatusBarView`, presented fro
 `Sources/pm-proxy/PMProxy.swift` is the `PlatformMac`-free equivalent. Same orchestrator, different wiring:
 
 - `InMemoryCredentialProvider()` instead of `CredentialManager` — empty store, every credential lookup returns `nil`, auth handshakes fall back to Kerberos (which is the healthy path on a Mac with a current TGT from `kinit`)
-- `ConsoleLogSink(minLevel:)` instead of `AppLogStore` — synchronous stderr writes, no MainActor pressure
+- `ConsoleLogSink(minLevel:)` instead of `AppLogStore` — bounded asynchronous stderr output, independent of UI history
 - `CFPACEvaluator()` injected as `pacEvaluator` (pm-proxy links `ProxyPAC`)
-- No `PrivilegeClient` — privileged operations (`applyDNS`, port 53 relay) throw `PrivilegeClientError.executionFailed` and the kernel downgrades to an info log. The `--no-system-*` flags are implicit: `pm-proxy` cannot write `/etc/resolver`, cannot set system DNS, cannot install login items, cannot send user notifications. `otool -L .build/debug/pm-proxy` shows no linkage against `Security.framework`, `SystemConfiguration.framework`, `UserNotifications.framework`, or `ServiceManagement.framework`.
+- No privileged relay command is injected; the kernel reports that the relay is unavailable without calling a helper. The `--no-system-*` flags are implicit: `pm-proxy` cannot write `/etc/resolver`, cannot set system DNS, cannot install login items, cannot send user notifications. `otool -L .build/debug/pm-proxy` shows no linkage against `Security.framework`, `SystemConfiguration.framework`, `UserNotifications.framework`, or `ServiceManagement.framework`.
 - NDJSON status writer — emits a `ready` event after successful bind; periodic snapshots when `--status-interval` is set.
 
 The package graph keeps these platform dependencies out of pm-proxy; the kernel import fence checks its narrower allowlist.

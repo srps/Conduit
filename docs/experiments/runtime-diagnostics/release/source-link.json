@@ -1,0 +1,28 @@
+{
+  "workflow_source_sha256": "8fb4376aaa58a1d14b631b4c091c9d3a6de93fa732f487a27ac0e1ba496c8896",
+  "release_runner_product_fingerprint": "d7d198de316a9b2971bce9f3d2936b5803f3af438b345084111a34b71104d298",
+  "current_product_bytes_match_runner_before_and_after": true,
+  "groups": [
+    {
+      "directory": "results",
+      "trials": 6,
+      "passed": true
+    },
+    {
+      "directory": "pressure-1",
+      "trials": 1,
+      "passed": true
+    },
+    {
+      "directory": "pressure-2",
+      "trials": 1,
+      "passed": true
+    },
+    {
+      "directory": "pressure-3",
+      "trials": 1,
+      "passed": true
+    }
+  ],
+  "note": "Workflow and runner scopes differ; both matched this frozen worktree before commit. Optimized-test measurements may subsequently rebuild objects with testability; Release objects were stable during these runs."
+}

@@ -1,0 +1,6 @@
+Test Case '-[ConduitTests.RuntimeHostControlOwnerTests testAHeldLoggerDrainLeavesStatusReadsAndStopAdmissionAnswered]' started.
+/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:2102: error: -[ConduitTests.RuntimeHostControlOwnerTests testAHeldLoggerDrainLeavesStatusReadsAndStopAdmissionAnswered] : XCTUnwrap failed: expected non-nil value of type "Instant" - the host entered its logger drain (synchronous flushes: 1)
+Test Case '-[ConduitTests.RuntimeHostControlOwnerTests testAHeldLoggerDrainLeavesStatusReadsAndStopAdmissionAnswered]' failed (14.212 seconds).
+	 Executed 1 test, with 1 failure (0 unexpected) in 14.212 (14.213) seconds
+	 Executed 1 test, with 1 failure (0 unexpected) in 14.212 (14.213) seconds
+	 Executed 1 test, with 1 failure (0 unexpected) in 14.212 (14.219) seconds

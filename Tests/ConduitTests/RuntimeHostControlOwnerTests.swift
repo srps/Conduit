@@ -2,6 +2,7 @@
 import Darwin
 import XCTest
 import ConduitShared
+@testable import Conduit
 @testable import ConduitRuntime
 @testable import PlatformMac
 @testable import ProxyKernel
@@ -81,6 +82,40 @@ private struct EarlyEndingClient: RuntimeClient {
 fileprivate extension PrivateEditorClient {
     func submit(_ request: PrivateConfigurationRequest, deadline: RuntimeDeadline) async throws -> ControlAdmission {
         try await submit(requestID: request.requestID, deadline: deadline) { request }
+    }
+}
+
+/// The host's logger in the held-drain test: it forwards every call to the app's log store, and records the host's synchronous flushes
+/// and the moment the host first enters an asynchronous drain, so the test acts only once the host's logger wait has actually begun.
+private final class DrainEntryWitness: LogSink, @unchecked Sendable {
+    private let base: any LogSink
+    private let lock = NSLock()
+    private var flushes = 0
+    private var drainEntered: ContinuousClock.Instant?
+    private var drainsReturned = 0
+
+    init(_ base: any LogSink) { self.base = base }
+
+    var minLevel: LogLevel { base.minLevel }
+    var statistics: RecordWriterStatistics { base.statistics }
+    var state: (flushes: Int, drainEntered: ContinuousClock.Instant?, drainsReturned: Int) {
+        lock.withLock { (flushes, drainEntered, drainsReturned) }
+    }
+
+    func flush(timeout: TimeInterval) -> Bool {
+        lock.withLock { flushes += 1 }
+        return base.flush(timeout: timeout)
+    }
+
+    func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome {
+        lock.withLock { if drainEntered == nil { drainEntered = .now } }
+        let outcome = await base.drain(until: deadline)
+        lock.withLock { drainsReturned += 1 }
+        return outcome
+    }
+
+    func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
+        base.logImpl(level, message, category: category)
     }
 }
 
@@ -2021,6 +2056,66 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         composed.host.serviceFault(.snapshotOverBound)
         let reports = composed.host.orchestrator.eventLog.events.filter { $0.typed == .runtimeService(.fault(.snapshotOverBound)) }
         XCTAssertEqual(reports.count, 2)
+    }
+
+    // MARK: - Logger drain
+
+    /// The host's logger is the app's log store over a file whose open is held in its guard, seen through a forwarding witness that records
+    /// when the host enters its logger drain. Once it has, while that drain is still held, the owner answers a framed status read and
+    /// admits a Stop, both inside the drain's own 2 s wait. The drain ends at that bounded wait and records its typed fact; the Stop then
+    /// settles. A host that blocked on a synchronous logger flush instead would never enter the drain, and could answer nothing meanwhile.
+    func testAHeldLoggerDrainLeavesStatusReadsAndStopAdmissionAnswered() async throws {
+        let held = HeldDestinationGuard(holds: 0)
+        defer { held.release() }
+        var store: AppLogStore?
+        var witnessed: DrainEntryWitness?
+        let composed = try await compose(dnsForwarderEnabled: false) { harness in
+            let logStore = AppLogStore(destinationGuard: held, eventLog: RuntimeEventLog())
+            logStore.logFileURL = harness.environment.logFile
+            let witness = DrainEntryWitness(logStore)
+            harness.logger = witness
+            store = logStore
+            witnessed = witness
+        }
+        let logStore = try XCTUnwrap(store)
+        let witness = try XCTUnwrap(witnessed)
+        try await composed.host.startRuntime()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        guard case .baseline = try await stream.next(deadline()) else { return XCTFail("a stream opens with its baseline") }
+
+        // A fresh writer, whose open the next line waits in.
+        held.arm(1)
+        logStore.logFileURL = nil
+        logStore.logFileURL = composed.harness.environment.logFile
+        logStore.log(.notice, "held logger witness")
+        XCTAssertEqual(joinCleanup(held.entered), .success, "the logger's file is held")
+
+        let flush = Task { await composed.host.flushEvents() }
+        // Bounded: the host's artifacts have nothing held, so it reaches its logger drain at once unless it blocks before it.
+        var entered: ContinuousClock.Instant?
+        for _ in 0..<5_000 {
+            entered = witness.state.drainEntered
+            if entered != nil { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let drainStart = try XCTUnwrap(entered, "the host entered its logger drain (synchronous flushes: \(witness.state.flushes))")
+        let snapshot = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertEqual(snapshot.stamp.incarnation, composed.host.incarnation, "the status read was answered")
+        let stop = try accepted(try await submit(composed, .stop(.proxy)))
+        XCTAssertLessThan(drainStart.duration(to: .now), DiagnosticFlushPhase.writerWait, "both answered inside the held drain's wait")
+        XCTAssertEqual(witness.state.drainsReturned, 0, "the drain was still held when both were answered")
+        XCTAssertEqual(witness.state.flushes, 0, "the host never blocked on a synchronous logger flush")
+
+        let report = await flush.value
+        XCTAssertEqual(report.logger, .timedOut, "the drain was still held when its wait ended")
+        XCTAssertTrue(composed.harness.typedEvents().contains(.lifecycle(.logFlushUnconfirmed(
+            LifecycleLogFlushUnconfirmed(source: .host, outcome: .timedOut)
+        ))))
+        let stopped = try await finished(stop, on: stream)
+        XCTAssertEqual(completed(stopped), .stop)
+        held.release()
+        XCTAssertTrue(logStore.flushFileLog(timeout: 5), "released, the held lines drained")
     }
 
     // MARK: - Stop

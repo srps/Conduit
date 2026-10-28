@@ -200,8 +200,13 @@ not a requirement to finish every event or property test before extraction:
    41 checks (3,710 tests, four existing skips, 103 simulator records), with
    [test-first regression evidence](./docs/verification-runtime-dns-effects-2026-10-28.md).
    [PR #259](https://github.com/srps/Conduit/pull/259) carries these verified
-   prerequisites. Relay/helper/diagnostic effects and the whole isolation move
-   remain in progress. Bound work per turn and prove status/Stop
+   prerequisites. The [relay/helper prerequisite](./docs/verification-runtime-relay-effects-2026-10-28.md)
+   also passes all 41 checks and exact-head hosted CI. The
+   [diagnostic correction](./docs/verification-runtime-diagnostics-2026-10-28.md)
+   passes corrected full workflow and independent review after a write/close
+   race found in review; nine fresh Release probe trials and three optimized
+   consumer/logger trials pass. New-head hosted and native checks remain pending. Its first passing workflow alone was not acceptance.
+   The whole isolation move remains unimplemented. Bound work per turn and prove status/Stop
    responsiveness under observer load; diagnostics cannot gate control progress.
 
 **Stage 5 — strengthen the shared implementation (separately scoped follow-ups).**

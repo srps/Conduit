@@ -641,8 +641,8 @@ package final class RuntimeHost {
     package func markReady(mode: String) async {
         await awaitLaunchRecovery()
         orchestrator.eventLog.append(RuntimeEvent(kind: .lifecycle, event: "daemon.ready", detail: "mode=\(mode)"))
-        writeReadyFile()
-        // The ready file precedes the snapshot write; readiness never promises the snapshot is already visible.
+        await writeReadyFile()
+        // The ready file precedes the snapshot submission; readiness never promises the snapshot is already visible.
         writeSnapshotFile(snapshot: orchestrator.snapshot)
         await flushEvents()
     }
@@ -983,12 +983,13 @@ package final class RuntimeHost {
     }
 
     /// The readiness and shutdown flush: audit, events, then the snapshot, inside one `DiagnosticFlushPhase`
-    /// (see `DiagnosticFlush`). Every writer is awaited. The logger's own flush stays a separate, bounded,
-    /// synchronous call; moving the whole runtime owner off the main actor is #47.
+    /// (see `DiagnosticFlush`). Every writer is awaited. Then the logger's own drain, awaited too, so the owner never
+    /// blocks on it: the existing per-writer wait from now, cut to `loggerUntil`, the quit's absolute deadline when there
+    /// is one. A deadline already passed waits for nothing. Its outcome is the report's `logger`, apart from `allConfirmed`.
     @discardableResult
-    package func flushEvents() async -> DiagnosticFlushReport {
+    package func flushEvents(loggerUntil cap: ContinuousClock.Instant? = nil) async -> DiagnosticFlushReport {
         reportWriterLoss()
-        let report = await DiagnosticFlush.run(
+        var report = await DiagnosticFlush.run(
             phase: DiagnosticFlushPhase(),
             audit: orchestrator.auditSink,
             events: eventWriter,
@@ -999,8 +1000,23 @@ package final class RuntimeHost {
         if !report.allConfirmed {
             logger.log(.warning, "Observability flush not fully confirmed: audit=\(report.audit.rawValue) events=\(report.events.rawValue) snapshot=\(report.snapshot.rawValue).", category: .general)
         }
-        logger.flush(timeout: 2)
+        report.logger = await drainLogger(until: cap)
         return report
+    }
+
+    /// One bounded logger drain. A drain that did not confirm the lines records `lifecycle.log_flush_unconfirmed`, event first and its
+    /// derived line second; neither is claimed persisted, and nothing waits after them.
+    private func drainLogger(until cap: ContinuousClock.Instant?) async -> RecordDrainOutcome {
+        let now = ContinuousClock.now
+        let wait = now.advanced(by: DiagnosticFlushPhase.writerWait)
+        let deadline = cap.map { min($0, wait) } ?? wait
+        let outcome = deadline > now ? await logger.drain(until: deadline) : .skippedBudget
+        if let unconfirmed = LifecycleLogFlushOutcome(outcome) {
+            recordLifecycle(RuntimeEvent(payload: .lifecycle(.logFlushUnconfirmed(
+                LifecycleLogFlushUnconfirmed(source: .host, outcome: unconfirmed)
+            ))), level: .warning)
+        }
+        return outcome
     }
 
     private var lastWriterLoss: UInt64 = 0
@@ -1515,14 +1531,28 @@ package final class RuntimeHost {
         dnsRelayUnresponsive = outcome == .unresponsive
     }
 
-    private func writeReadyFile() {
+    /// The status is read and encoded on the owner, in this turn. The directory and the atomic replacement run on `platformWork`, so
+    /// the owner never waits on the file system, and the failure, if any, is reported back here.
+    private func writeReadyFile() async {
         let readyURL = environment.configDirectory.appendingPathComponent("daemon-ready.json")
+        let data: Data
         do {
-            try FileManager.default.createDirectory(at: readyURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try Self.prettyEncoder.encode(status())
-            try data.write(to: readyURL, options: .atomic)
+            data = try Self.prettyEncoder.encode(status())
         } catch {
             logger.log(.warning, "Failed to write daemon-ready.json: \(error.localizedDescription)", category: .general)
+            return
+        }
+        let failure = await platformWork.run { () -> String? in
+            do {
+                try FileManager.default.createDirectory(at: readyURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: readyURL, options: .atomic)
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }
+        if let failure {
+            logger.log(.warning, "Failed to write daemon-ready.json: \(failure)", category: .general)
         }
     }
 

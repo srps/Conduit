@@ -1,0 +1,51 @@
+{
+  "lane": "diagnostic prerequisite, r1 review corrections (P2 + P3a + P3b)",
+  "source_state": "FROZEN after the focused green run below. No TEMP-CONTROL text remains in Sources or Tests (grep: no files).",
+  "marker": "runtime-diagnostic-targeted-mode written EMPTY after the targeted runs, which restores the default focused run",
+  "focused_green": {
+    "run": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-QVlsTD",
+    "exit": 0,
+    "tests": "568 executed, 0 failures (filter now includes RecordDrainWaiterTests and SnapshotArtifactWriterTests)",
+    "sims": "runtime-host-effects PASS, relay-reassert-after-stop PASS, bounded-writers PASS",
+    "checks": "kernel imports, event catalogue, decisions --require-history, git diff --check"
+  },
+  "P2": {
+    "fix": "Sources/ProxyKernel/Support/RotatingLogFile.swift write(_:): queue.async { drainPending() } moved inside admission.withLockedValue, on the branch that sets draining and enters the group. Enqueue only: no callback, I/O or publication under the lock; the drain block takes the lock itself later on the queue. The schedule Bool is gone. close() is unchanged: latch under the same lock, then queue.sync. FIFO on the one serial queue now puts every admitted record's drain ahead of close's join. No new queue, capacity, registry or retirement path.",
+    "retained_test": "Tests/ConduitTests/RotatingLogFileProtectionTests.swift testConcurrentWritesAndCloseAccountForEveryRecord. Eight paced writer threads; close at the first observed moment, within a bounded 200 ms, when admitted records are pending and none are being written, else close anyway; 50 more writes per thread after close. Asserts: pending == 0 when close returns; after the join failed == 0, written unchanged since close, written + dropped == attempts, dropped >= 400, the file's line count == written. It is a concurrent custody invariant under stress and does not force any interleaving.",
+    "temporary_control": {
+      "patch": "In write(_:), between the unlock and the old out-of-lock enqueue: `if schedule { usleep(20_000) }` (a widened window). In close(), after queue.sync: read (pendingRecords, draining) under the lock and print `TEMP-CONTROL close returned with pending=N draining=B` to stderr when N > 0 (a positive causal fact).",
+      "runs": [
+        {"dir": "runtime-diagnostic-targeted-qePzOu", "test": "first draft, unpaced writers, close at written >= 1000", "result": "passed; no TEMP-CONTROL fact. The close landed during an actively running drain (continuous writers never let the drain loop empty), so the widened window was never hit. Not evidence either way"},
+        {"dir": "runtime-diagnostic-targeted-95sLQV", "test": "paced writers, close at written >= 200", "result": "passed; no fact. The close again landed mid-drain"},
+        {"dir": "runtime-diagnostic-targeted-GjDJGy", "test": "retained form: close at an observed no-progress moment", "result": "FAILED, 3 assertions. Fact `TEMP-CONTROL close returned with pending=314 draining=true`; pending at close 314 (expected 0); failedRecords 314 (late drain after terminal); written + dropped 4948 != attempts 5262. This is the reviewed loss. Probabilistic: the widened window makes it likely, not certain"}
+      ],
+      "restoration": "Both TEMP-CONTROL edits removed; fix applied",
+      "after_fix": {"dir": "runtime-diagnostic-targeted-Y50YxK", "result": "passed, 0.183 s (the stall wait ran to its 200 ms bound: with the fix no stall is observable)"},
+      "honest_scope": "Without the temporary window the old race is microseconds wide, so the retained test is not a deterministic regression for it. The proof is structural (enqueue under the admission lock + FIFO). The control shows the retained assertions detect the loss when the window is open."
+    }
+  },
+  "P3a": {
+    "test": "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift testAHeldLoggerDrainLeavesStatusReadsAndStopAdmissionAnswered: 200 ms sleep replaced by the test-local DrainEntryWitness (same file, private). It forwards minLevel, statistics, logImpl, flush and drain to the real AppLogStore and records synchronous flushes, the first drain-entry instant and returned drains. The test polls, bounded to 5 s, for drain entry, then does a framed status read and a Stop admission. Asserts: both answered before drainEntry + writerWait (2 s, not weakened); 0 drains returned at that point; 0 synchronous flushes; report.logger == timedOut; the typed host fact; the Stop settles. defer releases the hold on every exit.",
+    "temporary_control": {
+      "patch": "Sources/ConduitRuntime/RuntimeHost.swift flushEvents: `report.logger = await drainLogger(until: cap)` replaced by `logger.flush(timeout: 2)` (the old blocking call) and `_ = cap`",
+      "run": {"dir": "runtime-diagnostic-targeted-6kzcH0", "result": "FAILED at XCTUnwrap: the host never entered its logger drain (synchronous flushes: 1); 14.2 s, from the bounded poll plus the old blocking flushes"},
+      "restoration": "Line restored to `report.logger = await drainLogger(until: cap)`",
+      "after_restore": {"dir": "runtime-diagnostic-targeted-RolOjI", "result": "passed, 2.095 s"}
+    }
+  },
+  "P3b": "Tests/ConduitTests/DaemonRuntimeHostTests.swift: renamed to testTheReadyFileHoldsTheReadinessStatus; the modification-time ordering claim is removed; asserts decode, processID and executableName == ConduitDaemon. The doc says the order rests on markReady awaiting the write and is not observed by this test.",
+  "P3c_no_duplicate": [
+    "RecordDrainWaiterTests.testDrainedCallerReturnsWhileAHeldTimerBodyKeepsCapacityBusyUntilItEnds (passed in QVlsTD)",
+    "RecordDrainWaiterTests.testCancelAfterRegistrationKeepsNotifyHeldThenReturnsBusyUntilCleanup",
+    "SnapshotArtifactWriterTests.testTimedOutWaitIsBusyUntilPhysicalCleanupFrees (passed in QVlsTD)",
+    "RotatingLogFileProtectionTests.testAHeldFileDropsExactlyPastItsBoundAndItsWaitsReportTheQueue"
+  ],
+  "files_changed_this_round": [
+    "Sources/ProxyKernel/Support/RotatingLogFile.swift (P2 fix only)",
+    "Tests/ConduitTests/RotatingLogFileProtectionTests.swift (new retained test)",
+    "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift (witness + test phase)",
+    "Tests/ConduitTests/DaemonRuntimeHostTests.swift (rename and assertions)"
+  ],
+  "unchanged_by_this_round": "RuntimeHost.swift ends byte-identical to its pre-control content (only the temporary line came and went); no other Source touched. The experiment files under docs/experiments/actual-runtime-client-profile carry the earlier logger-held work, which is not compiled or run yet.",
+  "next": "Parent r2 full workflow and independent re-review; then the Release probe with --modes logger-held logger-held-nosampler"
+}

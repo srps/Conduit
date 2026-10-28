@@ -102,6 +102,8 @@ final class InteractiveHostHarness {
         var helperStatus: (any HelperLifecycleManaging)?
         /// The saved-password store; a credentials test shares it with the app-side writer it stands in for.
         var credentials: any SecretStore = InMemorySecretStore()
+        /// The host's logger; a test that holds the logger's own drain names an app log store over a held file.
+        var logger: any LogSink = DiscardingLogSink()
         private let directory: URL
         private(set) var host: RuntimeHost?
 
@@ -128,7 +130,7 @@ final class InteractiveHostHarness {
             let helperStatus = self.helperStatus.map { HoldingHelperStatus(base: $0, hold: hold) }
             let built = try await RuntimeHost.open(
                 stateSession: session,
-                logger: DiscardingLogSink(),
+                logger: logger,
                 startupAllowsMissing: true,
                 startedAt: Date(timeIntervalSince1970: 1_700_000_000),
                 terminalExit: { XCTFail("the runtime host ended the process") },

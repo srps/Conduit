@@ -103,6 +103,32 @@ extension ControlLifecycleEvent {
             self = .versionChanged(from: changed.from, to: changed.to)
         case .moduleSettled(let settled):
             self = .moduleSettled(settlement: ControlLifecycleSettlement(settled.settlement), group: settled.group)
+        case .logFlushUnconfirmed(let unconfirmed):
+            self = .logFlushUnconfirmed(
+                source: ControlLifecycleLogFlushSource(unconfirmed.source),
+                outcome: ControlLifecycleLogFlushOutcome(unconfirmed.outcome)
+            )
+        }
+    }
+}
+
+extension ControlLifecycleLogFlushSource {
+    package init(_ source: LifecycleLogFlushSource) {
+        switch source {
+        case .host: self = .host
+        case .app: self = .app
+        }
+    }
+}
+
+extension ControlLifecycleLogFlushOutcome {
+    package init(_ outcome: LifecycleLogFlushOutcome) {
+        switch outcome {
+        case .timedOut: self = .timedOut
+        case .busy: self = .busy
+        case .skippedBudget: self = .skippedBudget
+        case .cancelled: self = .cancelled
+        case .unavailable: self = .unavailable
         }
     }
 }

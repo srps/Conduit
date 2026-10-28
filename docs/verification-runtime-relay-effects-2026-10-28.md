@@ -1,7 +1,7 @@
 # RuntimeActor prerequisite: relay effects
 
 Status: final r3 full workflow and independent source review pass. Earlier
-failures and causal test corrections remain below; hosted and release gates are separate. The control cluster is still MainActor. Diagnostics, whole-cluster
+failures and causal test corrections remain below. Exact-head hosted CI also passes; release gates are separate. The control cluster is still MainActor. Diagnostics, whole-cluster
 isolation and native/release acceptance are separate gates. Official Claude Code
 implements and reviews through the authenticated claude.ai subscription.
 
@@ -49,9 +49,7 @@ diagnostic count, not a relay-helper count. The failed run is preserved.
 
 [Independent static review](experiments/runtime-relay-effects/r1-source-review.md)
 accepts the relay shape and discriminating focused tests. That does not accept
-the failing execution. The source author is tracing receipt/reconciler completion
-and observed bindings before proposing any change; no blind rerun or weakened
-count/DNS assertion is accepted.
+the failing execution. The causal correction below preserves the count/DNS assertions; the failed execution is not accepted as verification.
 
 ## Test-only correction
 
@@ -74,7 +72,7 @@ one private helper joins the real app/host boundary without a host reference or
 test hook. The expanded focused run passes 327 tests and both simulator scenarios.
 [Byte comparison](experiments/runtime-relay-effects/r2-production-comparison.json)
 confirms every production Source file is unchanged from relay r1. Corrected-source
-full workflow and independent re-review are in progress. Other known artifact
+full workflow and independent re-review pass in the final checkpoint below. Other known artifact
 read limitations remain explicitly scoped for the diagnostic work.
 
 ## Second full run: a separate setup race
@@ -92,9 +90,9 @@ Independent [test-only review](experiments/runtime-relay-effects/r2-source-revie
 accepts the assertion movement while distinguishing bounded flush attempts from
 physical confirmation. Negative-only file assertions still have limited proof
 under unconfirmed drains; the diagnostic work retains that limitation explicitly.
-The corrected setup and precise helper documentation await their final full run.
+The final full run below verifies the corrected setup and precise helper documentation.
 
-## Final setup correction under verification
+## Final setup correction and verified source
 
 The backoff fixture now positively observes the initial VPN removal failure
 before issuing its five refreshes. Each refresh then has a pending repair and
@@ -117,6 +115,15 @@ run. [Commit provenance](experiments/runtime-relay-effects/commit-provenance.jso
 links the tested scope to `0aa744a`; [snapshot comparison](experiments/runtime-relay-effects/snapshot-source-link.json)
 checks every included relevant review file byte-for-byte against that commit,
 with the omitted build resources recorded separately.
+
+## Hosted checks
+
+[Exact-head CI evidence](experiments/runtime-relay-effects/hosted-checks-0aa.json)
+records Swift run 40633710890 and CodeQL passing on `0aa744a`. The three
+annotations were macOS runner-capacity and Ubuntu image-migration notices.
+Reviews, inline threads and comments were empty; the Devin status supplies no
+completed source review. Both PRs remain draft while the logger correction and
+native activation gates are completed.
 
 ## Limits carried forward
 

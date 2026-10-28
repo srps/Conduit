@@ -5,16 +5,25 @@ import Darwin
 import Glibc
 #endif
 import Foundation
+import NIOConcurrencyHelpers
 
 /// The byte writer the app's file log and pm-sim hold. The concrete `RotatingLogFile` stays internal, so
 /// callers depend on this protocol and on `rotatingLogFile(...)`, never on the backend.
 package protocol RotatingByteWriter: Sendable {
-    /// Queues one write. A line is never split: an oversized line is written whole.
+    /// Admits one write to the bounded queue, or counts it dropped. A line is never split: an oversized line is written whole.
     func write(_ data: Data)
-    /// Drains queued writes. For tests and shutdown.
-    func flush()
-    /// Closes the descriptor once. A failed close is reported and never retried.
+    /// Waits up to `timeout` for the admitted writes to leave the queue. False, and a counted timeout, when they had not.
+    @discardableResult func flush(timeout: TimeInterval) -> Bool
+    /// Awaits the admitted writes without blocking the caller, until the absolute `deadline` (see `RecordDrainWaiter`).
+    func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome
+    /// Closes the writer for good: nothing is admitted after it, and the descriptor is closed once. A failed close is
+    /// reported and never retried.
     func close()
+    var statistics: RecordWriterStatistics { get }
+}
+
+extension RotatingByteWriter {
+    @discardableResult package func flush() -> Bool { flush(timeout: 2) }
 }
 
 /// The app's file log writer. Its physical policy is its own, and it is not the record-file backend:
@@ -31,7 +40,14 @@ package protocol RotatingByteWriter: Sendable {
 /// it observes before the open. A path swapped after that check, or a device open that blocks, is not bounded here.
 /// Admitted symbolic links to ordinary files keep working.
 ///
-/// All file work happens on one serial queue; `write` returns immediately, and `flush()` drains the queue.
+/// All file work happens on one serial queue. `write` only admits under a lock and returns: the queue holds at most
+/// `RecordWriterLimits`' pending records and bytes, and a write past them is dropped and counted. One scheduled drain
+/// writes what was admitted, a record at a time, and counts each as written or failed. `flush(timeout:)` and
+/// `drain(until:)` wait for that queue, bounded, through one `RecordDrainWaiter` with the single default timer slot.
+///
+/// `close()` is terminal. It latches before it joins the queue, so a write after it is counted dropped and is never
+/// queued, and a drain that runs after it never opens the file again. Writes admitted before the latch are still written.
+/// No lock is held across the close, a write or a publication.
 ///
 /// Failures publish through the record gate's event log and logger, event first, then one derived line. A
 /// failure streak costs one event and one line, and the first successful write after it publishes recovery.
@@ -95,6 +111,20 @@ final class RotatingLogFile: @unchecked Sendable {
     private let logger: any LogSink
     private let effects: RotatingLogFileEffects
     private let queue = DispatchQueue(label: "io.github.srps.Conduit.logfile", qos: .utility)
+    private let limits: RecordWriterLimits
+    /// What `write` admitted and the queue has not written yet, and the writer's counters. Never held across a write.
+    private struct Admission {
+        var pending: [Data] = []
+        var draining = false
+        var closed = false
+        var statistics = RecordWriterStatistics()
+    }
+    private let admission = NIOLockedValueBox(Admission())
+    /// Entered while a drain is scheduled or running, left when it finds the queue empty.
+    private let drained = DispatchGroup()
+    private let waiter: RecordDrainWaiter
+    /// Set on the queue by `close`, so no drain after it opens a descriptor.
+    private var terminal = false
     private var fd: Int32 = -1
     private var size = 0
     /// Set on the first failed effect, cleared on the next success. Gates the report, so a failure streak
@@ -110,10 +140,13 @@ final class RotatingLogFile: @unchecked Sendable {
         url: URL, maxBytes: Int, archives: Int,
         destinationGuard: any RecordFileDestinationGuarding,
         gate: RecordFileDestinationGate, eventLog: RuntimeEventLog, logger: any LogSink,
-        effects: RotatingLogFileEffects
+        effects: RotatingLogFileEffects, limits: RecordWriterLimits = .init(),
+        drainSleep: (@Sendable (ContinuousClock.Instant) async throws -> Void)? = nil
     ) {
         precondition(maxBytes > 0, "a file log needs a positive size bound")
         precondition(archives >= 1, "a file log keeps at least one archive")
+        precondition(limits.maxPendingRecords > 0 && limits.maxPendingBytes > 0)
+        precondition(limits.maxBatchRecords > 0 && limits.maxBatchBytes > 0)
         self.url = url
         self.maxBytes = maxBytes
         self.archives = archives
@@ -122,6 +155,13 @@ final class RotatingLogFile: @unchecked Sendable {
         self.eventLog = eventLog
         self.logger = logger
         self.effects = effects
+        self.limits = limits
+        // Test seam: `drainSleep` replaces the drain timer's sleep when set.
+        if let drainSleep {
+            waiter = RecordDrainWaiter(group: drained, sleep: drainSleep)
+        } else {
+            waiter = RecordDrainWaiter(group: drained)
+        }
     }
 
     deinit {
@@ -136,16 +176,50 @@ final class RotatingLogFile: @unchecked Sendable {
 
     // MARK: - Public entry points
 
+    var statistics: RecordWriterStatistics { admission.withLockedValue { $0.statistics } }
+
+    /// The drain block is enqueued under the admission lock. Enqueueing runs no callback, and the block takes the lock itself only
+    /// later, on the queue. So no admitted record's drain can be queued after `close()`'s latch and join: FIFO on the one queue puts
+    /// it ahead of the close.
     func write(_ data: Data) {
-        queue.async { self.append(data) }
+        admission.withLockedValue { value in
+            guard !value.closed,
+                  value.statistics.pendingRecords < limits.maxPendingRecords,
+                  data.count <= limits.maxPendingBytes - value.statistics.pendingBytes else {
+                value.statistics.droppedRecords &+= 1
+                return
+            }
+            value.pending.append(data)
+            value.statistics.pendingRecords += 1
+            value.statistics.pendingBytes += data.count
+            guard !value.draining else { return }
+            value.draining = true
+            drained.enter()
+            queue.async { [self] in drainPending() }
+        }
     }
 
-    func flush() {
-        queue.sync {}
+    @discardableResult
+    func flush(timeout: TimeInterval) -> Bool {
+        precondition(timeout.isFinite && timeout >= 0)
+        let completed = drained.wait(timeout: .now() + timeout) == .success
+        if !completed { admission.withLockedValue { $0.statistics.flushTimeouts &+= 1 } }
+        return completed
     }
 
+    /// A timeout is counted as a flush timeout. See `RecordDrainWaiter` for what a timed-out, busy or cancelled wait leaves.
+    func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome {
+        let outcome = await waiter.drain(until: deadline)
+        if outcome == .timedOut { admission.withLockedValue { $0.statistics.flushTimeouts &+= 1 } }
+        return outcome
+    }
+
+    /// Latches first, outside the queue, so nothing is admitted from here on. The queue then writes what was admitted
+    /// before the latch, and only after that marks itself terminal and closes the descriptor.
     func close() {
+        admission.withLockedValue { $0.closed = true }
         queue.sync {
+            terminal = true
             if let failure = releaseDescriptor() { fail(failure) }
             reportPendingCleanup()
         }
@@ -153,11 +227,49 @@ final class RotatingLogFile: @unchecked Sendable {
 
     // MARK: - Queue-confined
 
-    private func append(_ data: Data) {
-        guard !retired else { return }
+    /// Writes admitted records in bounded batches until the queue is empty. The lock is held only to take a batch and to
+    /// count it, never across a write or a publication.
+    private func drainPending() {
+        while true {
+            let batch = admission.withLockedValue { value -> [Data] in
+                guard !value.pending.isEmpty else {
+                    value.draining = false
+                    drained.leave()
+                    return []
+                }
+                // At least one record, so a line larger than a batch is still written whole.
+                var count = 0
+                var bytes = 0
+                for record in value.pending.prefix(limits.maxBatchRecords) {
+                    guard count == 0 || record.count <= limits.maxBatchBytes - bytes else { break }
+                    count += 1
+                    bytes += record.count
+                }
+                let result = Array(value.pending.prefix(count))
+                value.pending.removeFirst(count)
+                return result
+            }
+            guard !batch.isEmpty else { return }
+            var written: UInt64 = 0
+            for record in batch where append(record) { written += 1 }
+            let failed = UInt64(batch.count) - written
+            let bytes = batch.reduce(0) { $0 + $1.count }
+            admission.withLockedValue { value in
+                value.statistics.pendingRecords -= batch.count
+                value.statistics.pendingBytes -= bytes
+                value.statistics.writtenRecords &+= written
+                value.statistics.failedRecords &+= failed
+            }
+        }
+    }
+
+    /// Whether the record was written. A retired or closed writer writes nothing and opens nothing.
+    private func append(_ data: Data) -> Bool {
+        guard !retired, !terminal else { return false }
         do {
             try gate.perform { try writeOne(data) }
             recover()
+            return true
         } catch is RecordFileDestinationRefusal {
             // The gate has latched and published the refusal. Only the close fact can remain to report.
             reportPendingCleanup()
@@ -168,6 +280,7 @@ final class RotatingLogFile: @unchecked Sendable {
             fail(RotatingLogFileFailure(stage: .other, code: 0))
             reportPendingCleanup()
         }
+        return false
     }
 
     /// Runs inside `gate.perform`. Opens if needed, rotates if the write would pass `maxBytes`, then writes.

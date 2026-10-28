@@ -137,7 +137,7 @@ BUILT_NAMES = [
 # LifecycleEventName as well.
 TYPED_NAMES = {
     'lifecycle.superseded', 'lifecycle.coalesced', 'lifecycle.termination_drain_expired',
-    'lifecycle.version_changed', 'lifecycle.module_settled',
+    'lifecycle.version_changed', 'lifecycle.module_settled', 'lifecycle.log_flush_unconfirmed',
 }
 TYPED_DIRECTORY = 'Sources/RuntimeEvents/'
 TYPED_INVENTORY = 'Sources/RuntimeEvents/LifecycleEvents.swift'

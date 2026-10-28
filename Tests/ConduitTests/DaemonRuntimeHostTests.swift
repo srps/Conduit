@@ -2717,6 +2717,22 @@ final class DaemonRuntimeHostTests: XCTestCase {
         assertSecondWriterIsBusy(harness.environment)
     }
 
+    /// Once readiness returns, `daemon-ready.json` exists and decodes as this daemon's status. That the file lands before the snapshot is
+    /// submitted rests on `markReady` awaiting the write first; this test does not observe that order.
+    func testTheReadyFileHoldsTheReadinessStatus() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        let host = try await harness.makeHost()
+        await host.markReady(mode: "runtime-host")
+
+        let ready = harness.environment.configDirectory.appendingPathComponent("daemon-ready.json")
+        let status = try CanonicalJSON.decoder().decode(ControlDaemonStatus.self, from: Data(contentsOf: ready))
+        XCTAssertEqual(status.daemon?.processID, Int(ProcessInfo.processInfo.processIdentifier))
+        XCTAssertEqual(status.daemon?.executableName, "ConduitDaemon")
+    }
+
     /// Readiness never precedes recovery. `daemon.ready` and
     /// `daemon-ready.json` tell a consumer startup is over; published while
     /// recovery was still out, they announced a machine that could still be

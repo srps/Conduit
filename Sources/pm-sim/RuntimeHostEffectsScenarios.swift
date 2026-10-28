@@ -223,10 +223,11 @@ enum RuntimeHostEffectsScenario {
         var notes: [String] = []
         func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
         let host: RuntimeHost
+        let logger = HeldFileLogger(directory: home.appendingPathComponent("held-logger", isDirectory: true))
         do {
             host = try await RuntimeHost.open(
                 stateSession: session,
-                logger: DiscardingLogSink(),
+                logger: logger,
                 startupAllowsMissing: false,
                 startedAt: Date(timeIntervalSince1970: 1_700_000_000),
                 terminalExit: {},
@@ -280,8 +281,33 @@ enum RuntimeHostEffectsScenario {
         // Released only when the settlement and the physical flush both confirm; otherwise the host and root stay pinned.
         let settlement = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
         check("the workflow host settles before its root is released", settlement == .settled)
+
+        // The host's own logger drain, held at its file's open. The flush awaits it to the existing bounded wait and records the typed
+        // fact, apart from the artifacts. A flush whose cap has already passed gives the logger no fresh wait at all.
+        logger.holdNextOpen()
+        logger.log(.notice, "held logger witness")
+        check("the logger's file open is held", logger.joinHeld())
+        let held = await host.flushEvents()
+        check("a held logger drain ends at its bounded wait", held.logger == .timedOut)
+        check("the held logger leaves the artifact confirmation alone", held.allConfirmed)
+        let capStarted = ContinuousClock.now
+        let capped = await host.flushEvents(loggerUntil: capStarted)
+        check("a passed cap skips the logger drain without waiting",
+              capped.logger == .skippedBudget && capStarted.duration(to: .now) < DiagnosticFlushPhase.writerWait)
+        logger.release()
         let report = await host.flushEvents()
+        check("released, the logger drains", report.logger == .drained)
         check("the workflow host's observability flush is confirmed", report.allConfirmed)
+        do {
+            let typed = try typedEvents(in: environment.eventsFile)
+            check("both unconfirmed logger drains are typed host facts in the owned events file",
+                  typed.contains(.lifecycle(.logFlushUnconfirmed(LifecycleLogFlushUnconfirmed(source: .host, outcome: .timedOut))))
+                      && typed.contains(.lifecycle(.logFlushUnconfirmed(LifecycleLogFlushUnconfirmed(source: .host, outcome: .skippedBudget)))))
+            notes.append("held logger: drain timed_out at its bounded wait, passed cap skipped_budget, released drain drained; both facts persisted")
+        } catch {
+            notes.append("the owned events file did not decode: \(error.localizedDescription)")
+            check("the owned events file decodes", false)
+        }
         // The typed events are read back from the owned file after the flush, so the checks see what was written.
         do {
             let typed = try typedEvents(in: environment.eventsFile)
@@ -1497,6 +1523,52 @@ enum RuntimeHostEffectsScenario {
             guard case .lifecycle(.moduleSettled(let settled)) = payload else { return nil }
             return settled
         }
+    }
+
+    /// A host logger over the kernel's own app-log file writer, in the run's scratch home. Until `holdNextOpen()` it keeps no file; after
+    /// it, a fresh writer's open waits in its destination guard until `release()`, as a stalled volume would, so the host's drain of it is
+    /// held. Lines are formatted once, as the app's store does.
+    private final class HeldFileLogger: LogSink, RecordFileDestinationGuarding, @unchecked Sendable {
+        private let directory: URL
+        private let events = RuntimeEventLog(capacity: 16)
+        private let file = NIOLockedValueBox<(any RotatingByteWriter)?>(nil)
+        private let entered = DispatchSemaphore(value: 0)
+        private let released = DispatchSemaphore(value: 0)
+
+        init(directory: URL) { self.directory = directory }
+
+        var minLevel: LogLevel { .debug }
+
+        func holdNextOpen() {
+            let writer = rotatingLogFile(
+                url: directory.appendingPathComponent("proxy.log"), destinationGuard: self,
+                gate: RecordFileDestinationGate(sink: .appLog, eventLog: events, logger: DiscardingLogSink()),
+                eventLog: events, logger: DiscardingLogSink()
+            )
+            file.withLockedValue { $0 = writer }
+        }
+
+        /// Whether the open was reached, bounded.
+        func joinHeld() -> Bool { entered.wait(timeout: .now() + 10) == .success }
+
+        func release() { released.signal() }
+
+        func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
+            let line = Data((LogEntry(level: level, category: category, message: message).formatted() + "\n").utf8)
+            file.withLockedValue { $0?.write(line) }
+        }
+
+        func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome {
+            guard let writer = file.withLockedValue({ $0 }) else { return .drained }
+            return await writer.drain(until: deadline)
+        }
+
+        func admit(destination: URL) throws {
+            entered.signal()
+            _ = released.wait(timeout: .now() + 10)
+        }
+
+        func admit(openedDescriptor descriptor: Int32, destination: URL) throws {}
     }
 
     /// The fakes one run names. Kept by the caller so the checks read what each one saw.

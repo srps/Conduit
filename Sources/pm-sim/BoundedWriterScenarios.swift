@@ -48,14 +48,69 @@ enum BoundedWriterScenarios {
         try await shutdownTimeoutPersistence()
         let confirmationNote = try await lateSnapshotConfirmation()
         let appendNote = try appendAmplification()
+        let logFileNote = try await heldLogFile()
         return ScenarioResult(
             name: "bounded-writers", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 1024, durationSeconds: Date().timeIntervalSince(start),
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
-            assertions: [.init("storage bounds, loss reporting, recovery, late confirmation and append amplification", true)],
+            assertions: [.init("storage bounds, loss reporting, recovery, late confirmation, append amplification and the held app log file", true)],
             notes: ["PASS: stalled storage retains at most 16 records/1024 bytes including in-flight writes",
                     "PASS: 9985 drops and flush deadline reported; event loop responsive; capacity recovered",
-                    confirmationNote, appendNote])
+                    confirmationNote, appendNote, logFileNote])
+    }
+
+    /// Holds the app log file's open in its destination guard, as a stalled volume would.
+    private final class HeldOpen: RecordFileDestinationGuarding, @unchecked Sendable {
+        let entered = DispatchSemaphore(value: 0)
+        let released = DispatchSemaphore(value: 0)
+        func admit(destination: URL) throws {
+            entered.signal()
+            _ = released.wait(timeout: .now() + 10)
+        }
+        func admit(openedDescriptor descriptor: Int32, destination: URL) throws {}
+    }
+
+    /// The app's file log writer, through its factory, with its open held. Writes from an event loop stay non-blocking and bounded by
+    /// the default limits, counting the held write; the excess is dropped exactly. Its waits report the queue (timed out at the deadline,
+    /// busy while that wait's notify is held, drained after release), the admitted lines all reach the file, and once closed a write is
+    /// counted dropped and the file is never reopened.
+    private static func heldLogFile() async throws -> String {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("conduit-applog-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("proxy.log")
+        let events = RuntimeEventLog(capacity: 16)
+        let held = HeldOpen()
+        let file = rotatingLogFile(url: url, destinationGuard: held,
+                                   gate: RecordFileDestinationGate(sink: .appLog, eventLog: events, logger: DiscardingLogSink()),
+                                   eventLog: events, logger: DiscardingLogSink())
+        let bound = RecordWriterLimits().maxPendingRecords
+        file.write(Data("line 0\n".utf8))
+        guard storageStarted(held.entered) else { throw Failure(message: "The app log open was not held") }
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        try await loop.submit {
+            for index in 1..<(bound + 10) { file.write(Data("line \(index)\n".utf8)) }
+        }.get()
+        let blocked = file.statistics
+        let timedOut = await file.drain(until: ContinuousClock.now.advanced(by: .milliseconds(200)))
+        let busy = await file.drain(until: ContinuousClock.now.advanced(by: .seconds(5)))
+        held.released.signal()
+        guard blocked.pendingRecords == bound, blocked.droppedRecords == 10, timedOut == .timedOut, busy == .busy,
+              file.flush(timeout: 5) else {
+            throw Failure(message: "The held app log was unbounded or its waits misreported: pending=\(blocked.pendingRecords) "
+                + "dropped=\(blocked.droppedRecords) first=\(timedOut.rawValue) second=\(busy.rawValue)")
+        }
+        let drained = await file.drain(until: ContinuousClock.now.advanced(by: .seconds(5)))
+        file.close()
+        file.write(Data("after close\n".utf8))
+        let final = file.statistics
+        let lines = try String(contentsOf: url, encoding: .utf8).split(separator: "\n").count
+        guard drained == .drained, final.writtenRecords == UInt64(bound), final.droppedRecords == 11, final.pendingRecords == 0,
+              lines == bound, events.events.isEmpty else {
+            throw Failure(message: "The held app log lost admitted lines or reopened after close: written=\(final.writtenRecords) "
+                + "dropped=\(final.droppedRecords) lines=\(lines)")
+        }
+        return "PASS: held app log admitted \(bound) of \(bound + 10) lines, dropped 10 exactly, waits timed_out then busy, "
+            + "all \(bound) written after release; a write after close was dropped and nothing reopened"
     }
 
     /// The production writers on the real clock: a fresh events writer with a queued event, and a snapshot whose write

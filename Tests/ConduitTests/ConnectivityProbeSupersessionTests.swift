@@ -327,6 +327,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         init(_ onListening: @escaping @Sendable () -> Void) { self.onListening = onListening }
         var minLevel: LogLevel { .debug }
         func flush(timeout: TimeInterval) -> Bool { true }
+        func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome { .drained }
         func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
             if message.hasPrefix("Local proxy listening on") { onListening() }
         }

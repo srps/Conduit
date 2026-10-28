@@ -44,6 +44,9 @@ final class AppStateHarness {
     )
     /// Holds one machine call, subprocess or privileged, when armed.
     let hold = HeldCall()
+    /// Holds the app's file log at its next open while armed, inside the composition's app-log guard effect, before the authoritative
+    /// guard is asked. Nothing is held unless a scenario arms it.
+    let appLogHold = HeldDestinationGuard(holds: 0)
     /// Fetches no PAC from the network; a scenario that plans PAC work injects its own before `launch()`.
     var pacEvaluator: any PacEvaluator = FakePacEvaluator()
     /// The host store's file access; a scenario that holds or refuses a store step names its own before `launch()`.
@@ -88,6 +91,7 @@ final class AppStateHarness {
         let wake = self.wake
         let helper = self.helper
         let locationStore = self.locationStore
+        let appLogHold = self.appLogHold
         return AppComposition(
             effects: RuntimeHostEffects(
                 privilege: { _ in RuntimePrivilegeAdapters(client: HoldingPrivilegeClient(base: machine, hold: hold), helperStatus: helper) },
@@ -112,6 +116,7 @@ final class AppStateHarness {
                 resolverDirectory: machine.resolverDirectory.path,
                 stateFiles: stateFiles
             ),
+            appLogGuard: AppLogGuardEffect { HoldingAppLogGuard(authoritative: $0, hold: appLogHold) },
             helperLifecycle: helper,
             credentialStore: secrets,
             loginItemManager: loginItems.manager,
@@ -165,6 +170,8 @@ final class AppStateHarness {
     /// Quits the way AppKit's terminate-later does, then removes the scratch state.
     func tearDown() async {
         hold.release()
+        // A held file log would block the close below.
+        appLogHold.release()
         if let appState {
             await appState.opening?.value
             if appState.beginQuit() { _ = await appState.finishQuit() }
@@ -173,6 +180,28 @@ final class AppStateHarness {
         appState = nil
         releaseScratchStateRoot(stateSession)
         removeScratch([stateDirectory])
+    }
+}
+
+/// The harness's app-log guard effect: each destination admission first passes `hold`, which waits there while armed, and is then
+/// judged by the authoritative guard the app built. A descriptor is judged by the authoritative guard alone. Nothing is admitted that
+/// the authoritative guard refuses.
+final class HoldingAppLogGuard: RecordFileDestinationGuarding, @unchecked Sendable {
+    private let authoritative: any RecordFileDestinationGuarding
+    private let hold: HeldDestinationGuard
+
+    init(authoritative: any RecordFileDestinationGuarding, hold: HeldDestinationGuard) {
+        self.authoritative = authoritative
+        self.hold = hold
+    }
+
+    func admit(destination: URL) throws {
+        try hold.admit(destination: destination)
+        try authoritative.admit(destination: destination)
+    }
+
+    func admit(openedDescriptor descriptor: Int32, destination: URL) throws {
+        try authoritative.admit(openedDescriptor: descriptor, destination: destination)
     }
 }
 
@@ -952,6 +981,81 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(refusals.map(\.detail), ["sink=log reason=protected_identity resource=writer_lease"])
         XCTAssertEqual(try writerLeaseFingerprint(lease), before, "the lock keeps its bytes and its inode")
         assertSecondWriterIsBusy(RuntimeEnvironment.isolated(stateDirectory: harness.stateDirectory))
+    }
+
+    // MARK: App log at Quit
+
+    /// Settings' own toggle gives the file log a fresh writer, and its open is held in the composition's app-log guard effect, before the
+    /// authoritative guard. The line logged next waits there, on the writer's queue, never on main.
+    private func holdTheAppLogOpen(_ state: AppState, _ harness: AppStateHarness, witness: String) {
+        state.logStore.logFileURL = nil
+        harness.appLogHold.arm(1)
+        state.logStore.logFileURL = harness.environment.logFile
+        state.logStore.log(.notice, witness)
+        XCTAssertEqual(Self.joined(harness.appLogHold.entered), .success, "the file log's open is held")
+    }
+
+    /// The bounded join for a hold, in a synchronous function: the compiler rejects the wait inside async code.
+    private static func joined(_ signal: DispatchSemaphore) -> DispatchTimeoutResult {
+        signal.wait(timeout: .now() + 10)
+    }
+
+    private func logFlushOutcomes(_ state: AppState, source: LifecycleLogFlushSource) -> [LifecycleLogFlushOutcome] {
+        state.eventLog.events.compactMap { event in
+            guard case .lifecycle(.logFlushUnconfirmed(let value))? = event.typed, value.source == source else { return nil }
+            return value.outcome
+        }
+    }
+
+    /// A held file log through the Quit. The host's logger drain ends at its own bounded wait, inside the Quit's deadline, and records
+    /// its typed fact; the app's tail drain, under the same deadline, finds that wait's reservation still held and records `busy`
+    /// without waiting again. The Quit still completes inside its one budget. Released, the held lines reach the file: nothing was lost.
+    func testAHeldAppLogLeavesBothFinalDrainsUnconfirmedInsideTheQuitBudget() async throws {
+        let harness = try makeHarness()
+        harness.timing.quitTotal = .seconds(4)
+        let state = await harness.ready()
+        holdTheAppLogOpen(state, harness, witness: "held tail witness")
+
+        let started = ContinuousClock.now
+        XCTAssertTrue(state.beginQuit())
+        let result = await state.finishQuit()
+        XCTAssertLessThan(started.duration(to: .now), .seconds(5), "the Quit ended inside its one budget")
+        guard case .settled(.completed)? = result?.quit else { return XCTFail("the Quit completed: \(String(describing: result?.quit))") }
+
+        let hostLine = "Lifecycle: lifecycle.log_flush_unconfirmed source=host outcome=timed_out"
+        XCTAssertTrue(state.logStore.entries.contains { $0.message == hostLine }, "the host's derived line")
+        XCTAssertEqual(logFlushOutcomes(state, source: .app), [.busy], "the app's tail did not wait a second time")
+        let appLine = "Lifecycle: lifecycle.log_flush_unconfirmed source=app outcome=busy"
+        XCTAssertEqual(state.logStore.entries.filter { $0.message == appLine }.count, 1, "the app's event has its one derived line")
+        await harness.settle("the host's event reached its own file") {
+            harness.hostEventsText.contains(#""detail":"source=host outcome=timed_out""#)
+        }
+
+        harness.appLogHold.release()
+        XCTAssertTrue(state.logStore.flushFileLog(timeout: 5), "the held writes drained once released")
+        let file = try String(contentsOf: harness.environment.logFile, encoding: .utf8)
+        for line in ["held tail witness", hostLine, appLine] {
+            XCTAssertTrue(file.contains(line), "\(line) reached the file")
+        }
+        XCTAssertEqual(state.logStore.statistics.droppedRecords, 0, "slowness is not loss")
+    }
+
+    /// A Quit whose deadline passes while the host still waits on the held file log. The host's drain is cut to the quit's deadline, and
+    /// the app's tail, past that same deadline, records `skipped_budget` and waits for nothing: no step gets a fresh budget.
+    func testAQuitPastItsDeadlineGivesTheAppLogTailNoFreshBudget() async throws {
+        let harness = try makeHarness()
+        harness.timing.quitTotal = .seconds(1)
+        let state = await harness.ready()
+        holdTheAppLogOpen(state, harness, witness: "expired tail witness")
+
+        let started = ContinuousClock.now
+        XCTAssertTrue(state.beginQuit())
+        _ = await state.finishQuit()
+        // The host's own 2 s logger wait, or any fresh tail wait, would end later than this.
+        XCTAssertLessThan(started.duration(to: .now), .milliseconds(1_900), "the Quit and its tail ended with the one deadline")
+        XCTAssertEqual(logFlushOutcomes(state, source: .app), [.skippedBudget])
+        XCTAssertTrue(state.logStore.entries.contains { $0.message == "Lifecycle: lifecycle.log_flush_unconfirmed source=host outcome=timed_out" },
+                      "the host's drain was cut to the quit's deadline")
     }
 
     // MARK: Updates

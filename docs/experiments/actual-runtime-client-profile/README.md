@@ -86,6 +86,28 @@ Each mode runs in a fresh process with its own scratch root, under a 300 s runne
 It fails the run if any of them changed. The tie between the objects and a build rests on the wrapper, which builds immediately
 before running.
 
+### Optional mode: `logger-held` (not in the default 31 runs)
+
+Run it explicitly: `python3 docs/experiments/actual-runtime-client-profile/run.py OUTPUT --repo "$PWD" --modes logger-held logger-held-nosampler`.
+That is three fresh trials of each.
+
+- **Logger.** The host is opened with a probe-local file logger, which writes the held root's own log file through the kernel's
+  `rotatingLogFile`. Every destination admission is judged by the authoritative app-log guard built from the held session
+  (`diagnosticDestinationGuard(for: .appLog, …, writerLeaseFile:)`). The probe's hold only delays an admission, with a 60 s safety bound
+  whose expiry fails the mode; it never admits anything itself.
+- **Run.** With the small fixture's loopback proxy running, the logger gets a fresh writer, and its open is held. The probe checks
+  that the hold was reached, then starts the host's flush. After the logger records the host's drain call, the probe measures
+  20 status reads and one proxy Stop (admission, completion, listener closed, fake system proxy cleared). It then checks that the drain
+  is still in flight.
+- **Records.**
+  - The drain's outcome and elapsed time, and the wait it asked for, which is the host's deliberate 2 s cap and is reported apart.
+  - The artifact confirmation, kept separate from the logger's outcome.
+  - After release, the time to drain, the exact writer counters (handed = written + pending, with 0 dropped and 0 failed), and the
+    file's bytes against the handed bytes.
+  - The typed `lifecycle.log_flush_unconfirmed source=host outcome=timed_out` fact, persisted exactly once.
+  - Stage memory, in the sampler terms used here. These are whole-probe figures, not app RAM.
+- **Exits.** The hold is released on every exit path, and the logger's descriptor is closed before the scratch root is removed.
+
 ## The profile
 
 The profile label is `CANDIDATE-4K-64K-10K-4M`. Every mode builds it through the actual `RuntimeServiceLimits` initializer.

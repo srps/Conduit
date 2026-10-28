@@ -233,11 +233,9 @@ final class AppStateActivationParityTests: XCTestCase {
     }
 
     /// Quits through the app's own Quit and returns whether it settled completed. The host settles it only after its quit's bounded
-    /// diagnostic flush attempt has been joined; that attempt does not guarantee the events writer's queue emptied, and records may remain
-    /// queued or their writes fail. The file assertions read after this detect any missing record.
-    /// That is logical quiescence, not a claim that every diagnostic writer confirmed its records: a drain that timed out, or a record the
-    /// writer dropped or failed, leaves the file short, and the assertions read after this still catch it. Runtime, listener and machine
-    /// assertions belong before it, since the Quit tears the modules down.
+    /// diagnostic flush attempt has been joined. That is logical quiescence, not a claim that every diagnostic writer confirmed its
+    /// records: a drain that timed out, or a record the writer dropped or failed, leaves the file short, and the file assertions read after
+    /// this catch it. Runtime, listener and machine assertions belong before it, since the Quit tears the modules down.
     private func quitJoiningHostDiagnostics(_ state: AppState, file: StaticString = #filePath, line: UInt = #line) async -> Bool {
         XCTAssertTrue(state.beginQuit(), "the test's Quit is the first", file: file, line: line)
         guard case .settled(.completed)? = await state.finishQuit()?.quit else {
@@ -931,11 +929,12 @@ final class AppStateActivationParityTests: XCTestCase {
         state.config.routing.pacURL = "https://user:TOKEN-HOST-7@pac.example.test/p.pac"
         state.commitPendingEdit(trigger: .submit)
         await state.awaitPendingSave()
-        let snapshot = (try? String(contentsOf: harness.environment.snapshotFile, encoding: .utf8)) ?? ""
-        XCTAssertFalse(snapshot.contains("TOKEN-HOST-7"))
         XCTAssertTrue(try String(contentsOf: harness.environment.configFile, encoding: .utf8).contains("pac.example.test"),
                       "the value was saved, so the absence is not vacuous")
         guard await quitJoiningHostDiagnostics(state) else { return }
+        // A required read: a missing snapshot throws, so its absence is never read as a clean one.
+        let snapshot = try String(contentsOf: harness.environment.snapshotFile, encoding: .utf8)
+        XCTAssertFalse(snapshot.contains("TOKEN-HOST-7"))
         XCTAssertTrue(harness.hostEventsText.contains("config.workflow"), "the host recorded the save, so the absence is not vacuous")
         XCTAssertFalse(harness.hostEventsText.contains("TOKEN-HOST-7"))
     }

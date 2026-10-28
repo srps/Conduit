@@ -1,0 +1,228 @@
+{
+  "sourceCommit": "6c9159ad163bc305b2b26958615fb1f43c4abdfd",
+  "provenanceBefore": {
+    "head": "6c9159ad163bc305b2b26958615fb1f43c4abdfd",
+    "productSourcesDirty": true,
+    "productSourceFingerprint": "d7d198de316a9b2971bce9f3d2936b5803f3af438b345084111a34b71104d298",
+    "untrackedProductFiles": 0,
+    "experimentFiles": {
+      "Probe.swift": "af1ef5857fee3279087fb042cd23f321a807d22bc1b5f9ae43e7e24c37c21a64",
+      "README.md": "363f0a7053937c579deafede43540abdd383abaf6bbe7bdce369b5b676a79447",
+      "run.py": "c5ddd530935f40ba47465e73310839a7221547f9d17dc3aaa9a025f6b54fdfe7"
+    }
+  },
+  "provenanceAfter": {
+    "head": "6c9159ad163bc305b2b26958615fb1f43c4abdfd",
+    "productSourcesDirty": true,
+    "productSourceFingerprint": "d7d198de316a9b2971bce9f3d2936b5803f3af438b345084111a34b71104d298",
+    "untrackedProductFiles": 0,
+    "experimentFiles": {
+      "Probe.swift": "af1ef5857fee3279087fb042cd23f321a807d22bc1b5f9ae43e7e24c37c21a64",
+      "README.md": "363f0a7053937c579deafede43540abdd383abaf6bbe7bdce369b5b676a79447",
+      "run.py": "c5ddd530935f40ba47465e73310839a7221547f9d17dc3aaa9a025f6b54fdfe7"
+    }
+  },
+  "sourceUnchangedDuringRun": true,
+  "objectsUnchangedDuringRun": true,
+  "probe_sha256": "af1ef5857fee3279087fb042cd23f321a807d22bc1b5f9ae43e7e24c37c21a64",
+  "runner_sha256": "c5ddd530935f40ba47465e73310839a7221547f9d17dc3aaa9a025f6b54fdfe7",
+  "swiftc": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)\nTarget: arm64-apple-macosx26.0",
+  "objects": {
+    "CNIOOpenBSD.o": {
+      "sha256": "a76c52360886ee6b13b54b8645a062abe2e05d58022cfa04b660f3b16b36ed9a",
+      "mtime": 1793166170.0636237
+    },
+    "RuntimeEvents.o": {
+      "sha256": "dcac577248d4de0d05d3e90177dabff916d5f78c52c6d267eabe5f662167795c",
+      "mtime": 1793166171.9444351
+    },
+    "CNIOLinux.o": {
+      "sha256": "d25fb202a2d09fee2f88d86accb6c654638b484303ebfcc1ca12426eb682d55b",
+      "mtime": 1793166170.363093
+    },
+    "InternalCollectionsUtilities.o": {
+      "sha256": "054d30700153d1d76c452310605fdebe9c67b1cf3032c4eebfffedd10616946a",
+      "mtime": 1792866987.8553352
+    },
+    "CNIOFreeBSD.o": {
+      "sha256": "c33ba43f29ed138ceb5c50a82249f12ee6a4fc1b82d8cd089e43fb14f342049a",
+      "mtime": 1793166170.065894
+    },
+    "_AtomicsShims.o": {
+      "sha256": "4712a7f99a5c4034b1dab16538d1a5877d029da6b7231b35a84d3ede7eb96a04",
+      "mtime": 1792866988.244233
+    },
+    "CNIOAtomics.o": {
+      "sha256": "f5bcaadcaaa49f9a0e79ddb43d9c017f0bb5b68d2e452a47d5ab10e5fe59b725",
+      "mtime": 1793166170.9305115
+    },
+    "CNIOLLHTTP.o": {
+      "sha256": "eee2ba6eb6f6bac26a1ad6f98f896b69eb4fcc3be1dcb81946d095f533f724f8",
+      "mtime": 1793166170.7795062
+    },
+    "_NIODataStructures.o": {
+      "sha256": "d20415b99dd71dabc44d4ce3b0777aa5a0f3978cb776905a38ab75ffb8c9f561",
+      "mtime": 1792866991.42828
+    },
+    "CNIOWindows.o": {
+      "sha256": "63f3e7d513bc29cbf870c6c9703ccb049b718b2e992161fdc27489940990cea7",
+      "mtime": 1792866986.9841125
+    },
+    "Atomics.o": {
+      "sha256": "552a474cc08dc0f42c8ba91e57ae5527214be708aad63f6014d1ebc0048c49a2",
+      "mtime": 1792866991.1289978
+    },
+    "NIOConcurrencyHelpers.o": {
+      "sha256": "2576476005bee1b6e294bd6fd44436483a7cf6d00695a81c6c4f81663b9521b2",
+      "mtime": 1792866991.4874232
+    },
+    "ProxyKernel.o": {
+      "sha256": "bc5f366d62773ff8096ffc240d67a4ed0862bb2d3ab2038552040de6a813b34a",
+      "mtime": 1793166211.6239595
+    },
+    "CNIOPosix.o": {
+      "sha256": "1740dc37a6c297c0646a1389ac61e910e66ea8f97beb15bfcfcf89bf4ed10552",
+      "mtime": 1793166170.1828837
+    },
+    "NIOCore.o": {
+      "sha256": "448b746a8be80a1828fab5ff3e604dfdabda8a73278f4a4cd17a2a9983fb5461",
+      "mtime": 1792867001.2366831
+    },
+    "DequeModule.o": {
+      "sha256": "79c270ec18648a256c63d29f60cd311e5f0f72f26b427a5628ff75e0a8416687",
+      "mtime": 1792866991.2740788
+    },
+    "CNIODarwin.o": {
+      "sha256": "a48db75b4dba4cab5a5f7a9ed998af1d42b3e5f2c35a55f314746af5e8cc283f",
+      "mtime": 1793166170.4219387
+    },
+    "NIOEmbedded.o": {
+      "sha256": "14d335cb973f2fee2be9f92e51ef7e533b7005a70bcfe65a4440627ce1647928",
+      "mtime": 1792867004.1835628
+    },
+    "NIO.o": {
+      "sha256": "2db37a344b62878317281f269807daa5d50453a66bcc315204d2e4f7504d5972",
+      "mtime": 1792867012.7553322
+    },
+    "ConduitShared.o": {
+      "sha256": "8fb82c987f484cd691366d8fc657d93afba53a264cce14bbe87709711a997c9f",
+      "mtime": 1793166181.8828824
+    },
+    "NIOPosix.o": {
+      "sha256": "cbaf1b9318df2fa9cc4f2e9613aa4746b1f70db252728ed5dd4b8eae80fd7bba",
+      "mtime": 1792867012.1681828
+    },
+    "ContainersPreview.o": {
+      "sha256": "00dbc7fb33d13ebfa85da3741c12b74792bb43a71ad720d4d68d9df6b4dd782f",
+      "mtime": 1792866988.5530581
+    },
+    "CNIOWASI.o": {
+      "sha256": "63f3e7d513bc29cbf870c6c9703ccb049b718b2e992161fdc27489940990cea7",
+      "mtime": 1793166170.0587175
+    },
+    "NIOHTTP1.o": {
+      "sha256": "3a9f143fb83919c4f99d0ce281acc48d51b224f2818b25c0ab1e3ac8f6fecbc5",
+      "mtime": 1792867016.8771985
+    },
+    "_NIOBase64.o": {
+      "sha256": "f2929d70eb43270d2e9dd814151acdcd1213f1ec78217fdaca2fb625d1ef3ee3",
+      "mtime": 1792866987.8030336
+    },
+    "ProxyControlBridge.o": {
+      "sha256": "5af149c106480f717e5967b4252170799f8f1515e3f5b5e7f325932789a010dc",
+      "mtime": 1793166212.7849622
+    },
+    "ConduitRuntime.o": {
+      "sha256": "16dadf6e0810d026c01e84e77aaad81cd5c45cfe27295d5fc2562447b0de687d",
+      "mtime": 1793166230.8357842
+    },
+    "PlatformMac.o": {
+      "sha256": "b8a13621350efea652fd8f748b935b35aae100211fdb391f25a5155d99a55934",
+      "mtime": 1793166222.6697
+    },
+    "ProxyAuth.o": {
+      "sha256": "3cf681ef21c9cfbce7fa97d9a07f4f07a59ac39bc447aa168fb5232c9778e5a0",
+      "mtime": 1793032114.4405975
+    },
+    "ProxyPAC.o": {
+      "sha256": "11d0424b2f8a90886ab1bac158016d11e3c6eafd8773818ab8f7705cd464b09b",
+      "mtime": 1793032113.374462
+    }
+  },
+  "modeTimeoutSeconds": 300,
+  "maxOutputBytes": 4194304,
+  "checks": [
+    {
+      "kind": "logger-held",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 2.869,
+      "log": "logger-held-t1.ndjson",
+      "outputBytes": 11253,
+      "outputTruncated": false,
+      "records": 46,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "logger-held",
+      "trial": 2,
+      "exit": 0,
+      "seconds": 2.247,
+      "log": "logger-held-t2.ndjson",
+      "outputBytes": 11241,
+      "outputTruncated": false,
+      "records": 46,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "logger-held",
+      "trial": 3,
+      "exit": 0,
+      "seconds": 2.319,
+      "log": "logger-held-t3.ndjson",
+      "outputBytes": 11220,
+      "outputTruncated": false,
+      "records": 46,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "logger-held-nosampler",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 2.289,
+      "log": "logger-held-nosampler-t1.ndjson",
+      "outputBytes": 11726,
+      "outputTruncated": false,
+      "records": 46,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "logger-held-nosampler",
+      "trial": 2,
+      "exit": 0,
+      "seconds": 2.273,
+      "log": "logger-held-nosampler-t2.ndjson",
+      "outputBytes": 11702,
+      "outputTruncated": false,
+      "records": 46,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "logger-held-nosampler",
+      "trial": 3,
+      "exit": 0,
+      "seconds": 2.186,
+      "log": "logger-held-nosampler-t3.ndjson",
+      "outputBytes": 11707,
+      "outputTruncated": false,
+      "records": 46,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    }
+  ]
+}

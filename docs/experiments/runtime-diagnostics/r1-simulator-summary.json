@@ -1,0 +1,521 @@
+{
+  "count": 103,
+  "all_passed": true,
+  "scenarios": [
+    {
+      "scenario": "baselineBurst",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "silentThenBurst(silent=8000ms)",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "multiConcurrent(n=30)",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "multiConcurrent(n=10)",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "highThroughput(single)",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "multiConcurrent(n=100)",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "bounded-writers",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "protected-snapshot-artifacts",
+      "passed": true,
+      "assertions": 10
+    },
+    {
+      "scenario": "protected-app-log",
+      "passed": true,
+      "assertions": 16
+    },
+    {
+      "scenario": "diagnostic-destination-guard",
+      "passed": true,
+      "assertions": 10
+    },
+    {
+      "scenario": "pac-fetch-bounds",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "pac-preview",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "shared-inbound-budget",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "connectionFlood(inbound-limit)",
+      "passed": true,
+      "assertions": 2
+    },
+    {
+      "scenario": "authStorm(pending-handshake-bound)",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "silentThenBurst(silent=30000ms)",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "keepaliveReadback",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "healthCheck(HEAD via upstream)",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "upstreamFailover",
+      "passed": true,
+      "assertions": 4
+    },
+    {
+      "scenario": "prewarm-selection",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "floodSlowDrain(AE5F6815 repro)",
+      "passed": true,
+      "assertions": 5
+    },
+    {
+      "scenario": "forced-proxy-precedence",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "pac-unsupported-only",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "strict-direct-reachable",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "strict-hint-vpn-settle",
+      "passed": true,
+      "assertions": 8
+    },
+    {
+      "scenario": "strict-hint-upstream-refusal",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "client-hangup-after-response",
+      "passed": true,
+      "assertions": 14
+    },
+    {
+      "scenario": "upstream-exchange-failure",
+      "passed": true,
+      "assertions": 8
+    },
+    {
+      "scenario": "gateway-probe-blocklist",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "request-body-spool",
+      "passed": true,
+      "assertions": 7
+    },
+    {
+      "scenario": "directModeSilence(VPN-off vs upstreams-unreachable)",
+      "passed": true,
+      "assertions": 2
+    },
+    {
+      "scenario": "directFailureStorm",
+      "passed": true,
+      "assertions": 5
+    },
+    {
+      "scenario": "expectedFailureLevels",
+      "passed": true,
+      "assertions": 9
+    },
+    {
+      "scenario": "vpnFlapShortIdleTunnel",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "vpnFlapShortActiveStream",
+      "passed": true,
+      "assertions": 2
+    },
+    {
+      "scenario": "vpnFlapLongOutage",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "vpnUserDisconnectFastPath",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "vpnRapidFlapBurst",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "transparentDirectRouting",
+      "passed": true,
+      "assertions": 5
+    },
+    {
+      "scenario": "relay-reassert-after-stop",
+      "passed": true,
+      "assertions": 10
+    },
+    {
+      "scenario": "vpnReconnectRouting",
+      "passed": true,
+      "assertions": 5
+    },
+    {
+      "scenario": "vpn-reconnect-reprobe",
+      "passed": true,
+      "assertions": 4
+    },
+    {
+      "scenario": "vpn-probe-superseded",
+      "passed": true,
+      "assertions": 5
+    },
+    {
+      "scenario": "vpn-startup-rederive",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "vpn-transition-migration",
+      "passed": true,
+      "assertions": 11
+    },
+    {
+      "scenario": "vpn-transition-setup-race",
+      "passed": true,
+      "assertions": 5
+    },
+    {
+      "scenario": "vpn-transition-direct-http",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "vpn-transition-late-dial",
+      "passed": true,
+      "assertions": 4
+    },
+    {
+      "scenario": "vpn-existing-stream-failure",
+      "passed": true,
+      "assertions": 4
+    },
+    {
+      "scenario": "browserRetainedPAC",
+      "passed": true,
+      "assertions": 5
+    },
+    {
+      "scenario": "networkTransition",
+      "passed": true,
+      "assertions": 4
+    },
+    {
+      "scenario": "networkPathChurn",
+      "passed": true,
+      "assertions": 7
+    },
+    {
+      "scenario": "vpn-pac-refresh",
+      "passed": true,
+      "assertions": 7
+    },
+    {
+      "scenario": "pac-slow-host",
+      "passed": true,
+      "assertions": 8
+    },
+    {
+      "scenario": "pac-route-bounds",
+      "passed": true,
+      "assertions": 4
+    },
+    {
+      "scenario": "upstreamFlap",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "recovery-unreachable-ladder",
+      "passed": true,
+      "assertions": 6
+    },
+    {
+      "scenario": "recovery-superseded-by-disconnect",
+      "passed": true,
+      "assertions": 5
+    },
+    {
+      "scenario": "health-restart-superseded",
+      "passed": true,
+      "assertions": 4
+    },
+    {
+      "scenario": "websocket-upgrade",
+      "passed": true,
+      "assertions": 4
+    },
+    {
+      "scenario": "connect-early-direct",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "connect-early-upstream",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "server-first-connect",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "server-first-socks5",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "audit-proxied-response-hop-by-hop",
+      "passed": true,
+      "assertions": 2
+    },
+    {
+      "scenario": "audit-socks5-nonzero-rsv",
+      "passed": true,
+      "assertions": 2
+    },
+    {
+      "scenario": "audit-expect-trailers",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "dnsDoHBlockedStillAnswers",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "dnsUpstreamSpoofRejected",
+      "passed": true,
+      "assertions": 5
+    },
+    {
+      "scenario": "dnsEphemeralPairRebind",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "observable-target-redaction",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "private-config-boundary",
+      "passed": true,
+      "assertions": 20
+    },
+    {
+      "scenario": "private-editor-codec",
+      "passed": true,
+      "assertions": 11
+    },
+    {
+      "scenario": "config-resource-bounds",
+      "passed": true,
+      "assertions": 35
+    },
+    {
+      "scenario": "config-file-boundary",
+      "passed": true,
+      "assertions": 13
+    },
+    {
+      "scenario": "config-sidecar-boundary",
+      "passed": true,
+      "assertions": 29
+    },
+    {
+      "scenario": "config-exact-persistence",
+      "passed": true,
+      "assertions": 8
+    },
+    {
+      "scenario": "auth-identity-length",
+      "passed": true,
+      "assertions": 8
+    },
+    {
+      "scenario": "security-boundaries",
+      "passed": true,
+      "assertions": 1
+    },
+    {
+      "scenario": "kerberos-service-ticket",
+      "passed": true,
+      "assertions": 2
+    },
+    {
+      "scenario": "kerberos-fallback-flood",
+      "passed": true,
+      "assertions": 9
+    },
+    {
+      "scenario": "kerberos-kdc-recovery",
+      "passed": true,
+      "assertions": 7
+    },
+    {
+      "scenario": "ntlm-credential-cache",
+      "passed": true,
+      "assertions": 9
+    },
+    {
+      "scenario": "helper-caller-identity",
+      "passed": true,
+      "assertions": 10
+    },
+    {
+      "scenario": "network-location-recovery",
+      "passed": true,
+      "assertions": 31
+    },
+    {
+      "scenario": "environment-drift",
+      "passed": true,
+      "assertions": 7
+    },
+    {
+      "scenario": "journal-integrity",
+      "passed": true,
+      "assertions": 6
+    },
+    {
+      "scenario": "state-writer-lease",
+      "passed": true,
+      "assertions": 33
+    },
+    {
+      "scenario": "runtime-file-replacement",
+      "passed": true,
+      "assertions": 18
+    },
+    {
+      "scenario": "framed-runtime-client",
+      "passed": true,
+      "assertions": 10
+    },
+    {
+      "scenario": "runtime-display-bounds",
+      "passed": true,
+      "assertions": 9
+    },
+    {
+      "scenario": "config-file-conditional-replacement",
+      "passed": true,
+      "assertions": 16
+    },
+    {
+      "scenario": "config-session-replacement",
+      "passed": true,
+      "assertions": 14
+    },
+    {
+      "scenario": "runtime-service-wire",
+      "passed": true,
+      "assertions": 20
+    },
+    {
+      "scenario": "split-dns-helper-retry",
+      "passed": true,
+      "assertions": 5
+    },
+    {
+      "scenario": "lifecycle-stop-overtakes-start",
+      "passed": true,
+      "assertions": 7
+    },
+    {
+      "scenario": "settings-retry-request",
+      "passed": true,
+      "assertions": 5
+    },
+    {
+      "scenario": "reapply-retry",
+      "passed": true,
+      "assertions": 4
+    },
+    {
+      "scenario": "settings-listener-commit",
+      "passed": true,
+      "assertions": 6
+    },
+    {
+      "scenario": "update-coordinator",
+      "passed": true,
+      "assertions": 15
+    },
+    {
+      "scenario": "update-preflight",
+      "passed": true,
+      "assertions": 3
+    },
+    {
+      "scenario": "helper-busy-status",
+      "passed": true,
+      "assertions": 7
+    },
+    {
+      "scenario": "runtime-host-effects",
+      "passed": true,
+      "assertions": 154
+    }
+  ]
+}

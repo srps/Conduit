@@ -3,7 +3,7 @@
 - Date: 2026-10-25
 - Decision: accepted (owner, 2026-10-25, #186: selected “Incremental development; one final AppState switch (Recommended)”)
 - Implementation: partial
-- Validation: none
+- Validation: pending
 - Supersedes: 0001, 0013
 - Superseded by: none
 
@@ -229,6 +229,23 @@ in flight. It deletes unused termination/queue-drain paths while retaining audit
 assertions on the consumed diagnostic path. Focused and all 41 workflow checks
 pass after causal test-fixture corrections; independent review accepts Source.
 Diagnostic/logger work and the whole RuntimeActor move remain open.
+
+
+The [diagnostic prerequisite](../verification-runtime-diagnostics-2026-10-28.md)
+adds the asynchronous [LogSink drain](../../Sources/ProxyKernel/Abstractions/LogSink.swift),
+bounded [file writer](../../Sources/ProxyKernel/Support/RotatingLogFile.swift) and
+[AppLogStore history handoff](../../Sources/Conduit/App/AppLogStore.swift), with the
+[host](../../Sources/ConduitRuntime/RuntimeHost.swift) and
+[app Quit tail](../../Sources/Conduit/App/AppState.swift) using bounded waits.
+Misses use a typed lifecycle event with separate wire mapping. Independent review
+found and corrected a write/close admission race; focused tests, control
+witnesses and all 41 corrected workflow checks pass. Fresh Release host/writer
+and optimized consumer/logger measurements pass; new-head hosted checks remain
+pending. The full-list baseline still shows a long current-owner turn, so whole
+RuntimeActor and full-capture control fairness remain required.
+No registry, queue or runtime/store path is added. Native activation and
+applicable machine checks are now due, so validation is pending; unit tests,
+models and hosted CI are not recorded as owner/real-machine validation.
 
 ## Open questions
 

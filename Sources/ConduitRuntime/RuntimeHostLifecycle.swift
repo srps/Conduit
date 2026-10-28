@@ -1014,7 +1014,8 @@ extension RuntimeHost {
             await waitUntilIdle(Self.allModules)
             await flush?.closed()
             await workflow.waitUntilIdle()
-            await flushEvents()
+            // The logger's drain is cut to the quit's own deadline, so the quit gives it no fresh budget.
+            await flushEvents(loggerUntil: deadline)
             flush?.quitDidEnd()
             // The physical work is done: the composed control service ends its streams after what it already published.
             quitEnded = true

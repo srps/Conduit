@@ -35,6 +35,10 @@ final class RuntimeEventTypedTests: XCTestCase {
          "lifecycle.module_settled", "module=proxy source=explicit outcome=superseded group=2"),
         (.moduleSettled(LifecycleModuleSettled(settlement: .conditionalDNS(.alreadyActive), group: 4)),
          "lifecycle.module_settled", "module=dns source=conditional outcome=already_active group=4"),
+        (.logFlushUnconfirmed(LifecycleLogFlushUnconfirmed(source: .host, outcome: .timedOut)),
+         "lifecycle.log_flush_unconfirmed", "source=host outcome=timed_out"),
+        (.logFlushUnconfirmed(LifecycleLogFlushUnconfirmed(source: .app, outcome: .skippedBudget)),
+         "lifecycle.log_flush_unconfirmed", "source=app outcome=skipped_budget"),
     ]
 
     private let superseded = #"{"family":"lifecycle","lifecycle":{"type":"superseded","operation":"proxy_start","generation":1,"current":2,"reason":"superseded"}}"#
@@ -49,18 +53,18 @@ final class RuntimeEventTypedTests: XCTestCase {
         }
     }
 
-    func testTheTypedInventoryIsTheFiveLifecycleNamesTheConfigWorkflowFourTheRuntimeServiceTwoAndTheProxyRecoveryTwo() {
+    func testTheTypedInventoryIsTheSixLifecycleNamesTheConfigWorkflowFourTheRuntimeServiceTwoAndTheProxyRecoveryTwo() {
         XCTAssertEqual(
             RuntimeEventPayload.typedNames,
             Set([
                 "lifecycle.superseded", "lifecycle.coalesced", "lifecycle.termination_drain_expired",
-                "lifecycle.version_changed", "lifecycle.module_settled",
+                "lifecycle.version_changed", "lifecycle.module_settled", "lifecycle.log_flush_unconfirmed",
                 "config.workflow.observed", "config.workflow.committed", "config.workflow.held", "config.workflow.superseded",
                 "runtime_service.fault", "runtime_service.snapshot_unavailable",
                 "proxy_recovery.recovered", "proxy_recovery.failed",
             ])
         )
-        XCTAssertEqual(LifecycleEventName.allCases.count, 5)
+        XCTAssertEqual(LifecycleEventName.allCases.count, 6)
         XCTAssertEqual(ConfigurationWorkflowEventName.allCases.count, 4)
         XCTAssertEqual(RuntimeServiceEventName.allCases.count, 2)
         XCTAssertEqual(ProxyRecoveryEventName.allCases.count, 2)
@@ -101,6 +105,31 @@ final class RuntimeEventTypedTests: XCTestCase {
                 XCTAssertEqual(decoded.detail, original.detail, "\(settlement) \(group)")
             }
         }
+    }
+
+    /// Every unconfirmed logger drain is closed tokens only, a sanitizer fixed point, and survives the file. The outcome set has no
+    /// `drained`, and the kernel's mapping gives a drained queue no event at all.
+    func testEveryUnconfirmedLogFlushIsClosedAndRoundTripsTheFile() throws {
+        XCTAssertEqual(LifecycleLogFlushSource.allCases.map(\.rawValue), ["host", "app"])
+        XCTAssertEqual(LifecycleLogFlushOutcome.allCases.map(\.rawValue), ["timed_out", "busy", "skipped_budget", "cancelled", "unavailable"])
+        XCTAssertNil(LifecycleLogFlushOutcome(RecordDrainOutcome.drained))
+        for outcome in [RecordDrainOutcome.timedOut, .busy, .skippedBudget, .cancelled, .unavailable] {
+            XCTAssertEqual(LifecycleLogFlushOutcome(outcome)?.rawValue, outcome.rawValue)
+        }
+        for source in LifecycleLogFlushSource.allCases {
+            for outcome in LifecycleLogFlushOutcome.allCases {
+                let value = LifecycleEvent.logFlushUnconfirmed(LifecycleLogFlushUnconfirmed(source: source, outcome: outcome))
+                XCTAssertEqual(SensitiveValueSanitizer.sanitize(value.detail), value.detail)
+                let original = RuntimeEvent(payload: .lifecycle(value))
+                let decoded = try CanonicalJSON.decoder().decode(RuntimeEvent.self, from: try CanonicalJSON.encoder().encode(original))
+                XCTAssertEqual(decoded.typed, original.typed)
+                XCTAssertEqual(decoded.detail, "source=\(source.rawValue) outcome=\(outcome.rawValue)")
+            }
+        }
+        let line = String(decoding: try CanonicalJSON.encoder().encode(RuntimeEvent(payload: .lifecycle(.logFlushUnconfirmed(
+            LifecycleLogFlushUnconfirmed(source: .app, outcome: .busy)
+        )))), as: UTF8.self)
+        XCTAssertTrue(line.contains(#""typed":{"family":"lifecycle","lifecycle":{"outcome":"busy","source":"app","type":"log_flush_unconfirmed"}}"#), line)
     }
 
     func testASettlementCarriesItsClosedFieldsInTheFile() throws {
@@ -439,6 +468,15 @@ final class RuntimeEventTypedTests: XCTestCase {
             ("a settlement without its group",
              "lifecycle.module_settled", "lifecycle", "module=dns source=explicit outcome=failed group=1",
              #"{"family":"lifecycle","lifecycle":{"type":"module_settled","module":"dns","source":"explicit","outcome":"failed"}}"#),
+            ("a log flush that claims it drained",
+             "lifecycle.log_flush_unconfirmed", "lifecycle", "source=host outcome=drained",
+             #"{"family":"lifecycle","lifecycle":{"type":"log_flush_unconfirmed","source":"host","outcome":"drained"}}"#),
+            ("a log flush from an unknown source",
+             "lifecycle.log_flush_unconfirmed", "lifecycle", "source=helper outcome=busy",
+             #"{"family":"lifecycle","lifecycle":{"type":"log_flush_unconfirmed","source":"helper","outcome":"busy"}}"#),
+            ("a log flush without its outcome",
+             "lifecycle.log_flush_unconfirmed", "lifecycle", "source=app outcome=busy",
+             #"{"family":"lifecycle","lifecycle":{"type":"log_flush_unconfirmed","source":"app"}}"#),
             ("a name that disagrees with its payload",
              "lifecycle.coalesced", "lifecycle", detail, superseded),
             ("a kind that disagrees with its payload",
