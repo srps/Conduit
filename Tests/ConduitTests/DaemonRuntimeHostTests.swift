@@ -3650,8 +3650,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// The resolver switch-on's entry write is queued with the VPN gate of its decision, behind a held shell-environment drift pass. A VPN
     /// drop taken meanwhile decides its removal in its own turn and queues it behind the write, running nothing on the owner (#47).
-    /// Released, the work lands in the order it was decided: the write from the stale gate succeeds, then the drop's removal is refused.
-    /// The earlier success recording first must not discard that later failure: it stays pending for the repair, with none superseded.
+    /// Released, the work lands in the order it was decided: the write from the stale gate succeeds, then the drop's removal is refused,
+    /// then the switch-on's correction removal behind it is refused too. The owner can observe those outcomes in another order, so two
+    /// holds on the platform queue fix the order they are recorded in: the drop's removal is held until the write is recorded, and the
+    /// correction until the drop's refusal is. This test checks that history, in queue order: the earlier success recording first must
+    /// not discard the later failures, both are counted, and none is superseded. Another legal order, the correction recorded before the
+    /// drop, is `SplitDNSEntryFileRepairTests.testAnOlderRefusalObservedAfterANewerRefusalIsSupersededAndTheNewerStands`.
     @RuntimeActor func testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
         await host.awaitLaunchRecovery()
@@ -3688,6 +3692,49 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertTrue(harness.machine.privilege.commands(matching: .applyDNS).isEmpty, "nothing was written yet")
         XCTAssertTrue(harness.machine.privilege.commands(matching: .removeDNS).isEmpty, "the drop's removal is queued, not run inline")
         harness.machine.privilege.failing = [.removeDNS]
+        func failures() -> [String] {
+            events.events.filter { $0.event == "platform.split_dns_failed" }.compactMap { $0.detail?.split(separator: " ").prefix(3).joined(separator: " ") }
+        }
+        func superseded() -> Bool {
+            events.events.contains { $0.event == "platform.split_dns_outcome_superseded" }
+        }
+
+        // The first removal is the drop's. Armed while the drift pass is held, the hold passes on: the next release lets the drift pass
+        // go, the write lands, and the drop's removal is held before it reaches the helper. Only the write can be recorded meanwhile.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.removeDNS.rawValue }
+        let beforeWrite = host.splitDNSRepair.generation
+        harness.hold.release()
+        let dropHeld = await harness.hold.waitUntilReached(within: .seconds(5))
+        XCTAssertTrue(dropHeld, "the drop's removal reached the platform queue")
+        for _ in 0..<5_000 where host.splitDNSRepair.generation == beforeWrite {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertNotEqual(host.splitDNSRepair.generation, beforeWrite, "the write's success is recorded first")
+        XCTAssertTrue(harness.hold.isHolding, "the drop's removal is held on the platform queue")
+        XCTAssertTrue(harness.hold.reachedOnArmedQueue, "the drop's removal was held on the platform queue, not the owner")
+        XCTAssertTrue(harness.machine.privilege.commands(matching: .removeDNS).isEmpty, "no removal reached the helper yet")
+        XCTAssertEqual(failures(), [], "nothing has failed yet")
+        XCTAssertFalse(superseded(), "the write's success was not superseded")
+        XCTAssertNil(host.splitDNSRepair.pending, "the write's success leaves nothing pending")
+
+        // The next removal is the switch-on's correction, queued once the write was recorded. Armed while the drop's removal is held,
+        // the hold passes on again: the release lets the drop's removal be refused, and the correction is held behind it.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.removeDNS.rawValue }
+        harness.hold.release()
+        let correctionHeld = await harness.hold.waitUntilReached(within: .seconds(5))
+        XCTAssertTrue(correctionHeld, "the switch-on's correction removal reached the platform queue")
+        for _ in 0..<5_000 where failures().isEmpty {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        // The owner has recorded the drop's refusal while the correction behind it waits: the history in queue order.
+        XCTAssertTrue(harness.hold.isHolding, "the correction is held on the platform queue")
+        XCTAssertTrue(harness.hold.reachedOnArmedQueue, "the correction was held on the platform queue, not the owner")
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .removeDNS).count, 1, "only the drop's removal reached the helper")
+        XCTAssertEqual(failures(), ["operation=remove source=vpn_transition attempt=1"], "the drop's refusal is recorded first")
+        XCTAssertFalse(superseded(), "nothing was superseded yet")
+        XCTAssertEqual(host.splitDNSRepair.pending?.operation, .remove)
+        XCTAssertEqual(host.splitDNSRepair.pending?.source, .vpnTransition)
+        XCTAssertEqual(host.splitDNSRepair.pending?.attempts, 1)
         harness.hold.release()
         try await reload.value
         await host.deliveries.drain()
@@ -3699,7 +3746,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(events.events.contains { $0.event == "platform.split_dns_outcome_superseded" },
                        "outcomes are recorded in the order they were queued")
         // The drop's own removal and the switch-on's correction behind it, both refused and both recorded.
-        XCTAssertEqual(events.events.filter { $0.event == "platform.split_dns_failed" }.compactMap { $0.detail?.split(separator: " ").prefix(3).joined(separator: " ") },
+        XCTAssertEqual(failures(),
                        ["operation=remove source=vpn_transition attempt=1", "operation=remove source=vpn_transition attempt=2"])
         XCTAssertEqual(host.splitDNSRepair.pending?.operation, .remove, "the refused removal stays pending for the repair")
         XCTAssertEqual(host.splitDNSRepair.pending?.source, .vpnTransition)

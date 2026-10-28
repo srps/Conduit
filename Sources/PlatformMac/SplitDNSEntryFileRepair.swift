@@ -139,8 +139,10 @@ package struct SplitDNSEntryFileRepair: Sendable {
     /// The last place `queue()` handed out.
     private var queued = 0
 
-    /// The next place in queue order, for an operation queued now. Outcomes land in this order on the host's serial platform queue, so
-    /// two operations in flight at once are both recorded, the later one last.
+    /// The next place in queue order, for an operation queued now. Operations run in this order on the host's serial platform queue,
+    /// but each outcome reaches the owner in the task that queued it, so the owner can observe them in another order. Recorded in place
+    /// order, every outcome counts. When a later place was recorded first, `record` drops the earlier outcome, so the physically
+    /// latest result stands.
     package mutating func queue() -> Int {
         queued = max(queued, generation) + 1
         return queued
