@@ -44,13 +44,13 @@ struct ConfigurationLoadObservation: Sendable {
     let outcome: Result<ConfigurationFrozenLoad, ConfigurationLoadRefusal>
     let baselines: ConfigurationSlots<ConfigurationFileBaseline?>
     /// For each sidecar the observation found missing, whether its decoded value differs from the store's previous value by canonical bytes.
-    /// It is false for the runtime file and for a present sidecar, whose own baseline decides. Computed on the worker, so the MainActor makes
+    /// It is false for the runtime file and for a present sidecar, whose own baseline decides. Computed on the worker, so the owner makes
     /// no O(size) comparison.
     var valueMoved = ConfigurationSlots(runtime: false, platform: false, preferences: false)
 }
 
 /// The physical steps of the configuration store. Each is a function of its inputs that the store runs on `PlatformWork`, so no
-/// read, parse, stage, hash or write runs on the MainActor. Every read goes through the one bounded reader, and every decode through
+/// read, parse, stage, hash or write runs on the owner. Every read goes through the one bounded reader, and every decode through
 /// the kernel's shared functions.
 enum ConfigurationStoreIO {
     /// Reads the three files once, checks the journal's presence through the access seam, and decodes the observation with the frozen

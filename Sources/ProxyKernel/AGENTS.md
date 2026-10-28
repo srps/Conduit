@@ -21,7 +21,7 @@ The portable product library: proxy, PAC routing engine, DNS forwarding, tunnels
 ## ProxyOrchestrator
 
 - Per-request callbacks (`onConnectionOpened`, `onConnectionClosed`, `onRequestCompleted`, `dnsForwarder.onMetrics`, tunnel counts) go through `emitSnapshotCoalesced()`. State transitions (`mutateSnapshot`, lifecycle, VPN changes, errors, auth outcomes) go through `emitSnapshotImmediate()`. A counter on the immediate path brings back the burst that flooded the main actor at 50+ req/s; a transition on the coalesced path adds up to 100 ms of UI lag. See the "Snapshot emission throttle" section of `Proxy/ProxyOrchestrator.swift`.
-- `ProxyOrchestrator` remains `@MainActor` until the whole RuntimeActor move (0031). Its `DispatchSource` handlers run on utility queues and hop to the owner under a captured generation. Repeating sources admit at most one pending owner hop; Stop or replacement invalidates older hops. Preserve their uptime scheduling.
+- `ProxyOrchestrator` shares `@RuntimeActor` with the runtime control-owner cluster (0031). Its `DispatchSource` handlers run on global dispatch queues and hop to that owner under a captured generation. Repeating sources admit at most one pending owner hop; cancellation, replacement or an immediate snapshot emission invalidates the affected older hop. Preserve uptime scheduling.
 
 ## DNS and tunnels
 

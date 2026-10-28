@@ -9,13 +9,12 @@ import XCTest
 /// The configuration store core over the fake file access and a real lease on a scratch root (decisions 0015, 0017, 0018, 0020, 0025
 /// and 0027). The fake holds the bytes and records each read and write, and its observation log holds 16 calls, so every fixture
 /// keeps its trace short. Nothing here exercises a Stop, an apply, an incarnation fence of a host, or a physical power loss.
-@MainActor
 final class ConfigurationStoreTests: XCTestCase {
     /// One store over a scratch root. The root's session is taken through the production bootstrap before anything is seeded, and the store
     /// is built over that session. `close` releases the session's lease through the scratch helper, and removes the directory only when that
     /// release returned `.released`. An unconfirmed close fails the test and keeps the directory, since its lock may still be held.
     /// Internal, so the preservation tests in `ConfigurationStorePreservationTests` share the same seeding.
-    @MainActor
+    @RuntimeActor
     final class Fixture {
         let directory: URL
         let session: StateRootSession
@@ -69,13 +68,13 @@ final class ConfigurationStoreTests: XCTestCase {
         expectedOwnerGeneration: PrivateConfigExpectedGeneration(rawValue: 1)!
     )
 
-    private func preferenceBytes(showMenuBarIcon: Bool) throws -> Data {
+    @RuntimeActor private func preferenceBytes(showMenuBarIcon: Bool) throws -> Data {
         var preferences = AppPreferences()
         preferences.showMenuBarIcon = showMenuBarIcon
         return try AppPreferencesPersistence.stagedData(for: preferences)
     }
 
-    private func describe(_ outcome: ConfigurationWriteOutcome) -> String {
+    @RuntimeActor private func describe(_ outcome: ConfigurationWriteOutcome) -> String {
         switch outcome {
         case .persisted: "persisted"
         case .unchanged: "unchanged"
@@ -86,7 +85,7 @@ final class ConfigurationStoreTests: XCTestCase {
         }
     }
 
-    private func adoptedLoad(_ fixture: Fixture) async -> ConfigurationSlots<ConfigurationComponentLoad>? {
+    @RuntimeActor private func adoptedLoad(_ fixture: Fixture) async -> ConfigurationSlots<ConfigurationComponentLoad>? {
         guard case .admitted(let report) = await fixture.store.load(context: Self.context),
               case .adopted(let loaded) = report.outcome else {
             XCTFail("the load was not adopted")
@@ -95,14 +94,14 @@ final class ConfigurationStoreTests: XCTestCase {
         return loaded
     }
 
-    private func writes(_ fixture: Fixture, at path: String) -> Int {
+    @RuntimeActor private func writes(_ fixture: Fixture, at path: String) -> Int {
         fixture.access.observations.filter { if case .write(let written, _) = $0 { written == path } else { false } }.count
     }
 
     /// Commits the store's current runtime and platform values at their current tokens, the canonical no-op save. A present file whose
     /// verified value is the candidate is verified without a write, so an external change is a conflict that latches. Returns the file that
     /// conflicted, or nil, and fails the test on any write.
-    private func latchByNoOpCommit(_ fixture: Fixture) async -> ConfigurationComponent? {
+    @RuntimeActor private func latchByNoOpCommit(_ fixture: Fixture) async -> ConfigurationComponent? {
         guard let current = fixture.store.values else {
             XCTFail("the store holds no values")
             return nil
@@ -128,7 +127,7 @@ final class ConfigurationStoreTests: XCTestCase {
     // MARK: - Open and reload
 
     /// One observation adopts the values and one baseline per file, each from the same bytes the shared decode read.
-    func testOpenAdoptsValuesAndBaselinesFromOneObservation() async throws {
+    @RuntimeActor func testOpenAdoptsValuesAndBaselinesFromOneObservation() async throws {
         let runtime = try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig())
         let fixture = try Fixture(runtime: runtime, platform: try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig()),
                                   preferences: try preferenceBytes(showMenuBarIcon: false))
@@ -144,7 +143,7 @@ final class ConfigurationStoreTests: XCTestCase {
     }
 
     /// Missing files are absent and uncommitted. Each one still has an absent baseline, and the open writes nothing.
-    func testMissingFilesAreAbsentUncommittedAndNothingIsWritten() async throws {
+    @RuntimeActor func testMissingFilesAreAbsentUncommittedAndNothingIsWritten() async throws {
         let fixture = try Fixture()
         defer { fixture.close() }
 
@@ -156,7 +155,7 @@ final class ConfigurationStoreTests: XCTestCase {
     }
 
     /// A refused startup input is never a baseline: no write can be authorized from it, and it names the refusal.
-    func testARefusedStartupHoldsNoBaseline() async throws {
+    @RuntimeActor func testARefusedStartupHoldsNoBaseline() async throws {
         let fixture = try Fixture(runtime: Data("not json".utf8))
         defer { fixture.close() }
 
@@ -181,7 +180,7 @@ final class ConfigurationStoreTests: XCTestCase {
 
     /// A coupled commit writes the platform file first, then the runtime file. Each receipt names its file's new version, and an
     /// old token no longer authorizes anything.
-    func testACoupledCommitPersistsBothFilesAndRetiresTheOldTokens() async throws {
+    @RuntimeActor func testACoupledCommitPersistsBothFilesAndRetiresTheOldTokens() async throws {
         let fixture = try Fixture()
         defer { fixture.close() }
         guard await adoptedLoad(fixture) != nil else { return }
@@ -209,7 +208,7 @@ final class ConfigurationStoreTests: XCTestCase {
 
     /// A present platform file whose verified content already is the candidate is verified without a save. The runtime update persists
     /// only the runtime file, and no platform write is made.
-    func testAnUnchangedPlatformFileIsVerifiedWithoutASaveWhileTheRuntimeUpdatePersists() async throws {
+    @RuntimeActor func testAnUnchangedPlatformFileIsVerifiedWithoutASaveWhileTheRuntimeUpdatePersists() async throws {
         let platformPath: String
         let fixture = try Fixture(platform: try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig()))
         defer { fixture.close() }
@@ -230,7 +229,7 @@ final class ConfigurationStoreTests: XCTestCase {
     }
 
     /// An external change to the platform file is a conflict, and the runtime write is held behind it. Nothing is overwritten.
-    func testAnExternalChangeToThePlatformFileConflictsAndHoldsTheRuntimeWrite() async throws {
+    @RuntimeActor func testAnExternalChangeToThePlatformFileConflictsAndHoldsTheRuntimeWrite() async throws {
         let externalPlatform = Data("{\"launchAtLogin\":true}".utf8)
         let fixture = try Fixture(platform: try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig()))
         defer { fixture.close() }
@@ -254,7 +253,7 @@ final class ConfigurationStoreTests: XCTestCase {
     }
 
     /// A value that cannot be staged starts no write, and the refusal names the field, never the value.
-    func testAStagingRefusalStartsNoWrite() async throws {
+    @RuntimeActor func testAStagingRefusalStartsNoWrite() async throws {
         let fixture = try Fixture()
         defer { fixture.close() }
         guard await adoptedLoad(fixture) != nil else { return }
@@ -271,7 +270,7 @@ final class ConfigurationStoreTests: XCTestCase {
 
     /// A no-op commit of the current value reports an external change and does not adopt it or write over it. The change latches the
     /// baseline, so no write is authorized.
-    func testANoOpCommitReportsAChangeWithoutAdoptingIt() async throws {
+    @RuntimeActor func testANoOpCommitReportsAChangeWithoutAdoptingIt() async throws {
         let fixture = try Fixture(preferences: try preferenceBytes(showMenuBarIcon: true))
         defer { fixture.close() }
         guard await adoptedLoad(fixture) != nil, let current = fixture.store.values?.preferences else { return XCTFail("the load was not adopted") }
@@ -294,7 +293,7 @@ final class ConfigurationStoreTests: XCTestCase {
 
     /// An observed external change latches the baseline until a reload. Restoring the old bytes does not lift the latch, the old token stays
     /// refused, and a reload adopts the current bytes so that a new token authorizes a save.
-    func testAnObservedChangeLatchesUntilAReloadEvenWhenTheOldBytesReturn() async throws {
+    @RuntimeActor func testAnObservedChangeLatchesUntilAReloadEvenWhenTheOldBytesReturn() async throws {
         let original = try preferenceBytes(showMenuBarIcon: true)
         let fixture = try Fixture(preferences: original)
         defer { fixture.close() }
@@ -328,7 +327,7 @@ final class ConfigurationStoreTests: XCTestCase {
     // MARK: - Busy slot
 
     /// Only one operation holds the store's slot. Of two overlapping calls, the one that finds the slot held returns busy, and nothing is queued.
-    func testASecondOperationIsRefusedWhileTheFirstHoldsTheSlot() async throws {
+    @RuntimeActor func testASecondOperationIsRefusedWhileTheFirstHoldsTheSlot() async throws {
         let fixture = try Fixture(preferences: try preferenceBytes(showMenuBarIcon: true))
         defer { fixture.close() }
         guard await adoptedLoad(fixture) != nil else { return }
@@ -342,7 +341,7 @@ final class ConfigurationStoreTests: XCTestCase {
         XCTAssertFalse(fixture.store.isBusy)
     }
 
-    private func isBusy<Value>(_ admission: ConfigurationStoreAdmission<Value>) -> Bool {
+    @RuntimeActor private func isBusy<Value>(_ admission: ConfigurationStoreAdmission<Value>) -> Bool {
         if case .busy = admission { return true }
         return false
     }
@@ -350,7 +349,7 @@ final class ConfigurationStoreTests: XCTestCase {
     // MARK: - Presence, exhaustion and adapter faults
 
     /// A journal presence that cannot be checked holds the whole load: nothing is adopted, and no baseline is issued until a later load succeeds.
-    func testAnUnknownJournalPresenceHoldsTheLoadAndEveryBaseline() async throws {
+    @RuntimeActor func testAnUnknownJournalPresenceHoldsTheLoadAndEveryBaseline() async throws {
         let fixture = try Fixture(preferences: try preferenceBytes(showMenuBarIcon: true))
         defer { fixture.close() }
         fixture.access.schedulePresence(.statusFailed(errno: EIO))
@@ -366,7 +365,7 @@ final class ConfigurationStoreTests: XCTestCase {
     }
 
     /// The OS presence check reads metadata only: an absent journal is absent, and a present one is present.
-    func testTheOSPresenceCheckReportsAbsenceAndPresenceOfTheJournal() throws {
+    @RuntimeActor func testTheOSPresenceCheckReportsAbsenceAndPresenceOfTheJournal() async throws {
         let fixture = try Fixture()
         defer { fixture.close() }
         let access = OSStateFileAccess()
@@ -377,7 +376,7 @@ final class ConfigurationStoreTests: XCTestCase {
 
     /// A component at its maximum version refuses a write before any I/O. A no-op commit is still verified without a write, a changed file
     /// still latches, and a new store incarnation recovers. No version wraps.
-    func testAComponentAtItsMaximumVersionRefusesWritesBeforeAnyIO() async throws {
+    @RuntimeActor func testAComponentAtItsMaximumVersionRefusesWritesBeforeAnyIO() async throws {
         let fixture = try Fixture(preferences: try preferenceBytes(showMenuBarIcon: true))
         defer { fixture.close() }
         guard await adoptedLoad(fixture) != nil else { return }
@@ -417,7 +416,7 @@ final class ConfigurationStoreTests: XCTestCase {
 
     /// A platform file with the same parsed value and different formatting is verified, not rewritten. The runtime write is the only write, so
     /// it takes the one scheduled failure. A platform rewrite would have consumed that failure first.
-    func testAFormattedUnchangedPlatformFileIsVerifiedAndOnlyTheRuntimeIsWritten() async throws {
+    @RuntimeActor func testAFormattedUnchangedPlatformFileIsVerifiedAndOnlyTheRuntimeIsWritten() async throws {
         let formatted = try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig()) + Data("\n".utf8)
         let fixture = try Fixture(platform: formatted)
         defer { fixture.close() }
@@ -443,7 +442,7 @@ final class ConfigurationStoreTests: XCTestCase {
     }
 
     /// A landed write that reports an error is persisted, and the reported error is kept beside the persisted fact (decision 0015).
-    func testALandedWriteThatReportsAnErrorIsPersistedWithItsErrorKept() async throws {
+    @RuntimeActor func testALandedWriteThatReportsAnErrorIsPersistedWithItsErrorKept() async throws {
         let fixture = try Fixture()
         defer { fixture.close() }
         guard await adoptedLoad(fixture) != nil else { return }
@@ -464,7 +463,7 @@ final class ConfigurationStoreTests: XCTestCase {
 
     /// A read-back that shows neither the staged bytes nor the prior is unknown. The baseline is latched, so no later save is authorized
     /// until a reload.
-    func testAnUnknownReadBackLatchesTheBaselineUntilAReload() async throws {
+    @RuntimeActor func testAnUnknownReadBackLatchesTheBaselineUntilAReload() async throws {
         let fixture = try Fixture(preferences: try preferenceBytes(showMenuBarIcon: true))
         defer { fixture.close() }
         guard await adoptedLoad(fixture) != nil else { return }
@@ -485,7 +484,7 @@ final class ConfigurationStoreTests: XCTestCase {
     }
 
     /// An error no known refusal describes keeps only its code. Its description, which carries a private marker, reaches no outcome.
-    func testAnUnexpectedErrorKeepsOnlyItsCode() {
+    @RuntimeActor func testAnUnexpectedErrorKeepsOnlyItsCode() async {
         struct PrivateFailure: LocalizedError {
             var errorDescription: String? { "PRIVATE-MARKER configuration value" }
         }
@@ -498,7 +497,7 @@ final class ConfigurationStoreTests: XCTestCase {
     }
 
     /// A field label is kept only when it is a short identifier path, so no value can pass as one.
-    func testAFieldLabelAcceptsOnlyAShortIdentifierPath() {
+    @RuntimeActor func testAFieldLabelAcceptsOnlyAShortIdentifierPath() async {
         XCTAssertNotNil(ConfigurationFieldLabel("health.connectionCheckTimeout"))
         XCTAssertNil(ConfigurationFieldLabel("PRIVATE-MARKER value"))
         XCTAssertNil(ConfigurationFieldLabel(String(repeating: "a", count: 65)))
@@ -508,7 +507,7 @@ final class ConfigurationStoreTests: XCTestCase {
     // MARK: - Worker gate, partial and unknown results, and load warnings
 
     /// A file access that holds the worker's next read until the test releases it. The hold runs on the `PlatformWork` thread, so the
-    /// MainActor stays free and a second operation is refused while the first is still in flight. It is a gate, not a timing race. Every
+    /// owner stays free and a second operation is refused while the first is still in flight. It is a gate, not a timing race. Every
     /// wait is bounded, so a missing entry or release fails the test rather than hanging it.
     private final class GatedAccess: StateFileAccessing, @unchecked Sendable {
         /// The bound for each wait. A passing run never comes near it, and a failing run ends instead of hanging.
@@ -531,7 +530,7 @@ final class ConfigurationStoreTests: XCTestCase {
             lock.withLock { armed = true }
         }
 
-        /// Waits, off the MainActor and off the cooperative pool, until the worker has entered the held read. False means no entry came
+        /// Waits, off the owner and off the cooperative pool, until the worker has entered the held read. False means no entry came
         /// within the bound.
         func waitUntilEntered() async -> Bool {
             let entered = self.entered
@@ -578,7 +577,7 @@ final class ConfigurationStoreTests: XCTestCase {
 
     /// A read held on the worker keeps the store's one slot. Overlapping loads and every kind of commit are refused as busy, queue no I/O,
     /// and keep the fake's log unchanged. A cancelled caller detaches only its wait, so the slot stays held until the worker returns.
-    func testAHeldWorkerReadKeepsTheSlotAndRefusesOtherOperationsWithoutQueuedIO() async throws {
+    @RuntimeActor func testAHeldWorkerReadKeepsTheSlotAndRefusesOtherOperationsWithoutQueuedIO() async throws {
         let fixture = try Fixture(preferences: try preferenceBytes(showMenuBarIcon: true))
         // Registered first, so it runs last. It removes the directory only if no queued work is still in flight.
         defer { fixture.close() }
@@ -634,7 +633,7 @@ final class ConfigurationStoreTests: XCTestCase {
 
     /// A platform write whose read-back cannot be classified is unknown. The platform is not verified, so the runtime write is held, and the
     /// runtime file keeps its bytes (decision 0025).
-    func testAnUnknownPlatformWriteHoldsTheRuntimeWrite() async throws {
+    @RuntimeActor func testAnUnknownPlatformWriteHoldsTheRuntimeWrite() async throws {
         let fixture = try Fixture(runtime: try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig()))
         defer { fixture.close() }
         guard await adoptedLoad(fixture) != nil else { return }
@@ -657,7 +656,7 @@ final class ConfigurationStoreTests: XCTestCase {
 
     /// A platform write that lands and a runtime write that fails is a partial result. Each file reports its own outcome, and nothing rolls back
     /// or retries.
-    func testAPartialCommitReportsEachFileSeparately() async throws {
+    @RuntimeActor func testAPartialCommitReportsEachFileSeparately() async throws {
         let fixture = try Fixture(runtime: try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig()))
         defer { fixture.close() }
         guard await adoptedLoad(fixture) != nil else { return }
@@ -683,7 +682,7 @@ final class ConfigurationStoreTests: XCTestCase {
     /// A finite matrix over the coupled commit's faults. Each row scripts the platform write and the runtime write, and it names what the
     /// store must report, what each file must hold, and whether each baseline still holds a token. A platform that does not verify holds the
     /// runtime write. Nothing rolls back, and nothing retries.
-    func testTheCoupledCommitReportsEachFaultAndHoldsTheRuntimeBehindAnUnverifiedPlatform() async throws {
+    @RuntimeActor func testTheCoupledCommitReportsEachFaultAndHoldsTheRuntimeBehindAnUnverifiedPlatform() async throws {
         let defaults = GenericDefaults.shared.makeConfig()
         var renamed = defaults
         renamed.profileName = "Renamed"
@@ -760,7 +759,7 @@ final class ConfigurationStoreTests: XCTestCase {
     }
 
     /// A refused decode reports the loader's fixed text, and no byte of the refused input reaches the outcome.
-    func testARefusedRuntimeReasonNamesNoInputByte() async throws {
+    @RuntimeActor func testARefusedRuntimeReasonNamesNoInputByte() async throws {
         let fixture = try Fixture(runtime: Data("PRIVATE-MARKER not json".utf8))
         defer { fixture.close() }
         guard case .admitted(let report) = await fixture.store.load(context: Self.context),
@@ -772,7 +771,7 @@ final class ConfigurationStoreTests: XCTestCase {
     }
 
     /// The staged defaults runtime file with extra top-level keys, so a witness can seed a legacy value of the wrong kind.
-    private func runtimeFile(adding extra: [String: Any]) throws -> Data {
+    @RuntimeActor private func runtimeFile(adding extra: [String: Any]) throws -> Data {
         let staged = try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig())
         guard var object = try JSONSerialization.jsonObject(with: staged) as? [String: Any] else {
             throw SeedNotAnObject()
@@ -784,7 +783,7 @@ final class ConfigurationStoreTests: XCTestCase {
     /// A canonical runtime file with no legacy platform or preferences keys, and no sidecars, adopts the defaults with no fallback and no
     /// warning. Each absent legacy key reads as its default, so the migration stays pending (decisions 0023 and 0026). A runtime file that
     /// carries valid legacy values adopts those instead. This witness does not cover that case.
-    func testAMissingSidecarBesideAPresentRuntimeFileAdoptsDefaultsWithNoWarning() async throws {
+    @RuntimeActor func testAMissingSidecarBesideAPresentRuntimeFileAdoptsDefaultsWithNoWarning() async throws {
         let fixture = try Fixture(runtime: try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig()))
         defer { fixture.close() }
         guard let loaded = await adoptedLoad(fixture) else { return }
@@ -798,7 +797,7 @@ final class ConfigurationStoreTests: XCTestCase {
 
     /// A legacy preferences value of the wrong kind refuses that component alone. The typed fallback is reported, the defaults are used, and
     /// nothing is pending, because a refused value is not a migration. The runtime file itself still loads.
-    func testAMalformedLegacyPreferencesValueFallsBackWithItsTypedWarning() async throws {
+    @RuntimeActor func testAMalformedLegacyPreferencesValueFallsBackWithItsTypedWarning() async throws {
         let fixture = try Fixture(runtime: try runtimeFile(adding: ["showMenuBarIcon": "bad"]))
         defer { fixture.close() }
         guard let loaded = await adoptedLoad(fixture) else { return }
@@ -811,7 +810,7 @@ final class ConfigurationStoreTests: XCTestCase {
     }
 
     /// A legacy platform value of the wrong kind is the platform's own fallback, and it leaves the preferences component untouched.
-    func testAMalformedLegacyPlatformValueFallsBackWithItsTypedWarning() async throws {
+    @RuntimeActor func testAMalformedLegacyPlatformValueFallsBackWithItsTypedWarning() async throws {
         let fixture = try Fixture(runtime: try runtimeFile(adding: ["launchAtLogin": "bad"]))
         defer { fixture.close() }
         guard let loaded = await adoptedLoad(fixture) else { return }
@@ -825,7 +824,7 @@ final class ConfigurationStoreTests: XCTestCase {
 
     /// A failed runtime write over a larger prior file reads the whole prior back, so the result is verified not-persisted, not unknown. The
     /// prior is the defaults followed by 8 KiB of whitespace, and the candidate is shorter than it.
-    func testAFailedRuntimeWriteOverALargerPriorReadsTheWholePriorBack() async throws {
+    @RuntimeActor func testAFailedRuntimeWriteOverALargerPriorReadsTheWholePriorBack() async throws {
         let larger = try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig()) + Data(repeating: 0x20, count: 8 * 1024)
         let fixture = try Fixture(runtime: larger)
         defer { fixture.close() }
@@ -853,7 +852,7 @@ final class ConfigurationStoreTests: XCTestCase {
     // MARK: - Per-component authority
 
     /// A refused runtime keeps its own reason, and a platform file that is authorized is held behind it. Nothing is written.
-    func testAnAuthorizedPlatformIsHeldBehindARefusedRuntimeWithItsOwnReason() async throws {
+    @RuntimeActor func testAnAuthorizedPlatformIsHeldBehindARefusedRuntimeWithItsOwnReason() async throws {
         let fixture = try Fixture(platform: try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig()))
         defer { fixture.close() }
         guard await adoptedLoad(fixture) != nil else { return }
@@ -879,7 +878,7 @@ final class ConfigurationStoreTests: XCTestCase {
     }
 
     /// The reverse: a refused platform keeps its own reason, and an authorized runtime is held behind it.
-    func testAnAuthorizedRuntimeIsHeldBehindARefusedPlatformWithItsOwnReason() async throws {
+    @RuntimeActor func testAnAuthorizedRuntimeIsHeldBehindARefusedPlatformWithItsOwnReason() async throws {
         let fixture = try Fixture(platform: try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig()))
         defer { fixture.close() }
         guard await adoptedLoad(fixture) != nil else { return }
@@ -900,7 +899,7 @@ final class ConfigurationStoreTests: XCTestCase {
     }
 
     /// Both refused, each with its own reason: the runtime has no authority, and the platform token names no baseline it holds.
-    func testBothRefusedComponentsKeepTheirOwnDifferentReasons() async throws {
+    @RuntimeActor func testBothRefusedComponentsKeepTheirOwnDifferentReasons() async throws {
         let fixture = try Fixture(platform: try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig()))
         defer { fixture.close() }
         guard await adoptedLoad(fixture) != nil else { return }
@@ -926,7 +925,7 @@ final class ConfigurationStoreTests: XCTestCase {
     /// bytes, so an ordinary save conflicts and latches the baseline until a reload. The file is kept as it was edited. With the platform
     /// sidecar present, the runtime write's own pre-read reports the conflict. With it missing, the platform's first write checks the same
     /// runtime bytes as its source and holds first, so the runtime write is held behind it. Both latch the runtime file until a reload.
-    func testAValidUnknownFieldEditToTheRuntimeFileConflictsAndLatchesUntilAReload() async throws {
+    @RuntimeActor func testAValidUnknownFieldEditToTheRuntimeFileConflictsAndLatchesUntilAReload() async throws {
         let platformCases: [(platform: Data?, runtime: ConfigurationWriteOutcome, platformOutcome: String)] = [
             (try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig()), .conflict, "unchanged"),
             (nil, .notAttempted(.heldBehindPlatform), "notAttempted(sourceChanged)"),
@@ -966,7 +965,7 @@ final class ConfigurationStoreTests: XCTestCase {
     /// defaults with trailing whitespace. A missing platform sidecar takes the runtime variant the last adopted reload saw as its source, and
     /// its first write is held when the runtime bytes differ from it. Each step is a model decision, and each store result must match it. The trace of each seed is part
     /// of the failure label, so a counterexample replays. It has no read or write faults, which the focused tests above cover. It does not explore interleavings.
-    func testABoundedModelOverRuntimeAndPlatformMatchesTheStoreForReplayableSeeds() async throws {
+    @RuntimeActor func testABoundedModelOverRuntimeAndPlatformMatchesTheStoreForReplayableSeeds() async throws {
         let defaults = GenericDefaults.shared.makeConfig()
         var renamed = defaults
         renamed.profileName = "Renamed"
@@ -1226,7 +1225,7 @@ final class ConfigurationStoreTests: XCTestCase {
     /// changes the missing sidecar's effective value takes a newer version, and a first write is held when the runtime variant on disk is
     /// not the source. It is a model of the rules, not the store's code. Each segment starts a new store on the same external bytes and runs
     /// five operations, and each step clears the fake's 16-call log. Interleavings are covered separately.
-    func testABoundedModelOverPreferencesMatchesTheStoreForReplayableSeeds() async throws {
+    @RuntimeActor func testABoundedModelOverPreferencesMatchesTheStoreForReplayableSeeds() async throws {
         // The runtime variants: the defaults, and the defaults carrying a legacy preference value that differs from the default.
         let runtimeVariants = [
             try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig()),

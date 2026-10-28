@@ -17,7 +17,7 @@ import ProxyKernel
 /// lifecycle fences are covered by `AppStateHarnessTests` and
 /// `DaemonRuntimeHostTests`.
 enum ReapplyRetryScenarios {
-    @MainActor
+    @RuntimeActor
     static func run() async throws -> ScenarioResult {
         let began = Date()
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("pm-reapply-retry-\(UUID())")

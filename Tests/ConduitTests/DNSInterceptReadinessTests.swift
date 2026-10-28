@@ -59,7 +59,7 @@ final class DNSInterceptReadinessTests: XCTestCase {
     /// By the time `startDNS()` returns, the orchestrator's own snapshot must
     /// already describe both listeners. Hosts write resolver files off this,
     /// synchronously, with no further `await` to let a mirror catch up.
-    @MainActor
+    @RuntimeActor
     func testStartDNSPublishesBothBindingsBeforeItReturns() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -98,7 +98,7 @@ final class DNSInterceptReadinessTests: XCTestCase {
 
     /// `stopDNS` tears the transparent proxy down, so readiness must drop with
     /// it — otherwise a later refresh would rewrite files for dead listeners.
-    @MainActor
+    @RuntimeActor
     func testStopDNSClearsBothBindings() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = []

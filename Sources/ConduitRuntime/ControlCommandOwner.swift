@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import ConduitShared
 import Foundation
+import ProxyKernel
 
 /// The owner's synchronous answer to one command. The owner records its own fence here, and it starts no
 /// effect. Every newly received Stop reaches the owner, including one that would coalesce, because the owner
@@ -19,10 +20,10 @@ enum ControlOwnerFenceResult: Sendable, Equatable {
 /// that the owner has no work left for the operation. Both are idempotent, and the first settlement is the one that
 /// counts. `quiesced` may arrive without `settled`, and the service then closes the operation as an internal failure.
 /// A report may only be used after its effect was launched, and it changes nothing once the operation has closed.
-@MainActor
+@RuntimeActor
 struct ControlEffectReport {
-    let settled: @MainActor (ControlOperationOutcome) -> Void
-    let quiesced: @MainActor () -> Void
+    let settled: @RuntimeActor (ControlOperationOutcome) -> Void
+    let quiesced: @RuntimeActor () -> Void
 }
 
 /// A closed fault the service reports to the owner, which is the canonical producer of diagnostics. Each case names the site
@@ -62,7 +63,7 @@ enum ControlServiceFault: Sendable, Equatable {
 /// The one owner of intent and lifecycle, seen from the service. `RuntimeHost` conforms (`RuntimeHostControlOwner.swift`): its fence is
 /// the host's own synchronous admission, which precedes launch recovery and any I/O. A fake owner in tests proves the service's contract,
 /// not the host's fence.
-@MainActor
+@RuntimeActor
 protocol ControlCommandOwner: AnyObject {
     var incarnation: ControlHostIncarnation { get }
 

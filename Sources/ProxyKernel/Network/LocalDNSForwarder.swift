@@ -47,7 +47,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
     private let preferProxyPathForDoH: @Sendable () -> Bool
-    private let onMetrics: (@Sendable (Int, Int, Int) -> Void)?
+    private let onMetrics: (@Sendable () -> Void)?
     private let tuning: DNSForwarderTuning
     private let tcpMaximumConnections: Int
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
@@ -55,7 +55,12 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     private var channel: Channel?
     private var tcpChannel: Channel?
     private var tcpConnections: DNSTCPConnectionRegistry?
-    private var core: DNSResolutionCore?
+    /// The running resolution core. `start` and `stop` swap it while other threads read it, so the reference is behind a lock.
+    private let currentCore = NIOLockedValueBox<DNSResolutionCore?>(nil)
+    private var core: DNSResolutionCore? {
+        get { currentCore.withLockedValue { $0 } }
+        set { currentCore.withLockedValue { $0 = newValue } }
+    }
 
     package var listeningHost: String? {
         channel?.localAddress?.ipAddress
@@ -76,7 +81,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool = { false },
-        onMetrics: (@Sendable (Int, Int, Int) -> Void)? = nil,
+        onMetrics: (@Sendable () -> Void)? = nil,
         // Exposed only so tests can drive the slow-lookup and idle rules
         // without waiting out the production timeouts.
         tuning: DNSForwarderTuning = DNSForwarderTuning(),
@@ -316,6 +321,18 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     package var cachedResponseCount: Int {
         core?.cachedResponseCount ?? 0
     }
+
+    /// The running core's counters, or nil while stopped. Each start builds a new core, so these are this run's.
+    var metricCounts: DNSMetricCounts? {
+        core?.metricCounts
+    }
+}
+
+/// One reading of a resolution core's counters.
+struct DNSMetricCounts: Equatable {
+    var queries: Int
+    var dohFallbacks: Int
+    var cacheHits: Int
 }
 
 /// Container for the DoH-fetch `URLSession` pair. Held inside a lock so we
@@ -439,7 +456,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
     private let preferProxyPathForDoH: @Sendable () -> Bool
-    private let onMetrics: (@Sendable (Int, Int, Int) -> Void)?
+    private let onMetrics: (@Sendable () -> Void)?
     private let tuning: DNSForwarderTuning
     private let lock = NSLock()
     private var queryCount = 0
@@ -487,7 +504,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool,
-        onMetrics: (@Sendable (Int, Int, Int) -> Void)? = nil,
+        onMetrics: (@Sendable () -> Void)? = nil,
         tuning: DNSForwarderTuning
     ) {
         self.tuning = tuning
@@ -612,14 +629,20 @@ private final class DNSResolutionCore: @unchecked Sendable {
         }
     }
 
+    /// This core's counters, read together under their lock.
+    var metricCounts: DNSMetricCounts {
+        lock.withLock { DNSMetricCounts(queries: queryCount, dohFallbacks: dohCount, cacheHits: cacheHitCount) }
+    }
+
+    /// Counts the query, then signals that the counters moved. The signal carries no values: its reader takes the current counters
+    /// when it runs, so a late signal cannot publish an older count.
     private func recordQuery(doh: Bool, cacheHit: Bool) {
-        let (q, d, c) = lock.withLock {
+        lock.withLock {
             queryCount += 1
             if doh { dohCount += 1 }
             if cacheHit { cacheHitCount += 1 }
-            return (queryCount, dohCount, cacheHitCount)
         }
-        onMetrics?(q, d, c)
+        onMetrics?()
     }
 
     /// Resolves one query. Never throws, and answers whenever a well-formed

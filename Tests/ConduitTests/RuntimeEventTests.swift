@@ -87,7 +87,7 @@ final class RuntimeEventTests: XCTestCase {
         XCTAssertEqual(kinds.count, 6)
     }
 
-    @MainActor
+    @RuntimeActor
     func testOrchestratorEmitsLifecycleEvents() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.proxy.port = 0
@@ -102,7 +102,7 @@ final class RuntimeEventTests: XCTestCase {
         XCTAssertTrue(lifecycleEvents.contains { $0.event == "proxy.stopping" })
     }
 
-    @MainActor
+    @RuntimeActor
     func testApplyConfigChangeEmitsConfigEventsPerBranch() async throws {
         // Locks the AGENTS.md "events first" contract for `applyConfigChange`: every taken
         // decision branch (logging / health / routing / tunnels / proxy-limits / upstreams)
@@ -148,7 +148,7 @@ final class RuntimeEventTests: XCTestCase {
         await orchestrator.stopProxy()
     }
 
-    @MainActor
+    @RuntimeActor
     func testApplyConfigChangePersistsMetadataOnlyChanges() async throws {
         let config = GenericDefaults.shared.makeConfig()
         let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
@@ -161,7 +161,7 @@ final class RuntimeEventTests: XCTestCase {
         XCTAssertTrue(orchestrator.eventLog.events.contains { $0.event == "config.metadata_changed" })
     }
 
-    @MainActor
+    @RuntimeActor
     func testAuthChangeEmitsTunnelReauthEventWhenRunning() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.proxy.port = 0
@@ -178,7 +178,7 @@ final class RuntimeEventTests: XCTestCase {
         await orchestrator.stopProxy()
     }
 
-    @MainActor
+    @RuntimeActor
     func testApplyConfigChangeEmitsAuthEventOnAuthChange() async throws {
         // The auth-changed branch was a gap — every other ConfigDiff section had a handler
         // and emitted observable state, but auth edits were silently dropped at the

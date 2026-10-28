@@ -8,10 +8,10 @@ import ConduitShared
 final class ControlSocketServer: @unchecked Sendable {
     private let socketPath: String
     private let logger: any LogSink
-    private let statusProvider: @MainActor @Sendable () -> ControlDaemonStatus
-    private let reloadHandler: @MainActor @Sendable () async throws -> Void
-    private let stopHandler: @MainActor @Sendable () async -> Void
-    private let upstreamTestHandler: @MainActor @Sendable (String) async -> ProbeResult?
+    private let statusProvider: @RuntimeActor @Sendable () -> ControlDaemonStatus
+    private let reloadHandler: @RuntimeActor @Sendable () async throws -> Void
+    private let stopHandler: @RuntimeActor @Sendable () async -> Void
+    private let upstreamTestHandler: @RuntimeActor @Sendable (String) async -> ProbeResult?
     private let queue = DispatchQueue(label: "pm-proxy.control-socket")
 
     private var listenFD: Int32 = -1
@@ -20,10 +20,10 @@ final class ControlSocketServer: @unchecked Sendable {
     init(
         socketPath: String,
         logger: any LogSink,
-        statusProvider: @escaping @MainActor @Sendable () -> ControlDaemonStatus,
-        reloadHandler: @escaping @MainActor @Sendable () async throws -> Void,
-        stopHandler: @escaping @MainActor @Sendable () async -> Void,
-        upstreamTestHandler: @escaping @MainActor @Sendable (String) async -> ProbeResult?
+        statusProvider: @escaping @RuntimeActor @Sendable () -> ControlDaemonStatus,
+        reloadHandler: @escaping @RuntimeActor @Sendable () async throws -> Void,
+        stopHandler: @escaping @RuntimeActor @Sendable () async -> Void,
+        upstreamTestHandler: @escaping @RuntimeActor @Sendable (String) async -> ProbeResult?
     ) {
         self.socketPath = socketPath
         self.logger = logger
@@ -165,7 +165,7 @@ final class ControlSocketServer: @unchecked Sendable {
                 )
                 Darwin.close(clientFD)
             case .reload:
-                Task { @MainActor in
+                Task { @RuntimeActor in
                     let response: ControlResponse
                     do {
                         try await reloadHandler()
@@ -199,7 +199,7 @@ final class ControlSocketServer: @unchecked Sendable {
                 )
                 Darwin.close(clientFD)
             case .status:
-                Task { @MainActor in
+                Task { @RuntimeActor in
                     let response = ControlResponse.status(statusProvider())
                     queue.async {
                         do {
@@ -227,7 +227,7 @@ final class ControlSocketServer: @unchecked Sendable {
                         )
                     }
                     Darwin.close(clientFD)
-                    Task { @MainActor in
+                    Task { @RuntimeActor in
                         self.stop()
                         await self.stopHandler()
                     }
@@ -238,7 +238,7 @@ final class ControlSocketServer: @unchecked Sendable {
                     Darwin.close(clientFD)
                     return
                 }
-                Task { @MainActor in
+                Task { @RuntimeActor in
                     let result = await upstreamTestHandler(upstreamName)
                     queue.async {
                         do {

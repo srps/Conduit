@@ -7,7 +7,7 @@ import ConduitShared
 
 /// One actual host, its control service and the framed client, over the interactive harness's fakes and scratch root. Every bound is the
 /// explicit fixture profile.
-@MainActor
+@RuntimeActor
 private struct PreflightComposed {
     let host: RuntimeHost
     let harness: InteractiveHostHarness
@@ -84,7 +84,6 @@ private func items(_ outcome: ControlOperationOutcome?, file: StaticString = #fi
 
 /// The host's preflight through the actual framed client (twin of `AppState.refreshPreflight`): its held helper verdict, its two passes,
 /// its revocation by a helper replacement or the quit, and its repairs. Reads are counted on the fake, never timed.
-@MainActor
 final class RuntimeHostPreflightTests: XCTestCase {
     private var harness: InteractiveHostHarness?
 
@@ -95,31 +94,31 @@ final class RuntimeHostPreflightTests: XCTestCase {
         try await super.tearDown()
     }
 
-    private func compose(helper: FakeHelperLifecycle?, ordinaryPending: Int = 2) async throws -> PreflightComposed {
+    @RuntimeActor private func compose(helper: FakeHelperLifecycle?, ordinaryPending: Int = 2) async throws -> PreflightComposed {
         let composed = try await PreflightComposed.make(helper: helper, ordinaryPending: ordinaryPending)
         harness = composed.harness
         return composed
     }
 
-    private func subscribe(_ composed: PreflightComposed) async throws -> RuntimeSubscription {
+    @RuntimeActor private func subscribe(_ composed: PreflightComposed) async throws -> RuntimeSubscription {
         let stream = try await composed.client.subscribe(.live, deadline: PreflightComposed.deadline())
         _ = try await stream.next(PreflightComposed.deadline())
         return stream
     }
 
     /// The repair a newly conclusive install delivers is observed on the environment drift pass it schedules: a wiped variable comes back.
-    private func wipeEnvironment(_ composed: PreflightComposed) throws {
+    @RuntimeActor private func wipeEnvironment(_ composed: PreflightComposed) throws {
         _ = try composed.harness.machine.run("/bin/launchctl", ["unsetenv", "HTTP_PROXY"])
     }
 
-    private func repaired(_ composed: PreflightComposed) -> Bool {
+    @RuntimeActor private func repaired(_ composed: PreflightComposed) -> Bool {
         composed.harness.machine.launchdEnvironment["HTTP_PROXY"] != nil
     }
 
     /// The held verdict, as the app holds it. A conclusive install repairs the running proxy's surfaces. A `busy` read keeps `installed` on
     /// display, says it was busy and repairs nothing. After a replacement the old verdict is not kept, so a `busy` read stands on its own;
     /// the next conclusive install is a new one and repairs again.
-    func testABusyReadKeepsTheHeldVerdictAndOnlyAConclusiveInstallRepairs() async throws {
+    @RuntimeActor func testABusyReadKeepsTheHeldVerdictAndOnlyAConclusiveInstallRepairs() async throws {
         let helper = FakeHelperLifecycle(status: .installed)
         let composed = try await compose(helper: helper)
         try await composed.host.startRuntime()
@@ -160,7 +159,7 @@ final class RuntimeHostPreflightTests: XCTestCase {
     /// A replacement admitted while a pass is reading drops that pass: its request fails `staleRevision`, and it updates no verdict, so the
     /// pass after it still sees a newly conclusive install and repairs. The requests admitted while it read, the replacing one included,
     /// share that next pass and its one fresh reading. Two passes read the helper.
-    func testAReplacementDropsTheReadingAPassBeganBeforeIt() async throws {
+    @RuntimeActor func testAReplacementDropsTheReadingAPassBeganBeforeIt() async throws {
         let helper = FakeHelperLifecycle(status: .installed)
         // Three requests stay unquiesced at once while the first pass reads, so the fixture admits three ordinary operations.
         let composed = try await compose(helper: helper, ordinaryPending: 3)
@@ -193,7 +192,7 @@ final class RuntimeHostPreflightTests: XCTestCase {
 
     /// At most two passes exist: the one reading, and the one every later request joins. The service's ordinary capacity bounds the
     /// requests, so the one past it is refused there and the host keeps no queue of its own.
-    func testPreflightRequestsShareAtMostTwoPassesAndTheServiceBoundsTheRest() async throws {
+    @RuntimeActor func testPreflightRequestsShareAtMostTwoPassesAndTheServiceBoundsTheRest() async throws {
         let helper = FakeHelperLifecycle(status: .installed)
         let composed = try await compose(helper: helper, ordinaryPending: 4)
         let stream = try await subscribe(composed)
@@ -227,7 +226,7 @@ final class RuntimeHostPreflightTests: XCTestCase {
     /// The fence starts no effect. An accepted request whose launch has not run has made no pass and read nothing, yet it is pending work,
     /// and a replacement it names is already recorded: the generation moved at the fence. Manual hops hold the launches. Once they run,
     /// both requests join one pass, which reads once.
-    func testAnAdmittedRequestStartsNoPassUntilItsEffectLaunches() async throws {
+    @RuntimeActor func testAnAdmittedRequestStartsNoPassUntilItsEffectLaunches() async throws {
         let helper = FakeHelperLifecycle(status: .installed)
         let harness = try makeInteractiveHarness(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: false)
         harness.helperStatus = helper
@@ -274,7 +273,7 @@ final class RuntimeHostPreflightTests: XCTestCase {
 
     /// The quit does not wait for a pass that is reading, and a request after its latch is refused as stopping. The pass reading at the
     /// latch and the one pending behind it both fail `staleRevision`, and the pending one never reads the helper.
-    func testTheQuitWaitsForNoReadingPassAndTheOnePendingAtItsLatchReadsNothing() async throws {
+    @RuntimeActor func testTheQuitWaitsForNoReadingPassAndTheOnePendingAtItsLatchReadsNothing() async throws {
         let helper = FakeHelperLifecycle(status: .installed)
         // The two passes' requests stay unquiesced while the read is held; a third slot lets the late request reach the host's fence,
         // which the service's capacity check would otherwise answer first with `queueFull`.
@@ -311,7 +310,7 @@ final class RuntimeHostPreflightTests: XCTestCase {
     }
 
     /// A pass reads and evaluates off `platformWork`, so it completes while a Stop's teardown holds that queue.
-    func testAPassCompletesWhileAStopsPlatformWorkIsHeld() async throws {
+    @RuntimeActor func testAPassCompletesWhileAStopsPlatformWorkIsHeld() async throws {
         let helper = FakeHelperLifecycle(status: .installed)
         let composed = try await compose(helper: helper)
         try await composed.host.startRuntime()
@@ -332,7 +331,7 @@ final class RuntimeHostPreflightTests: XCTestCase {
     }
 
     /// A host given no helper status source observes none: the reading is `notObserved`, never a guessed verdict.
-    func testAHostWithNoHelperSourceReportsNotObserved() async throws {
+    @RuntimeActor func testAHostWithNoHelperSourceReportsNotObserved() async throws {
         let composed = try await compose(helper: nil)
         let stream = try await subscribe(composed)
         defer { stream.cancel() }
@@ -365,7 +364,6 @@ private final class ReadThenHoldSecretStore: SecretStore, @unchecked Sendable {
 
 /// The app writes the saved password into the store it shares with the host, then tells the host (`credentialsChanged`). The host drops
 /// what it cached; a read already out discards its answer. Nothing names the secret on the wire.
-@MainActor
 final class RuntimeHostCredentialsChangeTests: XCTestCase {
     private var harness: InteractiveHostHarness?
 
@@ -378,18 +376,18 @@ final class RuntimeHostCredentialsChangeTests: XCTestCase {
     private let upstream = UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)
 
     /// The app's enrollment writer over the shared store, keyed by the host's own identity.
-    private func appWriter(_ host: RuntimeHost, store: any SecretStore) -> CredentialManager {
+    @RuntimeActor private func appWriter(_ host: RuntimeHost, store: any SecretStore) -> CredentialManager {
         let domain = host.config.domain, username = host.config.username, profileName = host.config.profileName
         return CredentialManager(identityProvider: { (domain: domain, username: username, profileName: profileName) }, store: store)
     }
 
-    private func credentials(_ workstation: String) -> ProxyCredentials {
+    @RuntimeActor private func credentials(_ workstation: String) -> ProxyCredentials {
         ProxyCredentials(username: "user", domain: "CORP", workstation: workstation, ntHash: SecretBytes(Array(repeating: UInt8(7), count: 16)))
     }
 
     /// The host's read, on a thread of its own: a read waits on the store's answer. A global queue stands in for the event loop a
     /// handshake reads from, so the wait never holds a thread of the concurrency pool.
-    private func hostRead(_ host: RuntimeHost) async -> Result<ProxyCredentials?, any Error> {
+    @RuntimeActor private func hostRead(_ host: RuntimeHost) async -> Result<ProxyCredentials?, any Error> {
         let manager = host.credentialManager, upstream = self.upstream
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -398,7 +396,7 @@ final class RuntimeHostCredentialsChangeTests: XCTestCase {
         }
     }
 
-    private func notify(_ composed: PreflightComposed, on stream: RuntimeSubscription) async throws {
+    @RuntimeActor private func notify(_ composed: PreflightComposed, on stream: RuntimeSubscription) async throws {
         let operation = try await composed.accepted(.credentialsChanged)
         guard case .completed(let completion) = try await composed.finished(operation, on: stream) else {
             return XCTFail("the invalidation completes")
@@ -408,7 +406,7 @@ final class RuntimeHostCredentialsChangeTests: XCTestCase {
     }
 
     /// The host caches what it read, so an app-side save is not seen until the app says so; then the new value is, and a clear is too.
-    func testTheHostServesTheAppsSaveAndClearOnlyOnceTold() async throws {
+    @RuntimeActor func testTheHostServesTheAppsSaveAndClearOnlyOnceTold() async throws {
         let store = InMemorySecretStore()
         let composed = try await PreflightComposed.make(helper: nil, credentials: store)
         harness = composed.harness
@@ -441,7 +439,7 @@ final class RuntimeHostCredentialsChangeTests: XCTestCase {
 
     /// A read that already has the old answer when the app saves and tells the host lands after the invalidation, so its answer is dropped:
     /// the host never serves it, and one more read, bounded to one, serves the new value.
-    func testAReadOutBeforeTheChangeIsNeverServed() async throws {
+    @RuntimeActor func testAReadOutBeforeTheChangeIsNeverServed() async throws {
         let store = ReadThenHoldSecretStore()
         let composed = try await PreflightComposed.make(helper: nil, credentials: store)
         harness = composed.harness

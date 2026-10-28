@@ -177,10 +177,13 @@ final class TunnelDNSResponderTests: XCTestCase {
 
     // MARK: - TunnelResolverManager with Recording
 
+    /// The resolver manager's platform queue, the host's in production.
+    private static let work = PlatformWork(label: "io.github.srps.Conduit.tests.tunnel-resolver")
+
     /// The stale sweep reads the directory it is given, never the machine's `/etc/resolver`: a tunnel file in it is removed,
     /// while an active tunnel file and a file that is not a tunnel's are kept.
     @MainActor
-    func testResolverManagerStaleSweepReadsOnlyItsOwnDirectory() throws {
+    func testResolverManagerStaleSweepReadsOnlyItsOwnDirectory() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tunnel-resolver-sweep-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -190,9 +193,9 @@ final class TunnelDNSResponderTests: XCTestCase {
         try tunnelFile.write(to: directory.appendingPathComponent("active.example"), atomically: true, encoding: .utf8)
         try "nameserver 10.0.0.53\n".write(to: directory.appendingPathComponent("corporate.example"), atomically: true, encoding: .utf8)
         let recording = TestPrivilegeClient()
-        let manager = TunnelResolverManager(privilegeClient: recording, logger: DiscardingLogSink(), resolverDirectory: directory.path)
+        let manager = TunnelResolverManager(privilegeClient: recording, logger: DiscardingLogSink(), resolverDirectory: directory.path, work: Self.work)
 
-        manager.cleanupStale(activeHostnames: ["active.example"])
+        await manager.cleanupStale(activeHostnames: ["active.example"])
 
         let commands = recording.executedCommands
         XCTAssertEqual(commands.count, 1)
@@ -204,7 +207,7 @@ final class TunnelDNSResponderTests: XCTestCase {
     func testResolverManagerApplyCallsApplyDNSWithPort() throws {
         let recording = TestPrivilegeClient()
         let logger = DiscardingLogSink()
-        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory())
+        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory(), work: Self.work)
 
         try manager.apply(hostname: "cluster0.mongodb.net", listenIP: "127.0.0.1")
 
@@ -220,7 +223,7 @@ final class TunnelDNSResponderTests: XCTestCase {
     func testResolverManagerRemoveCallsRemoveDNS() throws {
         let recording = TestPrivilegeClient()
         let logger = DiscardingLogSink()
-        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory())
+        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory(), work: Self.work)
 
         try manager.remove(hostname: "cluster0.mongodb.net")
 
@@ -231,13 +234,13 @@ final class TunnelDNSResponderTests: XCTestCase {
     }
 
     @MainActor
-    func testResolverManagerApplyAllTracksSuccessAndFailure() {
+    func testResolverManagerApplyAllTracksSuccessAndFailure() async {
         let recording = TestPrivilegeClient()
         recording.failingDomains.insert("bad.host")
         let logger = DiscardingLogSink()
-        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory())
+        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory(), work: Self.work)
 
-        let result = manager.applyAll(hostnames: ["good.host", "bad.host", "another.host"], listenIP: "127.0.0.1")
+        let result = await manager.applyAll(hostnames: ["good.host", "bad.host", "another.host"], listenIP: "127.0.0.1")
 
         XCTAssertEqual(result.succeeded.sorted(), ["another.host", "good.host"])
         XCTAssertEqual(result.failed, ["bad.host"])
@@ -290,7 +293,7 @@ final class TunnelDNSResponderTests: XCTestCase {
     func testResolverManagerPortValueIsAlways15053() throws {
         let recording = TestPrivilegeClient()
         let logger = DiscardingLogSink()
-        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory())
+        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory(), work: Self.work)
 
         try manager.apply(hostname: "a.example.com", listenIP: "127.0.0.1")
         try manager.apply(hostname: "b.example.com", listenIP: "127.0.0.1")
@@ -302,16 +305,16 @@ final class TunnelDNSResponderTests: XCTestCase {
     }
 
     @MainActor
-    func testResolverManagerRemoveAllCleansUpAfterApplyAll() {
+    func testResolverManagerRemoveAllCleansUpAfterApplyAll() async {
         let recording = TestPrivilegeClient()
         let logger = DiscardingLogSink()
-        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory())
+        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory(), work: Self.work)
 
         let hostnames = ["x.host", "y.host"]
-        let result = manager.applyAll(hostnames: hostnames, listenIP: "127.0.0.1")
+        let result = await manager.applyAll(hostnames: hostnames, listenIP: "127.0.0.1")
         XCTAssertEqual(result.succeeded.count, 2)
 
-        manager.removeAll(hostnames: result.succeeded)
+        await manager.removeAll(hostnames: result.succeeded)
 
         let removes = recording.executedCommands.filter { $0.0 == .removeDNS }
         XCTAssertEqual(removes.count, 2)

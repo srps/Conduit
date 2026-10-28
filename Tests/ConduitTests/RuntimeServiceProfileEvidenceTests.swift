@@ -237,9 +237,8 @@ enum RuntimeServiceProfileKernels {
 }
 
 /// Phase A: the candidate constructs, every current call frames under the request cap, and the page packer's 64 KiB pages carry real rows.
-@MainActor
 final class RuntimeServiceProfileEvidenceTests: XCTestCase {
-    func testCandidateConstructsThroughTheActualInitializerAndPrintsDerivedSizes() throws {
+    @RuntimeActor func testCandidateConstructsThroughTheActualInitializerAndPrintsDerivedSizes() async throws {
         let limits = try RuntimeServiceProfileCandidate.limits()
         print(
             "RUNTIME-SERVICE-PROFILE candidate constructed=true subscriberRecordBytes=\(limits.subscriberRecordBytes)"
@@ -270,7 +269,7 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
 
     /// The budget is the binding check: the candidate constructs at exactly its own budget, and one byte less is refused by the constructor.
     /// The budget does not depend on the ceiling, so the two constructions measure the same value.
-    func testTheConstructorRefusesOneByteBelowTheCandidateBudgetAndAcceptsExactlyIt() throws {
+    @RuntimeActor func testTheConstructorRefusesOneByteBelowTheCandidateBudgetAndAcceptsExactlyIt() async throws {
         let budget = try RuntimeServiceProfileCandidate.limits().retainedByteBudget
         XCTAssertNoThrow(try RuntimeServiceProfileCandidate.limits(retainedByteCeiling: budget))
         XCTAssertThrowsError(try RuntimeServiceProfileCandidate.limits(retainedByteCeiling: budget - 1)) { error in
@@ -280,7 +279,7 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
 
     /// The subscriber charge must hold the measured record. A charge one byte under the layout is refused, so the table cannot be
     /// under-charged by a configuration.
-    func testTheConstructorRefusesASubscriberChargeBelowTheMeasuredRecord() throws {
+    @RuntimeActor func testTheConstructorRefusesASubscriberChargeBelowTheMeasuredRecord() async throws {
         let measured = MemoryLayout<RuntimeSubscriberRecord>.size
         XCTAssertThrowsError(try RuntimeServiceProfileCandidate.limits(subscriberRecordBytes: measured - 1))
     }
@@ -288,7 +287,7 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
     /// Every current call, at its widest legal identifiers, cursors and budgets, encodes as one request frame within the server's request cap.
     /// The encode is the check: a frame above the cap throws, and the test fails with that error. Private workflow payloads are not defined on
     /// this wire and are not measured here.
-    func testEveryCurrentCallFramesWithinTheServerRequestCapAtItsWidestLegalForm() throws {
+    @RuntimeActor func testEveryCurrentCallFramesWithinTheServerRequestCapAtItsWidestLegalForm() async throws {
         let limits = try RuntimeServiceProfileCandidate.limits()
         let serverCap = try RuntimeServiceProfileCandidate.frameLimits(limits.maxRequestBytes)
         // The widest budget the wire carries, which is the protocol's own range rather than a candidate value.
@@ -308,7 +307,7 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
     /// The Quit's wire form is strict. The widest legal Quit round-trips; from its own encoding, both final saves naming one request, a
     /// negative or out-of-range total, and a missing total or flush are each refused on decode. Building a flush that names one request
     /// twice is refused too.
-    func testTheWidestQuitRoundTripsAndItsMalformedFormsAreRefused() throws {
+    @RuntimeActor func testTheWidestQuitRoundTripsAndItsMalformedFormsAreRefused() async throws {
         let widest = try XCTUnwrap(try Self.widestCalls().first { $0.label == "submit-quit-both-flushes" })
         guard case .submit(let request) = widest.call, case .quit(_, let flush) = request.command else {
             return XCTFail("the widest Quit is a submitted quit")
@@ -403,7 +402,7 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
     /// The configuration receipt is measured both with the conditional DNS companion and with all three members, a saved Start's receipt with
     /// both priors and its companion, and a DNS Stop completion with its causal disable write. Each closed field is the case with the longest encoding, chosen by encoding every case; numbers are at their
     /// maximum and baselines at the full `UInt64` version. Nothing is promoted to a default: the candidate is the test's own profile.
-    func testTheWidestOutcomeOfEveryKindFitsTheCandidateOutcomeLogAndReplyBounds() throws {
+    @RuntimeActor func testTheWidestOutcomeOfEveryKindFitsTheCandidateOutcomeLogAndReplyBounds() async throws {
         let limits = try RuntimeServiceProfileCandidate.limits()
         let replyLimits = try RuntimeServiceProfileCandidate.frameLimits(limits.maxReplyBytes)
         let id = RuntimeServiceFixtures.uuid(0xFFFF_FFFF_FFFF)
@@ -555,7 +554,7 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
 
     /// 64 KiB pages through the actual `ControlPagePacker` and codec, for typical rows, mixed-escape rows and all-NUL rows. Each row lands in
     /// exactly one page, and every page's frame is at most the cap. The rows come from the actual Bridge projection, not a parallel packer.
-    func testSixtyFourKiBPagesCarryTypicalMixedAndAllNULConnectionRowsThroughThePacker() throws {
+    @RuntimeActor func testSixtyFourKiBPagesCarryTypicalMixedAndAllNULConnectionRowsThroughThePacker() async throws {
         let limits = try RuntimeServiceProfileCandidate.limits()
         let frame = try RuntimeServiceProfileCandidate.frameLimits(limits.maxReplyBytes)
         let typical = try RuntimeServiceProfileKernels.connectionRows(

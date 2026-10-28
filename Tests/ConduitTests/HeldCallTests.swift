@@ -192,6 +192,26 @@ final class HeldCallTests: XCTestCase {
         await next.value
     }
 
+    /// A hand-over can leave two calls held at once, which one `release()` does not end. `releaseAll()` lets both go and disarms, so a
+    /// later matching call is not taken at all.
+    func testReleaseAllLetsEveryHeldCallGoAndDisarms() async {
+        let hold = HeldCall()
+        hold.arm { name, _ in name == "call" }
+        let first = call(hold, on: .global(qos: .userInitiated))
+        await hold.waitUntilReached()
+        hold.arm { name, _ in name == "call" }
+        let second = call(hold, on: .global(qos: .utility))
+        await hold.waitUntilReached()
+        XCTAssertTrue(hold.isHolding, "two calls are held")
+
+        hold.releaseAll()
+        await first.value
+        await second.value
+        XCTAssertFalse(hold.isHolding)
+        await call(hold, on: .global(qos: .userInitiated)).value
+        XCTAssertFalse(hold.isHolding, "the disarmed hold takes nothing")
+    }
+
     /// While the main thread is parked, no main-actor job runs, and work on the platform queue and on the pool completes.
     func testTheParkStopsTheMainActorAndNothingElse() async {
         XCTAssertFalse(Thread.isMainThread, "the test runs off the main thread, so the main thread is free to take the park")

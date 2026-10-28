@@ -40,7 +40,7 @@ func observationSnapshot(
 
 /// One pull, peeked and committed only when it delivers a frame, as the transport's winning gate does. A stream end removes the
 /// subscriber in the same turn, as the transport does.
-@MainActor
+@RuntimeActor
 func observePull(_ core: RuntimeServiceCore, _ subscriber: Int) throws -> ObservedPull {
     guard let peeked = try core.peekFrame(subscriber, fits: { _ in true }) else { return .gone }
     switch peeked.pull {
@@ -67,7 +67,7 @@ func observePull(_ core: RuntimeServiceCore, _ subscriber: Int) throws -> Observ
 }
 
 /// Opens one live subscription, and returns its identity with the revision its baseline names.
-@MainActor
+@RuntimeActor
 func openLive(_ core: RuntimeServiceCore) -> (subscriber: Int, revision: Int)? {
     guard case .opened(let subscriber, .baseline(let baseline)) = core.openSubscription(.live) else { return nil }
     return (subscriber, baseline.snapshot.stamp.presentationRevision.rawValue)
@@ -90,21 +90,20 @@ final class WakeCounter: @unchecked Sendable {
 /// The observation rules of the service, driven through the production core and its owner turns: the baseline capture, the latest
 /// snapshot slot, the invariant faults, generation exhaustion, exactly-once removal, the snapshot and log alternation, replay order,
 /// and the framed reads. Each test states its one rule.
-@MainActor
 final class RuntimeServiceObservationTests: XCTestCase {
     /// Sets the owner's state and reports the change, as the owner does in its own turn.
-    private func publish(_ harness: RuntimeServiceHarness, presentation: Int, profile: String = "Corp") throws {
+    @RuntimeActor private func publish(_ harness: RuntimeServiceHarness, presentation: Int, profile: String = "Corp") throws {
         harness.owner.snapshotValue = try observationSnapshot(presentation: presentation, profile: profile)
         harness.core.ownerDidChange()
     }
 
     /// Publishes one event, then runs the one drain hop it queued, so the event is in the ring before the next step.
-    private func ingest(_ harness: RuntimeServiceHarness) {
+    @RuntimeActor private func ingest(_ harness: RuntimeServiceHarness) {
         harness.core.ingest(ControlRuntimeEvent(timestamp: Date(timeIntervalSince1970: 1), kind: "proxy", event: "test.event"))
         harness.scheduling.drainAll()
     }
 
-    private func thrownError<T>(_ body: () async throws -> T) async -> RuntimeClientError? {
+    @RuntimeActor private func thrownError<T>(_ body: () async throws -> T) async -> RuntimeClientError? {
         do {
             _ = try await body()
             return nil
@@ -117,7 +116,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
 
     /// An open reads the owner's state in its own turn, so an owner change nobody reported is in the new baseline, and the old
     /// subscriber still receives that change once, as the latest snapshot.
-    func testAnOpenCapturesAnOwnerChangeThatNoOneReported() throws {
+    @RuntimeActor func testAnOpenCapturesAnOwnerChangeThatNoOneReported() async throws {
         let harness = try RuntimeServiceHarness()
         let first = try XCTUnwrap(openLive(harness.core))
         XCTAssertEqual(first.revision, 9, "the fixture owner state is the first baseline")
@@ -129,7 +128,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
     }
 
     /// Several owner changes between two pulls deliver one latest snapshot to each subscriber, and never one per change.
-    func testOwnerChangesCoalesceIntoTheLatestSnapshotForEverySubscriber() throws {
+    @RuntimeActor func testOwnerChangesCoalesceIntoTheLatestSnapshotForEverySubscriber() async throws {
         let harness = try RuntimeServiceHarness()
         let first = try XCTUnwrap(openLive(harness.core))
         XCTAssertEqual(harness.core.snapshotGeneration, 1)
@@ -148,7 +147,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
     }
 
     /// An identical owner state advances nothing and delivers nothing.
-    func testAnIdenticalOwnerStateAdvancesNothing() throws {
+    @RuntimeActor func testAnIdenticalOwnerStateAdvancesNothing() async throws {
         let harness = try RuntimeServiceHarness()
         try publish(harness, presentation: 10)
         let subscriber = try XCTUnwrap(openLive(harness.core)).subscriber
@@ -161,7 +160,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
 
     /// Two different bodies under one presentation revision break the owner's invariant. The slot keeps the held snapshot, the fault
     /// names the conflict, and the open and the read fail closed.
-    func testSameRevisionWithAnotherBodyIsAnInvariantFaultAndRetainsNothing() throws {
+    @RuntimeActor func testSameRevisionWithAnotherBodyIsAnInvariantFaultAndRetainsNothing() async throws {
         let harness = try RuntimeServiceHarness()
         let subscriber = try XCTUnwrap(openLive(harness.core)).subscriber
         harness.owner.snapshotValue = try observationSnapshot(presentation: 9, profile: "Other")
@@ -179,7 +178,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
     }
 
     /// A presentation revision older than the held one is an invariant fault, and nothing is retained.
-    func testARegressedPresentationRevisionIsAnInvariantFault() throws {
+    @RuntimeActor func testARegressedPresentationRevisionIsAnInvariantFault() async throws {
         let harness = try RuntimeServiceHarness()
         try publish(harness, presentation: 10)
         XCTAssertEqual(harness.core.snapshotGeneration, 1)
@@ -189,7 +188,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
     }
 
     /// A snapshot that names another incarnation is never retained, and the fault says so.
-    func testAnotherIncarnationIsAnInvariantFaultAndRetainsNothing() throws {
+    @RuntimeActor func testAnotherIncarnationIsAnInvariantFaultAndRetainsNothing() async throws {
         let harness = try RuntimeServiceHarness()
         harness.owner.snapshotValue = try observationSnapshot(presentation: 10, incarnation: 2)
         harness.core.ownerDidChange()
@@ -198,7 +197,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
     }
 
     /// A snapshot over the slot's declared bound is an invariant fault, never a capacity answer. The open fails closed.
-    func testAnOversizedSnapshotIsAnInvariantFaultNotACapacityAnswer() throws {
+    @RuntimeActor func testAnOversizedSnapshotIsAnInvariantFaultNotACapacityAnswer() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(snapshotBytes: 100))
         guard case .refused(let code) = harness.core.openSubscription(.live) else {
             return XCTFail("an oversized baseline must not open")
@@ -212,7 +211,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
 
     /// When the private generation cannot advance, the slot is sticky: no newer state is shown, every subscriber ends with a resync,
     /// and a new open or read fails closed. Nothing wraps, and no fake generation is invented.
-    func testGenerationExhaustionIsAStickyTerminalAndNewerStateIsNeverShown() throws {
+    @RuntimeActor func testGenerationExhaustionIsAStickyTerminalAndNewerStateIsNeverShown() async throws {
         let harness = try RuntimeServiceHarness(snapshotGenerationSeed: Int.max - 1)
         let subscriber = try XCTUnwrap(openLive(harness.core)).subscriber
         let held = harness.owner.snapshotValue
@@ -240,7 +239,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
     // MARK: - Removal and parked waits
 
     /// A subscriber leaves the table once, and its parked wait is woken once. A second removal changes nothing.
-    func testRemovingASubscriberIsExactlyOnceAndItsParkedWaitIsWokenOnce() throws {
+    @RuntimeActor func testRemovingASubscriberIsExactlyOnceAndItsParkedWaitIsWokenOnce() async throws {
         let harness = try RuntimeServiceHarness()
         let subscriber = try XCTUnwrap(openLive(harness.core)).subscriber
         let wakes = WakeCounter()
@@ -254,7 +253,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
     }
 
     /// The subscription limit is the only refusal of an open that is a capacity answer, and a refused open changes no state.
-    func testTheSubscriberLimitRefusesOnlyTheOpenThatExceedsIt() throws {
+    @RuntimeActor func testTheSubscriberLimitRefusesOnlyTheOpenThatExceedsIt() async throws {
         let harness = try RuntimeServiceHarness(subscribers: 1)
         _ = try XCTUnwrap(openLive(harness.core))
         let generation = harness.core.snapshotGeneration
@@ -269,7 +268,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
     // MARK: - Pulls and fairness
 
     /// A pull that is not committed consumes neither the snapshot generation nor the event cursor, so the same frame comes back.
-    func testAnUncommittedPullConsumesNothing() throws {
+    @RuntimeActor func testAnUncommittedPullConsumesNothing() async throws {
         let harness = try RuntimeServiceHarness()
         let subscriber = try XCTUnwrap(openLive(harness.core)).subscriber
         try publish(harness, presentation: 10)
@@ -282,7 +281,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
 
     /// With a snapshot and an ordered frame both waiting, they alternate: a snapshot never goes twice in a row while a log frame waits,
     /// and a log frame never waits behind a flood of snapshots.
-    func testSnapshotsAndOrderedFramesAlternateUnderAConstantFlood() throws {
+    @RuntimeActor func testSnapshotsAndOrderedFramesAlternateUnderAConstantFlood() async throws {
         let harness = try RuntimeServiceHarness()
         let subscriber = try XCTUnwrap(openLive(harness.core)).subscriber
         var observed: [ObservedPull] = []
@@ -299,7 +298,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
     }
 
     /// A snapshot alone is delivered at once, and ordered events alone are delivered at once. Neither waits for the other.
-    func testAWaitingKindIsDeliveredAtOnceWhenTheOtherIsAbsent() throws {
+    @RuntimeActor func testAWaitingKindIsDeliveredAtOnceWhenTheOtherIsAbsent() async throws {
         let harness = try RuntimeServiceHarness()
         let subscriber = try XCTUnwrap(openLive(harness.core)).subscriber
         try publish(harness, presentation: 10)
@@ -310,7 +309,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
     }
 
     /// Two subscribers that saw different generations each receive the right latest snapshot, and none of the intermediate ones.
-    func testTwoSubscribersAtDifferentGenerationsEachReceiveTheLatestAtTheirOwnPace() throws {
+    @RuntimeActor func testTwoSubscribersAtDifferentGenerationsEachReceiveTheLatestAtTheirOwnPace() async throws {
         let harness = try RuntimeServiceHarness()
         let early = try XCTUnwrap(openLive(harness.core)).subscriber
         try publish(harness, presentation: 10)
@@ -325,7 +324,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
     // MARK: - Replay order
 
     /// During a replay, the replayed events come first, then the caught-up mark, and only then a snapshot, even when the owner changed.
-    func testAReplayDeliversItsOrderedFramesBeforeAnySnapshot() throws {
+    @RuntimeActor func testAReplayDeliversItsOrderedFramesBeforeAnySnapshot() async throws {
         let harness = try RuntimeServiceHarness()
         ingest(harness)
         ingest(harness)
@@ -347,7 +346,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
 
     /// A baseline larger than the caller's frame is a typed refusal as the first frame, and the subscriber is released. It is never an
     /// invalid reply, and no subscriber is left behind.
-    func testABaselineThatDoesNotFitTheCallersFrameIsARefusedFirstFrame() async throws {
+    @RuntimeActor func testABaselineThatDoesNotFitTheCallersFrameIsARefusedFirstFrame() async throws {
         let harness = try RuntimeServiceHarness()
         let narrow = try ControlFrameLimits(maxFrameBytes: 512)
         let epoch = harness.timing.now
@@ -366,7 +365,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
     }
 
     /// A framed snapshot read answers the owner's state in its own turn, and a broken owner state is a stable internal failure.
-    func testTheFramedSnapshotReadAnswersTheOwnersStateAndAnInvariantBreakIsInternalFailure() async throws {
+    @RuntimeActor func testTheFramedSnapshotReadAnswersTheOwnersStateAndAnInvariantBreakIsInternalFailure() async throws {
         let harness = try RuntimeServiceHarness()
         let epoch = harness.timing.now
         let client = try makeFramedRuntimeClient(
@@ -393,7 +392,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
 
     /// An event whose own text is past the event bound is a loss, and a live subscriber resyncs. The text is refused before its encoding.
     /// An ordinary event published after the loss still reaches a subscriber opened after it, at the next position.
-    func testAnEventWhoseTextIsPastTheEventBoundIsALossAndAnOrdinaryEventStillArrives() throws {
+    @RuntimeActor func testAnEventWhoseTextIsPastTheEventBoundIsALossAndAnOrdinaryEventStillArrives() async throws {
         let harness = try RuntimeServiceHarness()
         let first = try XCTUnwrap(openLive(harness.core)).subscriber
         let oversize = ControlRuntimeEvent(
@@ -414,7 +413,7 @@ final class RuntimeServiceObservationTests: XCTestCase {
     // MARK: - Lanes
 
     /// A full read lane, which carries the pulls and the reads, leaves every stop and the ordinary lane reservable.
-    func testAFullReadLaneLeavesEveryStopAndTheOrdinaryLaneReservable() throws {
+    @RuntimeActor func testAFullReadLaneLeavesEveryStopAndTheOrdinaryLaneReservable() async throws {
         let harness = try RuntimeServiceHarness()
         let transport = harness.transport()
         for _ in 0..<harness.limits.readLaneCapacity {

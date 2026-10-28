@@ -14,7 +14,7 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
 
     // MARK: - CONNECT handshake authenticator reuse
 
-    @MainActor
+    @RuntimeActor
     func testCONNECTHandshakeReusesSameAuthenticatorInstance() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
 
@@ -67,7 +67,7 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
 
     // MARK: - HTTP exchange authenticator reuse
 
-    @MainActor
+    @RuntimeActor
     func testHTTPExchangeReusesSameAuthenticatorInstance() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
 
@@ -118,7 +118,7 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
 
     /// A 407 answering the authenticate leg rejects the credentials; the
     /// authenticator hears of it once, so a cached password can be dropped.
-    @MainActor
+    @RuntimeActor
     func testCONNECTRejectionOfTheFinalLegIsReportedToTheAuthenticator() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         let mockProxy = try await ServerBootstrap(group: group)
@@ -149,7 +149,7 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
         try? await mockProxy.close().get()
     }
 
-    @MainActor
+    @RuntimeActor
     func testHTTPExchangeRejectionOfTheFinalLegIsReportedToTheAuthenticator() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         let mockProxy = try await ServerBootstrap(group: group)
@@ -182,7 +182,7 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
 
     // MARK: - Stateful authenticator context preservation
 
-    @MainActor
+    @RuntimeActor
     func testStatefulAuthenticatorReceivesBothCallsOnSameInstance() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
 
@@ -223,7 +223,7 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
 
     // MARK: - Fix: Auth failure must close upstream channel (no socket leak)
 
-    @MainActor
+    @RuntimeActor
     func testAuthFailureClosesUpstreamChannel() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
 
@@ -272,7 +272,7 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
 
     // MARK: - Fix 3: Slow auth must not block event loop
 
-    @MainActor
+    @RuntimeActor
     func testSlowAuthDoesNotBlockEventLoop() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
 
@@ -338,8 +338,8 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
     /// test fails, the footgun has been reintroduced — either by removing the
     /// `authenticatorBox` indirection or by changing the lazy vars to capture
     /// a snapshot of the box contents instead of the closure.
-    @MainActor
-    func testSetAuthenticatorProviderIsLateBoundForLazyConsumers() throws {
+    @RuntimeActor
+    func testSetAuthenticatorProviderIsLateBoundForLazyConsumers() async throws {
         let orchestrator = ProxyOrchestrator(
             config: ProxyConfig.testFixture(),
             logger: DiscardingLogSink()
@@ -382,7 +382,7 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
                        "Stale spy should not receive further calls after the second swap.")
     }
 
-    @MainActor
+    @RuntimeActor
     func testAuthOutcomeHandlerUpdatesHeadlessOrchestratorSnapshotAndEvents() async throws {
         let upstream = UpstreamProxy(name: "Mock", host: "proxy.example.com", port: 8080, priority: 0)
         var config = ProxyConfig.testFixture()

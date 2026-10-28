@@ -18,7 +18,7 @@ final class ProxyOrchestratorObservabilityTests: XCTestCase {
         super.tearDown()
     }
 
-    @MainActor
+    @RuntimeActor
     func testTunnelSessionCountTracksLiveSessions() async throws {
         let targetServer = try await ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -77,7 +77,7 @@ final class ProxyOrchestratorObservabilityTests: XCTestCase {
         await orchestrator.stopTunnels()
     }
 
-    @MainActor
+    @RuntimeActor
     private func waitForSessionCount(
         _ expected: Int,
         orchestrator: ProxyOrchestrator,

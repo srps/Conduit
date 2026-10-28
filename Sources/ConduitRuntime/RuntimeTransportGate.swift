@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import ConduitShared
 import Foundation
+import ProxyKernel
 
 /// One lane of the in-memory transport. Ordinary commands, reads, parked stream pulls and each module's stop have separate
 /// finite capacity, so a full ordinary lane never consumes a stop's slot, and parked stream pulls never refuse a status read.
@@ -215,8 +216,8 @@ enum RuntimeGatePhase: Sendable, Equatable {
 /// timers cancel, cleanup callbacks run and hops queue only after it is released. The only nesting is gate → ticket,
 /// and the ticket never calls back into the gate.
 final class RuntimeWaitGate: @unchecked Sendable {
-    /// One owner round. It runs on the main actor, and it returns the outcome, or nil when it parked the wait.
-    typealias Attempt = @MainActor @Sendable (RuntimeWaitGate) -> RuntimeWaitOutcome?
+    /// One owner round. It runs on the owner, and it returns the outcome, or nil when it parked the wait.
+    typealias Attempt = @RuntimeActor @Sendable (RuntimeWaitGate) -> RuntimeWaitOutcome?
     /// Ends a parked registration. The flag says whether the service already released it: a wake does, and a resolution
     /// does not, so its cleanup must run in an owner hop.
     typealias ParkEnd = @Sendable (_ serviceReleased: Bool) -> Void
@@ -229,7 +230,7 @@ final class RuntimeWaitGate: @unchecked Sendable {
     /// The round's closure. It is kept until resolution, so a parked wait can run it again on a wake, and it is cleared at
     /// resolution, so a resolved wait releases the request it captured while its timer may still be held.
     private var attempt: Attempt?
-    private let abandoned: @MainActor @Sendable (RuntimeWaitOutcome) -> Void
+    private let abandoned: @RuntimeActor @Sendable (RuntimeWaitOutcome) -> Void
     /// The typed refusal to answer with when the wait's deadline is the request's budget and the budget ends before a claim.
     /// It is nil when the caller's own deadline is the bound, and that end is `notSent`. It is kept until resolution, because a
     /// round that parks can return the wait to open on a wake, and it is cleared at resolution like the round's closure.
@@ -254,7 +255,7 @@ final class RuntimeWaitGate: @unchecked Sendable {
         scheduling: any RuntimeOwnerScheduling,
         boundRefusal: RuntimeWaitOutcome? = nil,
         attempt: @escaping Attempt,
-        abandoned: @escaping @MainActor @Sendable (RuntimeWaitOutcome) -> Void
+        abandoned: @escaping @RuntimeActor @Sendable (RuntimeWaitOutcome) -> Void
     ) {
         self.ticket = ticket
         self.deadline = deadline
@@ -435,9 +436,9 @@ final class RuntimeWaitGate: @unchecked Sendable {
         scheduleRound()
     }
 
-    /// One owner round, on the main actor. It checks the deadline at claim time, claims the wait, and runs the attempt.
+    /// One owner round, on the owner. It checks the deadline at claim time, claims the wait, and runs the attempt.
     /// Its hop part ends last.
-    @MainActor
+    @RuntimeActor
     private func runRound() {
         defer { ticket.end(.hop) }
         guard deadline.remaining(at: timing.now()) > .zero else {
@@ -468,7 +469,7 @@ final class RuntimeWaitGate: @unchecked Sendable {
 
     /// Claims the wait and runs its attempt. The attempt is a local of this call only, so when the call returns the wait is the
     /// last holder of the round's closure, and resolution is what releases it.
-    @MainActor
+    @RuntimeActor
     private func runClaimedAttempt() -> RoundStep {
         guard let attempt = claim() else { return .unclaimed }
         guard let outcome = attempt(self) else { return .parked }

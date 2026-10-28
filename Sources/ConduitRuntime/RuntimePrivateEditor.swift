@@ -279,7 +279,7 @@ struct RuntimePrivateRound: Sendable {
     func turn(
         budget: ControlWireBudget,
         refusal: RuntimePrivateTurn,
-        _ body: @escaping @MainActor @Sendable () -> RuntimePrivateTurn
+        _ body: @escaping @RuntimeActor @Sendable () -> RuntimePrivateTurn
     ) async throws -> RuntimePrivateTurn {
         guard reservation.beginWait() else { throw ControlRuntimeTransportFailure.notSent(.invalidReply) }
         let budgetEnds = arrival.advanced(by: .milliseconds(budget.rawValue))
@@ -423,7 +423,7 @@ extension RuntimeInMemoryTransport: PrivateEditorTransport {
         budget: ControlWireBudget,
         core: RuntimeServiceCore,
         round: RuntimePrivateRound,
-        map: () throws -> @MainActor @Sendable (ControlOperationID) -> ControlOwnerFenceResult
+        map: () throws -> @RuntimeActor @Sendable (ControlOperationID) -> ControlOwnerFenceResult
     ) async throws -> SecretBytes {
         let admission: ControlAdmission
         do {
@@ -487,7 +487,7 @@ extension RuntimeInMemoryTransport: PrivateEditorTransport {
 }
 
 /// A single-use hand-off of one admitted update into its effect.
-@MainActor
+@RuntimeActor
 final class RuntimePrivateWorkBox {
     private var update: RuntimePrivateUpdate?
 
@@ -736,7 +736,7 @@ extension RuntimeHost {
     /// failed one shows in the snapshot and the lifecycle state. False does not say the runtime half was not taken: a module that went down
     /// before the flag actions leaves the runtime input held and the pair unreconciled.
     private func applyWhileRunning(_ verified: VerifiedRuntimePlatformInput, at revisions: PrivateModuleSlots<Int?>) async -> Bool {
-        let stands: @MainActor @Sendable () -> Bool = { [weak self] in
+        let stands: @RuntimeActor @Sendable () -> Bool = { [weak self] in
             guard let self, !self.workflow.isTerminal, self.workflow.stillHolds(verified) else { return false }
             let current = self.workflow.revisions
             let down = self.modulesDown()

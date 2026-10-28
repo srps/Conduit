@@ -10,7 +10,7 @@ import NIOConcurrencyHelpers
 package protocol VPNStatusObserving: AnyObject, Sendable {
     /// Set by the consumer (`AppState`) before `start()`. Implementations may
     /// invoke this on any queue; consumers are expected to hop to the right
-    /// isolation context (typically `@MainActor` for orchestrator integration).
+    /// isolation context (`@RuntimeActor` for orchestrator integration).
     func setOnChange(_ onChange: @Sendable @escaping (VPNObservedState) -> Void)
 
     /// Begin observing. Idempotent — calling twice without an intervening

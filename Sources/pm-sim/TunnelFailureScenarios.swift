@@ -56,7 +56,7 @@ enum TunnelFailureScenarios {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     private static func until(_ condition: () -> Bool) async throws -> Bool {
         let deadline = ContinuousClock.now + .seconds(2)
         while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
@@ -77,7 +77,7 @@ enum TunnelFailureScenarios {
         return try await result.futureResult.get()
     }
 
-    @MainActor
+    @RuntimeActor
     static func vpnExistingStreamFailure(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
@@ -125,7 +125,7 @@ enum TunnelFailureScenarios {
         }.bind(host: "127.0.0.1", port: 0).get()
     }
 
-    @MainActor
+    @RuntimeActor
     private static func exercise(listener: Channel, group: EventLoopGroup, pairs: NIOLockedValueBox<[Pair]>,
                                  events: RuntimeEventLog, started: Date) async throws -> ScenarioResult {
         var clients: [Channel] = [], captures: [Capture] = [] // two baseline streams, never network-sized

@@ -134,7 +134,7 @@ enum RuntimeServiceFixtures {
     }
 
     /// The lookup of one operation under the fixture incarnation.
-    @MainActor
+    @RuntimeActor
     static func lookup(_ core: RuntimeServiceCore, _ operation: ControlOperationID) -> ControlOperationLookup {
         core.operationLookup(ControlOperationQuery(
             expectedIncarnation: incarnation(1),
@@ -143,7 +143,7 @@ enum RuntimeServiceFixtures {
     }
 
     /// The admission lookup of one request under the fixture incarnation.
-    @MainActor
+    @RuntimeActor
     static func lookupRequest(_ core: RuntimeServiceCore, _ id: Int) throws -> ControlRequestLookup {
         core.requestLookup(ControlRequestQuery(
             expectedIncarnation: incarnation(1),
@@ -273,7 +273,7 @@ final class ManualOwnerScheduling: RuntimeOwnerScheduling, @unchecked Sendable {
 
     /// Runs the oldest queued hop. It returns false when none is queued.
     @discardableResult
-    @MainActor
+    @RuntimeActor
     func runNext() -> Bool {
         let next = lock.withLock { () -> RuntimeOwnerHop? in
             queue.isEmpty ? nil : queue.removeFirst()
@@ -285,7 +285,7 @@ final class ManualOwnerScheduling: RuntimeOwnerScheduling, @unchecked Sendable {
 
     /// Runs queued hops until none is left, or until `limit` have run. It returns how many ran.
     @discardableResult
-    @MainActor
+    @RuntimeActor
     func drainAll(limit: Int = 10_000) -> Int {
         var ran = 0
         while ran < limit, runNext() {
@@ -297,7 +297,7 @@ final class ManualOwnerScheduling: RuntimeOwnerScheduling, @unchecked Sendable {
 
 /// A fake owner. It is the contract the service is proven against, not the actual host's fence. The owner keeps the
 /// commands it fenced, and it resolves each launch's command from them, as the real owner will.
-@MainActor
+@RuntimeActor
 final class FakeCommandOwner: ControlCommandOwner {
     let incarnation: ControlHostIncarnation
     /// The snapshot the owner reports. A test changes it, with the DNS hosts below, to move the owner to a new revision.
@@ -399,7 +399,7 @@ final class FakeCommandOwner: ControlCommandOwner {
 }
 
 /// The production service, with its fake owner and the manual clock and hops, built once for a test.
-@MainActor
+@RuntimeActor
 struct RuntimeServiceHarness {
     let limits: RuntimeServiceLimits
     let owner: FakeCommandOwner
@@ -450,7 +450,7 @@ struct RuntimeServiceHarness {
 
 /// Waits, bounded, until an observable state holds. It yields between checks and returns false after `limit` checks, so a
 /// test fails on the state it expected rather than on a timing guess. It never sleeps.
-@MainActor
+@RuntimeActor
 func awaitState(limit: Int = 10_000, _ condition: () -> Bool) async -> Bool {
     for _ in 0..<limit {
         if condition() {
@@ -463,7 +463,7 @@ func awaitState(limit: Int = 10_000, _ condition: () -> Bool) async -> Bool {
 
 /// Runs one call that hops to the owner. It waits, bounded, until the call has queued its work, then runs the queued hops
 /// and returns the call's value.
-@MainActor
+@RuntimeActor
 func runCall<T: Sendable>(
     _ scheduling: ManualOwnerScheduling,
     _ body: @escaping @Sendable () async throws -> T

@@ -129,7 +129,7 @@ final class ConfigRuntimeRangeRefusalTests: XCTestCase {
     /// System wake calls `directConnectDetector.clearCache()`, which builds the detector's
     /// lazy initializer from the loaded config. Before the fix this trapped, while the proxy
     /// was stopped, for a persisted connect timeout past the range.
-    func testSystemWakeWithAnUnholdableConnectTimeoutDoesNotTrap() async {
+    @RuntimeActor func testSystemWakeWithAnUnholdableConnectTimeoutDoesNotTrap() async {
         var config = ProxyConfig.testFixture()
         config.health.connectionCheckTimeout = 1e10
         let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
@@ -353,7 +353,7 @@ final class ConfigRuntimeRangeRefusalTests: XCTestCase {
 
     /// Tunnel start converts the same durations, so it refuses before it binds anything.
     /// The refusal is an event on the orchestrator's log, and the snapshot names the field.
-    func testStartTunnelsRefusesAnUnholdableExchangeDurationBeforeBinding() async {
+    @RuntimeActor func testStartTunnelsRefusesAnUnholdableExchangeDurationBeforeBinding() async {
         var config = ProxyConfig.testFixture()
         config.health.upstreamResponseTimeout = 1e10
         config.tunnelDefinitions = [

@@ -8,7 +8,7 @@
 /// between that check and the claim. An effect that has claimed the slot runs to its end, so a teardown never runs beside a bind and closes
 /// everything that bind left. A restart or reconcile takes no epoch of its own: it captures the latest, so a stop admitted before or during
 /// it supersedes it instead of being undone by it.
-@MainActor
+@RuntimeActor
 final class PhysicalLifecycle {
     private(set) var epoch = 0
     /// Whether the latest admitted operation is a start. A restart or reconcile acts only then: after a stop, the module stays stopped.
@@ -31,7 +31,7 @@ final class PhysicalLifecycle {
     }
 
     /// Runs a whole start admitted at `epoch` as the joinable completion, and returns or throws its own result.
-    func runStart(epoch: Int, _ body: @escaping @MainActor () async throws -> Void) async throws {
+    func runStart(epoch: Int, _ body: @escaping @RuntimeActor () async throws -> Void) async throws {
         let completion = Task<Void, Error> { try await body() }
         start = (epoch, completion)
         defer { if self.start?.completion == completion { self.start = nil } }
@@ -55,7 +55,7 @@ final class PhysicalLifecycle {
     /// Runs `body` as the effect for `epoch` once the active effect, if any, has ended. Returns `false`, having run nothing, when a newer
     /// operation was admitted meanwhile: that operation now owns the listeners. Rethrows what `body` throws.
     @discardableResult
-    func run(epoch: Int, _ body: @escaping @MainActor () async throws -> Void) async throws -> Bool {
+    func run(epoch: Int, _ body: @escaping @RuntimeActor () async throws -> Void) async throws -> Bool {
         while let active {
             _ = await active.result
         }

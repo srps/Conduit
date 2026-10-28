@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import ConduitShared
 import Foundation
+import ProxyKernel
 
 /// The process quit's one total deadline and its reserved draft flush (decision 0015). The quit latches first, so nothing else is admitted;
 /// this window then admits each declared all-save-only private update once, the runtime and platform save and the preferences save, through
@@ -11,7 +12,7 @@ import Foundation
 ///
 /// The same deadline bounds the whole quit: `settled` answers whether the quit's work ended before it. A quit past its deadline is reported
 /// as such while its work still runs and still owns the root, until it ends.
-@MainActor
+@RuntimeActor
 final class RuntimeQuitFlush {
     /// The final saves one quit may declare, each admitted once: with the quit itself, the operations its partition can hold.
     enum Part: CaseIterable {

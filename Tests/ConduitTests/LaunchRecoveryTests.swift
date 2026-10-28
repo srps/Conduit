@@ -3,20 +3,21 @@ import Foundation
 import NIOConcurrencyHelpers
 import XCTest
 import PlatformMac
+import ProxyKernel
 
-/// The shared host builds its launch recovery in its `@MainActor` initialiser, and
+/// The shared host builds its launch recovery in its `@RuntimeActor` initialiser, and
 /// the two `restoreIfNeeded` calls it starts block on a 2 s DNS probe and on several
 /// `networksetup` subprocesses per network service. These pin the two halves of
-/// the seam that keeps that off the main actor without losing its ordering, and
+/// the seam that keeps that off the owner without losing its ordering, and
 /// the worker it runs on.
 final class LaunchRecoveryTests: XCTestCase {
     private static let workLabel = "io.github.srps.Conduit.launch-recovery-tests.platform-work"
     private let work = PlatformWork(label: LaunchRecoveryTests.workLabel)
 
-    /// The freeze. Run inline from a `@MainActor` initialiser, launch-time
+    /// The freeze. Run inline from the host's initialiser, launch-time
     /// recovery is seconds of an app that is on screen nowhere and answering
     /// nothing.
-    @MainActor
+    @RuntimeActor
     func testRecoveryDoesNotRunOnTheMainThread() async {
         let ranOnMainThread = NIOLockedValueBox(true)
 
@@ -34,7 +35,7 @@ final class LaunchRecoveryTests: XCTestCase {
 
     /// Nor on the concurrency pool, where seconds of blocking take a thread from every task and actor: it runs on the worker it is
     /// given, which for the host is its one platform queue.
-    @MainActor
+    @RuntimeActor
     func testRecoveryRunsOnTheGivenWorkerAndNotOnThePool() async {
         let label = NIOLockedValueBox("")
 
@@ -50,8 +51,8 @@ final class LaunchRecoveryTests: XCTestCase {
 
     /// The other half. Recovery restores the *previous* session's settings, so
     /// a `startProxy` that overtook it would have its own settings restored
-    /// away — moving the work off the main actor may not also make it unordered.
-    @MainActor
+    /// away — moving the work off the owner may not also make it unordered.
+    @RuntimeActor
     func testJoinReturnsOnlyAfterRecoveryHasFinished() async {
         let finished = NIOLockedValueBox(false)
 
@@ -70,7 +71,7 @@ final class LaunchRecoveryTests: XCTestCase {
     /// `awaitLaunchRecovery()` sits at the head of the host's Start, Stop,
     /// reload and readiness paths, so it is called on every lifecycle
     /// transition for the life of the process, not once.
-    @MainActor
+    @RuntimeActor
     func testJoinIsIdempotentAndRunsTheWorkOnce() async {
         let runs = NIOLockedValueBox(0)
 

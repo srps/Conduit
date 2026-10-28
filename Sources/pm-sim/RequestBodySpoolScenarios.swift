@@ -19,7 +19,7 @@ import ProxyKernel
 enum RequestBodySpoolScenarios {
     private static let bodySize = 65_536
 
-    @MainActor
+    @RuntimeActor
     static func run(verbose: Bool) async throws -> ScenarioResult {
         let name = "request-body-spool"
         let group = MultiThreadedEventLoopGroup.singleton
@@ -116,8 +116,8 @@ enum RequestBodySpoolScenarios {
     }
 
     /// Polls a condition; the deadline only keeps a regression from hanging pm-sim.
-    @MainActor
-    private static func waitUntil(_ condition: @MainActor () -> Bool) async throws {
+    @RuntimeActor
+    private static func waitUntil(_ condition: @RuntimeActor () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while !condition(), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))

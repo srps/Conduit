@@ -110,7 +110,7 @@ final class AgentHarnessTests: XCTestCase {
 
     // MARK: - Isolation Invariants
 
-    @MainActor
+    @RuntimeActor
     func testIsolatedOrchestratorHasNoSystemSideEffects() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0

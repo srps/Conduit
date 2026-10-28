@@ -4,7 +4,7 @@ import XCTest
 
 final class UpstreamTestEventTests: XCTestCase {
 
-    @MainActor
+    @RuntimeActor
     func testEmptyUpstreamTestNameEmitsInvalidEvent() async {
         let orchestrator = ProxyOrchestrator(config: GenericDefaults.shared.makeConfig(), logger: DiscardingLogSink())
 
@@ -18,7 +18,7 @@ final class UpstreamTestEventTests: XCTestCase {
         })
     }
 
-    @MainActor
+    @RuntimeActor
     func testMissingUpstreamTestTargetEmitsNotFoundEvent() async {
         let orchestrator = ProxyOrchestrator(config: GenericDefaults.shared.makeConfig(), logger: DiscardingLogSink())
 

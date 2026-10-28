@@ -125,10 +125,12 @@ final class AppState: ObservableObject {
         let environment = stateSession.environment
         let eventLog = RuntimeEventLog()
         self.eventLog = eventLog
+        // The authoritative guard holds the session, inside any effect the composition wraps around it, so a queued file-log write keeps
+        // the root's lease until it ends.
         let logStore = AppLogStore(
-            destinationGuard: composition.appLogGuard.wrap(
+            destinationGuard: composition.appLogGuard.wrap(stateSession.retainingAuthority(
                 diagnosticDestinationGuard(for: .appLog, in: environment, writerLeaseFile: stateSession.writerLeaseFile)
-            ),
+            )),
             eventLog: eventLog
         )
         self.logStore = logStore
@@ -187,20 +189,10 @@ final class AppState: ObservableObject {
         for warning in loaded.warnings { logStore.log(.warning, warning, category: .system) }
         if loaded.migrated { logStore.log(.notice, "Configuration files migrated to the current schema.", category: .system) }
 
-        let host: RuntimeHost
+        let opened: Result<(clients: RuntimeInMemoryClients, profile: RuntimeServiceProfile), any Error>
         do {
-            host = try await RuntimeHost.open(
-                stateSession: stateSession,
-                logger: logStore,
-                startupAllowsMissing: true,
-                startedAt: Date(),
-                // The app's process lifetime is AppKit's; it never asks the host for a terminal stop.
-                terminalExit: {},
-                effects: composition.effects,
-                networkLocationLimits: composition.hostSchedules.networkLocationLimits,
-                environmentDriftInterval: composition.hostSchedules.environmentDriftInterval,
-                reapplyRetrySchedule: composition.hostSchedules.reapplyRetrySchedule,
-                splitDNSHelperCheckInterval: composition.hostSchedules.splitDNSHelperCheckInterval
+            opened = try await Self.openHost(
+                stateSession: stateSession, logger: logStore, effects: composition.effects, schedules: composition.hostSchedules
             )
         } catch is CancellationError {
             // The quit cancelled the opening, and the factory refused before building the host: no recovery, observer or timer started.
@@ -213,8 +205,15 @@ final class AppState: ObservableObject {
             reportOpeningFailure(nil, message: error.localizedDescription)
             return await refuseOpening()
         }
-        guard let composed = compose(host) else { return refuseUnlessQuitting() }
-        // Kept in the turn the host was built, before any await, so a quit from here on reaches the host whatever the opening does next.
+        let composed: (clients: RuntimeInMemoryClients, profile: RuntimeServiceProfile)
+        switch opened {
+        case .success(let clients):
+            composed = clients
+        case .failure(let error):
+            reportOpeningFailure(nil, message: "The runtime's control service could not be composed: \(error.localizedDescription).")
+            return refuseUnlessQuitting()
+        }
+        // Kept in the turn the clients arrive, before any await, so a quit from here on reaches the host whatever the opening does next.
         control = composed.clients.control
         editorClient = composed.clients.editor
         await connect(composed.clients, rowBudget: composed.profile.collectionRowBudget)
@@ -263,14 +262,29 @@ final class AppState: ObservableObject {
         updateCoordinator.start(automaticChecks: false)
     }
 
-    /// The host's clients under the one shipping profile. The host is not kept here: the clients hold the composition.
-    private func compose(_ host: RuntimeHost) -> (clients: RuntimeInMemoryClients, profile: RuntimeServiceProfile)? {
-        do {
+    /// Opens the one host and composes its clients under the shipping profile in the owner turn that built it, so a built host always
+    /// has the clients a quit reaches it through. The host is not kept here: the clients hold the composition. Throws what the open
+    /// throws; a composition failure is the result's.
+    @RuntimeActor
+    private static func openHost(
+        stateSession: StateRootSession, logger: any LogSink, effects: RuntimeHostEffects, schedules: AppHostSchedules
+    ) async throws -> Result<(clients: RuntimeInMemoryClients, profile: RuntimeServiceProfile), any Error> {
+        let host = try await RuntimeHost.open(
+            stateSession: stateSession,
+            logger: logger,
+            startupAllowsMissing: true,
+            startedAt: Date(),
+            // The app's process lifetime is AppKit's; it never asks the host for a terminal stop.
+            terminalExit: {},
+            effects: effects,
+            networkLocationLimits: schedules.networkLocationLimits,
+            environmentDriftInterval: schedules.environmentDriftInterval,
+            reapplyRetrySchedule: schedules.reapplyRetrySchedule,
+            splitDNSHelperCheckInterval: schedules.splitDNSHelperCheckInterval
+        )
+        return Result {
             let profile = try RuntimeServiceProfile.inProcessApp()
             return (try host.makeInMemoryControlClient(profile: profile), profile)
-        } catch {
-            reportOpeningFailure(nil, message: "The runtime's control service could not be composed: \(error.localizedDescription).")
-            return nil
         }
     }
 
@@ -747,9 +761,9 @@ final class AppState: ObservableObject {
     /// over the configuration, the journal, the lease or any other runtime file.
     func exportConfiguration(to url: URL) throws {
         guard !quitFence else { return }
-        let guardian = diagnosticDestinationGuard(
+        let guardian = stateSession.retainingAuthority(diagnosticDestinationGuard(
             for: .connectionAudit, in: stateSession.environment, writerLeaseFile: stateSession.writerLeaseFile
-        )
+        ))
         try guardian.admit(destination: url)
         // A file leaving the process: the canonical encoder the configuration file itself uses (Unix-epoch timestamps, sorted keys).
         try CanonicalJSON.encoder(prettyPrinted: true).encode(config).write(to: url, options: .atomic)
@@ -1476,6 +1490,14 @@ final class AppState: ObservableObject {
         }
         if writable(.preferences) {
             let draft = appPreferences
+            // A value past its ceiling is refused before it is sent, so it is not declared: a declared save that is never sent would hold
+            // the host's flush window open until the deadline.
+            if let violation = DomainResourceCheck.text(draft.preferredBrowserTestURL, .browserTestURL) {
+                record(RuntimeEvent(kind: .config, event: "config.edit_discarded",
+                                    detail: "trigger=quit reason=resource_limit field=\(violation.field) limit=\(violation.limit)"),
+                       level: .notice)
+                return (configuration, nil)
+            }
             preferences = { requestID, prior in
                 guard let baseline = ledger.quitSaveBaselines(after: ledger.afterQuitPrior(prior, incarnation: incarnation)).preferences
                 else {

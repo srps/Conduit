@@ -4,15 +4,15 @@ import XCTest
 @testable import ConduitRuntime
 import ConduitShared
 import ProxyControlBridge
+import ProxyKernel
 
 /// The one shipping profile (`RuntimeServiceProfile.inProcessApp`) against the codec and the actual initializer: every stated byte term is
 /// re-derived from the measured worst record it holds, the retained-byte ceiling is exactly the initializer's own budget, and every call
 /// and settlement frames within the selected caps. A term that grows fails here rather than widening the profile silently.
-@MainActor
 final class RuntimeServiceShippingProfileTests: XCTestCase {
     private typealias Profile = RuntimeServiceProfile
 
-    func testTheProfileConstructsAtExactlyItsMeasuredBudgetAndRefusesOneByteLess() throws {
+    @RuntimeActor func testTheProfileConstructsAtExactlyItsMeasuredBudgetAndRefusesOneByteLess() async throws {
         let limits = try Profile.inProcessApp().limits
         print("RUNTIME-SHIPPING-PROFILE retainedByteBudget=\(limits.retainedByteBudget) ceiling=\(limits.retainedByteCeiling)")
         XCTAssertEqual(limits.retainedByteBudget, 17_082_600, "the measured candidate's budget")
@@ -39,7 +39,7 @@ final class RuntimeServiceShippingProfileTests: XCTestCase {
     }
 
     /// The selected caps and the measured shape, as the owner selected and the probe measured them.
-    func testTheSelectedCapsAndCapacitiesAreTheProfiles() throws {
+    @RuntimeActor func testTheSelectedCapsAndCapacitiesAreTheProfiles() async throws {
         let profile = try Profile.inProcessApp()
         let limits = profile.limits
         XCTAssertEqual(limits.maxRequestBytes, 4_096)
@@ -59,7 +59,7 @@ final class RuntimeServiceShippingProfileTests: XCTestCase {
     }
 
     /// Each retained byte term holds its full count of the widest record the codec writes today.
-    func testEveryRetainedTermHoldsItsCountOfTheWidestRecord() throws {
+    @RuntimeActor func testEveryRetainedTermHoldsItsCountOfTheWidestRecord() async throws {
         let limits = try Profile.inProcessApp().limits
         XCTAssertGreaterThanOrEqual(limits.aliasByteCapacityPerPartition, limits.aliasCapacityPerPartition * limits.aliasRecordWorstBytes)
         let operation = ControlOperationID(rawValue: RuntimeServiceFixtures.uuid(0xFFFF_FFFF_FFFF))
@@ -77,13 +77,13 @@ final class RuntimeServiceShippingProfileTests: XCTestCase {
     }
 
     /// The latest snapshot bound is the largest a baseline frame carries within the reply cap.
-    func testTheLatestSnapshotIsTheLargestABaselineFrameCarries() throws {
+    @RuntimeActor func testTheLatestSnapshotIsTheLargestABaselineFrameCarries() async throws {
         let limits = try Profile.inProcessApp().limits
         XCTAssertEqual(limits.latestSnapshotByteCapacity + limits.baselineFrameOverheadBytes, limits.maxReplyBytes)
     }
 
     /// Every current call frames within the shipping request cap at its widest legal form.
-    func testEveryCallFramesWithinTheShippingRequestCap() throws {
+    @RuntimeActor func testEveryCallFramesWithinTheShippingRequestCap() async throws {
         let limits = try Profile.inProcessApp().limits
         let cap = try ControlFrameLimits(maxFrameBytes: limits.maxRequestBytes)
         let requestID = ControlRequestID(rawValue: RuntimeServiceFixtures.uuid(0xFFFF_FFFF_FFFF))

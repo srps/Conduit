@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import ConduitShared
 import Foundation
+import ProxyKernel
 
 /// The logical state of one operation. `settled` is a marker only: the outcome itself lives in the bounded outcome table
 /// and the control log, so no outcome is held twice.
@@ -119,10 +120,10 @@ enum RuntimePageSource {
 ///   `dropQueuedStop`.
 /// - the observation log, subscribers, parked waits and collection captures.
 ///
-/// Every method runs in the owner's turn on the main actor, so one turn sees one consistent state. The owner keeps the
+/// Every method runs in the owner's turn on `RuntimeActor`, so one turn sees one consistent state. The owner keeps the
 /// single authority over intent and lifecycle, and it decides every Stop, including a coalescing one. The service never
 /// decides what a command does.
-@MainActor
+@RuntimeActor
 final class RuntimeServiceCore {
     private let owner: any ControlCommandOwner
     private let limits: RuntimeServiceLimits

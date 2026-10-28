@@ -8,7 +8,6 @@ import XCTest
 /// The retry policy for a failed re-apply of an advertised surface (#194),
 /// with a scripted host. Delays are zero: the scenarios count attempts and
 /// read events, they do not time anything.
-@MainActor
 final class ConfigReapplyRetryTests: XCTestCase {
     private var events: [String] = []
     private var lane: LifecycleLane!
@@ -18,7 +17,7 @@ final class ConfigReapplyRetryTests: XCTestCase {
     /// Runs inside an attempt, before its verdict is returned.
     private var duringAttempt: (() -> Void)?
 
-    override func setUp() async throws {
+    @RuntimeActor override func setUp() async throws {
         try await super.setUp()
         events = []
         verdicts = []
@@ -28,12 +27,12 @@ final class ConfigReapplyRetryTests: XCTestCase {
         make(delays: [.zero, .zero, .zero])
     }
 
-    override func tearDown() async throws {
+    @RuntimeActor override func tearDown() async throws {
         retry.cancelAll()
         try await super.tearDown()
     }
 
-    private func make(delays: [Duration]) {
+    @RuntimeActor private func make(delays: [Duration]) {
         retry = ConfigReapplyRetry(schedule: .init(delays: delays)) { [weak self] event, _ in
             self?.events.append("\(event.event) \(event.detail ?? "")")
         }
@@ -45,11 +44,11 @@ final class ConfigReapplyRetryTests: XCTestCase {
         }
     }
 
-    private func fail(_ surface: ConfigReapplyRetry.Surface = .systemProxy, reason: String = "refused") {
+    @RuntimeActor private func fail(_ surface: ConfigReapplyRetry.Surface = .systemProxy, reason: String = "refused") {
         retry.failed(surface, cause: .configChange, reason: reason, token: lane.observationToken)
     }
 
-    func testAFailureIsReportedAndRecoversOnALaterAttempt() async {
+    @RuntimeActor func testAFailureIsReportedAndRecoversOnALaterAttempt() async {
         verdicts = [.failed(reason: "not_applied"), .applied]
         fail()
         await retry.drain()
@@ -64,7 +63,7 @@ final class ConfigReapplyRetryTests: XCTestCase {
         XCTAssertTrue(retry.pending.isEmpty)
     }
 
-    func testARetryStopsAfterItsAttempts() async {
+    @RuntimeActor func testARetryStopsAfterItsAttempts() async {
         fail(.environment)
         await retry.drain()
 
@@ -77,7 +76,7 @@ final class ConfigReapplyRetryTests: XCTestCase {
     }
 
     /// A start or stop since the failure owns the surface.
-    func testAStartOrStopSinceTheFailureAbandonsWithoutAnAttempt() async {
+    @RuntimeActor func testAStartOrStopSinceTheFailureAbandonsWithoutAnAttempt() async {
         fail()
         guard case .run(let token) = lane.begin(.stop) else { return XCTFail("admitted") }
         lane.end(token)
@@ -87,7 +86,7 @@ final class ConfigReapplyRetryTests: XCTestCase {
         XCTAssertEqual(events.last, "config.reapply_abandoned surface=system_proxy reason=superseded attempts=0")
     }
 
-    func testAnAttemptOvertakenByAStartIsNotCountedAsRecovered() async {
+    @RuntimeActor func testAnAttemptOvertakenByAStartIsNotCountedAsRecovered() async {
         verdicts = [.applied]
         duringAttempt = { [unowned self] in
             guard case .run(let token) = self.lane.begin(.start) else { return XCTFail("admitted") }
@@ -99,7 +98,7 @@ final class ConfigReapplyRetryTests: XCTestCase {
         XCTAssertEqual(events.last, "config.reapply_abandoned surface=system_proxy reason=superseded attempts=1")
     }
 
-    func testASwitchTurnedOffAbandonsWithItsReason() async {
+    @RuntimeActor func testASwitchTurnedOffAbandonsWithItsReason() async {
         verdicts = [.notWanted(reason: "switch_off")]
         fail()
         await retry.drain()
@@ -110,7 +109,7 @@ final class ConfigReapplyRetryTests: XCTestCase {
     /// A newer failure replaces the request: the verdict of the attempt it
     /// overtook is dropped, and the schedule starts again. One worker per
     /// surface throughout.
-    func testANewerFailureDuringAnAttemptDropsTheOlderVerdict() async {
+    @RuntimeActor func testANewerFailureDuringAnAttemptDropsTheOlderVerdict() async {
         verdicts = [.applied, .applied]
         duringAttempt = { [unowned self] in
             if self.attempts.count == 1 { self.fail(reason: "again") }
@@ -131,7 +130,7 @@ final class ConfigReapplyRetryTests: XCTestCase {
 
     /// A newer failure does not wait out the old request's long delay: its
     /// own schedule starts at once.
-    func testANewerFailureWakesAWorkerAsleepOnALongDelay() async {
+    @RuntimeActor func testANewerFailureWakesAWorkerAsleepOnALongDelay() async {
         make(delays: [.zero, .seconds(3600), .zero])
         verdicts = [.failed(reason: "not_applied"), .applied]
         fail()
@@ -149,7 +148,7 @@ final class ConfigReapplyRetryTests: XCTestCase {
         XCTAssertEqual(events.last, "config.reapply_recovered surface=system_proxy attempts=1")
     }
 
-    func testSurfacesRetryIndependently() async {
+    @RuntimeActor func testSurfacesRetryIndependently() async {
         verdicts = [.applied, .applied]
         fail(.systemProxy)
         fail(.environment)
@@ -161,7 +160,7 @@ final class ConfigReapplyRetryTests: XCTestCase {
     }
 
     /// At teardown nothing more runs and nothing more is reported.
-    func testCancelAllDropsWhatIsOutstandingQuietly() async {
+    @RuntimeActor func testCancelAllDropsWhatIsOutstandingQuietly() async {
         make(delays: [.seconds(3600)])
         fail()
         retry.cancelAll()
@@ -176,7 +175,7 @@ final class ConfigReapplyRetryTests: XCTestCase {
     /// under the manager's lock: a flag action runs on the main actor, not
     /// on the platform queue, and its clear must not be undone by a retry
     /// queued before it.
-    func testTheSystemProxyAttemptLeavesASwitchTurnedOffAlone() async throws {
+    @RuntimeActor func testTheSystemProxyAttemptLeavesASwitchTurnedOffAlone() async throws {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("reapply-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let machine = FakeMachine(resolverDirectory: directory.appendingPathComponent("resolver", isDirectory: true))

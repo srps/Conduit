@@ -42,7 +42,7 @@ enum CredentialCacheScenarios {
     /// store answers only when the scenario releases it.
     private static let pendingReadWait: TimeInterval = 30
 
-    @MainActor
+    @RuntimeActor
     static func burstReadsOnce(verbose: Bool) async throws -> ScenarioResult {
         let name = "ntlm-credential-cache"
         let start = Date()

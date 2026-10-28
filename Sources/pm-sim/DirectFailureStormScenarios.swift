@@ -14,7 +14,7 @@ enum DirectFailureStormScenarios {
     private static let stormSize = 300
     private static let upstreamFailures = 25
 
-    @MainActor
+    @RuntimeActor
     static func run(verbose: Bool) async throws -> ScenarioResult {
         let name = "directFailureStorm"
         let group = MultiThreadedEventLoopGroup.singleton
@@ -116,8 +116,8 @@ enum DirectFailureStormScenarios {
     }
 
     /// Polls a count; the deadline only keeps a regression from hanging pm-sim.
-    @MainActor
-    private static func waitUntil(_ condition: @MainActor () -> Bool) async throws {
+    @RuntimeActor
+    private static func waitUntil(_ condition: @RuntimeActor () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(20)
         while !condition(), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))

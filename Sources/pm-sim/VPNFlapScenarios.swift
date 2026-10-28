@@ -31,7 +31,7 @@ enum VPNFlapScenarios {
     /// active. Tunnel never received `channelInactive`; snapshot's
     /// `directModeCause` came back to `.none`/probe-derived; exactly one
     /// `vpn.flap.recovered` event.
-    @MainActor
+    @RuntimeActor
     static func vpnFlapShortIdleTunnel(verbose: Bool) async throws -> ScenarioResult {
         let name = "vpnFlapShortIdleTunnel"
         let start = Date()
@@ -108,7 +108,7 @@ enum VPNFlapScenarios {
 
     /// Start streaming HTTP response (slow body), simulate 200 ms flap,
     /// response completes successfully and was not truncated.
-    @MainActor
+    @RuntimeActor
     static func vpnFlapShortActiveStream(verbose: Bool) async throws -> ScenarioResult {
         let name = "vpnFlapShortActiveStream"
         let start = Date()
@@ -176,7 +176,7 @@ enum VPNFlapScenarios {
     /// Simulate utun Link inactive 200 ms with grace=50 ms (so it expires).
     /// Snapshot transitions to `directModeCause == .vpnDisconnected` after
     /// grace; back to probe-derived when Link returns.
-    @MainActor
+    @RuntimeActor
     static func vpnFlapLongOutage(verbose: Bool) async throws -> ScenarioResult {
         let name = "vpnFlapLongOutage"
         let start = Date()
@@ -225,7 +225,7 @@ enum VPNFlapScenarios {
     /// Simulate utun interface *removal* (user-initiated). Snapshot transitions
     /// to `directModeCause == .vpnDisconnected` immediately, no probe cycle
     /// (vpn.disconnected.user event without preceding probe events).
-    @MainActor
+    @RuntimeActor
     static func vpnUserDisconnectFastPath(verbose: Bool) async throws -> ScenarioResult {
         let name = "vpnUserDisconnectFastPath"
         let start = Date()
@@ -279,7 +279,7 @@ enum VPNFlapScenarios {
     /// This is the natural outcome of the revised Phase 6 design: bursts of
     /// brief flaps don't need an "exactly one event pair" exception because
     /// they emit no events at all.
-    @MainActor
+    @RuntimeActor
     static func vpnRapidFlapBurst(verbose: Bool) async throws -> ScenarioResult {
         let name = "vpnRapidFlapBurst"
         let start = Date()
@@ -382,7 +382,7 @@ enum VPNFlapScenarios {
 
     // MARK: - Helpers
 
-    @MainActor
+    @RuntimeActor
     private static func makeBareOrchestrator(verbose: Bool) -> ProxyOrchestrator {
         // Scenarios that previously set `minBufferedLevel = .info`
         // assert on `orchestrator.eventLog` (RuntimeEventLog), not on the
@@ -401,7 +401,7 @@ enum VPNFlapScenarios {
 /// Pipeline harness for scenarios 6.1 and 6.2 — ProxyOrchestrator on top of
 /// FakeUpstreamProxy + FakeOrigin so a CONNECT tunnel can be exercised
 /// end-to-end while the orchestrator is driven through VPN state transitions.
-@MainActor
+@RuntimeActor
 final class VPNFlapHarness {
     let group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton
     let orchestrator: ProxyOrchestrator

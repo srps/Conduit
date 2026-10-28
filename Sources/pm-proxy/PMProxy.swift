@@ -10,8 +10,11 @@ import ProxyPAC
 
 @main
 enum PMProxy {
-    @MainActor
+    @RuntimeActor
     private static var retainedSources: [AnyObject] = []
+    /// Counts the reloads that applied, from the control socket and from SIGHUP alike.
+    @RuntimeActor
+    private static var configGeneration = 0
 
     static func main() {
         signal(SIGPIPE, SIG_IGN)
@@ -59,7 +62,7 @@ enum PMProxy {
 
         let processStartedAt = Date()
 
-        Task { @MainActor in
+        Task { @RuntimeActor in
             let environment = runtimeEnvironment(from: args)
             var config: ProxyConfig
             do {
@@ -148,16 +151,27 @@ enum PMProxy {
             let statusInterval = parseDoubleArg("--status-interval", from: args)
             let readyBudgetMS = parseIntArg("--assert-ready-under-ms", from: args)
             let exitAfterReady = args.contains("--exit-after-ready")
-            var configGeneration = 0
             let daemonMetadata = ControlDaemonMetadata(
                 processID: Int(ProcessInfo.processInfo.processIdentifier),
                 executableName: URL(fileURLWithPath: CommandLine.arguments.first ?? "pm-proxy").lastPathComponent,
                 startedAt: processStartedAt
             )
+            // The one reload, for the control socket and SIGHUP alike. A rejected reload throws after `reloadConfig` reported it, keeps
+            // the previous config serving and leaves the generation unchanged; only an applied one counts.
+            let reload: @RuntimeActor @Sendable () async throws -> Void = {
+                try await reloadConfig(
+                    args: args,
+                    environment: environment,
+                    orchestrator: orchestrator,
+                    logger: logger,
+                    snapshotWriter: snapshotWriter
+                )
+                configGeneration += 1
+            }
             let controlServer = ControlSocketServer(
                 socketPath: ControlSocket.path(in: environment.configDirectory),
                 logger: logger
-            ) { @MainActor in
+            ) { @RuntimeActor in
                 var status = ControlDaemonStatus(
                     snapshot: orchestrator.snapshot,
                     config: orchestrator.configSnapshotProvider()
@@ -167,14 +181,7 @@ enum PMProxy {
                 return status
             } reloadHandler: {
                 logger.log(.notice, "Received control reload, reloading config...", category: .general)
-                try await reloadConfig(
-                    args: args,
-                    environment: environment,
-                    orchestrator: orchestrator,
-                    logger: logger,
-                    snapshotWriter: snapshotWriter
-                )
-                configGeneration += 1
+                try await reload()
             } stopHandler: {
                 logger.log(.notice, "Received control stop, stopping...", category: .general)
                 await stopRuntime(orchestrator: orchestrator, eventFileWriter: eventFileWriter, snapshotWriter: snapshotWriter)
@@ -182,12 +189,14 @@ enum PMProxy {
                 await orchestrator.testUpstream(named: upstreamName)
             }
 
+            // The handlers are made in an owner turn, so they are written `@Sendable`: an inferred owner isolation would trap when the
+            // signal queue runs them. Each only logs and starts its owner task.
             for (sig, name) in [(SIGINT, "SIGINT"), (SIGTERM, "SIGTERM")] {
                 signal(sig, SIG_IGN)
-                let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-                source.setEventHandler {
+                let source = DispatchSource.makeSignalSource(signal: sig, queue: .global(qos: .utility))
+                source.setEventHandler { @Sendable in
                     logger.log(.notice, "Received \(name), stopping...", category: .general)
-                    Task { @MainActor in
+                    Task { @RuntimeActor in
                         controlServer.stop()
                         await stopRuntime(orchestrator: orchestrator, eventFileWriter: eventFileWriter, snapshotWriter: snapshotWriter)
                     }
@@ -197,19 +206,12 @@ enum PMProxy {
             }
 
             signal(SIGHUP, SIG_IGN)
-            let hupSource = DispatchSource.makeSignalSource(signal: SIGHUP, queue: .main)
-            hupSource.setEventHandler {
+            let hupSource = DispatchSource.makeSignalSource(signal: SIGHUP, queue: .global(qos: .utility))
+            hupSource.setEventHandler { @Sendable in
                 logger.log(.notice, "Received SIGHUP, reloading config...", category: .general)
-                Task { @MainActor in
+                Task { @RuntimeActor in
                     do {
-                        try await reloadConfig(
-                            args: args,
-                            environment: environment,
-                            orchestrator: orchestrator,
-                            logger: logger,
-                            snapshotWriter: snapshotWriter
-                        )
-                        configGeneration += 1
+                        try await reload()
                     } catch {
                         // reloadConfig already emitted the rejection; keep serving
                         // the previous config and leave its generation unchanged.
@@ -284,7 +286,7 @@ enum PMProxy {
         dispatchMain()
     }
 
-    @MainActor
+    @RuntimeActor
     private static func reloadConfig(
         args: [String],
         environment: RuntimeEnvironment,
@@ -321,7 +323,7 @@ enum PMProxy {
 
     /// The final stopped state is submitted before the shared diagnostic phase flushes it. The phase's report
     /// does not gate the exit: the process exits with `exitCode` whatever the writers confirmed.
-    @MainActor
+    @RuntimeActor
     private static func stopRuntime(
         orchestrator: ProxyOrchestrator,
         eventFileWriter: RuntimeEventFileWriter,
@@ -474,12 +476,12 @@ enum PMProxy {
 
     private static let statusEncoder: JSONEncoder = CanonicalJSON.encoder()
 
-    @MainActor
+    @RuntimeActor
     private static var lastEmittedSnapshot: ProxyOrchestratorSnapshot?
-    @MainActor
+    @RuntimeActor
     private static var lastEmittedWriterStatistics: [String: RecordWriterStatistics]?
 
-    @MainActor
+    @RuntimeActor
     private static func startStatusStream(
         interval: TimeInterval,
         environment: RuntimeEnvironment,
@@ -487,15 +489,17 @@ enum PMProxy {
         logger: any LogSink,
         snapshotWriter: any SnapshotArtifactWriting
     ) {
-        let timer = DispatchSource.makeTimerSource(queue: .main)
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         // Match the orchestrator's maximum counter publication rate (10 Hz).
-        // A tiny CLI interval must not flood the main queue with timer work.
+        // A tiny CLI interval must not flood the owner with timer work.
         let boundedInterval = interval.isFinite ? max(interval, 0.1) : 0.1
         timer.schedule(deadline: .now() + boundedInterval, repeating: boundedInterval)
-        timer.setEventHandler {
-            // This source is explicitly dispatched on .main. Handle its tick
-            // directly so slow output cannot accumulate one Task per tick.
-            MainActor.assumeIsolated {
+        // One tick on its way to the owner at a time, so slow output cannot accumulate one task per tick.
+        let hopPending = NIOLockedValueBox(false)
+        timer.setEventHandler { @Sendable in
+            guard hopPending.withLockedValue({ pending in defer { pending = true }; return !pending }) else { return }
+            Task { @RuntimeActor in
+                hopPending.withLockedValue { $0 = false }
                 let current = orchestrator.snapshot
                 let statistics = writerStatistics?()
                 guard current != lastEmittedSnapshot || statistics != lastEmittedWriterStatistics else { return }
@@ -513,10 +517,10 @@ enum PMProxy {
         retainedSources.append(timer)
     }
 
-    @MainActor
+    @RuntimeActor
     private static var writerStatistics: (() -> [String: RecordWriterStatistics])?
 
-    @MainActor
+    @RuntimeActor
     private static func emitStatusEvent(
         kind: StatusEventKind,
         snapshot: ProxyOrchestratorSnapshot,

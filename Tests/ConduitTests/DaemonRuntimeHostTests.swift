@@ -284,7 +284,7 @@ private enum GatedSettleFixtureError: Error {
 /// test started, stops the host, and settles it with a bounded wait. The final diagnostic flush must be confirmed. Only
 /// then does the owner drop the host and session, and a fresh acquisition prove the lease free, before the directory goes.
 /// Otherwise the fixture is kept in one retention slot, with its host and root. Nothing in the teardown waits unbounded.
-@MainActor
+@RuntimeActor
 private final class GatedSettleFixture {
     /// The fixture an unconfirmed teardown kept. One slot: no new gated fixture is built while it is occupied.
     private static var retained: GatedSettleFixture?
@@ -398,7 +398,7 @@ private final class GatedSettleFixture {
 
 /// Runs one gated settle test over its fixture. The teardown runs on every path: after the body returns, and after a
 /// thrown error from the body or from the host's construction.
-@MainActor
+@RuntimeActor
 private func withGatedSettleFixture(
     build: (StateRootSession, GatedSecretStore) async throws -> RuntimeHost,
     _ body: (GatedSettleFixture) async throws -> Void
@@ -443,7 +443,7 @@ final class DaemonRuntimeHostWarmupModelTests: XCTestCase {
     }
 
     /// Every batch of length 0 through 3: 1 + 3 + 9 + 27 = 40 traces.
-    private func exhaustiveBatches() -> [[Choice]] {
+    @RuntimeActor private func exhaustiveBatches() -> [[Choice]] {
         var batches: [[Choice]] = []
         for length in 0...3 {
             var prefixes: [[Choice]] = [[]]
@@ -456,18 +456,18 @@ final class DaemonRuntimeHostWarmupModelTests: XCTestCase {
     }
 
     /// Sixteen batches of eight requests, drawn from the same alphabet with a fixed seed.
-    private func seededBatches() -> [[Choice]] {
+    @RuntimeActor private func seededBatches() -> [[Choice]] {
         var generator = WarmupBatchGenerator(seed: 0x0033_5EED)
         return (0..<16).map { _ in (0..<8).map { _ in Choice.allCases.randomElement(using: &generator)! } }
     }
 
-    private func describe(_ batch: [Choice]) -> String {
+    @RuntimeActor private func describe(_ batch: [Choice]) -> String {
         batch.isEmpty ? "(empty)" : batch.map { "\($0)".uppercased() }.joined(separator: " ")
     }
 
     /// One trace. The first physical read is held, the batch is sent, the read is released, and the handle returned
     /// first is awaited alone. Its answer must already cover the pending request.
-    private func runTrace(_ batch: [Choice], label: String) async throws {
+    @RuntimeActor private func runTrace(_ batch: [Choice], label: String) async throws {
         let store = GatedSecretStore()
         // Opened on every exit, so a cancelled wait cannot leave the warm-up's read thread blocked on the gate.
         defer { store.open(refusing: true) }
@@ -513,7 +513,7 @@ final class DaemonRuntimeHostWarmupModelTests: XCTestCase {
         }
     }
 
-    func testWarmupCoalescingModelOverFiftySixBoundedTraces() async throws {
+    @RuntimeActor func testWarmupCoalescingModelOverFiftySixBoundedTraces() async throws {
         let exhaustive = exhaustiveBatches()
         let seeded = seededBatches()
         XCTAssertEqual(exhaustive.count, 40)
@@ -583,7 +583,6 @@ private struct FixedPACRoute: PacScriptEvaluating {
     }
 }
 
-@MainActor
 final class DaemonRuntimeHostTests: XCTestCase {
     /// The runner for a host whose test does not script any command. It
     /// fails every one: a host left on the default ran the real `launchctl`
@@ -607,7 +606,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// A host over a scratch root whose saved-password read waits on `store`, so the credential warm-up its start makes
     /// stays in flight until the test opens the store. Its machine is the fake, and its listeners are ephemeral.
-    private func gatedHost(_ session: StateRootSession, store: GatedSecretStore) async throws -> RuntimeHost {
+    @RuntimeActor private func gatedHost(_ session: StateRootSession, store: GatedSecretStore) async throws -> RuntimeHost {
         let environment = session.environment
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
@@ -645,7 +644,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// A stopped host's warm-up and deliveries join before its flush. Only `.settled` lets a test go on to the flush.
-    private func quiesce(_ host: RuntimeHost) async {
+    @RuntimeActor private func quiesce(_ host: RuntimeHost) async {
         let outcome = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
         XCTAssertEqual(outcome, .settled)
         await host.flushEvents()
@@ -654,7 +653,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// A deadline that passes first returns `.deadlineExpired`, and that is not quiescence. The owner keeps the host and
     /// the root through its own settle and its final flush, and drops them only after both. A timed-out wait is not an
     /// owner release, so the root is removed only when a fresh acquisition proves the lease free.
-    func testASettleDeadlineIsNotQuiescenceAndTheOwnerKeepsTheRootThroughItsFinalFlush() async throws {
+    @RuntimeActor func testASettleDeadlineIsNotQuiescenceAndTheOwnerKeepsTheRootThroughItsFinalFlush() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-settle-deadline-\(UUID().uuidString)", isDirectory: true)
         var removable = false
@@ -702,12 +701,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// An adopted reload while a settle's join is pending makes that settle's result `.superseded`, since the host view the
     /// settle observed has changed. A settle after the gate opens then reports `.settled` for the reloaded host.
-    func testAnAdoptedReloadWhileTheJoinIsPendingSupersedesIt() async throws {
+    @RuntimeActor func testAnAdoptedReloadWhileTheJoinIsPendingSupersedesIt() async throws {
         try await withGatedSettleFixture(build: { try await self.gatedHost($0, store: $1) }) { fixture in
             let host = fixture.host!
             try await host.startRuntime()
             await host.stopRuntime()
-            let first = fixture.track(Task { @MainActor in
+            let first = fixture.track(Task { @RuntimeActor in
                 await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
             })
             // Wait, bounded, until the first settle has been admitted: its join is then the one in flight.
@@ -724,7 +723,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// A settle that follows the gate's opening returns `.settled` once the warm-up has made its read, and the flush comes after it.
-    func testASettleSettlesOnlyAfterTheWarmupReadAndBeforeTheFlush() async throws {
+    @RuntimeActor func testASettleSettlesOnlyAfterTheWarmupReadAndBeforeTheFlush() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-settle-ok-\(UUID().uuidString)", isDirectory: true)
         defer { removeScratch([directory]) }
@@ -743,12 +742,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// While one settle's join is pending, a second settle returns `.busy` before it allocates anything. The first
     /// settle still ends `.settled` once the gate opens.
-    func testASecondSettleIsBusyWhileTheFirstJoinIsPending() async throws {
+    @RuntimeActor func testASecondSettleIsBusyWhileTheFirstJoinIsPending() async throws {
         try await withGatedSettleFixture(build: { try await self.gatedHost($0, store: $1) }) { fixture in
             let host = fixture.host!
             try await host.startRuntime()
             await host.stopRuntime()
-            let first = fixture.track(Task { @MainActor in
+            let first = fixture.track(Task { @RuntimeActor in
                 await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
             })
             // Wait, bounded, until the first settle has been admitted: its join is then the one in flight.
@@ -768,12 +767,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// A start admitted while a settle's join is pending makes that settle's result `.superseded`, not `.settled`. The
     /// join itself runs on until its gated warm-up ends, and then a settle of the newer stop succeeds.
-    func testAStartAdmittedWhileTheJoinIsPendingSupersedesIt() async throws {
+    @RuntimeActor func testAStartAdmittedWhileTheJoinIsPendingSupersedesIt() async throws {
         try await withGatedSettleFixture(build: { try await self.gatedHost($0, store: $1) }) { fixture in
             let host = fixture.host!
             try await host.startRuntime()
             await host.stopRuntime()
-            let first = fixture.track(Task { @MainActor in
+            let first = fixture.track(Task { @RuntimeActor in
                 await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
             })
             // Wait, bounded, until the first settle has been admitted: its join is then the one in flight.
@@ -795,7 +794,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// While the store blocks the first read, repeated warm-ups start no second producer. One request waits behind the
     /// active read and the newest one replaces the older waiting ones, so two reads happen, not three, and the middle
     /// request's sink never runs.
-    func testRepeatedWarmupsWhileTheStoreBlocksRunOneWorkerAndOneWaitingRequest() async throws {
+    @RuntimeActor func testRepeatedWarmupsWhileTheStoreBlocksRunOneWorkerAndOneWaitingRequest() async throws {
         let store = GatedSecretStore()
         let config = identityConfig(profileName: "Coalesce")
         let manager = CredentialManager(
@@ -832,7 +831,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// A warm-up requested while nothing is blocked runs, and is reported once, through its own sink.
-    func testAWarmupWithNothingBlockedRunsOnceThroughItsOwnSink() async throws {
+    @RuntimeActor func testAWarmupWithNothingBlockedRunsOnceThroughItsOwnSink() async throws {
         let store = GatedSecretStore()
         store.open(refusing: true)
         let config = identityConfig(profileName: "Single")
@@ -851,7 +850,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// The log's sink is bound before the privilege factory runs, so an event from the adapter's construction and one from
     /// its later command each reach the in-memory log and `events.ndjson` exactly once.
-    func testAnAdapterEventFromConstructionAndFromACommandIsRecordedOnce() async throws {
+    @RuntimeActor func testAnAdapterEventFromConstructionAndFromACommandIsRecordedOnce() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-witness-events-\(UUID().uuidString)", isDirectory: true)
         defer { removeScratch([directory]) }
@@ -893,7 +892,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// The VPN monitor reads the flap-window timings through the host's readers, so a reload's new values reach it
     /// without a restart. A recording factory sees the readers the host passes.
-    func testTheVPNMonitorReadsTheFlapWindowAsAReloadLeavesIt() async throws {
+    @RuntimeActor func testTheVPNMonitorReadsTheFlapWindowAsAReloadLeavesIt() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-witness-flap-\(UUID().uuidString)", isDirectory: true)
         defer { removeScratch([directory]) }
@@ -946,7 +945,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// A Start after a reload the Stop fence held adopts the input it commits through the one host-view path, as a reload does: status
     /// reports it, `configGeneration` counts it, and the VPN monitor reads its flap window. A Start that leaves the accepted pair as it
     /// was counts nothing, and an eligible reload still counts even when unchanged. The kernel's later config echo moves none of it.
-    func testAStartAfterAFenceHeldReloadAdoptsTheCommittedInputAsTheHostView() async throws {
+    @RuntimeActor func testAStartAfterAFenceHeldReloadAdoptsTheCommittedInputAsTheHostView() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-start-adopts-\(UUID().uuidString)", isDirectory: true)
         defer { removeScratch([directory]) }
@@ -1028,7 +1027,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// Negotiated auth takes its token from the injected provider, through the host's own authenticator provider, and the
     /// system GSS stack is never reached.
-    func testNegotiatedAuthTakesItsTokenFromTheInjectedProvider() async throws {
+    @RuntimeActor func testNegotiatedAuthTakesItsTokenFromTheInjectedProvider() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-witness-gss-\(UUID().uuidString)", isDirectory: true)
         defer { removeScratch([directory]) }
@@ -1073,7 +1072,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// A PAC refresh fetches through the injected evaluator, the production path `refreshPACRouting` takes. The URL is a
     /// scratch file, so a wrong wiring would still read only the test's own file.
-    func testAPACRefreshFetchesThroughTheInjectedEvaluator() async throws {
+    @RuntimeActor func testAPACRefreshFetchesThroughTheInjectedEvaluator() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-witness-pac-\(UUID().uuidString)", isDirectory: true)
         defer { removeScratch([directory]) }
@@ -1115,7 +1114,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// #246: an external edit that only respells the PAC URL (see `Respelled`), then a reload. The reload adopts the new bytes into the
     /// host view, and the reconciler, the orchestrator and the PAC fetch must take the same bytes, not keep the old spelling.
-    func testAReloadThatOnlyRespellsThePACURLAppliesAndFetchesTheNewBytes() async throws {
+    @RuntimeActor func testAReloadThatOnlyRespellsThePACURLAppliesAndFetchesTheNewBytes() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-respelled-pac-\(UUID().uuidString)", isDirectory: true)
         defer { removeScratch([directory]) }
@@ -1168,7 +1167,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await quiesce(host)
     }
 
-    func testCredentialsComeFromTheInjectedStore() async throws {
+    @RuntimeActor func testCredentialsComeFromTheInjectedStore() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-credential-store-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
@@ -1209,7 +1208,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(authenticator.scheme, "NTLM")
     }
 
-    func testMalformedSidecarsRejectReloadWithoutReplacingAnyConfiguration() async throws {
+    @RuntimeActor func testMalformedSidecarsRejectReloadWithoutReplacingAnyConfiguration() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-sidecar-reload-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
@@ -1259,7 +1258,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(host.configGeneration, 1)
     }
 
-    func testRefusedAndHeldReloadsPreserveTheAppliedConfigurationAndFiles() async throws {
+    @RuntimeActor func testRefusedAndHeldReloadsPreserveTheAppliedConfigurationAndFiles() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.profileName = "Last good config"
         config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
@@ -1296,7 +1295,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(host.configGeneration, 0)
     }
 
-    func testConfigGenerationStartsAtZeroAndIncrementsOnReload() async throws {
+    @RuntimeActor func testConfigGenerationStartsAtZeroAndIncrementsOnReload() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1335,7 +1334,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(host.status().profileName, "Reloaded")
     }
 
-    func testVPNObserverDrivesOrchestratorState() async throws {
+    @RuntimeActor func testVPNObserverDrivesOrchestratorState() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1379,7 +1378,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// Twin of the app's burst scenario: reports delivered without waiting
     /// for each other are stamped on the observer's turn, all applied in
     /// order, and the last one decides (#155).
-    func testABurstOfVPNReportsEndsOnTheLastOneAndDropsNone() async throws {
+    @RuntimeActor func testABurstOfVPNReportsEndsOnTheLastOneAndDropsNone() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1421,7 +1420,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// hops to the main actor between the observer's callback and the
     /// orchestrator, so a name read after the hop would be whatever the
     /// monitor had moved on to.
-    func testVPNInterfaceNameIsTheOneDeliveredWithTheState() async throws {
+    @RuntimeActor func testVPNInterfaceNameIsTheOneDeliveredWithTheState() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1471,7 +1470,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// is written to the resolver directory, the privilege client or the machine. The bind-failure cleanup, where a start that has already
     /// begun reverts what it touched, is covered by `testAFailedStartWithAReloadPassQueuedBehindItDoesNotDeadlock` and by the
     /// `runtime-host-effects` simulator scenario.
-    func testAStartRefusedForAStartBlockingConfigAppliesNothing() async throws {
+    @RuntimeActor func testAStartRefusedForAStartBlockingConfigAppliesNothing() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1522,7 +1521,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// The platform sidecar is missing, so its values come from the runtime file. An editor outside the host adds a legacy platform value to
     /// that file after the open. The Start's first platform write checks the runtime bytes it was opened with, holds, and creates no sidecar
     /// over the edited value. The runtime write is held behind it, both files are latched until a reload, and no machine effect runs.
-    func testAStartAfterAnExternalRuntimeEditBesideAMissingPlatformSidecarHoldsWithoutCreatingIt() async throws {
+    @RuntimeActor func testAStartAfterAnExternalRuntimeEditBesideAMissingPlatformSidecarHoldsWithoutCreatingIt() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1599,7 +1598,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// every subprocess and privileged write lands on the model, resolver
     /// files in a scratch directory, and the journal file under the
     /// isolated environment.
-    @MainActor
+    @RuntimeActor
     private final class DaemonHarness {
         /// The scratch root's writer authority, taken before any seed write. Released by `tearDown`, after the host's work.
         let stateSession: StateRootSession
@@ -1751,9 +1750,9 @@ final class DaemonRuntimeHostTests: XCTestCase {
         /// host's audit, event and snapshot writers before removal, which is what this fixture relies on. It is not a
         /// general proof that nothing else can write under the root.
         func tearDown() async {
-            // A test that failed mid-hold leaves the hold armed, and the stop would wait on it. Releasing is harmless when
-            // nothing waits.
-            hold.release()
+            // A test that failed mid-hold leaves the hold armed, maybe with more than one call held, and the stop would wait on
+            // them. Releasing all is harmless when nothing waits.
+            hold.releaseAll()
             XCTAssertFalse(hold.takenOnCooperativePool, "a held call was let through on the concurrency pool instead of held")
             listings.release()
             if let host = ownedHost {
@@ -1856,7 +1855,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     private var harness: DaemonHarness!
 
-    // The async override runs on the main actor, where `harness` lives.
+    // The async override awaits `harness`, which lives on the owner.
     override func tearDown() async throws {
         await harness?.tearDown()
         harness = nil
@@ -1865,7 +1864,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// Ephemeral ports, one split-DNS entry: the same config the app
     /// scenarios run on.
-    private func launch(platform: PlatformIntegrationConfig, dnsForwarderEnabled: Bool = false) async throws -> RuntimeHost {
+    @RuntimeActor private func launch(platform: PlatformIntegrationConfig, dnsForwarderEnabled: Bool = false) async throws -> RuntimeHost {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -1877,7 +1876,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// A terminal stop hands the process exit to the injected hook once, after
     /// its snapshot is written. A plain stop never reaches the hook.
-    func testTerminalStopEndsTheProcessOnceAfterItsSnapshot() async throws {
+    @RuntimeActor func testTerminalStopEndsTheProcessOnceAfterItsSnapshot() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -1904,7 +1903,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// The `ConduitDaemon --exit-after-ready --start-runtime` sequence, run through the FakeMachine harness rather
     /// than the executable. It is the process quit: the shutdown latches, never calls the terminal exit, and its own
     /// flush confirms the stopped state, since the readiness flush happened before the stop.
-    func testExitAfterReadySequenceConfirmsTheStoppedStateInTheFile() async throws {
+    @RuntimeActor func testExitAfterReadySequenceConfirmsTheStoppedStateInTheFile() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -1938,7 +1937,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// A snapshot delivery that reaches the main actor only after the final stop was submitted must not write the
     /// older state it was emitted with. The callback reads canonical state when it runs, so the file keeps the
     /// final state after the explicit flush.
-    func testDeferredOlderSnapshotDeliveryCannotResurrectTheFileAfterTheFinalStop() async throws {
+    @RuntimeActor func testDeferredOlderSnapshotDeliveryCannotResurrectTheFileAfterTheFinalStop() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -1962,7 +1961,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// `status()` reports the start the entry point passed in and reads no
     /// clock of its own.
-    func testStatusReportsTheInjectedStartTime() async throws {
+    @RuntimeActor func testStatusReportsTheInjectedStartTime() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig())
         await host.awaitLaunchRecovery()
 
@@ -1972,7 +1971,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// The runtime starts and stops the injected path observer, and a report
     /// it delivers reaches the orchestrator as a path decision.
-    func testRuntimeDrivesTheInjectedPathObserver() async throws {
+    @RuntimeActor func testRuntimeDrivesTheInjectedPathObserver() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig())
         await host.awaitLaunchRecovery()
 
@@ -1987,7 +1986,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.pathObserver.isObserving)
     }
 
-    func testLocationSwitchWithoutVPNOrPathChangeRestoresInactiveStateAndPreservesExternalEdits() async throws {
+    @RuntimeActor func testLocationSwitchWithoutVPNOrPathChangeRestoresInactiveStateAndPreservesExternalEdits() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -2020,7 +2019,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
     }
 
-    func testVPNReportRepairsFailedPACApplicationAndLaterRewriteWithoutRestartingRuntime() async throws {
+    @RuntimeActor func testVPNReportRepairsFailedPACApplicationAndLaterRewriteWithoutRestartingRuntime() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.localPACEnabled = true
@@ -2050,7 +2049,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
     }
 
-    func testContendedRepairRetriesWhenTheWindowReopensWithoutAnotherNotification() async throws {
+    @RuntimeActor func testContendedRepairRetriesWhenTheWindowReopensWithoutAnotherNotification() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.localPACEnabled = true
@@ -2090,7 +2089,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
     }
 
-    func testLatePACRewriteRepairsOnSettingsNotificationWithoutAnotherVPNOrPathReport() async throws {
+    @RuntimeActor func testLatePACRewriteRepairsOnSettingsNotificationWithoutAnotherVPNOrPathReport() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.localPACEnabled = true
@@ -2130,7 +2129,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
     }
 
-    func testVPNReconcileRetriesDNSInSameLocationAfterInitiallyDisabledService() async throws {
+    @RuntimeActor func testVPNReconcileRetriesDNSInSameLocationAfterInitiallyDisabledService() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -2152,7 +2151,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
-    func testLocationNotificationDuringRuntimeStopCannotRepinStoppedListeners() async throws {
+    @RuntimeActor func testLocationNotificationDuringRuntimeStopCannotRepinStoppedListeners() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -2184,7 +2183,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
     }
 
-    func testVPNNotificationDuringRuntimeStopCannotRepinStoppedListeners() async throws {
+    @RuntimeActor func testVPNNotificationDuringRuntimeStopCannotRepinStoppedListeners() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -2217,7 +2216,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// A captured settings callback can arrive after observation stops;
     /// it must wait for teardown and never restore a dead listener's PAC.
-    func testSettingsNotificationDuringRuntimeStopCannotRepinStoppedListeners() async throws {
+    @RuntimeActor func testSettingsNotificationDuringRuntimeStopCannotRepinStoppedListeners() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -2253,14 +2252,14 @@ final class DaemonRuntimeHostTests: XCTestCase {
     // MARK: - System wake (twin of `AppState.handleSystemWake`)
 
     /// How many times the kernel's wake path ran: it records one DNS transport reset for each, before it awaits anything.
-    private func kernelWakes(_ host: RuntimeHost) -> Int {
+    @RuntimeActor private func kernelWakes(_ host: RuntimeHost) -> Int {
         host.orchestrator.eventLog.events.filter { $0.event == "dns.transports_reset" && $0.detail == "source=system_wake" }.count
     }
 
     /// Wake is observed from open until the quit, as `AppState` observes it from init until termination. A wake before any Start and
     /// one after a Stop both reach the kernel's wake path, as the app's do. A Stop that leaves every module down keeps observing. The
     /// quit's admission ends observation in its own turn, and a wake already in flight then does nothing.
-    func testWakeIsObservedFromOpenUntilTheQuitsAdmissionAndNotPastIt() async throws {
+    @RuntimeActor func testWakeIsObservedFromOpenUntilTheQuitsAdmissionAndNotPastIt() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig())
         XCTAssertTrue(harness.wake.isObserving, "observed from open, before any Start")
         XCTAssertEqual(harness.wake.startCount, 1)
@@ -2292,7 +2291,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// While the proxy runs, a wake repairs a system proxy rewritten during sleep, through the same bounded reconcile as a settings
     /// notification, and runs the kernel's wake path. After a Stop, a wake repairs nothing.
-    func testWakeRepairsARewrittenSystemProxyOnlyWhileTheProxyRuns() async throws {
+    @RuntimeActor func testWakeRepairsARewrittenSystemProxyOnlyWhileTheProxyRuns() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.localPACEnabled = true
@@ -2325,7 +2324,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// While the forwarder runs, a wake re-pins an interface a VPN client re-asserted its own resolvers on during sleep, through the
     /// coalesced system DNS reconcile. After a Stop, a wake writes no DNS.
-    func testWakeRepinsSystemDNSOnlyWhileTheForwarderRuns() async throws {
+    @RuntimeActor func testWakeRepinsSystemDNSOnlyWhileTheForwarderRuns() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemDNS: true), dnsForwarderEnabled: true)
         await host.awaitLaunchRecovery()
         try await host.startRuntime()
@@ -2351,7 +2350,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// A burst of wakes is bounded before any task exists: one tracked delivery per repair, one coalesced pass each. The repairs are
     /// independent: a DNS pass held on the machine does not hold the kernel's wake path, and a burst while it is held adds no DNS delivery.
     /// A quit admitted in the same turn as a burst drops every pass that runs after it, the pending ones included.
-    func testABurstOfWakesIsBoundedPerRepairIndependentAndDroppedByTheQuit() async throws {
+    @RuntimeActor func testABurstOfWakesIsBoundedPerRepairIndependentAndDroppedByTheQuit() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemDNS: true), dnsForwarderEnabled: true)
         await host.awaitLaunchRecovery()
         try await host.startRuntime()
@@ -2388,7 +2387,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// #98, as in `AppState`: the runtime start reads the saved password
     /// once, and the handshakes after it are answered from that read.
-    func testRuntimeStartReadsASavedPasswordOnce() async throws {
+    @RuntimeActor func testRuntimeStartReadsASavedPasswordOnce() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig())
         let config = host.config
         try CredentialManager(
@@ -2403,7 +2402,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// #246, the Start's own adoption: an external edit that only respells the PAC URL (see `Respelled`), and a reload the Stop fence
     /// holds. The store has the new bytes, the host view keeps the old ones, and the next Start commits the store's pair and adopts it.
-    func testAStartAfterAFenceHeldReloadThatOnlyRespellsThePACURLAdoptsTheNewBytes() async throws {
+    @RuntimeActor func testAStartAfterAFenceHeldReloadThatOnlyRespellsThePACURLAdoptsTheNewBytes() async throws {
         let composed = "https://pac.example.test/\(Respelled.composed).pac"
         let decomposed = "https://pac.example.test/\(Respelled.decomposed).pac"
         Respelled.assertRespelling(composed, decomposed)
@@ -2445,7 +2444,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// a journal behind its resolver manager, a reconcile pass on a flag
     /// flip, and a stop that clears by ownership. All three came over; the
     /// reload's pass removes the file, and stop has nothing left to do.
-    func testStopRemovesAResolverFileTheSwitchNoLongerNamesWhenTheHostWroteIt() async throws {
+    @RuntimeActor func testStopRemovesAResolverFileTheSwitchNoLongerNamesWhenTheHostWroteIt() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
         try await host.startRuntime()
         XCTAssertEqual(harness.machine.resolverFile(for: "corp.example"), "nameserver 10.0.0.53")
@@ -2462,7 +2461,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// Same guard when the flip's own clear did not land: the switch is off,
     /// the flag is left unreconciled, and the journal still names the file.
     /// Stop must remove it anyway, by ownership rather than by the switch.
-    func testStopRemovesAResolverFileTheSwitchNoLongerNamesWhenTheJournalOwnsIt() async throws {
+    @RuntimeActor func testStopRemovesAResolverFileTheSwitchNoLongerNamesWhenTheJournalOwnsIt() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
         try await host.startRuntime()
 
@@ -2480,7 +2479,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// A file for a configured domain that nothing recorded is the user's:
     /// with the switch off, stop leaves it alone.
-    func testStopLeavesAResolverFileTheUserWroteWhenTheSwitchIsOff() async throws {
+    @RuntimeActor func testStopLeavesAResolverFileTheUserWroteWhenTheSwitchIsOff() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageDNSResolvers: false))
         try harness.machine.strandResolverFile(for: "corp.example", contents: "nameserver 192.168.1.1")
         try await host.startRuntime()
@@ -2492,7 +2491,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// The system proxy through the whole stack: the start applies it, a
     /// reload with the switch off clears it while the proxy keeps running,
     /// and the journal is released.
-    func testASystemProxySwitchFlippedOffOnReloadClearsItWithoutAStop() async throws {
+    @RuntimeActor func testASystemProxySwitchFlippedOffOnReloadClearsItWithoutAStop() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
         try await host.startRuntime()
         XCTAssertTrue(harness.wifi.routesThroughAProxy)
@@ -2509,7 +2508,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// The guard from #13 for the system proxy: the flip's clear was
     /// refused, so the switch is off and the journal still holds the prior.
     /// Stop clears it anyway.
-    func testStopClearsASystemProxyTheSwitchNoLongerNamesWhenTheJournalOwnsIt() async throws {
+    @RuntimeActor func testStopClearsASystemProxyTheSwitchNoLongerNamesWhenTheJournalOwnsIt() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
         try await host.startRuntime()
 
@@ -2536,7 +2535,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// start's capture is not where it went wrong: `recordPrior` is
     /// first-write-wins, so the crashed run's record survives a start either
     /// way, and the last assertion holds with or without recovery.
-    func testLaunchRestoresTheProxyACrashedRunLeftBehind() async throws {
+    @RuntimeActor func testLaunchRestoresTheProxyACrashedRunLeftBehind() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
@@ -2594,7 +2593,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// Twin of `AppStateHarnessTests.testAJournalFromANewerConduitIsReportedAndKeptAtLaunch`.
-    func testAJournalFromANewerConduitIsReportedAndKeptAtLaunch() async throws {
+    @RuntimeActor func testAJournalFromANewerConduitIsReportedAndKeptAtLaunch() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
@@ -2613,7 +2612,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// The broken-config path builds its own journal, and reports through
     /// the same `emit` that writes `events.ndjson`.
-    func testRecoveryWithoutConfigurationReportsAJournalFromANewerConduit() async throws {
+    @RuntimeActor func testRecoveryWithoutConfigurationReportsAJournalFromANewerConduit() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
@@ -2642,7 +2641,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// The broken-config recovery writes its events through the adopted guard. An events alias of the lease is refused
     /// into the returned events, and the lock keeps its bytes, its inode and its holder.
-    func testRecoveryWithoutConfigurationRefusesAnEventsAliasOfTheWriterLease() async throws {
+    @RuntimeActor func testRecoveryWithoutConfigurationRefusesAnEventsAliasOfTheWriterLease() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
@@ -2674,7 +2673,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// The host's events writer refuses an alias of the lease through its own log. The readiness flush joins every writer
     /// before the lock is checked, so the refusal and the lock's state are both settled.
-    func testAnEventsAliasOfTheWriterLeaseIsRefusedByTheHostAndTheLeaseKeepsItsAuthority() async throws {
+    @RuntimeActor func testAnEventsAliasOfTheWriterLeaseIsRefusedByTheHostAndTheLeaseKeepsItsAuthority() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -2697,7 +2696,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// The host's snapshot writer refuses an alias of the lease the same way. Readiness writes the snapshot, and the flush
     /// joins that write before the lock is checked.
-    func testASnapshotAliasOfTheWriterLeaseIsRefusedByTheHostAndTheLeaseKeepsItsAuthority() async throws {
+    @RuntimeActor func testASnapshotAliasOfTheWriterLeaseIsRefusedByTheHostAndTheLeaseKeepsItsAuthority() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -2720,7 +2719,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// Once readiness returns, `daemon-ready.json` exists and decodes as this daemon's status. That the file lands before the snapshot is
     /// submitted rests on `markReady` awaiting the write first; this test does not observe that order.
-    func testTheReadyFileHoldsTheReadinessStatus() async throws {
+    @RuntimeActor func testTheReadyFileHoldsTheReadinessStatus() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -2738,7 +2737,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// `daemon-ready.json` tell a consumer startup is over; published while
     /// recovery was still out, they announced a machine that could still be
     /// pointed at a crashed run's dead proxy port.
-    func testReadinessIsPublishedOnlyAfterLaunchRecovery() async throws {
+    @RuntimeActor func testReadinessIsPublishedOnlyAfterLaunchRecovery() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
@@ -2758,7 +2757,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// A stop admitted while a start is suspended before its listener binds. The stop finds no listener, the start then binds one, and the
     /// stop has already run. The stopped host must not be left running a listener. The start is held on a PAC fetch, which the kernel awaits
     /// before `localProxyServer.start()`, so this reaches the window with no new seam.
-    func testAStopAdmittedBeforeTheBindLeavesNoListenerRunning() async throws {
+    @RuntimeActor func testAStopAdmittedBeforeTheBindLeavesNoListenerRunning() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -2788,7 +2787,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// That older start is superseded, so it binds nothing and cleans up nothing: the newer listener must survive, and the stop must not have
     /// closed the newer start's listener. The system proxy is managed, and the surface names the configured port, so the port is a free one
     /// the newer listener binds: the stale start must not clear the newer start's surface either.
-    func testAStaleStartReleasedAfterANewerStartLeavesTheNewerListenerRunning() async throws {
+    @RuntimeActor func testAStaleStartReleasedAfterANewerStartLeavesTheNewerListenerRunning() async throws {
         let configured = try reserveLoopbackPort()
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = configured
@@ -2843,7 +2842,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// The journal and machine a crashed run leaves: the prior proxy recorded and applied, and the machine still pointed at a dead loopback
     /// proxy. Launch recovery restores the prior settings from it.
-    private func seedCrashedRunProxy() {
+    @RuntimeActor private func seedCrashedRunProxy() {
         let prior = ProxyServiceState(
             webHost: "prior.example.test", webPort: "8080", webEnabled: true,
             secureHost: "prior.example.test", securePort: "8080", secureEnabled: true,
@@ -2862,7 +2861,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// the test releases the hold, so whatever the test admits now waits behind it. The hold is armed before the host exists, because the
     /// host starts recovery as it is built, on its one platform queue. Strict: a listing made anywhere else is recorded and let
     /// through, never held, so a recovery that ran on the pool or the main thread fails the placement check instead of hanging.
-    private func makeHostWithHeldRecovery(terminalExit: @escaping @Sendable () -> Void) async throws -> RuntimeHost {
+    @RuntimeActor private func makeHostWithHeldRecovery(terminalExit: @escaping @Sendable () -> Void) async throws -> RuntimeHost {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
@@ -2875,7 +2874,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// A Start a Stop, a newer Start or a replaced input overtook reports the typed refusal, never success.
-    private func assertSuperseded(
+    @RuntimeActor private func assertSuperseded(
         _ start: Task<Void, Error>,
         _ message: String,
         file: StaticString = #filePath,
@@ -2890,7 +2889,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// Waits, bounded, until the host has admitted exactly `count` start or stop calls that have not yet returned.
-    private func waitForPendingAdmissions(_ host: RuntimeHost, _ count: Int) async throws {
+    @RuntimeActor private func waitForPendingAdmissions(_ host: RuntimeHost, _ count: Int) async throws {
         for _ in 0..<5_000 where host.pendingAdmissions != count {
             try await Task.sleep(for: .milliseconds(1))
         }
@@ -2902,7 +2901,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// Launch recovery runs on the host's platform queue, not the pool or the main thread, and while it is held there the owner still
     /// answers status and admits a Stop, which waits for recovery before it reaches its lane.
-    func testHeldLaunchRecoveryIsOnThePlatformQueueAndLeavesStatusAndStopAdmissionFree() async throws {
+    @RuntimeActor func testHeldLaunchRecoveryIsOnThePlatformQueueAndLeavesStatusAndStopAdmissionFree() async throws {
         let host = try await makeHostWithHeldRecovery(terminalExit: unexpectedTerminalExit)
         await harness.hold.waitUntilReached()
         XCTAssertTrue(harness.hold.reachedOnArmedQueue, "recovery was held on \(harness.hold.reachedQueueLabel ?? "nowhere")")
@@ -2924,7 +2923,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// A start admitted during held recovery, then a stop: the stop is the newer intent, so the start stops without applying anything,
     /// and the stop finds nothing running. Both are admitted before recovery finishes.
-    func testAStartThenAStopAdmittedDuringRecoveryLeavesTheRuntimeDownAndAppliesNothing() async throws {
+    @RuntimeActor func testAStartThenAStopAdmittedDuringRecoveryLeavesTheRuntimeDownAndAppliesNothing() async throws {
         let host = try await makeHostWithHeldRecovery(terminalExit: unexpectedTerminalExit)
         let start = Task { try await host.startRuntime() }
         await harness.hold.waitUntilReached()
@@ -2949,7 +2948,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// A stop admitted during held recovery, then a start: the start is the newer intent, so the stop does nothing and the start runs.
-    func testAStopThenAStartAdmittedDuringRecoveryLeavesTheStartRunning() async throws {
+    @RuntimeActor func testAStopThenAStartAdmittedDuringRecoveryLeavesTheStartRunning() async throws {
         let host = try await makeHostWithHeldRecovery(terminalExit: unexpectedTerminalExit)
         let stop = Task { await host.stopRuntime() }
         await harness.hold.waitUntilReached()
@@ -2969,7 +2968,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// A terminal stop admitted during held recovery latches the refusal while recovery is still out: a start called then is refused as
     /// terminating, admits nothing, and the terminal stop exits exactly once after recovery.
-    func testAStartIsRefusedDuringAHeldTerminalStopAndTheTerminalStopExitsOnce() async throws {
+    @RuntimeActor func testAStartIsRefusedDuringAHeldTerminalStopAndTheTerminalStopExitsOnce() async throws {
         let exits = LockedLog<Bool>()
         let host = try await makeHostWithHeldRecovery(terminalExit: { exits.append(true) })
         let stop = Task { await host.stopRuntime(exitAfterStop: true) }
@@ -2998,7 +2997,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// A start admitted before recovery finishes counts as pending: settle does not report the host settled while that admission is still
     /// waiting, and once the runtime has run and stopped, settle reports it.
-    func testASettleIsNotSettledWhileAnAdmittedStartWaitsForRecovery() async throws {
+    @RuntimeActor func testASettleIsNotSettledWhileAnAdmittedStartWaitsForRecovery() async throws {
         let host = try await makeHostWithHeldRecovery(terminalExit: unexpectedTerminalExit)
         let start = Task { try await host.startRuntime() }
         await harness.hold.waitUntilReached()
@@ -3018,7 +3017,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// A reload whose pass is queued behind a held start keeps a settle from reporting settled. The pass is in flight, but the start and
     /// the reload are calls still pending and the lane is busy, and `stoppedEffectsPending` answers those before a pass in flight, so the
     /// answer is `runtimeActive`. `reconcilePending` is left for a pass in flight once no call is pending and the runtime is down.
-    func testASettleIsNotSettledWhileAReloadPassWaitsBehindAHeldStart() async throws {
+    @RuntimeActor func testASettleIsNotSettledWhileAReloadPassWaitsBehindAHeldStart() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
         await host.awaitLaunchRecovery()
         harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
@@ -3052,7 +3051,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// runs the journal restores through `recoverWithoutConfiguration` before
     /// it exits; this drives that function over the same crashed-run seed.
     /// Only the resolver scan needs the config, so it alone is skipped.
-    func testABrokenConfigStillRestoresTheJournaledProxyBeforeExiting() async throws {
+    @RuntimeActor func testABrokenConfigStillRestoresTheJournaledProxyBeforeExiting() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
@@ -3098,7 +3097,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// Twin of `AppStateHarnessTests.testAFailedLivenessProbeRestartsTheRelayOffTheMainThread`.
-    func testAFailedLivenessProbeRestartsTheRelayOffTheMainThread() async throws {
+    @RuntimeActor func testAFailedLivenessProbeRestartsTheRelayOffTheMainThread() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemDNS: true), dnsForwarderEnabled: true)
         try await host.startRuntime()
         let privilege = harness.machine.privilege
@@ -3117,7 +3116,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// Twin of `AppStateHarnessTests.testARelayRestartThatFindsSystemDNSReleasedStartsNothing`.
-    func testARelayRestartThatFindsSystemDNSReleasedStartsNothing() async throws {
+    @RuntimeActor func testARelayRestartThatFindsSystemDNSReleasedStartsNothing() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemDNS: true), dnsForwarderEnabled: true)
         try await host.startRuntime()
         await host.stopRuntime()
@@ -3134,7 +3133,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// Every VPN and path notification is its own delivery, and each used to
     /// put a reconcile on the platform work queue. While a helper is held
     /// they would pile up there and drain later as so many stale passes.
-    func testSystemDNSReconcilesCoalesceWhileOneIsOut() async throws {
+    @RuntimeActor func testSystemDNSReconcilesCoalesceWhileOneIsOut() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemDNS: true), dnsForwarderEnabled: true)
         try await host.startRuntime()
 
@@ -3170,7 +3169,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// Twin of `AppStateHarnessTests.testProxyAndDNSStartAndStopWaitOnTheHelperOffTheMainThread`:
     /// every privileged write a start and a stop make, system DNS included,
     /// is asked for from the platform work queue.
-    func testStartAndStopWaitOnTheHelperOffTheMainThread() async throws {
+    @RuntimeActor func testStartAndStopWaitOnTheHelperOffTheMainThread() async throws {
         let host = try await launch(
             platform: PlatformIntegrationConfig(
                 manageSystemProxy: true,
@@ -3203,7 +3202,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// lands after it, and the start, overtaken, starts nothing more: the
     /// monitors it would start are what put resolver files back on the next
     /// VPN transition.
-    func testAStopIssuedWhileTheStartAppliesLandsLastAndTheStartGoesNoFurther() async throws {
+    @RuntimeActor func testAStopIssuedWhileTheStartAppliesLandsLastAndTheStartGoesNoFurther() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
         await host.awaitLaunchRecovery()
         // The start's first read of the machine, once its listeners are up.
@@ -3247,7 +3246,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// behavior until AppState activates the shared owner. Decision 0037 changes it here: a reload that replaces the start's captured
     /// pair while the start applies holds the rest of the start, which ends as failed and clears what it applied. It is not rebound to the
     /// reloaded input, and the reload's own pass, admitted under the ended start, applies nothing.
-    func testAReloadReplacingTheInputWhileTheStartAppliesHoldsTheRestOfTheStart() async throws {
+    @RuntimeActor func testAReloadReplacingTheInputWhileTheStartAppliesHoldsTheRestOfTheStart() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
         await host.awaitLaunchRecovery()
         harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
@@ -3285,7 +3284,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// A second identical Start while the first applies joins it on the lane. Its admission ends the first Start's group in the workflow,
     /// but the lane still orders the first Start, which finishes for both; the joiner then settles its own authorized group with that result.
-    func testAnIdenticalStartThatJoinsTheOneApplyingReportsItsSuccess() async throws {
+    @RuntimeActor func testAnIdenticalStartThatJoinsTheOneApplyingReportsItsSuccess() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
         await host.awaitLaunchRecovery()
         harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
@@ -3314,7 +3313,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// A newer Start that ends an authorized Start's group and then holds before the lane (its store slot is busy) leaves no authority.
     /// The older Start still holds the lane and its receipts, but the owner check stops it at its next step and it tears down what it
     /// activated: nothing is left running and no permission is resurrected.
-    func testANewerStartHeldBeforeTheLaneEndsTheAuthorizedStartItSuperseded() async throws {
+    @RuntimeActor func testANewerStartHeldBeforeTheLaneEndsTheAuthorizedStartItSuperseded() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
         await host.awaitLaunchRecovery()
         harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
@@ -3358,7 +3357,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// Decision 0035's scoped cleanup: a held Start tears down only the modules it owns. A second Start over a running proxy owns no proxy,
     /// so when a reload replaces its captured input while it reapplies, the running listener and its system proxy stay as they were.
-    func testAHeldStartOverARunningProxyLeavesTheRunningProxyUp() async throws {
+    @RuntimeActor func testAHeldStartOverARunningProxyLeavesTheRunningProxyUp() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
         try await host.startRuntime()
         XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running)
@@ -3401,7 +3400,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// A start whose bind fails while a reload's pass waits behind its lane. The start reverts under its own token and the pass then finds its
     /// admission ended, so nothing waits on the other and no surface is written after the failure.
-    func testAFailedStartWithAReloadPassQueuedBehindItDoesNotDeadlock() async throws {
+    @RuntimeActor func testAFailedStartWithAReloadPassQueuedBehindItDoesNotDeadlock() async throws {
         let held = try HeldLoopbackPort()
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = held.port
@@ -3449,7 +3448,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// A terminal stop latches: a Start after it is refused as terminating, not as an exhausted intent, and it applies nothing.
-    func testAStartAfterATerminalStopIsRefusedAsTerminating() async throws {
+    @RuntimeActor func testAStartAfterATerminalStopIsRefusedAsTerminating() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -3475,7 +3474,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// A stop issued while a reload's surface re-apply is out waits for that re-apply, then clears what it left.
-    func testAStopWaitsForAnInFlightSurfaceReapplyAndThenClears() async throws {
+    @RuntimeActor func testAStopWaitsForAnInFlightSurfaceReapplyAndThenClears() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .manual))
         await host.awaitLaunchRecovery()
         try await host.startRuntime()
@@ -3510,7 +3509,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// Twin of `AppStateHarnessTests.testABypassEditReachesTheAdvertisedSurfacesInManualMode`.
-    func testABypassReloadReachesTheAdvertisedSurfacesInManualMode() async throws {
+    @RuntimeActor func testABypassReloadReachesTheAdvertisedSurfacesInManualMode() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(
             manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .manual))
         await host.awaitLaunchRecovery()
@@ -3529,7 +3528,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// Twin of `AppStateHarnessTests.testALocalPACPortEditRepointsTheSystemProxy`.
-    func testALocalPACPortReloadRepointsTheSystemProxy() async throws {
+    @RuntimeActor func testALocalPACPortReloadRepointsTheSystemProxy() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.localPACEnabled = true
@@ -3554,14 +3553,14 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
-    private func reapplyEvents(_ host: RuntimeHost) -> [String] {
+    @RuntimeActor private func reapplyEvents(_ host: RuntimeHost) -> [String] {
         host.orchestrator.eventLog.events.filter { $0.event.hasPrefix("config.reapply_") }.map { "\($0.event) \($0.detail ?? "")" }
     }
 
     private static let shortRetries = ConfigReapplyRetry.Schedule(delays: [.milliseconds(100), .milliseconds(100), .milliseconds(100)])
 
     /// Twin of `AppStateHarnessTests.testAFailedSystemProxyReapplyIsReportedAndRetried`.
-    func testAFailedSystemProxyReapplyOnReloadIsReportedAndRetried() async throws {
+    @RuntimeActor func testAFailedSystemProxyReapplyOnReloadIsReportedAndRetried() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
@@ -3593,7 +3592,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// Twin of `AppStateHarnessTests.testASystemProxySwitchThatFailsToApplyIsRetried`.
-    func testASystemProxySwitchThatFailsToApplyOnReloadIsRetried() async throws {
+    @RuntimeActor func testASystemProxySwitchThatFailsToApplyOnReloadIsRetried() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = try reserveLoopbackPort()
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
@@ -3622,7 +3621,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// A reload's system DNS switch-on runs on the platform queue (#47). Held there, a DNS Stop is admitted; its teardown waits for the
     /// action and its settlement, so the health timer the action arms is stopped by the Stop rather than left running past it, and the
     /// Stop's restore lands after the apply.
-    func testADNSStopDuringAHeldSystemDNSSwitchOnLeavesNoHealthTimer() async throws {
+    @RuntimeActor func testADNSStopDuringAHeldSystemDNSSwitchOnLeavesNoHealthTimer() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: true)
         await host.awaitLaunchRecovery()
         try await host.startRuntime()
@@ -3653,7 +3652,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// drop taken meanwhile decides its removal in its own turn and queues it behind the write, running nothing on the owner (#47).
     /// Released, the work lands in the order it was decided: the write from the stale gate succeeds, then the drop's removal is refused.
     /// The earlier success recording first must not discard that later failure: it stays pending for the repair, with none superseded.
-    func testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending() async throws {
+    @RuntimeActor func testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
         await host.awaitLaunchRecovery()
         try await host.startRuntime()
@@ -3711,7 +3710,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// The entry-file commands for the configured domain, in the order the helper took them.
-    private func entryFileCommands() -> [PrivilegedOperation] {
+    @RuntimeActor private func entryFileCommands() -> [PrivilegedOperation] {
         harness.machine.privilege.commands.filter { $0.values.first == "corp.example" }.map { $0.command }
     }
 
@@ -3719,7 +3718,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// meets a drop whose removal is then held behind it; its tail queues another removal. A reconnect taken during that hold acts for a
     /// running proxy and queues the write, and a Stop admitted after it clears behind all of it. The start the Stop overtook does not
     /// mark the stopped proxy up again.
-    func testAVPNFlapAndAStopDuringAStartsHeldEntryFileTailEndInOrderAndStopped() async throws {
+    @RuntimeActor func testAVPNFlapAndAStopDuringAStartsHeldEntryFileTailEndInOrderAndStopped() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageDNSResolvers: true))
         await host.awaitLaunchRecovery()
         harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
@@ -3771,7 +3770,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// The drop queues its removal behind the start's write; the reconnect, taken before the proxy's surfaces are up, writes nothing.
     /// The gate then wants what the start captured, but it took reports since: the start's tail must put the entry back after the drop's
     /// removal, or the tunnel stays up with no entry file and no failure for a retry to repair.
-    func testADropAndReconnectDuringAStartsHeldBlockLeaveTheEntryFile() async throws {
+    @RuntimeActor func testADropAndReconnectDuringAStartsHeldBlockLeaveTheEntryFile() async throws {
         let host = try await launch(
             platform: PlatformIntegrationConfig(manageSystemProxy: true, manageDNSResolvers: true), dnsForwarderEnabled: true
         )
@@ -3819,7 +3818,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// A pending repair whose only residue is a recorded file for a disabled intercept rule, which a start's intercept sweep removes.
     /// The start reads its residue after that sweep, under the same lock, so its success settles the repair there and then, as before
     /// the start's resolver work moved off the main actor.
-    func testAStartsInterceptSweepSettlesARepairWhoseOnlyResidueItRemoved() async throws {
+    @RuntimeActor func testAStartsInterceptSweepSettlesARepairWhoseOnlyResidueItRemoved() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -3861,7 +3860,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// A retry decides its write in the turn it reads the gate, and queues it there (#47). Held, it has been reported and nothing has
     /// been written; a VPN drop taken meanwhile queues its removal behind it. The work lands in that order and the repair settles, so the
     /// files end where the last report wants.
-    func testAVPNDropDuringAHeldSplitDNSRetryQueuesItsRemovalBehindIt() async throws {
+    @RuntimeActor func testAVPNDropDuringAHeldSplitDNSRetryQueuesItsRemovalBehindIt() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
         await host.awaitLaunchRecovery()
         harness.machine.privilege.failingDomains = ["corp.example"]
@@ -3897,7 +3896,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// Twin of `AppStateHarnessTests.testAFailedSystemProxyModeChangeIsReportedAsOne`.
-    func testAFailedSystemProxyModeChangeOnReloadIsReportedAsOne() async throws {
+    @RuntimeActor func testAFailedSystemProxyModeChangeOnReloadIsReportedAsOne() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .manual))
@@ -3918,7 +3917,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// Twin of `AppStateHarnessTests.testAPartialEnvironmentReapplyIsReportedAndRetried`
     /// and `…RecoversOnTheRetry`.
-    func testAPartialEnvironmentReapplyOnReloadIsReportedAndRetried() async throws {
+    @RuntimeActor func testAPartialEnvironmentReapplyOnReloadIsReportedAndRetried() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageEnvironmentVariables: true))
@@ -3947,7 +3946,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// Twin of `AppStateHarnessTests.testAStopAfterAFailedReapplyAbandonsTheRetry`.
-    func testAStopAfterAFailedReloadReapplyAbandonsTheRetry() async throws {
+    @RuntimeActor func testAStopAfterAFailedReloadReapplyAbandonsTheRetry() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
@@ -3974,7 +3973,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// Twin of `AppStateHarnessTests.testABypassEditReappliesOffTheMainActor`.
-    func testABypassReloadReappliesOffTheMainActor() async throws {
+    @RuntimeActor func testABypassReloadReappliesOffTheMainActor() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
         await host.awaitLaunchRecovery()
         try await host.startRuntime()
@@ -3996,7 +3995,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// Twin of `AppStateHarnessTests.testABypassEditInPACModeLeavesTheSystemProxyAlone`.
-    func testABypassReloadInPACModeLeavesTheSystemProxyAlone() async throws {
+    @RuntimeActor func testABypassReloadInPACModeLeavesTheSystemProxyAlone() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(
             manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .pac))
         await host.awaitLaunchRecovery()
@@ -4016,7 +4015,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// Twin of `AppStateHarnessTests.testAWipedEnvironmentIsRepairedOnTheNextSettingsNotification`.
-    func testAWipedEnvironmentIsRepairedOnTheNextSettingsNotification() async throws {
+    @RuntimeActor func testAWipedEnvironmentIsRepairedOnTheNextSettingsNotification() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
         await host.awaitLaunchRecovery()
         try await host.startRuntime()
@@ -4036,7 +4035,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// Twin of `AppStateHarnessTests.testRepeatedDNSStopsWhileTheFirstIsHeldRunOneTeardown`:
     /// stops while a stop is held join it instead of queueing teardowns.
-    func testRepeatedStopsWhileTheFirstIsHeldRunOneTeardown() async throws {
+    @RuntimeActor func testRepeatedStopsWhileTheFirstIsHeldRunOneTeardown() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
         try await host.startRuntime()
         XCTAssertTrue(harness.wifi.routesThroughAProxy)
@@ -4085,7 +4084,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// `AppStateHarnessTests.testARefusedRemovalOnAConfigEditIsRetriedWhenTheHelperIsAvailable`:
     /// a reload renames the entry while the helper refuses; the old file,
     /// named only by the journal, is swept once the check finds the helper.
-    func testARefusedRemovalOnAConfigReloadIsRetriedWhenTheHelperIsAvailable() async throws {
+    @RuntimeActor func testARefusedRemovalOnAConfigReloadIsRetriedWhenTheHelperIsAvailable() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -4127,7 +4126,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// `AppStateHarnessTests.testAFailedSwitchOffTeardownIsRetriedWhenTheHelperIsAvailable`:
     /// a reload turns the switch off while the helper refuses; the check
     /// finds the helper and the retry runs the teardown.
-    func testAFailedSwitchOffTeardownOnAReloadIsRetriedWhenTheHelperIsAvailable() async throws {
+    @RuntimeActor func testAFailedSwitchOffTeardownOnAReloadIsRetriedWhenTheHelperIsAvailable() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -4168,7 +4167,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// Twin of `AppStateHarnessTests.testASwitchOnSettledByAVPNFlipIsTornDownWhenTheSwitchTurnsOff`.
-    func testASwitchOnSettledByAVPNFlipIsTornDownWhenAReloadTurnsItOff() async throws {
+    @RuntimeActor func testASwitchOnSettledByAVPNFlipIsTornDownWhenAReloadTurnsItOff() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -4199,7 +4198,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
-    func testAFailedRemovalIsRetriedWhenTheHelperCheckFindsTheHelperAvailable() async throws {
+    @RuntimeActor func testAFailedRemovalIsRetriedWhenTheHelperCheckFindsTheHelperAvailable() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -4239,7 +4238,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
-    func testAVPNDropWhileTheStartAppliesLeavesNoEntryFile() async throws {
+    @RuntimeActor func testAVPNDropWhileTheStartAppliesLeavesNoEntryFile() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageDNSResolvers: true))
         await host.awaitLaunchRecovery()
         harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in

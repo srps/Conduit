@@ -15,10 +15,10 @@ import ProxyKernel
 /// `networksetup -getdnsservers` for every service;
 /// `SystemProxyManager.restoreIfNeeded` spawns roughly four `networksetup`
 /// subprocesses per service before it decides anything. Its caller is a host's
-/// `@MainActor` initialiser — for the app, one that runs before the menu bar
+/// `@RuntimeActor` initialiser — for the app, one that runs before the menu bar
 /// exists — so run inline that work is several seconds during which the host
-/// is on screen nowhere and answering nothing. None of it needs the main
-/// actor: both managers are `Sendable` and talk only to subprocesses, sockets
+/// is on screen nowhere and answering nothing. None of it needs the owner:
+/// both managers are `Sendable` and talk only to subprocesses, sockets
 /// and the journal file.
 ///
 /// **It must still happen first.** Recovery restores the *previous* session's
@@ -29,7 +29,7 @@ import ProxyKernel
 /// it exists to repair goes unrepaired. `join()` is how the ordering the
 /// inline version got for free survives the move: every path that touches a
 /// platform surface awaits it before doing so.
-@MainActor
+@RuntimeActor
 package final class LaunchRecovery {
     /// Dropped once joined, so the second and later `join()`s cost nothing and
     /// the closure's captures do not outlive the recovery.

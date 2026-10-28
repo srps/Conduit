@@ -27,7 +27,7 @@ import ProxyKernel
 ///
 /// This is not per-surface applied state; that is the full #194, with #186
 /// and #48.
-@MainActor
+@RuntimeActor
 package final class ConfigReapplyRetry {
     /// The raw value is the events' `surface=`.
     package enum Surface: String, CaseIterable, Sendable {
@@ -82,15 +82,15 @@ package final class ConfigReapplyRetry {
     }
 
     private let schedule: Schedule
-    private let emit: @MainActor (RuntimeEvent, LogLevel) -> Void
+    private let emit: @RuntimeActor (RuntimeEvent, LogLevel) -> Void
     /// Runs one drift pass for a surface and returns its verdict. Set by the
     /// host once it exists; holds the host weakly.
-    package var attempt: (@MainActor (Surface, LifecycleLane.Token) async -> Outcome)?
+    package var attempt: (@RuntimeActor (Surface, LifecycleLane.Token) async -> Outcome)?
     private var requests: [Surface: Request] = [:]
     private var workers: [Surface: (id: UInt64, task: Task<Void, Never>)] = [:]
     private var nextID: UInt64 = 0
 
-    package init(schedule: Schedule = .standard, emit: @escaping @MainActor (RuntimeEvent, LogLevel) -> Void) {
+    package init(schedule: Schedule = .standard, emit: @escaping @RuntimeActor (RuntimeEvent, LogLevel) -> Void) {
         self.schedule = schedule
         self.emit = emit
     }

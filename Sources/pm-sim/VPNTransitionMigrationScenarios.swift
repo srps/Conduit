@@ -16,7 +16,7 @@ import ProxyKernel
 /// origin's loopback port is a DIRECT tunnel whatever the VPN state;
 /// `migrate.test:443` goes via the upstream.
 enum VPNTransitionMigrationScenarios {
-    @MainActor
+    @RuntimeActor
     private static func until(timeout: TimeInterval, _ condition: () -> Bool) async throws -> Bool {
         let deadline = ContinuousClock.now + .milliseconds(Int64(timeout * 1000))
         while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
@@ -35,7 +35,7 @@ enum VPNTransitionMigrationScenarios {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     static func run(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
@@ -173,7 +173,7 @@ enum VPNTransitionMigrationScenarios {
     /// upstream handshake is still unanswered when a DIRECT-routing
     /// disconnect lands fails at once with a local 502: no wait for the
     /// response timeout, no retry on another upstream, no DIRECT fallback.
-    @MainActor
+    @RuntimeActor
     static func setupRace(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
@@ -247,7 +247,7 @@ enum VPNTransitionMigrationScenarios {
     /// removed is closed when it registers, whenever its routing was decided:
     /// the client gets a 502 at once, the upstream is not blamed, and no
     /// other upstream is tried.
-    @MainActor
+    @RuntimeActor
     static func lateDial(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
@@ -305,7 +305,7 @@ enum VPNTransitionMigrationScenarios {
                        "Injected probe outcomes and paths; no real VPN, helper, settings or credentials"])
     }
 
-    @MainActor
+    @RuntimeActor
     private static func migrations(_ orchestrator: ProxyOrchestrator) -> [String] {
         orchestrator.eventLog.events.filter { $0.event == "vpn.tunnels_migrated" }.compactMap(\.detail)
     }
@@ -314,7 +314,7 @@ enum VPNTransitionMigrationScenarios {
     /// a silent origin, has its origin socket closed by the reconnect sweep
     /// once its route moves onto the tunnel.
     /// The client must get a 502 at once, not hang until it gives up.
-    @MainActor
+    @RuntimeActor
     static func directHTTPSwept(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)

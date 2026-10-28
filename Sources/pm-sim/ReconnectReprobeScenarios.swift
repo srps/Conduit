@@ -7,7 +7,7 @@ import ProxyKernel
 enum ReconnectReprobeScenarios {
     private struct ProbeState { var reachable = true; var attempts = 0 }
 
-    @MainActor
+    @RuntimeActor
     private static func until(timeout: TimeInterval, _ condition: () -> Bool) async throws -> Bool {
         let deadline = ContinuousClock.now + .milliseconds(Int64(timeout * 1000))
         while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
@@ -16,7 +16,7 @@ enum ReconnectReprobeScenarios {
 
     /// Only probe reachability is injected. The production timer, orchestrator,
     /// pool and established CONNECT pipeline own the actual sockets under test.
-    @MainActor
+    @RuntimeActor
     static func failedFirstProbe(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)

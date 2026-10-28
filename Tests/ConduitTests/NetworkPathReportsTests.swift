@@ -8,7 +8,6 @@ import XCTest
 /// DNS reconcile on every report. A VPN client (Cisco Secure Client) rewrites
 /// service DNS with no material path change, and the reconcile is what
 /// re-pins 127.0.0.1.
-@MainActor
 final class NetworkPathReportsTests: XCTestCase {
 
     private static func wifi(gateway: String = "192.168.1.1") -> NetworkPathState {
@@ -20,14 +19,14 @@ final class NetworkPathReportsTests: XCTestCase {
         )
     }
 
-    private func makeOrchestrator() -> ProxyOrchestrator {
+    @RuntimeActor private func makeOrchestrator() -> ProxyOrchestrator {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.upstreams = []
         return ProxyOrchestrator(config: config, logger: DiscardingLogSink())
     }
 
-    func testIdenticalReportsReconcileEveryTimeAndActOnce() async {
+    @RuntimeActor func testIdenticalReportsReconcileEveryTimeAndActOnce() async {
         let orchestrator = makeOrchestrator()
         var acted = 0
         var reconciles = 0
@@ -47,7 +46,7 @@ final class NetworkPathReportsTests: XCTestCase {
         XCTAssertEqual(proxyReconciles, 21, "unchanged path reports retry system proxy drift too")
     }
 
-    func testGatewayChangeActsAndReconciles() async throws {
+    @RuntimeActor func testGatewayChangeActsAndReconciles() async throws {
         let orchestrator = makeOrchestrator()
         var changes: [NetworkPathChange] = []
         var reconciles = 0

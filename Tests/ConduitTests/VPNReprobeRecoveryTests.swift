@@ -8,7 +8,6 @@ import XCTest
 @testable import ProxyKernel
 @testable import ProxyAuth
 
-@MainActor
 final class VPNReprobeRecoveryTests: XCTestCase {
     private struct ProbeState { var reachable = true; var attempts = 0 }
 
@@ -25,14 +24,15 @@ final class VPNReprobeRecoveryTests: XCTestCase {
         }
     }
 
-    func testFailedReconnectAutomaticallyReprobesWithoutAnotherVPNReport() async throws {
+    @RuntimeActor func testFailedReconnectAutomaticallyReprobesWithoutAnotherVPNReport() async throws {
         try await verifyRecovery(from: .disconnected(reason: .userInitiated))
     }
 
-    func testFailedFlapRecoveryAutomaticallyReprobesWithoutAnotherVPNReport() async throws {
+    @RuntimeActor func testFailedFlapRecoveryAutomaticallyReprobesWithoutAnotherVPNReport() async throws {
         try await verifyRecovery(from: .reasserting)
     }
 
+    @RuntimeActor
     private func verifyRecovery(from outage: VPNObservedState) async throws {
         let server = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .childChannelInitializer { channel in

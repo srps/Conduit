@@ -53,8 +53,8 @@ package struct DiagnosticFlushReport: Sendable, Equatable {
     /// earlier in the process keeps a later confirmation conservative.
     package var auditStatistics: RecordWriterStatistics
     package var eventsStatistics: RecordWriterStatistics
-    /// The logger's own drain after the artifacts, a fact about its queues only. It is separate from the artifacts and
-    /// never part of `allConfirmed`. `unavailable` until the owner that drains the logger sets it.
+    /// The logger's own drain, which the host runs before the artifacts, a fact about its queues only. It is separate from the
+    /// artifacts and never part of `allConfirmed`. `unavailable` until the owner that drains the logger sets it.
     package var logger: RecordDrainOutcome = .unavailable
 
     /// The events queue confirmed its records: drained by this phase's wait, with no recorded drop or failure.

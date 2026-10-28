@@ -33,8 +33,8 @@ struct AppComposition {
 }
 
 /// Wraps the authoritative destination guard the app's file log is built with: the one `diagnosticDestinationGuard(for:
-/// .appLog, …)` maps from the held state root. A wrapper must delegate every admission to it, so it can add a wait but
-/// never admit what the authoritative guard refuses. Production and the dev instance name `.identity`; the harness names
+/// .appLog, …)` maps from the held state root, holding that root's session. A wrapper must delegate every admission to it,
+/// and keep it, so it can add a wait but never admit what the authoritative guard refuses or drop the root's authority. Production and the dev instance name `.identity`; the harness names
 /// a delegating hold, so a scenario can hold the app's own final drain.
 struct AppLogGuardEffect: Sendable {
     let wrap: @Sendable (any RecordFileDestinationGuarding) -> any RecordFileDestinationGuarding

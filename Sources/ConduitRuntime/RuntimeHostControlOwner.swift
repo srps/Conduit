@@ -587,7 +587,7 @@ package struct RuntimeInMemoryClients: Sendable {
 
 /// The control service composed over one host, and its in-memory transport (decision 0014). The caller supplies every bound and the
 /// clock: no production profile is selected, so a test or a scenario passes its own explicit one. One service per host.
-@MainActor
+@RuntimeActor
 struct RuntimeControlComposition {
     let service: RuntimeServiceCore
     let transport: RuntimeInMemoryTransport

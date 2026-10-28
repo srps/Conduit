@@ -17,7 +17,6 @@ import RuntimeEvents
 /// keeps serving and stops. Start and Stop go through the framed client. Each request is a loopback one sent to the host's listener;
 /// the default no-proxy list routes it DIRECT to an origin this test owns, so no upstream or authentication is involved. The host's own
 /// request counts are the witness that it was served.
-@MainActor
 final class RuntimeHostAuditTests: XCTestCase {
     private var harness: InteractiveHostHarness?
     private var origin: Channel?
@@ -36,7 +35,7 @@ final class RuntimeHostAuditTests: XCTestCase {
     /// The query value every request carries. No audit row may contain it.
     private static let secret = "audit-secret-6f2c"
 
-    private func deadline() -> RuntimeDeadline {
+    @RuntimeActor private func deadline() -> RuntimeDeadline {
         .after(.seconds(30), from: ContinuousClock.now)
     }
 
@@ -52,7 +51,7 @@ final class RuntimeHostAuditTests: XCTestCase {
 
     /// One host over a saved configuration whose logging section `configure` sets, after the root is taken so it can name the root's
     /// files, and the framed client the production factory hands out. The upstream is the closed discard port; no request here uses it.
-    private func compose(_ configure: (inout LoggingSection, StateRootSession) throws -> Void) async throws -> Composed {
+    @RuntimeActor private func compose(_ configure: (inout LoggingSection, StateRootSession) throws -> Void) async throws -> Composed {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderEnabled = false
@@ -72,7 +71,7 @@ final class RuntimeHostAuditTests: XCTestCase {
     }
 
     /// One command through the framed client and its settlement, nil when it was not admitted or never settled within the bound.
-    private func settle(_ composed: Composed, _ command: ControlRuntimeCommand) async throws -> ControlOperationOutcome? {
+    @RuntimeActor private func settle(_ composed: Composed, _ command: ControlRuntimeCommand) async throws -> ControlOperationOutcome? {
         let incarnation = try await composed.control.readSnapshot(deadline: deadline()).stamp.incarnation
         let stream = try await composed.control.subscribe(.live, deadline: deadline())
         defer { stream.cancel() }
@@ -90,7 +89,7 @@ final class RuntimeHostAuditTests: XCTestCase {
     }
 
     /// A saved proxy Start through the framed client; returns the port it bound.
-    private func startProxy(_ composed: Composed) async throws -> Int {
+    @RuntimeActor private func startProxy(_ composed: Composed) async throws -> Int {
         let snapshot = try await composed.control.readSnapshot(deadline: deadline())
         let revision = try XCTUnwrap(snapshot.stamp.modules?.proxy)
         let outcome = try await settle(composed, .start(.proxy, ifModuleRevision: revision))
@@ -102,7 +101,7 @@ final class RuntimeHostAuditTests: XCTestCase {
     }
 
     /// A proxy Stop through the framed client; it must complete and leave no listener.
-    private func stopProxy(_ composed: Composed) async throws {
+    @RuntimeActor private func stopProxy(_ composed: Composed) async throws {
         let outcome = try await settle(composed, .stop(.proxy))
         guard case .completed(let completion)? = outcome else { return XCTFail("the Stop settles: \(String(describing: outcome))") }
         XCTAssertEqual(completion.command, .stop)
@@ -111,7 +110,7 @@ final class RuntimeHostAuditTests: XCTestCase {
 
     /// The loopback origin. The test target has no shared HTTP origin (each suite's is file-private), so this is the smallest one: a
     /// complete 200 on a connection's first read.
-    private func startOrigin() async throws -> Int {
+    @RuntimeActor private func startOrigin() async throws -> Int {
         let channel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in channel.pipeline.addHandler(AuditOrigin()) }
@@ -124,7 +123,7 @@ final class RuntimeHostAuditTests: XCTestCase {
     /// Sends one absolute-form GET through the host's listener, its query carrying the secret, and waits until the host has handled and
     /// served `served` requests and closed every connection. The orchestrator hands a connection's row to its sink in the same
     /// main-actor step that closes it, queued after the request's completion, so these counts mean every row was handed over.
-    private func request(through proxyPort: Int, origin originPort: Int, host: RuntimeHost, served: Int) async throws {
+    @RuntimeActor private func request(through proxyPort: Int, origin originPort: Int, host: RuntimeHost, served: Int) async throws {
         let client = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .connect(host: "127.0.0.1", port: proxyPort)
             .get()
@@ -142,18 +141,18 @@ final class RuntimeHostAuditTests: XCTestCase {
         XCTAssertEqual(metrics.openConnections, 0, "the host closed each connection")
     }
 
-    private func auditRows(at url: URL) throws -> (text: String, rows: [ConnectionAuditRecord]) {
+    @RuntimeActor private func auditRows(at url: URL) throws -> (text: String, rows: [ConnectionAuditRecord]) {
         let text = try String(contentsOf: url, encoding: .utf8)
         let decoder = ConnectionAuditRecord.canonicalDecoder
         return (text, try text.split(separator: "\n").map { try decoder.decode(ConnectionAuditRecord.self, from: Data($0.utf8)) })
     }
 
-    private func defaultAuditFile(_ composed: Composed) -> URL {
+    @RuntimeActor private func defaultAuditFile(_ composed: Composed) -> URL {
         composed.environment.configDirectory.appendingPathComponent("audit.ndjson")
     }
 
     /// Serves one request through a started host, stops through the client and flushes.
-    private func serveOne(_ composed: Composed) async throws -> (originPort: Int, report: DiagnosticFlushReport) {
+    @RuntimeActor private func serveOne(_ composed: Composed) async throws -> (originPort: Int, report: DiagnosticFlushReport) {
         let originPort = try await startOrigin()
         let proxyPort = try await startProxy(composed)
         try await request(through: proxyPort, origin: originPort, host: composed.host, served: 1)
@@ -161,7 +160,7 @@ final class RuntimeHostAuditTests: XCTestCase {
         return (originPort, await composed.host.flushEvents())
     }
 
-    func testAnEnabledAuditRecordsTheServedRequestAtTheDefaultPathWithItsQueryRedacted() async throws {
+    @RuntimeActor func testAnEnabledAuditRecordsTheServedRequestAtTheDefaultPathWithItsQueryRedacted() async throws {
         let composed = try await compose { logging, _ in logging.auditLogEnabled = true }
         let served = try await serveOne(composed)
 
@@ -182,7 +181,7 @@ final class RuntimeHostAuditTests: XCTestCase {
     /// its open's would find no row to audit and leave a stale one, so the counts are the order witness: no open connection or row is
     /// left, and every connection has its one audit row. The hops themselves come from the event loop at that thread's priority; what
     /// varies is the priority of everything queued beside them.
-    func testConnectionTrackingUnderMixedPriorityLoadKeepsEachOpenBeforeItsClose() async throws {
+    @RuntimeActor func testConnectionTrackingUnderMixedPriorityLoadKeepsEachOpenBeforeItsClose() async throws {
         let composed = try await compose { logging, _ in logging.auditLogEnabled = true }
         let originPort = try await startOrigin()
         let proxyPort = try await startProxy(composed)
@@ -190,7 +189,7 @@ final class RuntimeHostAuditTests: XCTestCase {
         let priorities: [TaskPriority] = [.background, .utility, .medium, .userInitiated, .high]
         let host = composed.host
         let load = (0..<256).map { index in
-            Task(priority: priorities[index % priorities.count]) { @MainActor in _ = host.status() }
+            Task(priority: priorities[index % priorities.count]) { @RuntimeActor in _ = host.status() }
         }
         let clients = (0..<connections).map { index in
             Task.detached(priority: priorities[index % priorities.count]) {
@@ -235,7 +234,7 @@ final class RuntimeHostAuditTests: XCTestCase {
         try? await client.close()
     }
 
-    func testADisabledAuditWritesNothing() async throws {
+    @RuntimeActor func testADisabledAuditWritesNothing() async throws {
         let composed = try await compose { logging, _ in logging.auditLogEnabled = false }
         let served = try await serveOne(composed)
 
@@ -243,7 +242,7 @@ final class RuntimeHostAuditTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: defaultAuditFile(composed).path))
     }
 
-    func testAnExplicitPathOutsideTheRootIsWrittenInsteadOfTheDefault() async throws {
+    @RuntimeActor func testAnExplicitPathOutsideTheRootIsWrittenInsteadOfTheDefault() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-audit-external-\(UUID().uuidString)", isDirectory: true)
         external = directory
@@ -261,7 +260,7 @@ final class RuntimeHostAuditTests: XCTestCase {
     }
 
     /// A configured bound below one row's size skips the row rather than writing part of it, so the bound reached the writer.
-    func testTheConfiguredBoundReachesTheWriter() async throws {
+    @RuntimeActor func testTheConfiguredBoundReachesTheWriter() async throws {
         let composed = try await compose { logging, _ in
             logging.auditLogEnabled = true
             logging.auditLogMaxBytes = 64
@@ -273,21 +272,21 @@ final class RuntimeHostAuditTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: defaultAuditFile(composed).path))
     }
 
-    func testAPathAliasingTheWriterLeaseIsRefusedAndTheHostKeepsServing() async throws {
+    @RuntimeActor func testAPathAliasingTheWriterLeaseIsRefusedAndTheHostKeepsServing() async throws {
         try await assertRefusedAlias(detail: "sink=audit reason=protected_identity resource=writer_lease") { session, alias in
             XCTAssertEqual(link(session.writerLeaseFile.path, alias.path), 0)
             return session.writerLeaseFile
         }
     }
 
-    func testAPathAliasingTheConfigIsRefusedAndTheHostKeepsServing() async throws {
+    @RuntimeActor func testAPathAliasingTheConfigIsRefusedAndTheHostKeepsServing() async throws {
         try await assertRefusedAlias(detail: "sink=audit reason=protected_path resource=config") { session, alias in
             try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: session.environment.configFile)
             return session.environment.configFile
         }
     }
 
-    func testAPathAliasingThePlatformSidecarIsRefusedAndTheHostKeepsServing() async throws {
+    @RuntimeActor func testAPathAliasingThePlatformSidecarIsRefusedAndTheHostKeepsServing() async throws {
         try await assertRefusedAlias(detail: "sink=audit reason=protected_path resource=platform_config") { session, alias in
             try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: session.environment.platformConfigFile)
             return session.environment.platformConfigFile
@@ -297,7 +296,7 @@ final class RuntimeHostAuditTests: XCTestCase {
     /// The audit path is an alias `makeAlias` creates in the root, of the protected file it returns. The first row is refused, with one
     /// fixed event on the actual stream and in the events file; the protected file keeps its bytes and inode; the next request is still
     /// served, its row counted as a drop; and the Stop through the client completes.
-    private func assertRefusedAlias(
+    @RuntimeActor private func assertRefusedAlias(
         detail: String,
         _ makeAlias: (StateRootSession, URL) throws -> URL
     ) async throws {

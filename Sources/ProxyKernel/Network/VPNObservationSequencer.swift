@@ -3,7 +3,7 @@ import NIOConcurrencyHelpers
 
 /// Stamps VPN observations in the order the monitor reports them (#155).
 ///
-/// Hosts hand each report to the main actor in its own task, and those
+/// Hosts hand each report to the runtime actor in its own task, and those
 /// tasks are not ordered, so a consumer can receive an older report after
 /// a newer one. The host stamps each report on the monitor's own callback;
 /// a consumer applies a report only when its stamp is newer than the last

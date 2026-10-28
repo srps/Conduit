@@ -9,17 +9,16 @@ import XCTest
 /// The private editor's memory observation over the actual workflow and store (decisions 0032 and 0034): one owner turn, no disk I/O,
 /// the store's values with each component's exact baseline or its closed retained reason, and the module intents. The reasons are the
 /// store's own latches, recorded where each baseline was cleared.
-@MainActor
 final class ConfigurationEditorCaptureTests: XCTestCase {
     private typealias Fixture = ConfigurationStoreTests.Fixture
 
-    private func preferences(showMenuBarIcon: Bool) throws -> Data {
+    @RuntimeActor private func preferences(showMenuBarIcon: Bool) throws -> Data {
         var preferences = AppPreferences()
         preferences.showMenuBarIcon = showMenuBarIcon
         return try AppPreferencesPersistence.stagedData(for: preferences)
     }
 
-    private func opened(
+    @RuntimeActor private func opened(
         _ fixture: Fixture,
         incarnation: ControlHostIncarnation = ControlHostIncarnation(rawValue: UUID())
     ) async throws -> RuntimeConfigurationWorkflow {
@@ -28,7 +27,7 @@ final class ConfigurationEditorCaptureTests: XCTestCase {
         return workflow
     }
 
-    private func reads(_ fixture: Fixture) -> Int {
+    @RuntimeActor private func reads(_ fixture: Fixture) -> Int {
         fixture.access.observations.filter { if case .read = $0 { true } else { false } }.count
     }
 
@@ -40,7 +39,7 @@ final class ConfigurationEditorCaptureTests: XCTestCase {
 
     /// An opened store's capture names each present file's exact token as a verified baseline and a missing sidecar's as an absence, with
     /// the module intents at their first revision. It reads no file, and it maps through the one bridge.
-    func testACaptureNamesEachExactBaselineAndReadsNoFile() async throws {
+    @RuntimeActor func testACaptureNamesEachExactBaselineAndReadsNoFile() async throws {
         let fixture = try Fixture(preferences: try preferences(showMenuBarIcon: false))
         defer { fixture.close() }
         let workflow = try await opened(fixture)
@@ -71,7 +70,7 @@ final class ConfigurationEditorCaptureTests: XCTestCase {
     }
 
     /// A conflicting write retains only its own component, with the closed `changedSinceBaseline`, and a reload gives it a newer baseline.
-    func testAConflictRetainsOnlyItsComponentUntilAReload() async throws {
+    @RuntimeActor func testAConflictRetainsOnlyItsComponentUntilAReload() async throws {
         let fixture = try Fixture(preferences: try preferences(showMenuBarIcon: true))
         defer { fixture.close() }
         let workflow = try await opened(fixture)
@@ -93,7 +92,7 @@ final class ConfigurationEditorCaptureTests: XCTestCase {
     }
 
     /// A write whose read-back cannot say what landed retains its component as `writeUnknown`.
-    func testAnUnknownWriteRetainsItsComponentAsWriteUnknown() async throws {
+    @RuntimeActor func testAnUnknownWriteRetainsItsComponentAsWriteUnknown() async throws {
         let fixture = try Fixture(preferences: try preferences(showMenuBarIcon: true))
         defer { fixture.close() }
         let workflow = try await opened(fixture)
@@ -108,7 +107,7 @@ final class ConfigurationEditorCaptureTests: XCTestCase {
     }
 
     /// A refused reload retains every component as `observationRefused` and keeps the last adopted values for display.
-    func testARefusedReloadRetainsEveryComponentAndKeepsTheLastValues() async throws {
+    @RuntimeActor func testARefusedReloadRetainsEveryComponentAndKeepsTheLastValues() async throws {
         let fixture = try Fixture(preferences: try preferences(showMenuBarIcon: false))
         defer { fixture.close() }
         let workflow = try await opened(fixture)
@@ -126,7 +125,7 @@ final class ConfigurationEditorCaptureTests: XCTestCase {
 
     /// A client's request ID follows its Start into the store, and the store context names the host's incarnation: both receipts of the
     /// prepared pair carry them. The host's own facade, which has no client request, names a fresh ID instead.
-    func testAClientRequestAndTheHostIncarnationReachTheStartsCommitReceipts() async throws {
+    @RuntimeActor func testAClientRequestAndTheHostIncarnationReachTheStartsCommitReceipts() async throws {
         let fixture = try Fixture()
         defer { fixture.close() }
         let incarnation = ControlHostIncarnation(rawValue: UUID())
@@ -151,7 +150,7 @@ final class ConfigurationEditorCaptureTests: XCTestCase {
     }
 
     /// A session DNS Stop's fence is in the next capture, at the revision its admission took, with no store work.
-    func testAStopFenceIsInTheNextCapture() async throws {
+    @RuntimeActor func testAStopFenceIsInTheNextCapture() async throws {
         let fixture = try Fixture()
         defer { fixture.close() }
         let workflow = try await opened(fixture)

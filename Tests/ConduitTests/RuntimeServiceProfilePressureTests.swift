@@ -2,9 +2,10 @@
 import XCTest
 @testable import ConduitRuntime
 import ConduitShared
+import ProxyKernel
 
 /// Each task's own completion, recorded inside the task. Teardown reads it to know whether awaiting the task is safe.
-@MainActor
+@RuntimeActor
 private final class Completion {
     var finished = false
     var pullOutcome: Result<Data, any Error>?
@@ -28,7 +29,6 @@ private struct ParkedStream {
 /// unexpected outcome kept with its description. Every launched call and every parked pull is retained. Teardown cancels what has not ended,
 /// pumps the owner in a bounded wait, and awaits only the tasks that have recorded their end. The counts are the evidence, and no timeout,
 /// latency or memory figure is asserted.
-@MainActor
 final class RuntimeServiceProfilePressureTests: XCTestCase {
     /// How the calls of one kind resolved. Each call lands in exactly one count.
     private final class Tally: @unchecked Sendable {
@@ -85,7 +85,7 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
     }
 
     /// The candidate's request cap encodes every call.
-    private func encoded(_ id: Int, _ call: ControlRuntimeCall, requestCap: Int) throws -> Data {
+    @RuntimeActor private func encoded(_ id: Int, _ call: ControlRuntimeCall, requestCap: Int) throws -> Data {
         try ControlRuntimeCodec.encodeFrame(
             ControlRuntimeMessage(
                 correlation: RuntimeServiceFixtures.requestID(id),
@@ -96,7 +96,7 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
     }
 
     /// Classifies one decoded response into exactly one tally count.
-    private func record(_ response: ControlRuntimeResponse, expecting: ExpectedReply, tally: Tally) {
+    @RuntimeActor private func record(_ response: ControlRuntimeResponse, expecting: ExpectedReply, tally: Tally) {
         switch (expecting, response) {
         case (.admitted, .admission(.accepted)), (.admitted, .admission(.joined)):
             tally.answered += 1
@@ -115,7 +115,7 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
 
     /// One caller call through the production transport. Its reply is decoded under the reply cap and classified. Its typed lane refusal is
     /// counted apart. The completion is recorded at the end of the task, so teardown knows when awaiting it is safe.
-    private func launch(
+    @RuntimeActor private func launch(
         _ transport: RuntimeInMemoryTransport,
         _ request: Data,
         expecting: ExpectedReply,
@@ -149,13 +149,13 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
     /// stays unanswered until teardown cancels it as `notSent(cancelled)`. That is traced from the source and consistent with the status reads
     /// seen on 2026-10-27; it was not reproduced deterministically. The failure message names the queue as it was, so a recurrence shows which
     /// stage was short.
-    private func awaitQueuedRounds(_ harness: RuntimeServiceHarness, _ rounds: Int, _ stage: String) async {
+    @RuntimeActor private func awaitQueuedRounds(_ harness: RuntimeServiceHarness, _ rounds: Int, _ stage: String) async {
         let queued = await awaitState { harness.scheduling.pendingCount == rounds }
         XCTAssertTrue(queued, "\(stage): \(harness.scheduling.pendingCount) owner rounds queued, expected one per admitted call (\(rounds))")
     }
 
     /// Opens one live subscription through the production transport and consumes its buffered baseline.
-    private func openStream(
+    @RuntimeActor private func openStream(
         _ harness: RuntimeServiceHarness,
         _ transport: RuntimeInMemoryTransport,
         id: Int
@@ -172,7 +172,7 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
     }
 
     /// One pull on a subscription. Its outcome is written to the completion before the task ends.
-    private func startPull(_ stream: ControlRuntimeStream, _ deadline: RuntimeDeadline) -> Pending {
+    @RuntimeActor private func startPull(_ stream: ControlRuntimeStream, _ deadline: RuntimeDeadline) -> Pending {
         let completion = Completion()
         let task = Task {
             defer { completion.finished = true }
@@ -186,7 +186,7 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
     }
 
     /// Parks one pull on each of `count` subscriptions. Each parked pull holds one stream-lane reservation, as a live stream does.
-    private func parkStreamPulls(
+    @RuntimeActor private func parkStreamPulls(
         _ harness: RuntimeServiceHarness,
         _ transport: RuntimeInMemoryTransport,
         count: Int
@@ -211,7 +211,7 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
     /// cancelled wait ends as its typed cancellation. Each stream's registration is then released, and the owner is pumped inside a bounded
     /// `awaitState` until every task has recorded its end. Only the ended tasks are awaited, since awaiting an unfinished one would block the
     /// manual scheduler. Lanes, subscribers and owner effects must then reach zero.
-    private func teardown(
+    @RuntimeActor private func teardown(
         _ harness: RuntimeServiceHarness,
         _ transport: RuntimeInMemoryTransport,
         parked: [ParkedStream],
@@ -281,7 +281,7 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
 
     /// Measures one row under the candidate lanes: the stream lane is empty or full of parked pulls, then an ordinary flood, one Stop per module
     /// and status reads, all through the production transport. Each stage waits for the observable state it expects, with a bounded wait.
-    private func measure(_ label: String, streamPressure: Bool) async throws -> Row {
+    @RuntimeActor private func measure(_ label: String, streamPressure: Bool) async throws -> Row {
         let limits = try RuntimeServiceProfileCandidate.limits()
         let harness = try RuntimeServiceHarness(limits: limits)
         let transport = harness.transport()
@@ -354,7 +354,7 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
     }
 
     /// Under the candidate lanes, Stop and status answers are the same with an ordinary flood alone and with the stream lane full of parked pulls.
-    func testCandidateStopAndStatusAnswersAreTheSameWithAFullStreamLane() async throws {
+    @RuntimeActor func testCandidateStopAndStatusAnswersAreTheSameWithAFullStreamLane() async throws {
         let flood = try await measure("candidate-ordinary-flood", streamPressure: false)
         let streams = try await measure("candidate-ordinary-flood+stream-lane-full", streamPressure: true)
         XCTAssertEqual(flood.stopAnswered, streams.stopAnswered, "Stop is independent of stream pressure")
@@ -364,7 +364,7 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
     /// The candidate's stream lane equals its subscriber limit, so the lane is full exactly when the table is full. Through the public framed client,
     /// a ninth subscription opens as a stream whose first frame is the host's typed refusal. The refusal is
     /// `RuntimeClientError.wire(.subscriberLimit)` at the first pull, and it changes nothing. The parked pulls are then torn down.
-    func testCandidateNinthSubscriptionIsRefusedAsTheTypedSubscriberLimitAtItsFirstPull() async throws {
+    @RuntimeActor func testCandidateNinthSubscriptionIsRefusedAsTheTypedSubscriberLimitAtItsFirstPull() async throws {
         let limits = try RuntimeServiceProfileCandidate.limits()
         let harness = try RuntimeServiceHarness(limits: limits)
         let transport = harness.transport()
@@ -400,7 +400,7 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
 
     /// Each module's Stop lane holds the candidate's reservations. A Stop beyond them is refused as a typed lane-busy, with nothing sent, and the
     /// other modules' Stops are still admitted while that module's lane is held.
-    func testCandidateStopLanePerModuleHoldsItsReservationsWhileOtherModulesStayAdmitted() async throws {
+    @RuntimeActor func testCandidateStopLanePerModuleHoldsItsReservationsWhileOtherModulesStayAdmitted() async throws {
         let limits = try RuntimeServiceProfileCandidate.limits()
         let harness = try RuntimeServiceHarness(limits: limits)
         let transport = harness.transport()
@@ -457,7 +457,7 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
     /// The event ring and the ingress hold the candidate's bounds. A flood beyond the ingress queue is one loss marker, and the held snapshot stays
     /// one generation at a time within its byte bound. A Stop is admitted during the flood. The flood sizes are derived from the candidate's ring
     /// and ingress, so no count is a free literal.
-    func testCandidateEventAndSnapshotFloodKeepsTheWindowBoundedAndAdmitsAStop() throws {
+    @RuntimeActor func testCandidateEventAndSnapshotFloodKeepsTheWindowBoundedAndAdmitsAStop() async throws {
         let limits = try RuntimeServiceProfileCandidate.limits()
         let harness = try RuntimeServiceHarness(limits: limits)
         // Positions past the ring, so the window must slide. The overflow is a fixture choice of 88 positions.

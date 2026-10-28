@@ -15,7 +15,7 @@ final class AgentIsolationTests: XCTestCase {
         XCTAssertEqual(environment.platformStateFile.path, stateDirectory.appendingPathComponent("platform-state.json").path)
     }
 
-    @MainActor
+    @RuntimeActor
     func testProxyOrchestratorBindsEphemeralProxyAndDNSPorts() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = []

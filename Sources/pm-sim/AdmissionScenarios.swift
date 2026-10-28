@@ -13,7 +13,7 @@ enum AdmissionScenarios {
         guard value else { throw Failure(message: message) }
     }
 
-    @MainActor
+    @RuntimeActor
     private static func eventually(_ message: String, _ condition: () -> Bool) async throws {
         for _ in 0..<300 {
             if condition() { return }
@@ -22,7 +22,7 @@ enum AdmissionScenarios {
         throw Failure(message: message)
     }
 
-    @MainActor
+    @RuntimeActor
     private final class Fixture {
         let group = MultiThreadedEventLoopGroup.singleton
         let config = NIOLockedValueBox(GenericDefaults.shared.makeConfig())
@@ -142,7 +142,7 @@ enum AdmissionScenarios {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     static func sharedBudget(verbose: Bool) async throws -> ScenarioResult {
         let start = Date()
         let fixture = Fixture(verbose: verbose)

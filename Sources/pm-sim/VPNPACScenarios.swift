@@ -54,7 +54,7 @@ enum VPNPACScenarios {
 
     /// Which upstream served a GET through the proxy: `off`, `on`, or the
     /// response's status line when neither did.
-    @MainActor
+    @RuntimeActor
     private static func servedBy(_ orchestrator: ProxyOrchestrator) async throws -> String {
         guard let port = orchestrator.snapshot.bindings.proxyPort else {
             throw Failure(description: "the proxy listener is not bound")
@@ -69,7 +69,7 @@ enum VPNPACScenarios {
         return response.components(separatedBy: "\r\n").first ?? ""
     }
 
-    @MainActor
+    @RuntimeActor
     static func refreshOnTransition(verbose: Bool) async throws -> ScenarioResult {
         let started = Date()
         let group = MultiThreadedEventLoopGroup.singleton

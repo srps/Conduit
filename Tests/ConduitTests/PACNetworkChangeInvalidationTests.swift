@@ -7,7 +7,6 @@ import XCTest
 
 /// A material network-path change drops the cached PAC answers (#34, after
 /// #101 made path changes rare enough to act on).
-@MainActor
 final class PACNetworkChangeInvalidationTests: XCTestCase {
     private static func wifi(gateway: String) -> NetworkPathState {
         NetworkPathState(
@@ -30,7 +29,7 @@ final class PACNetworkChangeInvalidationTests: XCTestCase {
         func routeChain(for entries: [String]) -> PACChain { CFPACEvaluator().routeChain(for: entries) }
     }
 
-    func testAMaterialPathChangeInvalidatesTheRoutesAndTheFirstPathDoesNot() async throws {
+    @RuntimeActor func testAMaterialPathChangeInvalidatesTheRoutesAndTheFirstPathDoesNot() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.upstreams = []
@@ -39,7 +38,7 @@ final class PACNetworkChangeInvalidationTests: XCTestCase {
         let pac = StaticPAC()
         let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink(), pacEvaluator: pac)
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
         let cutoff = Date()
         func invalidations() -> [String] {
             orchestrator.eventLog.events

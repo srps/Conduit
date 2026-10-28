@@ -151,7 +151,6 @@ struct ObservationSplitMix64 {
 }
 
 /// The observation model against the production core. It drives each sequence in a fresh harness and compares after every action.
-@MainActor
 final class RuntimeServiceObservationModelTests: XCTestCase {
     private static let alphabet: [ObservationAction] = [
         .advance, .silentAdvance, .repeatOwner, .publish, .open, .pull(0), .pull(1), .cancel(0), .cancel(1),
@@ -169,7 +168,7 @@ final class RuntimeServiceObservationModelTests: XCTestCase {
     }
 
     /// Runs one sequence on the production core and on the model. It returns the first disagreement, named with its step, or nil.
-    private func disagreement(_ sequence: [ObservationAction]) throws -> String? {
+    @RuntimeActor private func disagreement(_ sequence: [ObservationAction]) throws -> String? {
         let harness = try RuntimeServiceHarness()
         harness.owner.snapshotValue = try observationSnapshot(presentation: 9)
         var model = ObservationModel()
@@ -238,7 +237,7 @@ final class RuntimeServiceObservationModelTests: XCTestCase {
         return nil
     }
 
-    func testTheObservationRulesAgreeWithTheModelOnEveryBoundedSequence() throws {
+    @RuntimeActor func testTheObservationRulesAgreeWithTheModelOnEveryBoundedSequence() async throws {
         let sequences = Self.exhaustiveSequences()
         XCTAssertEqual(sequences.count, 9 + 81 + 729 + 6561, "the exhaustive bound is every sequence of depth one to four")
         for sequence in sequences {
@@ -248,7 +247,7 @@ final class RuntimeServiceObservationModelTests: XCTestCase {
         }
     }
 
-    func testTheObservationRulesAgreeWithTheModelOnSeededLongWalks() throws {
+    @RuntimeActor func testTheObservationRulesAgreeWithTheModelOnSeededLongWalks() async throws {
         for seed in UInt64(1)...100 {
             var generator = ObservationSplitMix64(seed: seed)
             let walk = (0..<25).map { _ in

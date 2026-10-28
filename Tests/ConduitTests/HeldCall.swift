@@ -188,6 +188,17 @@ final class HeldCall: @unchecked Sendable {
             }
         }
     }
+
+    /// Ends the hold for good, for a harness's teardown: disarms, and lets every held call go. A test that failed mid-hold can leave
+    /// more than one held after a hand-over, and `release()` frees only the oldest, so a stop waiting on the next would hang.
+    func releaseAll() {
+        condition.withLock {
+            matcher = nil
+            releasedEarly = false
+            released = issued
+            condition.broadcast()
+        }
+    }
 }
 
 /// Parks the main thread, so a test can show work going on while the main actor cannot run. The park is bounded: it ends at

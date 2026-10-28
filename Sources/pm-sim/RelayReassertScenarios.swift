@@ -4,7 +4,7 @@ import PlatformMac
 import ProxyKernel
 
 /// `pm-sim relay-reassert-after-stop` (#199). The transparent-relay reassert
-/// probes the intercept address off the main actor, for up to its connect
+/// probes the intercept address off the owner, for up to its connect
 /// timeout. A stop that lands while the probe is out must win: the stale
 /// "nothing accepts" verdict is dropped with `tcp_relay.reassert_superseded`
 /// instead of restarting the relay the user just turned off. And a reassert
@@ -16,7 +16,7 @@ enum RelayReassertScenarios {
     /// The platform queue the scenario's relay commands run on, as the host's do on its own.
     private static let relayQueueLabel = "io.github.srps.Conduit.pm-sim.relay-platform-work"
 
-    @MainActor
+    @RuntimeActor
     static func stopDuringProbe() async throws -> ScenarioResult {
         let start = Date()
         let host = "127.44.3.0"
@@ -34,7 +34,7 @@ enum RelayReassertScenarios {
         let afterFirst = client.commands.map(\.command)
 
         probe.arm()
-        let pending = Task { @MainActor in
+        let pending = Task { @RuntimeActor in
             await orchestrator.reassertTransparentRelayOffMain(host: host, targetPort: 10443)
         }
         let probeHeld = await probe.waitUntilHeld(within: .seconds(10))
@@ -81,7 +81,7 @@ enum RelayReassertScenarios {
     /// A reassert whose relay start is held on the platform queue, inside the DNS module's slot, then a DNS stop. The stop's teardown
     /// must wait for the reassert's effect and then stop the relay it raised. Every wait is bounded, and the hold is released on every
     /// path.
-    @MainActor
+    @RuntimeActor
     private static func heldStartAgainstAStop(host: String) async -> SlotWitness {
         let client = RecordingPrivilegeClient()
         let relay = HeldStep()
@@ -90,13 +90,13 @@ enum RelayReassertScenarios {
         await orchestrator.startDNS()
         var witness = SlotWitness()
         relay.arm(onQueueLabeled: relayQueueLabel)
-        let reassert = Task { @MainActor in
+        let reassert = Task { @RuntimeActor in
             await orchestrator.reassertTransparentRelay(host: host, targetPort: 10443)
         }
         let reached = await relay.waitUntilHeld(within: .seconds(10))
         witness.heldOnPlatformQueue = reached && relay.heldOnExpectedQueue
         witness.queueLabel = relay.queueLabel
-        let stop = Task { @MainActor in await orchestrator.stopDNS() }
+        let stop = Task { @RuntimeActor in await orchestrator.stopDNS() }
         // A teardown beside the slot closes the forwarder within a few milliseconds; give it that long to show.
         for _ in 0..<500 where orchestrator.snapshot.dnsRunState == .running {
             try? await Task.sleep(nanoseconds: 1_000_000)
@@ -112,7 +112,7 @@ enum RelayReassertScenarios {
 
     /// An orchestrator whose forwarder binds an ephemeral loopback port and whose relay commands run one at a time on the scenario's
     /// own platform queue, each offered to `relay` there first.
-    @MainActor
+    @RuntimeActor
     private static func makeOrchestrator(
         client: RecordingPrivilegeClient,
         relay: HeldStep,

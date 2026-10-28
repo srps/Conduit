@@ -11,7 +11,6 @@ import XCTest
 ///
 /// The bounded model enumerates every trace of up to `maximumLength` admissions over four operations. Its oracle is two integers
 /// and a flag, written here without the workflow's code, so a defect in the workflow's arithmetic or fence cannot agree with itself.
-@MainActor
 final class ConfigurationWorkflowAdmissionTests: XCTestCase {
     private enum Operation: CaseIterable {
         case start
@@ -23,13 +22,13 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
     /// Every trace of length 0 through `maximumLength`: 1 + 4 + 16 + 64 + 256 = 341 traces.
     private static let maximumLength = 4
 
-    private func scratchSession() throws -> (StateRootSession, URL) {
+    @RuntimeActor private func scratchSession() throws -> (StateRootSession, URL) {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-workflow-admission-\(UUID().uuidString)", isDirectory: true)
         return (try acquireScratchStateRoot(.isolated(stateDirectory: directory)), directory)
     }
 
-    private func workflow(
+    @RuntimeActor private func workflow(
         _ session: StateRootSession,
         startupAllowsMissing: Bool = true,
         generation: Int = 0
@@ -67,7 +66,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         }
     }
 
-    func testEveryBoundedTraceOfAdmissionsAgreesWithTheReferenceOracle() throws {
+    @RuntimeActor func testEveryBoundedTraceOfAdmissionsAgreesWithTheReferenceOracle() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)
@@ -124,7 +123,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
 
     /// A Start prepares the required defaults through the store, persists them before the start, and returns the exact pair. The
     /// reload that observed the same missing files held apply and wrote nothing.
-    func testAStartCommitsRequiredDefaultsBeforeItAdmitsAnApply() async throws {
+    @RuntimeActor func testAStartCommitsRequiredDefaultsBeforeItAdmitsAnApply() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)
@@ -161,7 +160,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
 
     /// A reload captured at generation 0, before any Start, is superseded by a Start admitted during its wait. Its observation stays a
     /// durable observation, and it changes no applied view.
-    func testAReloadCapturedBeforeAnyStartIsSupersededByOneAdmittedDuringItsWait() async throws {
+    @RuntimeActor func testAReloadCapturedBeforeAnyStartIsSupersededByOneAdmittedDuringItsWait() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)
@@ -182,7 +181,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
     }
 
     /// A reload under a Stop fence adopts nothing that applies, and the fence stays in force.
-    func testAReloadUnderAStopFenceHoldsApplyAndLeavesTheFenceInForce() async throws {
+    @RuntimeActor func testAReloadUnderAStopFenceHoldsApplyAndLeavesTheFenceInForce() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)
@@ -203,7 +202,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
     /// The maximum generation, reached through the internal seed. A Start there is the last one admitted: a further Start is refused as
     /// exhausted and leaves the admission standing. Ending the failed Start cannot advance, so it fences, and every stop then reports the
     /// closed fence hold, since no newer generation exists to name. A Stop at the maximum fences without advancing.
-    func testTheMaximumGenerationRefusesFurtherStartsAndFencesInPlaceOfAdvancing() async throws {
+    @RuntimeActor func testTheMaximumGenerationRefusesFurtherStartsAndFencesInPlaceOfAdvancing() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)
@@ -249,7 +248,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
 
     /// A client's reload names its request in the store context it reads under; the host's own facade names a fresh one. A refused
     /// observation is answered refused at the return of its one event, adopts nothing, and still names its request.
-    func testAReloadNamesItsRequestInTheStoreContextAndAnswersBesideItsEvents() async throws {
+    @RuntimeActor func testAReloadNamesItsRequestInTheStoreContextAndAnswersBesideItsEvents() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)
@@ -278,7 +277,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
     /// Decision 0037: a saved-input Start captures the store's pair at preparation, not admission. A reload of valid B while the Start is
     /// queued supplies B, and B's observed bytes are verified, never written over. A reload of B after the capture holds the prepared Start:
     /// it is neither authorized nor rebound, and its cause is the replaced input.
-    func testAFacadeStartNeverWritesOverAReloadObservedDNSValue() async throws {
+    @RuntimeActor func testAFacadeStartNeverWritesOverAReloadObservedDNSValue() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)
@@ -325,7 +324,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
     }
 
     /// A reload that observes the captured pair's unchanged bytes keeps the store's versions, so it replaces nothing.
-    func testAnUnchangedReloadAfterTheCaptureKeepsThePreparedStart() async throws {
+    @RuntimeActor func testAnUnchangedReloadAfterTheCaptureKeepsThePreparedStart() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)
@@ -344,7 +343,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
 
     /// A session DNS Stop fences at once and owes its disable. A facade Start is refused whole while it is owed. The save goes through the
     /// runtime-only lifecycle commit and ends the obligation only once verified; the next facade Start then captures the saved false.
-    func testASessionDNSStopOwesItsDisableUntilTheRuntimeOnlySaveVerifies() async throws {
+    @RuntimeActor func testASessionDNSStopOwesItsDisableUntilTheRuntimeOnlySaveVerifies() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)
@@ -378,7 +377,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
     }
 
     /// A runtime file changed outside the store since its baseline conflicts: the disable is not written over it and stays owed.
-    func testAnOwedDNSDisableIsNotWrittenOverAChangedFile() async throws {
+    @RuntimeActor func testAnOwedDNSDisableIsNotWrittenOverAChangedFile() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)
@@ -398,7 +397,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         XCTAssertEqual(workflow.admitStart(), .failure(.stopSaveOwed), "the disable is still owed")
     }
 
-    private func externalEdit(_ session: StateRootSession, dnsForwarderEnabled: Bool, profileName: String) throws -> Data {
+    @RuntimeActor private func externalEdit(_ session: StateRootSession, dnsForwarderEnabled: Bool, profileName: String) throws -> Data {
         var edited = GenericDefaults.shared.makeConfig()
         edited.dnsForwarderEnabled = dnsForwarderEnabled
         edited.profileName = profileName
@@ -408,7 +407,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
     }
 
     /// A Start whose preparation resumes after a newer Stop stops without preparing anything, and says why.
-    func testAStartSupersededByAStopStopsWithoutCommitting() async throws {
+    @RuntimeActor func testAStartSupersededByAStopStopsWithoutCommitting() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)

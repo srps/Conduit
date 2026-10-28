@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import ConduitShared
 import Foundation
+import ProxyKernel
 
 /// A test seam for lost answers. A lost answer still reaches the owner, so the admission is recorded, and only
 /// the reply is dropped. A caller must then recover by lookup, never by resending. It is not a product fault model.
@@ -294,7 +295,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         deadline: RuntimeDeadline,
         onQuiesced: (@Sendable () -> Void)? = nil,
         boundRefusal: Data? = nil,
-        abandoned: @escaping @MainActor @Sendable (RuntimeWaitOutcome) -> Void = { _ in },
+        abandoned: @escaping @RuntimeActor @Sendable (RuntimeWaitOutcome) -> Void = { _ in },
         attempt: @escaping RuntimeWaitGate.Attempt
     ) async -> RuntimeWaitOutcome {
         guard let ticket = lanes.reserve(lane, onQuiesced: onQuiesced) else {
@@ -316,7 +317,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         on ticket: RuntimeLaneTicket,
         deadline: RuntimeDeadline,
         boundRefusal: RuntimeWaitOutcome? = nil,
-        abandoned: @escaping @MainActor @Sendable (RuntimeWaitOutcome) -> Void = { _ in },
+        abandoned: @escaping @RuntimeActor @Sendable (RuntimeWaitOutcome) -> Void = { _ in },
         attempt: @escaping RuntimeWaitGate.Attempt
     ) async -> RuntimeWaitOutcome {
         let gate = RuntimeWaitGate(
@@ -350,7 +351,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
 
     /// The owner's answer to one exchange. It runs inside the owner's turn, and every admission it makes is
     /// recorded before the reply is encoded.
-    @MainActor
+    @RuntimeActor
     private func answer(_ message: ControlRuntimeMessage, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
         guard case .request(let envelope) = message.body else {
             // The claim was made, so the owner turn may have run: the answer is possibly sent, never not sent.
@@ -381,7 +382,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
 
     /// A page answer. Each closed source is one closed reply. A failed read is a closed internal failure, not a corrupt transport,
     /// so the client receives a stable wire error. A capture that cannot fit the frame is refused the same way, never truncated.
-    @MainActor
+    @RuntimeActor
     private func pageOutcome(_ page: ControlPageRequest, correlation: ControlRequestID, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
         switch core.pageSource(page) {
         case .changedIncarnation:
@@ -410,7 +411,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     private func pack(
         _ rows: ControlProjectedRows,
         offset: Int,
@@ -444,7 +445,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     private func replyOutcome(
         _ body: ControlRuntimeBody,
         correlation: ControlRequestID,
@@ -456,7 +457,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
     /// Encodes one reply. An answer that the caller's frame cannot hold is replaced by one `frameTooLarge` failure. A failure is never
     /// replaced, since its size is its own answer, and a failure that does not fit ends the reply as a disconnect. Any other encoding
     /// invalidity is an invalid reply.
-    @MainActor
+    @RuntimeActor
     private func finishReply(_ message: ControlRuntimeMessage, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
         do {
             return answered(try ControlRuntimeCodec.encodeFrame(message, limits: limits))
@@ -469,7 +470,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
     }
 
     /// The one failure that stands in for an answer the caller's frame cannot hold. It is encoded once, with no further fallback.
-    @MainActor
+    @RuntimeActor
     private func oversizedReply(correlation: ControlRequestID, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
         let failure = ControlRuntimeMessage(correlation: correlation, body: .response(.failure(.frameTooLarge)))
         do {
@@ -482,7 +483,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
     }
 
     /// The reply for one encoded answer. A lost reply is dropped after encoding, so the answer was real and only its delivery failed.
-    @MainActor
+    @RuntimeActor
     private func answered(_ bytes: Data) -> RuntimeWaitOutcome {
         if faults.consumeLostReply() {
             return .failed(.sent(.disconnected))
@@ -497,7 +498,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
 
     /// A snapshot reply. A snapshot that does not fit the caller's frame is a closed `frameTooLarge` answer, and any other encoding
     /// failure is a closed `internalFailure`. Neither is reported as a disconnect or as an invalid reply.
-    @MainActor
+    @RuntimeActor
     private func snapshotOutcome(_ snapshot: ControlRuntimeSnapshot, correlation: ControlRequestID, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
         let message = ControlRuntimeMessage(correlation: correlation, body: .response(.snapshot(snapshot)))
         do {
@@ -512,7 +513,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
     /// The open's first frame, encoded. A failure after a subscriber was registered releases that subscriber. A baseline that does
     /// not fit the caller's frame is refused as a typed `frameTooLarge` first frame, so the subscriber is released and nothing is
     /// reported as an invalid reply.
-    @MainActor
+    @RuntimeActor
     private func openOutcome(
         _ body: ControlRuntimeBody,
         correlation: ControlRequestID,
@@ -548,7 +549,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
     }
 
     /// A refused open's first frame. It registers nothing, so it carries no subscriber.
-    @MainActor
+    @RuntimeActor
     private func refusedOpen(_ code: ControlRuntimeErrorCode, correlation: ControlRequestID, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
         do {
             let refusal = try ControlRuntimeCodec.encodeFrame(
@@ -567,7 +568,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
     /// installed registration is covered by a part that holds the reservation. A resolution that lands before the park
     /// queues the cleanup, and the part holds until that cleanup has run. `afterRegistration` exists so a test can land a
     /// resolution in exactly that window.
-    @MainActor
+    @RuntimeActor
     func installRegistration(
         _ subscriber: Int,
         token: RuntimeWaiterToken,
@@ -659,7 +660,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
     /// One owner round of a pull. The frame is peeked and encoded first, so the cursor moves only when this gate's finish
     /// wins. A pull with nothing ready parks its registration, and it reports nothing, so the caller's wait stays open.
     /// A stream end is terminal: the handle releases and the subscription leaves the service in this same owner turn.
-    @MainActor
+    @RuntimeActor
     private func pullOnce(_ handle: RuntimeStreamHandle, limits: ControlFrameLimits, gate: RuntimeWaitGate) -> RuntimeWaitOutcome? {
         guard let subscriber = handle.subscriberID else {
             return .failed(.sent(.disconnected))
@@ -710,7 +711,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     private func fits(_ frame: ControlRuntimeFrame, correlation: ControlRequestID, limits: ControlFrameLimits) -> Bool {
         do {
             _ = try ControlRuntimeCodec.encodeFrame(ControlRuntimeMessage(correlation: correlation, body: .frame(frame)), limits: limits)
