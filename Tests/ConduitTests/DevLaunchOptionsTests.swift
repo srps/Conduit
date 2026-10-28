@@ -309,18 +309,23 @@ final class DevLaunchOptionsTests: XCTestCase {
         let helper = DevLaunch.session?.helper
         XCTAssertNotNil(helper, "the session keeps the fake helper it was built with")
 
-        await state.awaitLaunchRecovery()
+        // The shared host opens over the fakes and the framed clients reach readiness.
+        await state.opening?.value
+        XCTAssertEqual(state.phase, .ready)
+        await waitUntil("the observation is live") { state.runtime.isLive }
         state.installHelper()
         await waitUntil("the helper install reaches the fake") { helper?.installs == 1 }
         XCTAssertEqual(helper?.installs, 1)
-        await state.deliveries.drain()
+        XCTAssertTrue(DevLaunch.session?.machine.privilege.commands(matching: .setWebProxyEndpoint).isEmpty ?? false,
+                      "opening and installing applied nothing to the fake machine")
 
-        state.performTerminationCleanup()
-        await state.deliveries.drain()
-        await waitUntil("the runtime has shut down") {
-            state.runtimeSnapshot.runtimeStatus.state == .stopped
-                && state.runtimeSnapshot.dnsRunState == .stopped
+        // The client Quit, as AppKit's terminate-later asks for it, ends the host.
+        XCTAssertTrue(state.beginQuit())
+        let result = await state.finishQuit()
+        guard case .settled(.completed)? = result?.quit else {
+            return XCTFail("the client Quit completed: \(String(describing: result))")
         }
+        XCTAssertEqual(state.runtime.observation, .ended)
     }
 
     /// A config alias into the installed app is refused by the state root before

@@ -170,6 +170,30 @@ adds the shared host's guarded startup audit sink before activation, with actual
 framed-client tests in [RuntimeHostAuditTests.swift](../../Tests/ConduitTests/RuntimeHostAuditTests.swift).
 The legacy app construction remains until the single cut.
 
+### Activation compatibility clarification (2026-10-27)
+
+The app now reaches the selected preparation-time replacement rule (0037):
+enabling DNS while a proxy Start is applying can supersede that Start and tear
+down its partial resources. The app must report the interruption and require an
+explicit retry, rather than follow the newer input. This differs from the
+legacy app path; the owner has been notified, and the integration witness and
+release acceptance remain due. See 0037's compatibility clarification.
+
+### AppState activation implementation checkpoint (2026-10-28)
+
+[`AppComposition`](../../Sources/Conduit/App/AppComposition.swift) now opens the
+shared host with explicit effects. [`AppState`](../../Sources/Conduit/App/AppState.swift)
+uses the ordinary/private clients; its replaced runtime, reconciler, machine
+observer and direct configuration-writer paths are removed.
+[`RuntimeEditorLedger`](../../Sources/Conduit/App/RuntimeEditorLedger.swift) owns
+only draft/receipt authority, and
+[`RuntimeObserver`](../../Sources/Conduit/App/RuntimeObserver.swift) owns bounded
+client observation. The [activation checkpoint](../verification-appstate-activation-2026-10-28.md)
+records focused tests, executed guard witnesses and independent source review,
+with full/native/release gates separate. This implementation is under verification
+and unreleased. The complete RuntimeActor move remains unimplemented, so this
+record's overall implementation status remains partial.
+
 ## Open questions
 
 Complete the workflow freshness/private-editor observation API, preserving

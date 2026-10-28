@@ -272,7 +272,7 @@ struct UpstreamsSettingsView: View {
     /// The runtime row for a configured upstream. `ConnectionPool` keys the
     /// status by the upstream's own id, so two rows with the same name or
     /// endpoint still get their own traffic light.
-    private func liveStatus(for upstream: UpstreamProxy) -> UpstreamRuntimeStatus? {
+    private func liveStatus(for upstream: UpstreamProxy) -> UpstreamStatusDisplay? {
         runtime.upstreamStatuses.first { $0.id == upstream.id }
     }
 

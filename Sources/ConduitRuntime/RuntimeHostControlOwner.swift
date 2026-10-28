@@ -495,7 +495,7 @@ extension RuntimeHost: ControlCommandOwner {
         }
     }
 
-    /// The app's Test DNS probe of `port`, as `AppState` and the host's own DNS health timer run theirs: through the injected probe on a
+    /// The app's Test DNS probe of `port`, run as the host's own DNS health timer runs its probe: through the injected probe on a
     /// global queue, never on `platformWork`, so a probe waiting out its timeout cannot hold a Stop's or a quit's teardown there. One
     /// physical probe runs at a time. A request for the latest probe's port joins it, and one for another port runs after it, so each
     /// answer is for the port its request chose and the probes waiting are bounded by the service's ordinary capacity.

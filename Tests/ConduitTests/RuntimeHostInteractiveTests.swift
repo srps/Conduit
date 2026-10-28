@@ -619,6 +619,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         })
         // No grant is left for a companion: a later proxy-only Start finds DNS unstarted and configured, and starts it itself.
         let next = try await host.startProxy(conditionalDNS: true)
+        XCTAssertEqual(next.modules.proxy, .started)
         XCTAssertEqual(next.conditionalDNS, .started)
     }
 

@@ -16,8 +16,8 @@ final class PACPreviewTests: XCTestCase {
         try await super.tearDown()
     }
 
-    func testEmptyTargetIsRejectedBeforeFetching() throws {
-        let state = try launch()
+    func testEmptyTargetIsRejectedBeforeFetching() async throws {
+        let state = try await launch()
         // This file does not exist: a fetch-first implementation reports a
         // download failure instead of the actionable diagnostic setting.
         state.config.pacURL = harness!.stateDirectory.appendingPathComponent("missing.pac").absoluteString
@@ -43,8 +43,8 @@ final class PACPreviewTests: XCTestCase {
         XCTAssertEqual(restored.preferredBrowserTestURL, customized.preferredBrowserTestURL)
     }
 
-    func testInvalidTargetsAreRejectedWithoutCrashing() throws {
-        let state = try launch()
+    func testInvalidTargetsAreRejectedWithoutCrashing() async throws {
+        let state = try await launch()
         state.config.pacURL = "https://pac.example.test/proxy.pac"
         for target in ["   ", "example.com/path", "http://", "file:///tmp/test", "https://user:password@example.test/"] {
             state.appPreferences.preferredBrowserTestURL = target
@@ -55,7 +55,7 @@ final class PACPreviewTests: XCTestCase {
     }
 
     func testPreviewShowsChainAndCapturesTargetWithOneOperationInFlight() async throws {
-        let state = try launch(realPAC: true)
+        let state = try await launch(realPAC: true)
         try setScript("function FindProxyForURL(url, host) { return host == 'preview.test' ? 'PROXY proxy.test:8080; DIRECT' : 'DIRECT'; }", on: state)
         state.appPreferences.preferredBrowserTestURL = " https://preview.test/path "
         state.refreshPACResolutionPreview()
@@ -70,7 +70,7 @@ final class PACPreviewTests: XCTestCase {
     }
 
     func testInvalidScriptShowsFailureAndReleasesPreviewSlot() async throws {
-        let state = try launch(realPAC: true)
+        let state = try await launch(realPAC: true)
         try setScript("function FindProxyForURL( {", on: state)
         state.appPreferences.preferredBrowserTestURL = "https://preview.test/"
         state.refreshPACResolutionPreview()
@@ -87,11 +87,10 @@ final class PACPreviewTests: XCTestCase {
         XCTAssertEqual(state.pacPreviewMessage, "https://preview.test/: DIRECT")
     }
 
-    /// `realPAC` swaps the harness's refusing fake for the production CFNetwork
-    /// evaluator, which the runtime and the preview share. Its scenarios only
-    /// point `pacURL` at a script in the scratch directory, so nothing is fetched
-    /// from the network.
-    private func launch(realPAC: Bool = false) throws -> AppState {
+    /// `realPAC` swaps the harness's refusing fake for the CFNetwork evaluator. The preview runs the app's own evaluator on the draft;
+    /// the runtime routes through the host's. Its scenarios only point `pacURL` at a script in the scratch directory, so nothing is
+    /// fetched from the network. The app is ready before a draft is edited, so the opening's seed cannot replace it.
+    private func launch(realPAC: Bool = false) async throws -> AppState {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -99,7 +98,7 @@ final class PACPreviewTests: XCTestCase {
         let harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig())
         if realPAC { harness.pacEvaluator = CFPACEvaluator() }
         self.harness = harness
-        return harness.launch()
+        return await harness.ready()
     }
 
     private func setScript(_ script: String, on state: AppState) throws {

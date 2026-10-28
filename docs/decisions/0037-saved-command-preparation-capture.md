@@ -106,6 +106,22 @@ instead of generic success. The
 records the 125-history saved-Start model, its executed causal-prior guard,
 focused checks and workflow results.
 
+### Activation compatibility clarification (2026-10-27)
+
+The app activation exposes a concrete legacy difference already covered by this
+decision and 0035: enabling DNS while a proxy Start is still applying commits a
+new input and can supersede that unfinished proxy Start. Its partial resources
+are torn down; it does not silently rebind or retry. The user must explicitly
+Start again. The legacy AppState path could follow the later configuration.
+
+Independent review of the interim app activation confirmed this interpretation
+against the existing host lifecycle; the host policy was not changed by that
+activation. The owner was notified of this user-visible consequence. The app
+must explain the typed input_replaced result, and the actual-client witness
+must cover DNS progress, partial cleanup and no automatic proxy retry. Those
+integration checks remain under verification; this note records no new owner
+decision or completed release acceptance.
+
 ## Open questions
 
 The collection count/byte policy is selected in [0038](0038-bounded-runtime-collection-capture.md).

@@ -32,15 +32,18 @@ struct MenuBarLabel: View {
         }
     }
 
+    /// No state is claimed while the runtime is not observed: a stopped glyph would say the proxy is off.
     private var symbol: String {
-        MenuBarPresentation.menuBarSymbol(
+        guard runtime.isLive else { return "ellipsis.circle" }
+        return MenuBarPresentation.menuBarSymbol(
             state: runtime.runtimeStatus.state,
             directModeCause: runtime.directModeCause
         )
     }
 
     private var stateLine: String {
-        MenuBarPresentation.stateLine(
+        guard runtime.isLive else { return "status unavailable" }
+        return MenuBarPresentation.stateLine(
             state: runtime.runtimeStatus.state,
             directModeCause: runtime.directModeCause,
             activeUpstream: runtime.runtimeStatus.activeUpstream,
@@ -126,7 +129,7 @@ struct StatusBarView: View {
             Toggle("Proxy", isOn: proxySwitch)
                 .toggleStyle(.switch)
                 .labelsHidden()
-                .disabled(!MenuBarPresentation.proxySwitchIsEnabled(for: runtime.runtimeStatus.state))
+                .disabled(!appState.controlsEnabled || !MenuBarPresentation.proxySwitchIsEnabled(for: runtime.runtimeStatus.state))
                 .accessibilityLabel("Proxy, \(stateLine)")
                 .accessibilityHint(stateDetail)
         }
@@ -163,16 +166,17 @@ struct StatusBarView: View {
             // One element per row, like the header: "DNS forwarder,
             // 127.0.0.1:5353, Running, switch". A stopped module's detail is
             // just "off", which the value already says.
+            // Not observed, the row claims no state: no "off", no switch position.
             Toggle(title, isOn: Binding(
-                get: { MenuBarPresentation.moduleSwitchIsOn(for: state) },
+                get: { runtime.isLive && MenuBarPresentation.moduleSwitchIsOn(for: state) },
                 set: { _ in toggle() }
             ))
             .toggleStyle(.switch)
             .labelsHidden()
             .controlSize(.small)
-            .disabled(!MenuBarPresentation.moduleSwitchIsEnabled(for: state))
-            .accessibilityLabel(state == .stopped ? title : "\(title), \(detail)")
-            .accessibilityValue(state.title)
+            .disabled(!appState.controlsEnabled || !MenuBarPresentation.moduleSwitchIsEnabled(for: state))
+            .accessibilityLabel(state == .stopped && runtime.isLive ? title : "\(title), \(detail)")
+            .accessibilityValue(runtime.isLive ? state.title : "Unknown")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
@@ -238,7 +242,7 @@ struct StatusBarView: View {
 
     /// The upstream carrying traffic, matched by endpoint. Nil in direct mode
     /// and whenever the runtime has not picked one.
-    private var activeUpstreamStatus: UpstreamRuntimeStatus? {
+    private var activeUpstreamStatus: UpstreamStatusDisplay? {
         guard !runtime.directMode, let endpoint = runtime.runtimeStatus.activeUpstream else { return nil }
         return runtime.upstreamStatuses.first { $0.endpoint == endpoint }
     }
@@ -253,7 +257,7 @@ struct StatusBarView: View {
         )
     }
 
-    private func upstreamDetail(for status: UpstreamRuntimeStatus) -> String {
+    private func upstreamDetail(for status: UpstreamStatusDisplay) -> String {
         switch status.circuitState {
         case .open:
             if let openUntil = status.openUntil {
@@ -274,7 +278,7 @@ struct StatusBarView: View {
         VStack(alignment: .leading, spacing: 0) {
             commandRow("Open Conduit…", shortcut: "⌘0") { openApp(on: .overview) }
             commandRow("Restart Proxy") { appState.restartProxy() }
-                .disabled(!MenuBarPresentation.canRestartProxy(for: runtime.runtimeStatus.state))
+                .disabled(!appState.controlsEnabled || !MenuBarPresentation.canRestartProxy(for: runtime.runtimeStatus.state))
             commandRow("Copy Diagnostics") { copyDiagnostics() }
             if appState.updateStatus.availability == .available {
                 commandRow("Check for Updates…") { appState.checkForUpdates() }
@@ -314,7 +318,10 @@ struct StatusBarView: View {
     // MARK: - Derived state
 
     private var stateLine: String {
-        MenuBarPresentation.stateLine(
+        if let unavailable = RuntimeStatusText.unavailable(phase: appState.phase, observation: runtime.observation) {
+            return unavailable
+        }
+        return MenuBarPresentation.stateLine(
             state: runtime.runtimeStatus.state,
             directModeCause: runtime.directModeCause,
             activeUpstream: MenuBarPresentation.displayName(
@@ -338,16 +345,18 @@ struct StatusBarView: View {
         MenuBarPresentation.activityLine(
             requests: runtime.requestsHandled,
             errors: runtime.failedRequests,
-            active: runtime.activeConnections.count
+            active: runtime.activeConnectionCount
         )
     }
 
     private var dnsEndpoint: String {
+        guard runtime.isLive else { return "unknown" }
         guard runtime.dnsRunState != .stopped else { return "off" }
         return MenuBarPresentation.endpoint(host: runtime.bindings.dnsHost, port: runtime.bindings.dnsPort)
     }
 
     private var tunnelsDetail: String {
+        guard runtime.isLive else { return "unknown" }
         guard runtime.tunnelsRunState != .stopped else { return "off" }
         let count = runtime.tunnelActiveCount
         return "\(count) active"
@@ -379,7 +388,7 @@ struct StatusBarView: View {
             socksEndpoint: MenuBarPresentation.endpoint(host: runtime.bindings.socksHost, port: runtime.bindings.socksPort),
             requestsHandled: runtime.requestsHandled,
             failedRequests: runtime.failedRequests,
-            activeConnectionCount: runtime.activeConnections.count,
+            activeConnectionCount: runtime.activeConnectionCount,
             directModeCause: runtime.directModeCause,
             vpnLabel: VPNStatusFormatter.label(for: runtime.vpnState, interfaceName: runtime.vpnInterfaceName)
         )

@@ -22,7 +22,12 @@ struct GeneralSettingsView: View {
             }
 
             Section {
-                Toggle("Launch at login", isOn: $appState.platformConfig.launchAtLogin)
+                // Administration, not a draft edit: the flag is written alone and the login item follows only a verified write.
+                Toggle("Launch at login", isOn: Binding(
+                    get: { appState.platformConfig.launchAtLogin },
+                    set: { appState.setLaunchAtLogin($0) }
+                ))
+                .disabled(!appState.controlsEnabled)
                 Toggle("Keep window on top", isOn: $appState.appPreferences.floatingWindowEnabled)
                     .help("Float the Conduit window above other windows, for demos and screen sharing.")
                 Toggle(isOn: $appState.appPreferences.globalShortcutEnabled) {

@@ -1,8 +1,26 @@
 # Changelog
 
-All notable changes to Conduit. Released versions come first; below them is the
-pre-release development history that precedes the first public `0.1`, grouped by theme.
+All notable changes to Conduit. Unreleased work appears first, followed by
+released versions. The early development history before the first public `0.1`
+is grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
+
+## Unreleased
+
+The runtime architecture work is under verification; 0.5.8 remains the released
+version.
+
+### Changed
+
+- Start and Restart use saved settings captured once when preparation begins.
+  A later committed settings change can interrupt an unfinished Start. For
+  example, enabling DNS while a proxy Start is applying can supersede that
+  Start and clear its partial resources; explicitly Start again. Conduit must
+  report the interruption and never retry it automatically. This replaces the
+  legacy app's ability to follow the newer input during that Start.
+- In-process Quit has one ten-second total for final frozen saves and cleanup
+  confirmation, returning earlier when finished. Final saves apply no new
+  settings; unresolved cleanup retains its recovery records.
 
 ## 0.5.8
 

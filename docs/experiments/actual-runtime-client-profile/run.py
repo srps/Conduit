@@ -6,7 +6,7 @@ The probe links the existing Release objects with `-package-name conduit` (the l
 runner plus ConduitRuntime, PlatformMac, ProxyAuth and ProxyPAC), so it widens no product access and adds no product,
 dependency or test hook. Each mode runs in a fresh process under its own owned scratch root, with a bounded deadline and a
 bounded output, and prints numeric NDJSON only. The runner refuses any string value that is not a short fixed label.
-Every host mode runs at the probe's one measured CANDIDATE profile, which is not a shipping default or an owner selection.
+Every host mode consumes RuntimeServiceProfile.inProcessApp and compares it to independent codec-derived sizing. The client Quit mode uses the selected ten-second total (0039).
 """
 import argparse
 import hashlib

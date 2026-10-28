@@ -13,6 +13,9 @@ struct OverviewView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                if let unavailable = RuntimeStatusText.unavailable(phase: appState.phase, observation: runtime.observation) {
+                    statusBanner(unavailable)
+                }
                 modules
                 routeCard
                 if showsTelemetry {
@@ -21,7 +24,7 @@ struct OverviewView: View {
                 if !runtime.upstreamStatuses.isEmpty {
                     upstreamsCard
                 }
-                if !appState.activationPreflight.summary.isEmpty {
+                if !preflightSummary.isEmpty {
                     preflightBanner
                 }
                 if let lastError = appState.lastErrorMessage {
@@ -43,6 +46,8 @@ struct OverviewView: View {
                 runState: proxyRunState,
                 errorMessage: runtime.proxyError,
                 badge: authBadge,
+                enabled: appState.controlsEnabled,
+                observed: runtime.isLive,
                 toggle: { appState.toggleProxy() }
             )
             Divider()
@@ -51,6 +56,8 @@ struct OverviewView: View {
                 detail: dnsDetail,
                 runState: dnsRunState,
                 errorMessage: runtime.dnsError,
+                enabled: appState.controlsEnabled,
+                observed: runtime.isLive,
                 toggle: { appState.toggleDNS() }
             )
             Divider()
@@ -59,6 +66,8 @@ struct OverviewView: View {
                 detail: tunnelsDetail,
                 runState: tunnelsRunState,
                 errorMessage: runtime.tunnelsError,
+                enabled: appState.controlsEnabled,
+                observed: runtime.isLive,
                 toggle: { appState.toggleTunnels() }
             )
         }
@@ -152,9 +161,10 @@ struct OverviewView: View {
     /// Pure mapping from runtime state to the first chip's text.
     /// Implementation lives in `VPNStatusFormatter` so it's unit-testable
     /// without standing up a SwiftUI view tree.
+    /// The count is the snapshot's exact one. The stalled tunnels need the rows, which are read only while Connections is shown.
     private var activeConnectionsLabel: String {
         VPNStatusFormatter.activeConnectionsLabel(
-            active: runtime.activeConnections.count,
+            active: runtime.activeConnectionCount,
             stalled: VPNStatusFormatter.stalledTunnelCount(
                 vpnState: runtime.vpnState,
                 activeTunnelCount: runtime.activeConnections.filter { $0.tunnel }.count
@@ -199,13 +209,32 @@ struct OverviewView: View {
 
     // MARK: - Banners
 
+    private var preflightSummary: String {
+        appState.activationPreflight?.summary ?? ""
+    }
+
+    private func statusBanner(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "antenna.radiowaves.left.and.right.slash")
+                .foregroundStyle(.secondary)
+                .font(.callout)
+                .accessibilityHidden(true)
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
     private var preflightBanner: some View {
         HStack(spacing: 8) {
             Image(systemName: "lock.shield")
                 .foregroundStyle(.blue)
                 .font(.callout)
                 .accessibilityHidden(true)
-            Text(appState.activationPreflight.summary)
+            Text(preflightSummary)
                 .font(.callout)
                 .foregroundStyle(.secondary)
             Spacer(minLength: 0)
@@ -224,6 +253,11 @@ struct OverviewView: View {
                 .font(.callout)
                 .textSelection(.enabled)
             Spacer(minLength: 0)
+            if appState.configurationNeedsReload {
+                Button("Reload from Disk") { appState.reloadConfigurationFromDisk() }
+                    .controlSize(.small)
+                    .help("Discard unsaved Settings edits, read the configuration files again and apply them.")
+            }
             Button {
                 appState.lastErrorMessage = nil
             } label: {
@@ -242,10 +276,10 @@ struct OverviewView: View {
     private var actions: some View {
         HStack(spacing: 8) {
             Button("Restart Proxy") { appState.restartProxy() }
-                .disabled(!MenuBarPresentation.canRestartProxy(for: runtime.runtimeStatus.state))
+                .disabled(!appState.controlsEnabled || !MenuBarPresentation.canRestartProxy(for: runtime.runtimeStatus.state))
                 .help("Stop and start the proxy runtime to clear accumulated connections and errors.")
             Button("Test DNS") { appState.testDNS() }
-                .disabled(runtime.dnsRunState != .running)
+                .disabled(!appState.controlsEnabled || runtime.dnsRunState != .running)
             Button("Open Test URL") { appState.revealHealthTestURL() }
             Button("Copy Diagnostics") { copyDiagnostics() }
             Spacer()
@@ -264,7 +298,7 @@ struct OverviewView: View {
             socksEndpoint: MenuBarPresentation.endpoint(host: runtime.bindings.socksHost, port: runtime.bindings.socksPort),
             requestsHandled: runtime.requestsHandled,
             failedRequests: runtime.failedRequests,
-            activeConnectionCount: runtime.activeConnections.count,
+            activeConnectionCount: runtime.activeConnectionCount,
             directModeCause: runtime.directModeCause,
             vpnLabel: VPNStatusFormatter.label(for: runtime.vpnState, interfaceName: runtime.vpnInterfaceName)
         )
@@ -299,6 +333,7 @@ struct OverviewView: View {
     }
 
     private var proxyDetail: String {
+        guard runtime.isLive else { return "Status unavailable" }
         guard proxyRunState != .stopped else { return "Stopped" }
         let host = runtime.bindings.proxyHost ?? appState.config.effectiveClientHost
         let port = runtime.bindings.proxyPort ?? appState.config.localPort
@@ -325,6 +360,7 @@ struct OverviewView: View {
     }
 
     private var dnsDetail: String {
+        guard runtime.isLive else { return "Status unavailable" }
         guard runtime.dnsRunState != .stopped else { return "Stopped" }
         let host = runtime.bindings.dnsHost ?? ProxyConfig.dnsForwarderHost
         let port = runtime.bindings.dnsPort ?? appState.config.dnsForwarderPort
@@ -335,14 +371,17 @@ struct OverviewView: View {
     }
 
     private var tunnelsDetail: String {
+        guard runtime.isLive else { return "Status unavailable" }
         guard runtime.tunnelsRunState != .stopped else { return "Stopped" }
-        let count = runtime.bindings.tunnels.count
+        let count = runtime.bindings.tunnelCount
         var parts = ["\(count) definition\(count == 1 ? "" : "s")", "\(runtime.tunnelSessionCount) session\(runtime.tunnelSessionCount == 1 ? "" : "s")"]
         switch runtime.tunnelDNSOverrideStatus {
         case .active(let hostnames):
             parts.append("DNS override \(hostnames.count) host\(hostnames.count == 1 ? "" : "s")")
         case .partial(let succeeded, let failed):
             parts.append("DNS override \(succeeded.count) active, \(failed.count) failed")
+        case .hostsNotRead(let hostCount):
+            parts.append("DNS override \(hostCount) host\(hostCount == 1 ? "" : "s")")
         case .unavailable:
             parts.append("DNS override unavailable")
         case .notNeeded:
@@ -398,7 +437,13 @@ struct ModuleRowView: View {
     let runState: ModuleRunState
     var errorMessage: String? = nil
     var badge: (text: String, color: Color, help: String)? = nil
+    /// False while the runtime is opening, refused or not observed: the switch cannot act on a state it does not know.
+    var enabled = true
+    /// False while the runtime is not observed: the row claims no state, so it never says a module it cannot see is stopped.
+    var observed = true
     let toggle: () -> Void
+
+    private var stateTitle: String { observed ? runState.title : "Unknown" }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -419,16 +464,16 @@ struct ModuleRowView: View {
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 8)
-                StatusPill(text: runState.title, color: statusColor)
+                StatusPill(text: stateTitle, color: observed ? statusColor : .secondary)
                 Toggle(title, isOn: Binding(
-                    get: { MenuBarPresentation.moduleSwitchIsOn(for: runState) },
+                    get: { observed && MenuBarPresentation.moduleSwitchIsOn(for: runState) },
                     set: { _ in toggle() }
                 ))
                 .toggleStyle(.switch)
                 .labelsHidden()
-                .disabled(!MenuBarPresentation.moduleSwitchIsEnabled(for: runState))
+                .disabled(!enabled || !observed || !MenuBarPresentation.moduleSwitchIsEnabled(for: runState))
                 .accessibilityLabel(title)
-                .accessibilityValue(runState.title)
+                .accessibilityValue(stateTitle)
             }
             if let errorMessage, runState == .failed || runState == .warning {
                 Text(errorMessage)
@@ -456,7 +501,7 @@ struct ModuleRowView: View {
 /// consecutive failures, retry window, circuit state. Shared by Overview and
 /// the live strip at the top of Upstreams & Routing.
 struct UpstreamStatusRow: View {
-    let status: UpstreamRuntimeStatus
+    let status: UpstreamStatusDisplay
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {

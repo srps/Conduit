@@ -1,4 +1,4 @@
-// Actual Conduit client/host resource probe. NOT product code, NOT a shipping profile, NOT a benchmark product.
+// Actual Conduit client/host resource probe. Not product code or a benchmark product. Host modes consume the shipping profile.
 // It links the existing Release objects with `-package-name conduit` and drives the actual `RuntimeHost.open` facade over
 // explicit fakes (the `pm-sim` runtime-host-effects composition) and an owned scratch state root, then the actual in-memory
 // framed client and private editor client from `RuntimeHost.makeInMemoryControlClient`. No production adapter default,
@@ -1492,10 +1492,10 @@ final class HostRun {
 
     func compose(limits: RuntimeServiceLimits) throws {
         guard let host else { throw ProbeError("noHost") }
-        clients = try host.makeInMemoryControlClient(
-            limits: limits, clientFrameLimits: try ControlFrameLimits(maxFrameBytes: CandidateProfile.maxReplyBytes),
-            wireBudgetCap: .seconds(30)
-        )
+        let profile = try RuntimeServiceProfile.inProcessApp()
+        // Keep independent codec sizing: a changed shipping term must not silently replace the measured candidate.
+        guard profile.limits == limits else { throw ProbeError("shippingProfileMismatch") }
+        clients = try host.makeInMemoryControlClient(profile: profile)
     }
 
     var control: any RuntimeClient { clients!.control }
@@ -2754,7 +2754,7 @@ func runClientQuit(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
             budget: try ControlWireBudget(60_000), preferencesBaseline: baselines.preferences
         )
     }
-    let total: Duration = .seconds(30)
+    let total: Duration = .seconds(10) // Decision 0039: one total, also pinned by the app composition tests.
     let quitStart = ContinuousClock.now
     var quitting: Task<RuntimeClientQuitResult, Never>? = Task.detached {
         await RuntimeClientQuit.quit(

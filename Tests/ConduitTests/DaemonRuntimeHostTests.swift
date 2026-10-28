@@ -2769,13 +2769,15 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// A stop, then a newer start, while the first start is held before its bind. The newer start has an unchanged config, so it queues no
     /// reconcile pass and does not wait on the older start's lane token. Its listener is published, and then the older start is released.
     /// That older start is superseded, so it binds nothing and cleans up nothing: the newer listener must survive, and the stop must not have
-    /// closed the newer start's listener.
+    /// closed the newer start's listener. The system proxy is managed, and the surface names the configured port, so the port is a free one
+    /// the newer listener binds: the stale start must not clear the newer start's surface either.
     func testAStaleStartReleasedAfterANewerStartLeavesTheNewerListenerRunning() async throws {
+        let configured = try reserveLoopbackPort()
         var config = GenericDefaults.shared.makeConfig()
-        config.localPort = 0
+        config.localPort = configured
         config.dnsForwarderPort = 0
         config.pacURL = "https://pac.example.test/held.pac"
-        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
         let fetch = HeldPACFetch()
         harness.pacEvaluator = fetch
         let host = try await harness.makeHost()
@@ -2804,12 +2806,22 @@ final class DaemonRuntimeHostTests: XCTestCase {
         }
         let listenerPort = host.orchestrator.snapshot.bindings.proxyPort
         XCTAssertNotNil(listenerPort, "the newer start binds a listener")
+        XCTAssertEqual(listenerPort, configured, "on the configured port")
         await assertSuperseded(older, "the stop and the newer start overtook the older start")
 
         XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running, "the released stale start does not overwrite the newer one")
         XCTAssertEqual(host.orchestrator.snapshot.bindings.proxyPort, listenerPort, "the stale start neither binds nor closes the newer listener")
+        // Every lane is idle, so no platform work of either start is still out when the machine is read.
+        await host.awaitLifecycleIdle()
+        XCTAssertTrue(host.lanesIdle)
+        XCTAssertEqual(harness.wifi.webProxy, FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: String(configured)),
+                       "the newer start's system proxy survives the stale start, and names its listener")
+        XCTAssertFalse(harness.journal.knowsSurfaceIsIdle(.systemProxy), "the journal holds the prior state the newer start captured")
         await host.stopRuntime()
+        await host.awaitLifecycleIdle()
         XCTAssertNil(host.orchestrator.snapshot.bindings.proxyPort, "a final stop closes the listener")
+        XCTAssertFalse(harness.wifi.routesThroughAProxy, "and clears the system proxy")
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy), "and releases the surface it restored")
     }
 
     /// The journal and machine a crashed run leaves: the prior proxy recorded and applied, and the machine still pointed at a dead loopback

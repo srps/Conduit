@@ -5,8 +5,8 @@ import ProxyKernel
 /// Pure presentation / decision helpers for the menu-bar-first control
 /// surface. Keeping these outside `StatusBarView` and `AppState` gives us
 /// cheap unit coverage for the user-visible labels, the status-item glyph,
-/// and the restart-state decisions without launching SwiftUI or constructing
-/// the full `AppState` runtime.
+/// and the restart-state decisions without launching SwiftUI or composing
+/// the app over a runtime host.
 package enum MenuBarPresentation {
 
     // MARK: - Status item glyph
@@ -130,7 +130,7 @@ package enum MenuBarPresentation {
 
     /// `activeUpstream` is an endpoint ("host:port" or "DIRECT"); the user
     /// named the upstream, so show the name when the runtime knows it.
-    package static func displayName(forActiveUpstream endpoint: String?, statuses: [UpstreamRuntimeStatus]) -> String? {
+    static func displayName(forActiveUpstream endpoint: String?, statuses: [UpstreamStatusDisplay]) -> String? {
         guard let endpoint else { return nil }
         if let match = statuses.first(where: { $0.endpoint == endpoint }), !match.name.isEmpty {
             return match.name

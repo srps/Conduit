@@ -2,7 +2,7 @@
 
 - Date: 2026-10-27
 - Decision: accepted (owner, 2026-10-27, #186: selected “10 seconds total (Recommended)”)
-- Implementation: planned
+- Implementation: implemented
 - Validation: pending
 - Supersedes: none
 - Superseded by: none
@@ -67,10 +67,21 @@ wait; machine cleanup validation remains separate from fake timing.
 The existing [client Quit routine](../../Sources/ConduitShared/PrivateConfiguration/RuntimeClientQuit.swift)
 and [host flush window](../../Sources/ConduitRuntime/RuntimeQuitFlush.swift) accept
 one explicit total and distinguish deadline outcome from physical quiescence.
-Shipping composition must now consume the selected ten-second total; the
-existing experimental thirty-second probe is not evidence for that composition.
+[`AppTiming.quitTotal`](../../Sources/Conduit/App/AppComposition.swift) now supplies
+ten seconds to the app's one Quit path. [`AppState`](../../Sources/Conduit/App/AppState.swift)
+fences synchronously and freezes final intent once; [`ConduitAppDelegate`](../../Sources/Conduit/App/AppDelegate.swift)
+uses AppKit terminate-later and replies after the bounded client routine returns.
+[`RuntimeServiceShippingProfileTests`](../../Tests/ConduitTests/RuntimeServiceShippingProfileTests.swift)
+pins the selected value, and [`AppStateHarnessTests`](../../Tests/ConduitTests/AppStateHarnessTests.swift)
+cover repeated Quit, expiry, late opening, final save order and refusal. The
+focused activation checkpoint passes 295 tests (two existing skips); full workflow,
+fresh selected-total measurements and native acceptance remain due. The historical
+thirty-second probe does not establish the shipping composition.
+
+Does not prove: native AppKit termination timing, real-helper teardown latency,
+or release readiness. Those checks remain separate from focused fake-effect tests.
 
 ## Open questions
 
-Implement the selected total in the production app composition and verify the
-actual client and AppKit path. Native and real-machine checks remain due.
+Verify the selected-total actual-client probe and native AppKit path on the
+frozen activation. Real-machine cleanup timing remains due.

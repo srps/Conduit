@@ -270,7 +270,7 @@ extension RuntimeHost {
     }
 
     /// Whether the effect still holds `module`'s lane. Once it does not, a newer Start or Stop of the module owns it, and the effect says so
-    /// with one `lifecycle.superseded` (twin of `AppState.isCurrent`).
+    /// with one `lifecycle.superseded`.
     func holdsLane(_ effect: RuntimeLifecycleEffect, _ module: ControlModule) -> Bool {
         let token = effect.token(module)
         guard token.isSuperseded else { return true }
@@ -588,7 +588,7 @@ extension RuntimeHost {
     /// The DNS module's physical start under `effect`'s DNS token, the explicit member's and the companion's alike: the capture of the
     /// prior DNS servers, the forwarder, then the system DNS pointed at it and the intercept files, once the forwarder and the transparent
     /// proxy they point clients at are both listening, then the health timer. A forwarder that does not come up gives the interfaces back
-    /// what was captured, as `AppState.startDNS` does, withdraws the intercept files and starts no health timer.
+    /// what was captured, withdraws the intercept files and starts no health timer.
     ///
     /// `stands` is the caller's authority over its verified pair: the group's DNS member and its strict input for an explicit Start, the
     /// companion's conditional permission and its parent's strict input for a companion (decisions 0036 and 0037). It is checked, with the
@@ -660,7 +660,7 @@ extension RuntimeHost {
         if let stop = current() { return stop }
         guard forwarderRunning else { return .failed }
         if platform.manageSystemDNS {
-            // Whether or not `apply` succeeded — see `AppState.startDNS`.
+            // Whether or not `apply` succeeded: a refused or failed apply is what the probe's relay restart exists to retry.
             startDNSHealthTimer(forwarderPort: forwarderPort)
         }
         return .running
@@ -815,7 +815,7 @@ extension RuntimeHost {
         let logger = self.logger
 
         // Each surface is cleared when its flag is on *or* when the journal
-        // says the surface is ours, as in `AppState.stopProxy`. The flag alone
+        // says the surface is ours. The flag alone
         // skipped the clear whenever the switch had gone off since the
         // surface was applied; the reload reconciles that flip now, so what
         // is left for the guard is the residue: a clear the machine refused,
@@ -970,9 +970,8 @@ extension RuntimeHost {
     /// may the caller release the root's authority. It returns and never exits; a caller that ends the process calls `terminalExit` after
     /// it, as `stopRuntime(exitAfterStop: true)` does. A second call joins the first.
     ///
-    /// It joins launch recovery first, and this is where the daemon parts from the app: `AppState.performTerminationCleanup` does not join
-    /// because `applicationWillTerminate` is synchronous. `SIGTERM` reaches this through a `Task`, so the join leaves the main actor free,
-    /// and the stop's clears never overlap recovery's.
+    /// It joins launch recovery first. Every caller reaches it asynchronously (the app's terminate-later Quit, the daemon's `SIGTERM`
+    /// through a `Task`), so the join leaves the main actor free, and the stop's clears never overlap recovery's.
     ///
     /// `reservingFlushUntil` is the quit's one total deadline (`RuntimeQuitFlush`): it opens the reserved flush window for `flushing` until
     /// then, and the quit waits for the flushes it admits, or for the deadline, before it joins store work and confirms the flush of

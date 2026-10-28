@@ -77,6 +77,17 @@ final class HeldCall: @unchecked Sendable {
         }
     }
 
+    /// `waitUntilReached`, bounded: false when the armed call has not arrived within `limit`, so a call that never comes fails the
+    /// scenario instead of hanging it.
+    func waitUntilReached(within limit: Duration) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: limit)
+        while ContinuousClock.now < deadline {
+            if lock.withLock({ reached }) { return true }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return lock.withLock { reached }
+    }
+
     /// Blocks the calling thread until the armed call has arrived. For tests
     /// that drive a manager from threads of their own, never from the main
     /// actor while the held work needs it.

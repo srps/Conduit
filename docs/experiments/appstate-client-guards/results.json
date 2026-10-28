@@ -1,0 +1,402 @@
+{
+  "date": "2026-10-28",
+  "review_snapshot_sha256": "e7e85f3b74dc02937c8e36ec6c8c824e7ac881f2ce9b4bfcfc5f6590905378c1",
+  "production_sources": {
+    "Sources/Conduit/App/RuntimeEditorLedger.swift": "bc6ce1e7113ab56a69836e7e2ca4ec9d448b937d2bf69c39309d8f384b09b33b",
+    "Sources/Conduit/App/RuntimeEditorSession.swift": "8ccdd3023feabab5d092ca7065564254a2dc34f2e12aafcc4c80c416f1f7df78",
+    "Sources/Conduit/App/RuntimeObserver.swift": "480d5f20fa40a27def42c0b3f9e056b104c2ae022ebf1d77f6e4f0dd1f402b11",
+    "Sources/Conduit/App/AppState.swift": "a8ce22535c9b27e966c2c390fc5d586c0be0317734f1921bef52a8935155b1c4"
+  },
+  "executions": [
+    {
+      "group": "editor-model",
+      "restored": true,
+      "ledger_sha256": "bc6ce1e7113ab56a69836e7e2ca4ec9d448b937d2bf69c39309d8f384b09b33b",
+      "error": null,
+      "checks": [
+        {
+          "label": "baseline",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateEditorModelTests.testEvery"
+          ],
+          "exit": 0,
+          "seconds": 7.579,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 4
+        },
+        {
+          "label": "G1-restore-lost-authority",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateEditorModelTests.testEvery"
+          ],
+          "exit": 1,
+          "seconds": 7.466,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/AppStateEditorModelTests.swift:147: error: -[ConduitTests.AppStateEditorModelTests testEveryBoundedHistoryKeepsTheCausalAuthorityRules] : XCTAssertNil failed: \"PrivateBaseline(runtime v2 in C9ABBEF4-76AD-4C78-AEF3-154C6E4C720A)\" - authority kept over an unknown own write: edit,submit,sendStop,deliverOldestLost,settleHost",
+          "test_case_log_markers": 4
+        },
+        {
+          "label": "G3-drop-own-explainable-mismatch",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateEditorModelTests.testEvery"
+          ],
+          "exit": 1,
+          "seconds": 8.619,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/AppStateEditorModelTests.swift:174: error: -[ConduitTests.AppStateEditorModelTests testEveryBoundedHistoryKeepsTheCausalAuthorityRules] : XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(2)\") - own authority lost or behind: sendStart,sendStop,edit,deliverOldest,edit,execute,edit,submit,settleHost,deliverNewest",
+          "test_case_log_markers": 4
+        },
+        {
+          "label": "G5-keep-conflicting-or-unknown-authority",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateEditorModelTests.testEvery"
+          ],
+          "exit": -15,
+          "seconds": 6.761,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/AppStateEditorModelTests.swift:147: error: -[ConduitTests.AppStateEditorModelTests testEveryBoundedHistoryKeepsTheCausalAuthorityRules] : XCTAssertNil failed: \"PrivateBaseline(runtime v1 in 54A0D163-B482-4126-AEB2-7A8B1F78BED0)\" - authority kept over an unknown own write: edit,edit,edit,submit,settleConflict",
+          "test_case_log_markers": 1
+        },
+        {
+          "label": "G13-keep-unexplained-mismatch",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateEditorModelTests.testEvery"
+          ],
+          "exit": 1,
+          "seconds": 7.602,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/AppStateEditorModelTests.swift:174: error: -[ConduitTests.AppStateEditorModelTests testEveryBoundedHistoryKeepsTheCausalAuthorityRules] : XCTAssertTrue failed - a mismatch left held: sendStart,sendStart,foreignWrite,deliverOldest,edit,deliverOldest,sendStart,submit,settleHost,sendStart,deliverNewest,deliverOldest",
+          "test_case_log_markers": 4
+        },
+        {
+          "label": "G14-keep-stranded-chain",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateEditorModelTests.testEvery"
+          ],
+          "exit": -15,
+          "seconds": 6.615,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/AppStateEditorModelTests.swift:147: error: -[ConduitTests.AppStateEditorModelTests testEveryBoundedHistoryKeepsTheCausalAuthorityRules] : XCTAssertTrue failed - a chained write left stranded: edit,foreignWrite,sendStop,execute,deliverOldest",
+          "test_case_log_markers": 1
+        },
+        {
+          "label": "restored",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateEditorModelTests.testEvery"
+          ],
+          "exit": 0,
+          "seconds": 7.308,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 4
+        }
+      ]
+    },
+    {
+      "group": "not-admitted",
+      "restored": true,
+      "ledger_sha256": "bc6ce1e7113ab56a69836e7e2ca4ec9d448b937d2bf69c39309d8f384b09b33b",
+      "error": null,
+      "checks": [
+        {
+          "label": "baseline",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateEditorModelTests.testEvery"
+          ],
+          "exit": 0,
+          "seconds": 6.954,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 4
+        },
+        {
+          "label": "not-admitted-stranded-state",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateEditorModelTests.testEvery"
+          ],
+          "exit": 1,
+          "seconds": 9.267,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/AppStateEditorModelTests.swift:174: error: -[ConduitTests.AppStateEditorModelTests testEveryBoundedHistoryKeepsTheCausalAuthorityRules] : XCTAssertTrue failed - a mismatch left held: edit,sendStop,foreignWrite,submit,settleHost,execute,takeExplained,submit,deliverOldest,notAdmitted",
+          "test_case_log_markers": 4
+        },
+        {
+          "label": "restored",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateEditorModelTests.testEvery"
+          ],
+          "exit": 0,
+          "seconds": 6.934,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 4
+        }
+      ]
+    },
+    {
+      "group": "session-resubmit",
+      "restored": true,
+      "ledger_sha256": "8ccdd3023feabab5d092ca7065564254a2dc34f2e12aafcc4c80c416f1f7df78",
+      "error": null,
+      "checks": [
+        {
+          "label": "baseline",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "RuntimeEditorSessionChainTests"
+          ],
+          "exit": 0,
+          "seconds": 2.779,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        },
+        {
+          "label": "G21-no-post-settle-resubmit",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "RuntimeEditorSessionChainTests"
+          ],
+          "exit": 1,
+          "seconds": 7.441,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/AppStateEditorModelTests.swift:894: error: -[ConduitTests.RuntimeEditorSessionChainTests testAnOwnStopsWriteChainedBeforeTheMismatchReceiptSendsTheRefusedDraftOnceAndNoLaterEdit] : XCTAssertEqual failed: (\"1\") is not equal to (\"2\") - the refused draft went again once",
+          "test_case_log_markers": 1
+        },
+        {
+          "label": "restored",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "RuntimeEditorSessionChainTests"
+          ],
+          "exit": 0,
+          "seconds": 5.853,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        }
+      ]
+    },
+    {
+      "group": "pending",
+      "restored": true,
+      "ledger_sha256": "480d5f20fa40a27def42c0b3f9e056b104c2ae022ebf1d77f6e4f0dd1f402b11",
+      "error": null,
+      "checks": [
+        {
+          "label": "baseline",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "RuntimeObserverSettlementTests.testAnOperationTheHostReportsPendingIsWaitedForPastTheRelookupBound"
+          ],
+          "exit": 0,
+          "seconds": 3.181,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        },
+        {
+          "label": "pending-counted-as-failed-lookup",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "RuntimeObserverSettlementTests.testAnOperationTheHostReportsPendingIsWaitedForPastTheRelookupBound"
+          ],
+          "exit": 1,
+          "seconds": 11.551,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeObserverSettlementTests.swift:224: error: -[ConduitTests.RuntimeObserverSettlementTests testAnOperationTheHostReportsPendingIsWaitedForPastTheRelookupBound] : XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(ConduitShared.ControlOperationOutcome.failed(ConduitShared.ControlFailureCode.effectFailed))\") - pending is the host still holding the operation, not a lookup that failed",
+          "test_case_log_markers": 2
+        },
+        {
+          "label": "restored",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "RuntimeObserverSettlementTests.testAnOperationTheHostReportsPendingIsWaitedForPastTheRelookupBound"
+          ],
+          "exit": 0,
+          "seconds": 8.607,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        }
+      ]
+    },
+    {
+      "group": "quit-baseline",
+      "restored": true,
+      "ledger_sha256": "bc6ce1e7113ab56a69836e7e2ca4ec9d448b937d2bf69c39309d8f384b09b33b",
+      "error": null,
+      "checks": [
+        {
+          "label": "baseline",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateEditorModelTests.testTheQuitsFinalSavePreconditionNeverOutranksAVerifiedReceiptOrRestoresAuthority"
+          ],
+          "exit": 0,
+          "seconds": 3.109,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        },
+        {
+          "label": "quit-drops-frozen-precondition",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateEditorModelTests.testTheQuitsFinalSavePreconditionNeverOutranksAVerifiedReceiptOrRestoresAuthority"
+          ],
+          "exit": 1,
+          "seconds": 8.888,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/AppStateEditorModelTests.swift:507: error: -[ConduitTests.AppStateEditorModelTests testTheQuitsFinalSavePreconditionNeverOutranksAVerifiedReceiptOrRestoresAuthority] : XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(PrivateBaseline(runtime v1 in 43402838-1EA3-4755-AEEE-CCEB74FF89AE))\") - the frozen precondition: settled(ConduitShared.ControlOperationOutcome.configurationSettled(ConduitShared.ControlConfigurationReceipt(requestID: 11054AC8-3806-480C-862B-932BF7A91944, incarnation: 115CC4DC-6FCD-4A06-9358-EAA55CDC58D3, runtime: ConduitShared.ControlComponentWrite(write: ConduitShared.ControlConfigWorkflowWrite.conflict, baseline: nil), platform: ConduitShared.ControlComponentWrite(write: ConduitShared.ControlConfigWorkflowWrite.unchanged, baseline: Optional(PrivateBaseline(platform v1 in 43402838-1EA3-4755-AEEE-CCEB74FF89AE))), committedDNSForwarderEnabled: nil, modules: [], applied: nil, conditionalDNS: nil, prior: nil)))",
+          "test_case_log_markers": 2
+        },
+        {
+          "label": "restored",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateEditorModelTests.testTheQuitsFinalSavePreconditionNeverOutranksAVerifiedReceiptOrRestoresAuthority"
+          ],
+          "exit": 0,
+          "seconds": 5.888,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        }
+      ]
+    },
+    {
+      "group": "dns-intent",
+      "restored": true,
+      "ledger_sha256": "a8ce22535c9b27e966c2c390fc5d586c0be0317734f1921bef52a8935155b1c4",
+      "error": null,
+      "checks": [
+        {
+          "label": "baseline",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateActivationParityTests.testTypingBackToTheCommittedPortRebindsNothingAndADNSToggleHoldsNoLaterPause"
+          ],
+          "exit": 0,
+          "seconds": 5.914,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        },
+        {
+          "label": "dns-bit-does-not-follow-host",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateActivationParityTests.testTypingBackToTheCommittedPortRebindsNothingAndADNSToggleHoldsNoLaterPause"
+          ],
+          "exit": 1,
+          "seconds": 35.817,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/AppStateActivationParityTests.swift:715: error: -[ConduitTests.AppStateActivationParityTests testTypingBackToTheCommittedPortRebindsNothingAndADNSToggleHoldsNoLaterPause] : XCTAssertEqual failed: (\"false\") is not equal to (\"true\") - the draft follows the host-owned bit",
+          "test_case_log_markers": 2
+        },
+        {
+          "label": "restored",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateActivationParityTests.testTypingBackToTheCommittedPortRebindsNothingAndADNSToggleHoldsNoLaterPause"
+          ],
+          "exit": 0,
+          "seconds": 10.465,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        }
+      ]
+    }
+  ],
+  "invalidated_runner_attempts": [
+    {
+      "path": "appstate-editor-model-guard-results",
+      "error": "[Errno 1] Operation not permitted",
+      "restored": true
+    },
+    {
+      "path": "appstate-editor-model-guard-results-diagnostic",
+      "error": "Traceback (most recent call last):\n  File \"/private/tmp/conduit-runtime-stage1-20261024/replay-editor-model-guards.py\", line 93, in <module>\n    result=verify(label,True);results.append(result)\n  File \"/private/tmp/conduit-runtime-stage1-20261024/replay-editor-model-guards.py\", line 62, in verify\n    os.killpg(process.pid,signal.SIGTERM)\n    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nPermissionError: [Errno 1] Operation not permitted\n",
+      "restored": true
+    }
+  ]
+}

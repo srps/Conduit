@@ -61,11 +61,22 @@ final class ConduitAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Quit is asynchronous (decision 0039): AppKit waits while the client Quit fences the runtime, flushes the final frozen saves and
+    /// confirms cleanup within its one total budget, and is answered when that returns. The main actor is never blocked; nothing
+    /// app-owned starts after the answer.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let appState else { return .terminateNow }
+        // A repeated request joins the quit already running: it starts no second quit and no new budget, and the one reply below
+        // answers AppKit once.
+        guard appState.beginQuit() else { return .terminateLater }
+        Task { @MainActor in
+            _ = await appState.finishQuit()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        // Before cleanup: an edit typed just before quitting is still
-        // waiting for its pause (#171).
-        appState?.persistPendingEditForTermination()
-        appState?.performTerminationCleanup()
         removeShortcutMonitors()
         if let windowCloseObserver {
             NotificationCenter.default.removeObserver(windowCloseObserver)

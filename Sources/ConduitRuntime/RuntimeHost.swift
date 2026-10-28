@@ -20,11 +20,10 @@ package struct RuntimeOpenRefusal: Error, Sendable {
     package let event: RuntimeEvent
 }
 
-/// Shared runtime host, run by `ConduitDaemon` (decision 0013).
-///
-/// This is the production-daemon counterpart to the runtime ownership that
-/// still lives in `AppState` as a temporary in-process twin. The host lives in
-/// `ConduitRuntime`, not the daemon executable, so the tests drive it over
+/// The one shared runtime host (decisions 0013 and 0031): the app hosts it in
+/// process behind its framed clients, and `ConduitDaemon` runs it. It alone owns
+/// the runtime's lifecycle, recovery and persistence. It lives in
+/// `ConduitRuntime`, not an executable, so the tests drive it over
 /// `FakeMachine`. It may link `PlatformMac` (Keychain, CFNetwork PAC,
 /// SCDynamicStore, helper XPC, networksetup wrappers) but imports no AppKit or
 /// SwiftUI.
@@ -78,8 +77,8 @@ package final class RuntimeHost {
 
     let orchestrator: ProxyOrchestrator
     let credentialManager: CredentialManager
-    /// The saved password's read at proxy start; see `AppState`'s twin
-    /// (#98). Internal so a test can join it.
+    /// The saved password's read at proxy start, so a Keychain prompt lands
+    /// then and not inside a handshake burst (#98). Internal so a test can join it.
     var credentialWarmup: Task<Void, Never>?
     /// Base client every privileged side effect goes through, wrapped by
     /// `auditedPrivilegeClient`. Injectable so tests can drive the platform
@@ -93,15 +92,14 @@ package final class RuntimeHost {
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
     /// The stale-listener probe the system proxy manager asks; the effects supply it, so no manager reaches the real port by default.
     private let loopbackPortProbe: @Sendable (Int) -> Bool
-    /// Twin of `AppState.dnsResponds`, from `effects`.
+    /// Whether a resolver answers on a local port, from `effects`, so launch recovery never waits on the real port 53 under test.
     private let dnsResponds: @Sendable (Int) -> Bool
     private let homeDirectory: URL
     private let resolverDirectory: String
     /// One serialised pass per config reload: the runtime takes the edit,
     /// the surfaces whose contents changed are re-applied, and each flipped
-    /// platform flag applies or clears the surface it names. The same type
-    /// the app runs per save, so the daemon has the ownership guard from
-    /// #13 rather than a twin of it.
+    /// platform flag applies or clears the surface it names, with the
+    /// ownership guard from #13. The host's one applied baseline.
     let reconciler: RuntimeReconciler
 
     // Platform side-effect coordinators. Startup applies nothing until
@@ -160,14 +158,14 @@ package final class RuntimeHost {
     private let networkLocationLimits: NetworkLocationLimits
     /// At most one pending retry for a drift repair withheld by the contention budget.
     private var proxyRepairRetry: Task<Void, Never>?
-    /// Twin of `AppState`'s shell environment drift pass (#175).
+    /// The shell environment drift pass (#175): one in flight, one wanted after it, one retry, one periodic tick.
     private var environmentDriftInFlight = false
     /// The trigger of the pass wanted after the one in flight.
     private var environmentDriftPending: EnvironmentDriftRepair.Trigger?
     private var environmentRepairRetry: Task<Void, Never>?
     private var environmentDriftTimer: Task<Void, Never>?
     private let environmentDriftInterval: Duration
-    /// Twin of `AppState.reapplyRetry` (#194, narrow).
+    /// A failed re-apply of the system proxy or the environment, reported and retried through the drift passes (#194, narrow).
     private(set) lazy var reapplyRetry: ConfigReapplyRetry = {
         let retry = ConfigReapplyRetry(schedule: reapplyRetrySchedule) { [weak self] event, level in
             guard let self else { return }
@@ -198,11 +196,11 @@ package final class RuntimeHost {
     let networkPathObserver: any NetworkPathObserving
     /// The hops from the observers and the orchestrator's callbacks onto the
     /// main actor. Internal so the tests can `drain()` them instead of
-    /// sleeping. Same shape as `AppState`.
+    /// sleeping.
     let deliveries = ObserverDeliveries()
     private let proxySettingsNotifications = CoalescedObserverDelivery()
-    /// Blocking platform work that needs no answer on the spot. See
-    /// `AppState.platformWork`.
+    /// Blocking platform work that needs no answer on the spot: serial, so a
+    /// Stop's clear lands after the apply of a Start it overtook.
     let platformWork = PlatformWork(label: "io.github.srps.Conduit.daemon.platform-work")
     private var dnsRelayRestartInFlight = false
     private var dnsReconcileInFlight = false
@@ -226,7 +224,7 @@ package final class RuntimeHost {
     /// wait on it to know that a settle has been admitted. It is not a public or package API.
     var stoppedEffectsJoinCount: Int { stoppedEffectsJoin == nil ? 0 : 1 }
     /// One lifecycle lane per module, fixed at three (decision 0031): which Start or Stop of the module is the latest, and a repeat of the
-    /// effect in flight joins it. See `LifecycleLane` and `RuntimeHostLifecycle.swift`. Twins of `AppState.proxyLane` and `dnsLane`.
+    /// effect in flight joins it. See `LifecycleLane` and `RuntimeHostLifecycle.swift`.
     let lanes = PrivateModuleSlots(
         proxy: LifecycleLane(name: "proxy"),
         dns: LifecycleLane(name: "dns"),
@@ -255,12 +253,12 @@ package final class RuntimeHost {
             await lanes[busy].waitUntilIdle()
         }
     }
-    /// VPN-gating policy for split-DNS entry files (single source of truth
-    /// shared with `AppState`). Fed by `handleVPNStateChange`; every
-    /// resolver-file apply path consults `entriesWanted`.
+    /// VPN-gating policy for split-DNS entry files (single source of truth).
+    /// Fed by `handleVPNStateChange`; every resolver-file apply path consults
+    /// `entriesWanted`.
     var splitDNSGate = SplitDNSVPNGate()
     /// A failed entry-file write or removal, retried once the helper is
-    /// seen available (#165). Twin of `AppState.splitDNSRepair`.
+    /// seen available (#165).
     var splitDNSRepair = SplitDNSEntryFileRepair()
     /// While a repair is pending, asks the helper for its status every
     /// `splitDNSHelperCheckInterval` (backed off); gone otherwise. This host
@@ -285,7 +283,7 @@ package final class RuntimeHost {
     /// Launch-time crash recovery for the system-proxy, system-DNS and
     /// resolver-file surfaces. Started by `init` and joined by
     /// `awaitLaunchRecovery()` — see `LaunchRecovery` for why it is neither
-    /// inline nor unordered. Twin of `AppState.launchRecovery`.
+    /// inline nor unordered.
     private var launchRecovery: LaunchRecovery?
     /// The process start `status()` reports. The entry point passes it in, so
     /// the host reads no clock of its own for status.
@@ -298,7 +296,9 @@ package final class RuntimeHost {
     /// the orchestrator and the reconciler take their baselines, so every baseline comes from that observation. A caller that runs a
     /// startup migration runs it before this call, under the same session. Nothing else reads or writes configuration at open.
     ///
-    /// Throws `RuntimeOpenRefusal` when the startup inputs are refused, and then no host is built.
+    /// Throws `RuntimeOpenRefusal` when the startup inputs are refused, and then no host is built. Throws `CancellationError` when the
+    /// calling task was cancelled before construction, such as by a quit that began while the observation was out: no host is built, so
+    /// no launch recovery, observer or timer starts. The observation writes nothing, so nothing started is abandoned.
     package static func open(
         stateSession: StateRootSession,
         logger: any LogSink,
@@ -325,6 +325,8 @@ package final class RuntimeHost {
         } catch let refusal as RuntimeConfigurationWorkflow.OpenRefusal {
             throw RuntimeOpenRefusal(event: RuntimeEvent(payload: .configWorkflow(refusal.event)))
         }
+        // Checked in the turn that constructs: construction starts recovery and the observers, and nothing after it is cancellable.
+        try Task.checkCancellation()
         let host = RuntimeHost(
             stateSession: stateSession,
             logger: logger,
@@ -513,7 +515,7 @@ package final class RuntimeHost {
         }
         // The interface name is read on the monitor's own delivery, not
         // after the hop, so a queued transition cannot lend its tunnel's
-        // name to the one delivered before it. Same shape as `AppState`.
+        // name to the one delivered before it.
         // Weak on both: the monitor stores this closure, so a strong capture
         // of the monitor would keep a stopped host's observer alive forever.
         self.vpnStatusMonitor.setOnChange { [weak self, deliveries, vpnSequencer, weak monitor = self.vpnStatusMonitor] state in
@@ -525,18 +527,17 @@ package final class RuntimeHost {
         }
         reconciler.host = self
 
-        // Crash recovery, as in `AppState.init`: a run that was `SIGKILL`ed
-        // never tore down, so the machine can still point at its dead proxy
-        // port and the helper's relay at its dead forwarder, and launch is when
-        // the journal's record of what was there before is most likely still
-        // the truth. Without this the daemon leaves them until its next start
-        // or stop, and in runtime-host mode (no `--start-runtime`) that may be
-        // never. Same three calls in the same order, off the main actor.
+        // Crash recovery: a run that was `SIGKILL`ed never tore down, so the
+        // machine can still point at its dead proxy port and the helper's relay
+        // at its dead forwarder, and launch is when the journal's record of
+        // what was there before is most likely still the truth. Without this
+        // the host leaves them until its next start or stop, which may be
+        // never. Three calls in a fixed order, off the main actor.
         //
-        // The app skips only the resolver-file ownership inference when its
-        // config failed to load; this host is never built from a failed load
-        // (`ConduitDaemon.main` runs the journal restores itself and exits,
-        // see `recoverWithoutConfiguration`), so the scan always has a config.
+        // This host is never built from a failed load: its entry points run
+        // `recoverWithoutConfiguration` instead, which skips only the
+        // resolver-file ownership inference, so the scan here always has a
+        // config.
         let dnsRecovery = systemDNSManager
         let proxyRecovery = systemConduit
         let resolverRecovery = dnsManager
@@ -561,12 +562,12 @@ package final class RuntimeHost {
         startEnvironmentDriftTimer()
     }
 
-    /// The connection audit sink the orchestrator records each closed connection to. Twin of `AppState.makeAuditSink`, until the app
-    /// adopts this host: off (the default) is the no-op sink; on, a bounded file at `auditLogPath`, or the root's `audit.ndjson` when no
-    /// path is set, with `auditLogMaxBytes`. The guard protects the same resources as the other writers, the writer lease included, so a
-    /// configured path that aliases one is refused with one fixed event and the runtime keeps serving.
+    /// The connection audit sink the orchestrator records each closed connection to, the composition's only one: off (the default) is the
+    /// no-op sink; on, a bounded file at `auditLogPath`, or the root's `audit.ndjson` when no path is set, with `auditLogMaxBytes`. The
+    /// guard protects the same resources as the other writers, the writer lease included, so a configured path that aliases one is refused
+    /// with one fixed event and the runtime keeps serving.
     ///
-    /// Built once, from the configuration the host opened with. A reload does not re-resolve it, as in the app.
+    /// Built once, from the configuration the host opened with. A reload does not re-resolve it.
     private static func makeAuditSink(
         for config: ProxyConfig,
         environment: RuntimeEnvironment,
@@ -596,9 +597,8 @@ package final class RuntimeHost {
     }
 
     /// Waits for launch-time crash recovery before this host touches a
-    /// platform surface. Free after the first call. Twin of
-    /// `AppState.awaitLaunchRecovery`, and internal for the same reason: a
-    /// test that asserts on what recovery did joins it rather than polls.
+    /// platform surface. Free after the first call. Internal so a test that
+    /// asserts on what recovery did joins it rather than polls.
     ///
     /// Joined at the head of `startRuntime`, `stopRuntime` and
     /// `performReload`. Every other path that touches a surface is
@@ -711,7 +711,7 @@ package final class RuntimeHost {
         try continueStart(start)
         // A VPN transition handled while the apply was out reconciled the
         // entry files then, possibly before the apply wrote them from the
-        // gate it was queued with. Twin of the check in `AppState.startProxy`.
+        // gate it was queued with; put them where the gate is now.
         if platform.manageDNSResolvers, splitDNSGate.entriesWanted != vpnConnected {
             let outcome = splitDNSGate.reconcileEntryFiles(
                 config: config,
@@ -920,9 +920,9 @@ package final class RuntimeHost {
 
     /// The errors `LocalProxyServer.start` deliberately ignores. A blocking
     /// one surfaces as the start failure itself; a non-blocking one — an
-    /// intercept rule whose files will be withheld — surfaced nowhere in this
-    /// host, because the GUI's twin (`AppState.saveConfig`) is where the
-    /// banner lives. Headless, the log is the banner.
+    /// intercept rule whose files will be withheld — surfaces nowhere else in
+    /// this host. The app shows its own banner from the draft; headless, the
+    /// log is the banner.
     func logNonBlockingConfigProblems() {
         for error in config.validate() where !error.blocksProxyStart {
             logger.log(.warning, "Config validation: \(error.localizedDescription)", category: .system)
@@ -930,8 +930,7 @@ package final class RuntimeHost {
     }
 
     /// Intercept resolver files for the reconciler's passes, which still run
-    /// on this actor. Twin of `AppState.refreshInterceptFiles`; the rule is
-    /// `DNSManager.refreshInterceptFiles`.
+    /// on this actor. The rule is `DNSManager.refreshInterceptFiles`.
     /// The platform is the caller's: a pass refreshes with the flags it is applying, and a retry with the flags the machine holds. It is
     /// never read live from the host, because the host's flags can be ahead of the pass.
     private func refreshInterceptFiles(for config: ProxyConfig, platform: PlatformIntegrationConfig) throws {
@@ -1100,7 +1099,7 @@ package final class RuntimeHost {
 
     // MARK: - Split-DNS entry-file repair (#165)
 
-    /// Twin of `AppState.recordSplitDNS`.
+    /// Feeds an entry-file outcome to `splitDNSRepair`, event first, and keeps the helper check running while something is pending.
     func recordSplitDNS(
         _ outcome: SplitDNSEntryFileRepair.Outcome?,
         source: SplitDNSEntryFileRepair.Source,
@@ -1125,7 +1124,7 @@ package final class RuntimeHost {
         logger.log(level, "Split DNS: \(event.event) \(event.detail ?? "")", category: .system)
     }
 
-    /// Twin of `AppState.observeHelperForSplitDNS`. A retry waits for the
+    /// One observation of the helper for the split-DNS repair. A retry waits for the
     /// start or stop in flight, so `runtimeStarted` is settled when it reads it.
     ///
     /// A dispatched retry ends the helper check: the retry's completion
@@ -1194,8 +1193,8 @@ package final class RuntimeHost {
         reconciler.markResolverSwitchLanded(manageDNSResolvers: platform.manageDNSResolvers)
     }
 
-    /// Twin of `AppState.scheduleSplitDNSHelperCheck`, and this host's only
-    /// way to learn the helper is back: it is told of no install.
+    /// While a repair is pending, one backed-off helper read at a time: a
+    /// helper installed outside the app reports nothing.
     private func scheduleSplitDNSHelperCheck() {
         guard splitDNSRepair.pending != nil, splitDNSHelperCheck == nil, let helper = helperStatusSource else { return }
         let base = splitDNSHelperCheckInterval
@@ -1325,7 +1324,7 @@ package final class RuntimeHost {
         }
     }
 
-    /// Twin of `AppState.retryReapply` (#194).
+    /// One retry of a failed re-apply (#194): the drift pass for `surface`, run once and judged.
     private func retryReapply(_ surface: ConfigReapplyRetry.Surface, token: LifecycleLane.Token) async -> ConfigReapplyRetry.Outcome {
         await awaitLaunchRecovery()
         await waitUntilIdle([.proxy])
@@ -1352,8 +1351,8 @@ package final class RuntimeHost {
         }
     }
 
-    /// Twin of `AppState.scheduleProxyRepairRetry`: one pass when a contended
-    /// repair budget reopens, since no notification may follow.
+    /// One pass when a contended repair budget reopens, since no notification
+    /// may follow.
     private func scheduleProxyRepairRetry(after delay: Duration) {
         proxyRepairRetry?.cancel()
         proxyRepairRetry = Task { [weak self] in
@@ -1363,7 +1362,7 @@ package final class RuntimeHost {
         }
     }
 
-    /// Twin of `AppState.runDNSReconcile`, without the debounce: off the main
+    /// The system DNS reconcile, without a debounce: off the main
     /// actor, because it is one `networksetup` read per interface and a
     /// helper round trip for each that drifted. Nothing follows it in either
     /// caller, so the suspension lets nothing in that was not already let in
@@ -1435,8 +1434,7 @@ package final class RuntimeHost {
             dnsRelayUnresponsive = false
             return
         }
-        // Twin of `AppState.handleDNSHealthResult`: the restart and the probe
-        // after it run off the main actor, one at a time.
+        // The restart and the probe after it run off the main actor, one at a time.
         guard !dnsRelayRestartInFlight else { return }
         dnsRelayRestartInFlight = true
 
@@ -1496,8 +1494,8 @@ extension RuntimeHost {
     /// `ConduitDaemon.main` before it exits. No host is built from a failed
     /// load, so without this a daemon killed with the system proxy or system
     /// DNS applied, and relaunched over a broken file, left the machine on
-    /// the dead run's listeners. The app restores in that case too
-    /// (`AppStateHarnessTests.testCorruptConfigStillRestoresJournaledProxyOnLaunch`):
+    /// the dead run's listeners. The app runs this on a refused open too
+    /// (`AppStateHarnessTests.testACorruptConfigIsRefusedKeepsItsBytesAndStillRestoresTheJournaledProxy`):
     /// both restores work from the journal's recorded prior values, and only
     /// the legacy resolver scan needs the config, so that one is reported
     /// skipped.
@@ -1571,9 +1569,8 @@ extension RuntimeHost {
 
 // MARK: - RuntimeReconcilerHost
 
-/// The host's side of a reconcile pass. Each method is the twin of the one
-/// in `AppState`, over this host's managers and logger; the rules about what
-/// a pass may read live in `RuntimeReconciler`, not here.
+/// The host's side of a reconcile pass, over this host's managers and logger;
+/// the rules about what a pass may read live in `RuntimeReconciler`, not here.
 extension RuntimeHost: RuntimeReconcilerHost {
     /// The host has no presentation mirror, so the orchestrator's config after the push is the input it holds.
     package func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async -> RuntimeConfigApplication {
@@ -1677,9 +1674,8 @@ extension RuntimeHost: RuntimeReconcilerHost {
         let reapplyEnvironment = environmentFollows && platform.manageEnvironmentVariables
             && !pass.platformActions.contains(.applyEnvironment)
         guard reapplySystemProxy || reapplyEnvironment else { return }
-        // Twin of `AppState.reapplyConfigDrivenSurfaces`: off the main actor,
-        // and a failure, partial environment applies included, is reported
-        // and retried.
+        // Off the main actor, and a failure, partial environment applies
+        // included, is reported and retried.
         let systemProxy = systemConduit, environment = environmentManager, log = logger
         let mode = platform.systemProxyMode, pacURL = orchestrator.snapshot.bindings.localPACURL
         let token = lanes.proxy.observationToken
@@ -1834,7 +1830,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
         }
     }
 
-    /// Twin of `AppState.applySystemProxySwitch`: a failure is reported to the
+    /// The system proxy switch turned on, or its mode changed: a failure is reported to the
     /// retry, and the completed baseline does not move for it, so the switch is
     /// still owed when the retry looks again sooner (#194).
     private func applySystemProxySwitch(config: ProxyConfig, platform: PlatformIntegrationConfig,
@@ -1853,7 +1849,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
         }
     }
 
-    /// Twin of `AppState.applyEnvironmentSwitch`: a partial apply lands the
+    /// The environment switch turned on: a partial apply lands the
     /// flag, and is reported and retried like a failure (#194).
     private func applyEnvironmentSwitch(config: ProxyConfig) -> Bool {
         do {

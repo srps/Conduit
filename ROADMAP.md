@@ -30,10 +30,10 @@ remains the serving version. [CHANGELOG](./CHANGELOG.md) records shipped history
 | Stage | Current state | Remaining work |
 | --- | --- | --- |
 | Contracts and mechanisms | Typed lifecycle/configuration values, framed client/service, bounded observation/replay, verified store and file readers are merged. | Broader event families migrate with their owners. |
-| Shared owner | PR253 converges DNS, tunnels and proxy on one lifecycle/store path, with preparation-time capture, exact freshness and Stop/Quit policy. | Consume that owner from AppState. |
+| Shared owner | PR253 converges DNS, tunnels and proxy on one lifecycle/store path, with preparation-time capture, exact freshness and Stop/Quit policy. PR257 adds guarded host-owned audit parity. | Verify AppState consumes that owner without a parallel path. |
 | Actual client integration | PR254 connects host admission/observation, private frozen updates, receipts, preferences/admin persistence and final Quit saves through the actual framed clients. | Local and exact-head hosted gates pass; consume it through the native-client completion below. |
 | Native client completion | PR256 merged saved Start receipts, explicit reload, bounded preflight/credential/wake operations, typed recovery and DNS health after local and hosted checks. | Ten seconds total is selected in 0039; consume it with the production composition. |
-| AppState, isolation and release | One final activation and deletion is selected (0031); 64 KiB ordinary frames and 8 MiB private frames are selected. | Use the selected 10,000-row / 4 MiB capture / 8 MiB retained collection profile (0038), consume the coherently measured engineering profile, finish guarded audit parity, switch AppState once and delete replaced paths, move the control cluster to RuntimeActor, then complete release acceptance. |
+| AppState, isolation and release | One final activation and deletion is selected (0031); 64 KiB ordinary frames and 8 MiB private frames are selected. | Use the selected 10,000-row / 4 MiB capture / 8 MiB retained collection profile (0038), consume the measured production profile, verify the in-progress single AppState switch and deletion, move the control cluster to RuntimeActor, then complete release acceptance. |
 
 The [client-owner checkpoint](./docs/verification-runtime-client-owner-2026-10-27.md)
 records the scoped independent review and all 41 passing local gates: 3,619 tests
@@ -167,7 +167,7 @@ not a requirement to finish every event or property test before extraction:
    Current acceptance still requires the single AppState switch, RuntimeActor,
    native app checks and applicable installed-machine validation.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
-   in ConduitRuntime, with the daemon as its entry point; AppState remains its twin.
+   in ConduitRuntime, first with the daemon as its entry point. The stage-3 activation removes AppState's twin.
    The move preserves MainActor and existing policy, with the daemon fake-machine
    suite and explicit composition dependencies. The owner selected ConduitRuntime
    for the host and an event-only RuntimeEvents target; control values/client/
@@ -176,7 +176,7 @@ not a requirement to finish every event or property test before extraction:
 3. **Stage 3 — incremental host development, one AppState activation.** Develop
    and verify DNS, tunnels and proxy in reviewable host increments, then switch
    AppState once and delete its replaced runtime/save paths together (0031).
-   AppState retains editor drafts and UI responsibilities. Migrate the event
+   The activation is implemented on the current branch and under verification; it is not released. AppState retains editor drafts and UI responsibilities. Migrate the event
    families touched by each slice. Bring
    [#183](https://github.com/srps/Conduit/issues/183)'s independent models,
    bounded exhaustive exploration and seeded tests alongside lifecycle,

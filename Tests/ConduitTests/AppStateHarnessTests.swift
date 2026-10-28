@@ -3,23 +3,18 @@ import Foundation
 import XCTest
 import ConduitShared
 @testable import Conduit
+@testable import ConduitRuntime
 @testable import PlatformMac
+@testable import ProxyAuth
 @testable import ProxyKernel
 import RuntimeEvents
 
 // MARK: - Harness
 
-/// Stands up a real `AppState` — real orchestrator on ephemeral ports, real
-/// managers, real journal file — over a `FakeMachine`, scratch directories,
-/// a fake VPN observer and fake login items. Scenarios drive the same entry
-/// points the views call and assert on the machine and the journal, the way
-/// the daemon host's tests do, not on AppState internals.
-///
-/// The tested parts of `AppState` were already the pieces pulled out as pure
-/// or narrow types: the flag table, the reconcile chain, the VPN gate, launch
-/// recovery. What this covers is the composition: start and stop, the
-/// ownership guards, termination cleanup, the failed-start revert, and the
-/// wiring between the reconciler and the editor.
+/// Stands up the actual app composition (decision 0031): the one `RuntimeHost` the app opens, its framed client and private editor client
+/// under the shipping profile, and `AppState` over them, all over a `FakeMachine`, scratch directories and fakes for every other machine
+/// effect. Scenarios drive the entry points the views call and wait on what the app observes through its clients; they assert on the
+/// machine, the files and the app's own state. Nothing reaches the host except through the clients.
 @MainActor
 final class AppStateHarness {
     let stateDirectory: URL
@@ -29,41 +24,30 @@ final class AppStateHarness {
     let machine: FakeMachine
     let vpn = FakeVPNStatusObserver()
     let locationObserver = FakeNetworkLocationObserver()
+    /// The host starts its wake observer when it is built, so its start count says whether a host was built at all.
+    let wake = FakeSystemWakeObserver()
     var locationStore: FakeNetworkLocationStore?
-    var locationLimits = NetworkLocationLimits()
     let loginItems = FakeLoginItems()
     let helper = FakeHelperLifecycle()
     let secrets = InMemorySecretStore()
-    /// The updater seam: never the real process, which would be the test
-    /// runner's bundle at best.
+    /// The updater seam: never the real process.
     let updater = FakeUpdaterLauncher()
     var currentVersion = "0.5.0"
-    /// The host's real waits, by default. A scenario that waits on one
-    /// shortens it; the rest keep the production timing they were written
-    /// against.
-    var networkPathDebounce = NetworkMonitor.defaultDebounceInterval
-    var helperSocketBindWait: Duration = .seconds(1)
-    /// Long, so a re-read after a busy helper never lands inside a scenario
-    /// about something else; the busy-helper scenarios pass a short one.
-    var helperBusyRecheckDelay: Duration = .seconds(3600)
-    var dnsReconcileDebounce: TimeInterval = 1.0
-    /// Long, so an autosave never lands inside a scenario about something
-    /// else; the autosave scenarios pass a short one (#171).
-    var settingsSaveDebounce: Duration = .seconds(3600)
-    /// Long, so the periodic environment drift tick never lands inside a
-    /// scenario about something else; the tick's own scenario passes a short one.
-    var environmentDriftInterval: Duration = .seconds(3600)
-    /// Long, so a failed re-apply's retry never lands inside a scenario
-    /// about something else; the retry scenarios pass short ones (#194).
-    var reapplyRetrySchedule = ConfigReapplyRetry.Schedule(delays: [.seconds(3600)])
-    /// Long, so a split-DNS helper check never lands inside a scenario about
-    /// something else; the check's own scenario passes a short one (#165).
-    var splitDNSHelperCheckInterval: Duration = .seconds(3600)
+    /// Long waits by default, so an autosave or a re-read never lands inside a scenario about something else.
+    var timing = AppTiming(settingsSaveDebounce: .seconds(3600), helperSocketBindWait: .zero, helperBusyRecheckDelay: .seconds(3600))
+    var overrides = AppLaunchOverrides()
+    /// The host's repair schedules: long by default, so no retry or drift tick lands inside a scenario about something else.
+    var hostSchedules = AppHostSchedules(
+        environmentDriftInterval: .seconds(3600),
+        reapplyRetrySchedule: ConfigReapplyRetry.Schedule(delays: [.seconds(3600)]),
+        splitDNSHelperCheckInterval: .seconds(3600)
+    )
     /// Holds one machine call, subprocess or privileged, when armed.
     let hold = HeldCall()
-    /// Fetches no PAC from the network: the fake refuses and counts every fetch. A scenario that plans PAC work injects its own before
-    /// `launch()`.
+    /// Fetches no PAC from the network; a scenario that plans PAC work injects its own before `launch()`.
     var pacEvaluator: any PacEvaluator = FakePacEvaluator()
+    /// The host store's file access; a scenario that holds or refuses a store step names its own before `launch()`.
+    var stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem()
     private(set) var appState: AppState?
 
     init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) throws {
@@ -71,8 +55,7 @@ final class AppStateHarness {
             .appendingPathComponent("appstate-harness-\(UUID().uuidString)", isDirectory: true)
         self.stateDirectory = stateDirectory
         try FileManager.default.createDirectory(
-            at: stateDirectory.appendingPathComponent("home", isDirectory: true),
-            withIntermediateDirectories: true
+            at: stateDirectory.appendingPathComponent("home", isDirectory: true), withIntermediateDirectories: true
         )
         // An established install: the files a previous launch left, written before this process takes the root.
         let fixture = RuntimeEnvironment.isolated(stateDirectory: stateDirectory)
@@ -86,85 +69,89 @@ final class AppStateHarness {
 
     var homeDirectory: URL { stateDirectory.appendingPathComponent("home", isDirectory: true) }
 
-    /// A fresh reader over the journal file. The app's own instance caches
-    /// what it loaded, so assertions read the file the way the next launch
-    /// will, and seeding before `launch()` writes what a crashed run left.
+    /// A fresh reader over the journal file, as the next launch reads it.
     var journal: PlatformStateJournal { PlatformStateJournal(fileURL: environment.platformStateFile) }
 
-    @discardableResult
-    func launch() -> AppState {
+    var savedConfig: ProxyConfig {
+        get throws { try ProxyConfigPersistence.load(from: environment.configFile) }
+    }
+
+    var savedPlatform: PlatformIntegrationConfig {
+        get throws { try PlatformConfigPersistence.load(in: environment) }
+    }
+
+    /// The composition, every collaborator named.
+    func composition() -> AppComposition {
         let machine = self.machine
         let hold = self.hold
-        let state = AppState(
-            stateSession: stateSession,
-            privilegeClient: HoldingPrivilegeClient(base: machine, hold: hold),
+        let vpn = self.vpn
+        let wake = self.wake
+        let helper = self.helper
+        let locationStore = self.locationStore
+        return AppComposition(
+            effects: RuntimeHostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: HoldingPrivilegeClient(base: machine, hold: hold), helperStatus: helper) },
+                credentials: secrets,
+                kerberosTicketRecovery: FakeKerberosTicketRecovery(),
+                gss: .injected { HarnessRefusingGSS() },
+                pacEvaluator: pacEvaluator,
+                portHolderProbe: FakeListenerPortHolderProbe(),
+                loopbackPortProbe: FakeLoopbackPortProbe().isServed(port:),
+                commandRunner: { launchPath, arguments in
+                    hold.pass(launchPath, arguments)
+                    return try machine.run(launchPath, arguments)
+                },
+                // No resolver answers on the fake machine's loopback; the real port 53 is never probed.
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                networkPath: FakeNetworkPathObserver(),
+                networkLocation: locationObserver,
+                networkLocationStoreFactory: { _ in locationStore },
+                vpnStatusMonitor: { _, _ in vpn },
+                wake: wake,
+                homeDirectory: homeDirectory,
+                resolverDirectory: machine.resolverDirectory.path,
+                stateFiles: stateFiles
+            ),
             helperLifecycle: helper,
             credentialStore: secrets,
-            kerberosTicketRecovery: FakeKerberosTicketRecovery(),
-            commandRunner: { launchPath, arguments in
-                hold.pass(launchPath, arguments)
-                return try machine.run(launchPath, arguments)
-            },
-            // No resolver answers on the fake machine's loopback. Probing the
-            // real port 53 instead waited two seconds wherever nothing does,
-            // and answered for the installed Conduit's relay where it runs.
-            dnsResponds: FakeDNSProbe().responds(onPort:),
-            networkPathDebounce: networkPathDebounce,
-            helperSocketBindWait: helperSocketBindWait,
-            helperBusyRecheckDelay: helperBusyRecheckDelay,
-            dnsReconcileDebounce: dnsReconcileDebounce,
-            settingsSaveDebounce: settingsSaveDebounce,
-            environmentDriftInterval: environmentDriftInterval,
-            reapplyRetrySchedule: reapplyRetrySchedule,
-            splitDNSHelperCheckInterval: splitDNSHelperCheckInterval,
-            homeDirectory: homeDirectory,
-            resolverDirectory: machine.resolverDirectory.path,
             loginItemManager: loginItems.manager,
-            vpnStatusMonitor: vpn,
             pacEvaluator: pacEvaluator,
-            networkLocationObserver: locationObserver,
-            networkLocationStoreFactory: { [locationStore] _ in locationStore },
-            networkLocationLimits: locationLimits,
             updaterLauncher: updater,
             updateReports: FakeUpdateReports(),
             updaterAvailability: .available,
-            currentVersion: currentVersion
+            currentVersion: currentVersion,
+            launchOverrides: overrides,
+            timing: timing,
+            hostSchedules: hostSchedules
         )
+    }
+
+    /// The host's own `events.ndjson`, as written so far.
+    var hostEventsText: String {
+        (try? String(contentsOf: environment.eventsFile, encoding: .utf8)) ?? ""
+    }
+
+    @discardableResult
+    func launch() -> AppState {
+        precondition(appState == nil, "one app per harness")
+        let state = AppState(stateSession: stateSession, composition: composition())
         appState = state
         return state
     }
 
-    /// Reports `state` from the VPN observer and waits for the app to take it
-    /// in: the hop onto the main actor, the handler, the orchestrator work it
-    /// starts and the snapshot that comes back. The observer calls its
-    /// handler from inside `emit`, so the delivery is counted by the time
-    /// `emit` returns and the drain cannot slip past it.
-    func setVPN(_ state: VPNObservedState, file: StaticString = #filePath, line: UInt = #line) async {
-        vpn.emit(state)
-        await deliveries()
-        XCTAssertEqual(appState?.runtimeSnapshot.vpnState, state, "the app sees the VPN \(state)", file: file, line: line)
+    /// Launches and waits for meaningful readiness: the opening finished ready and the observation delivered a baseline.
+    func ready(file: StaticString = #filePath, line: UInt = #line) async -> AppState {
+        let state = launch()
+        await state.opening?.value
+        XCTAssertEqual(state.phase, .ready, "the app opened", file: file, line: line)
+        await settle("the observation is live", file: file, line: line) { state.runtime.isLive }
+        return state
     }
 
-    /// Waits for every observer delivery in flight, and what each started.
-    func deliveries() async {
-        await appState?.deliveries.drain()
-    }
-
-    /// Joins launch-time crash recovery. Recovery restores the machine and
-    /// then releases the journal, off the main actor; a scenario that polled
-    /// for the first asserted on the second before it happened, four runs in
-    /// twenty (#19).
-    func launchRecovery() async {
-        await appState?.awaitLaunchRecovery()
-    }
-
-    /// Polls until `condition` holds. For the edges that still have no
-    /// handle, which today is the listener shutdown `tearDown` waits for;
-    /// observer deliveries have `deliveries()` and recovery has
-    /// `launchRecovery()`.
+    /// Polls until `condition` holds, for edges the app observes asynchronously through its stream.
     func settle(
         _ what: String,
-        timeoutMilliseconds: Int = 3000,
+        timeoutMilliseconds: Int = 5_000,
         file: StaticString = #filePath,
         line: UInt = #line,
         until condition: @MainActor () -> Bool
@@ -175,487 +162,113 @@ final class AppStateHarness {
         XCTAssertTrue(condition(), "timed out waiting until \(what)", file: file, line: line)
     }
 
-    /// Quits the way the app delegate does, then removes the scratch state.
-    /// `performTerminationCleanup` queues the listener shutdown on a task
-    /// that holds the orchestrator weakly, so the app is kept alive until
-    /// the snapshot reports everything stopped; dropped earlier, the real
-    /// NIO listeners the scenario bound would outlive the test.
+    /// Quits the way AppKit's terminate-later does, then removes the scratch state.
     func tearDown() async {
+        hold.release()
         if let appState {
-            appState.performTerminationCleanup()
-            await settle("the runtime has shut down", timeoutMilliseconds: 5_000) {
-                appState.runtimeSnapshot.runtimeStatus.state == .stopped
-                    && appState.runtimeSnapshot.dnsRunState == .stopped
-            }
-            // Termination cleanup does not join launch recovery, which logs
-            // from off the main actor; join it here. Clearing the log URL
-            // closes the writer after draining its queued appends, and a
-            // main-actor log hop that lands later has no file to recreate.
-            await appState.awaitLaunchRecovery()
+            await appState.opening?.value
+            if appState.beginQuit() { _ = await appState.finishQuit() }
             appState.logStore.logFileURL = nil
         }
         appState = nil
-        // Runtime, DNS, launch recovery and the file log have stopped above,
-        // so the root's authority ends before its files go.
         releaseScratchStateRoot(stateSession)
         removeScratch([stateDirectory])
     }
 }
 
+/// The operating system's state-file access with every platform-file replacement refused, as a read-only or full volume would.
+final class RefusingPlatformWrites: StateFileAccessing, @unchecked Sendable {
+    private let inner = StateFileAccess.operatingSystem()
+
+    func readConfigurationFile(_ file: StateRootFile, limit: Int) -> Result<Data, ConfigurationFileError> {
+        inner.readConfigurationFile(file, limit: limit)
+    }
+
+    func replaceConfigurationFile(_ file: StateRootFile, bytes: Data) -> Result<Void, ConfigurationFileWriteError> {
+        file.role == .platformConfig ? .failure(.writeFailed(errno: EACCES)) : inner.replaceConfigurationFile(file, bytes: bytes)
+    }
+
+    func entryPresence(_ file: StateRootFile) -> Result<Bool, ConfigurationPresenceError> {
+        inner.entryPresence(file)
+    }
+}
+
+/// The operating system's state-file access with every replacement of one file refused while `refusing` is set, as a destination the
+/// user can repair would be.
+final class RefusingWrites: StateFileAccessing, @unchecked Sendable {
+    private let inner = StateFileAccess.operatingSystem()
+    private let role: StateRootRole
+    private let lock = NSLock()
+    private var _refusing = true
+
+    init(of role: StateRootRole) {
+        self.role = role
+    }
+
+    var refusing: Bool {
+        get { lock.withLock { _refusing } }
+        set { lock.withLock { _refusing = newValue } }
+    }
+
+    func readConfigurationFile(_ file: StateRootFile, limit: Int) -> Result<Data, ConfigurationFileError> {
+        inner.readConfigurationFile(file, limit: limit)
+    }
+
+    func replaceConfigurationFile(_ file: StateRootFile, bytes: Data) -> Result<Void, ConfigurationFileWriteError> {
+        file.role == role && refusing ? .failure(.writeFailed(errno: EACCES)) : inner.replaceConfigurationFile(file, bytes: bytes)
+    }
+
+    func entryPresence(_ file: StateRootFile) -> Result<Bool, ConfigurationPresenceError> {
+        inner.entryPresence(file)
+    }
+}
+
+/// A free loopback TCP port, found by binding and releasing it, for a listener whose port a configuration must name. Shared with the
+/// host suites.
+func reserveLoopbackPort() throws -> Int {
+    let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }
+    defer { Darwin.close(fd) }
+    var address = sockaddr_in()
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+    address.sin_port = 0
+    let bound = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    var chosen = sockaddr_in()
+    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let named = withUnsafeMutablePointer(to: &chosen) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            Darwin.getsockname(fd, $0, &length)
+        }
+    }
+    guard bound == 0, named == 0 else { throw CocoaError(.fileWriteUnknown) }
+    return Int(UInt16(bigEndian: chosen.sin_port))
+}
+
+/// The harness's Kerberos token source: every token is refused, so no handshake reaches the system GSS stack.
+final class HarnessRefusingGSS: GSSTokenProvider, @unchecked Sendable {
+    struct Refused: Error {}
+    func generateToken(host: String, inputToken: Data?) throws -> Data? { throw Refused() }
+    func resetContext() {}
+}
+
 // MARK: - Scenarios
 
+/// Thin app/client scenarios over the actual host. Lifecycle, recovery and persistence policy are the host's and are pinned by its own
+/// suites; these pin what the app composes and sends, and what it does with the answers.
 @MainActor
 final class AppStateHarnessTests: XCTestCase {
-
-    func testDeletedConfigInEstablishedStateCannotBecomeFirstRunDefaults() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
-        try FileManager.default.removeItem(at: harness.environment.configFile)
-        let state = harness.launch()
-        do {
-            try await state.startProxy()
-            XCTFail("Deleted policy was replaced with first-run defaults")
-        } catch is ConfigurationLoadError {}
-        state.saveConfig()
-        XCTAssertFalse(isRunning(state))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.environment.configFile.path))
-    }
-
-    /// The app log's refusal lands in the composition's one event log (the orchestrator's), and the config keeps its bytes.
-    /// The log path is a hardlink to the config, so the refusal is an identity refusal from the adopted guard.
-    func testAnAppLogAliasOfTheConfigIsRefusedThroughTheCompositionEventLog() throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
-        let config = harness.environment.configFile
-        XCTAssertEqual(link(config.path, harness.environment.logFile.path), 0)
-        let state = harness.launch()
-        let before = try Data(contentsOf: config)
-
-        state.logStore.log(.notice, "composition witness")
-        state.logStore.flushFileLog()
-
-        let refusals = state.eventLog.events.filter { $0.event == RecordFileDestinationGate.eventName }
-        XCTAssertEqual(refusals.map(\.detail), ["sink=log reason=protected_identity resource=config"])
-        XCTAssertEqual(try Data(contentsOf: config), before)
-    }
-
-    /// The app log, adopted by the composition, refuses an alias of the writer lease. The lock keeps its bytes and its
-    /// inode, and its holder keeps the root, so a second writer is busy.
-    func testAnAppLogAliasOfTheWriterLeaseIsRefusedAndTheLeaseKeepsItsAuthority() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
-        let lease = harness.stateSession.writerLeaseFile
-        let before = try writerLeaseFingerprint(lease)
-        XCTAssertEqual(link(lease.path, harness.environment.logFile.path), 0)
-        let state = harness.launch()
-        await harness.launchRecovery()
-
-        state.logStore.log(.notice, "lease witness")
-        state.logStore.flushFileLog()
-
-        let refusals = state.eventLog.events.filter { $0.event == RecordFileDestinationGate.eventName }
-        XCTAssertEqual(refusals.map(\.detail), ["sink=log reason=protected_identity resource=writer_lease"])
-        XCTAssertEqual(try writerLeaseFingerprint(lease), before, "the lock keeps its bytes and its inode")
-        assertSecondWriterIsBusy(RuntimeEnvironment.isolated(stateDirectory: harness.stateDirectory))
-    }
-
-
-    /// #98: the saved password is read once when the proxy comes up, so a
-    /// Keychain prompt lands then and not in the middle of a handshake burst.
-    func testProxyStartReadsASavedPasswordOnce() async throws {
-        let state = try launch()
-        try state.credentialManager.saveHash(SecretBytes(Array(repeating: UInt8(7), count: 16)), for: state.config)
-        try await state.startProxy()
-        await state.credentialWarmup?.value
-        XCTAssertEqual(harness.secrets.loads, 1)
-        // The manager keys on the profile, not the upstream.
-        _ = try state.credentialManager.credentials(for: UpstreamProxy(name: "any", host: "proxy.example.test", port: 3128, priority: 0))
-        XCTAssertEqual(harness.secrets.loads, 1, "the handshake's read is answered from the start's")
-    }
-
-    func testProxyStartDoesNotReadWithoutASavedPassword() async throws {
-        let state = try launch()
-        try await state.startProxy()
-        await state.credentialWarmup?.value
-        XCTAssertNotNil(state.credentialWarmup)
-        XCTAssertEqual(harness.secrets.loads, 0)
-    }
-
-    func testLocalhostIsPinnedInListenersAndAdvertisedClientSettings() async throws {
-        let state = try launch(
-            platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true),
-            configure: { $0.localHost = "localhost" }
-        )
-        try await state.startProxy()
-        XCTAssertEqual(state.runtimeSnapshot.bindings.proxyHost, "127.0.0.1")
-        XCTAssertEqual(wifi.webProxy.host, "127.0.0.1")
-        XCTAssertEqual(wifi.secureWebProxy.host, "127.0.0.1")
-        XCTAssertEqual(URL(string: machine.launchdEnvironment["HTTP_PROXY"] ?? "")?.host, "127.0.0.1")
-        XCTAssertEqual(URL(string: machine.launchdEnvironment["HTTPS_PROXY"] ?? "")?.host, "127.0.0.1")
-    }
-
-    func testCorruptConfigStillRestoresJournaledProxyOnLaunch() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
-        let prior = ProxyServiceState(
-            webHost: "prior.example.test", webPort: "8080", webEnabled: true,
-            secureHost: "prior.example.test", securePort: "8080", secureEnabled: true,
-            autoURL: "", autoEnabled: false, bypassDomains: ["*.local"]
-        )
-        let journal = harness.journal
-        journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: prior.journalValues)
-        journal.markApplied(surface: .systemProxy)
-        machine.describe("Wi-Fi") {
-            $0.webProxy = FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "47113")
-            $0.secureWebProxy = $0.webProxy
-        }
-        let corrupt = Data("{".utf8)
-        try corrupt.write(to: harness.environment.configFile)
-        let state = harness.launch()
-        await harness.launchRecovery()
-        XCTAssertEqual(wifi.webProxy.host, "prior.example.test", "journal recovery proceeds despite invalid configuration")
-        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
-        XCTAssertEqual(
-            state.eventLog.events.filter { $0.event.hasPrefix("platform.launch_recovery_") }.map(\.detail),
-            ["surface=systemDNS reason=nothing_recorded", "surface=systemProxy stale=false", "surface=resolverFile reason=config_unavailable"],
-            "the resolver scan needs the config, so it alone is skipped"
-        )
-        XCTAssertEqual(wifi.bypassDomains, ["*.local"])
-        do {
-            try await state.startProxy()
-            XCTFail("Invalid configuration allowed activation after recovery")
-        } catch is ConfigurationLoadError {}
-        state.saveConfig()
-        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), corrupt)
-        XCTAssertFalse(isRunning(state))
-    }
-
-    /// #182/#191: a journal written by a newer Conduit fails closed at
-    /// launch. The app reports why in its own event log and leaves the file
-    /// as it was, so a later upgrade still finds the records.
-    func testAJournalFromANewerConduitIsReportedAndKeptAtLaunch() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
-        let newer = Data(#"{"version":2,"records":[]}"#.utf8)
-        try newer.write(to: harness.environment.platformStateFile)
-        let state = harness.launch()
-        await harness.launchRecovery()
-
-        XCTAssertEqual(
-            state.eventLog.events.filter { $0.event == "platform.journal_unreadable" }.map(\.detail),
-            ["file=platform-state.json reason=unsupported_version version=2 supported=1"]
-        )
-        XCTAssertEqual(try Data(contentsOf: harness.environment.platformStateFile), newer)
-    }
-
-    func testMalformedPlatformSidecarBlocksActivationAndSaving() async throws {
-        try await assertMalformedSidecarBlocksActivation("platform.json")
-    }
-
-    func testMalformedPreferencesSidecarBlocksActivationAndSaving() async throws {
-        try await assertMalformedSidecarBlocksActivation("preferences.json")
-    }
-
-    private func assertMalformedSidecarBlocksActivation(_ filename: String) async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
-        let path = harness.stateDirectory.appendingPathComponent(filename)
-        let corrupt = Data("{".utf8)
-        let runtimeBytes = try Data(contentsOf: harness.environment.configFile)
-        try corrupt.write(to: path)
-        let state = harness.launch()
-        do {
-            try await state.startProxy()
-            XCTFail("Malformed sidecar allowed activation")
-        } catch is ConfigurationLoadError {}
-        state.saveConfig()
-        XCTAssertFalse(isRunning(state))
-        XCTAssertEqual(try Data(contentsOf: path), corrupt)
-        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), runtimeBytes)
-    }
-
-    func testCorruptConfigurationCannotStartOrOverwriteTheFile() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
-        let corrupt = Data("{".utf8)
-        try corrupt.write(to: harness.environment.configFile)
-        let state = harness.launch()
-        do {
-            try await state.startProxy()
-            XCTFail("Corrupt configuration started the proxy")
-        } catch is ConfigurationLoadError {}
-        await state.startDNS()
-        await state.startTunnels()
-        state.saveConfig()
-        XCTAssertFalse(isRunning(state))
-        XCTAssertNotEqual(state.runtimeSnapshot.dnsRunState, .running)
-        XCTAssertNotEqual(state.runtimeSnapshot.tunnelsRunState, .running)
-        XCTAssertNotNil(state.lastErrorMessage)
-        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), corrupt)
-        XCTAssertTrue(machine.privilege.commands(matching: .setWebProxyEndpoint).isEmpty)
-    }
-
     private var harness: AppStateHarness!
 
     override func tearDown() async throws {
         await harness?.tearDown()
         harness = nil
         try await super.tearDown()
-    }
-
-    /// Ephemeral ports throughout: the harness runs beside whatever else the
-    /// machine has bound. One split-DNS entry, so the resolver surface has
-    /// a file to write.
-    func testLocationSwitchWithoutVPNOrPathChangeRestoresInactiveStateAndPreservesExternalEdits() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, manageSystemDNS: true))
-        let locations = NetworkLocationFixture.store()
-        let original = try locations.snapshot()
-        harness.locationStore = locations
-        let state = harness.launch()
-        await harness.launchRecovery()
-        try await state.startProxy()
-        await state.startDNS()
-        let vpnBefore = state.runtimeSnapshot.vpnState
-        locations.edit { $0.activeLocationID = NetworkLocationFixture.office }
-        harness.locationObserver.emit(NetworkLocationFixture.office)
-        await harness.deliveries()
-        let switched = try locations.snapshot()
-        XCTAssertEqual(switched.services[0].proxies, original.services[0].proxies)
-        XCTAssertEqual(switched.services[0].dns, original.services[0].dns)
-        XCTAssertEqual(switched.services[1].proxies["HTTPProxy"], .text("127.0.0.1"))
-        XCTAssertEqual(switched.services[1].dns["ServerAddresses"], .list(["127.0.0.1"]))
-        let boundDNSPort = try XCTUnwrap(state.runtimeSnapshot.bindings.dnsPort)
-        XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(boundDNSPort)])
-        XCTAssertEqual(state.runtimeSnapshot.vpnState, vpnBefore)
-        XCTAssertTrue(state.eventLog.events.contains { $0.event == "platform.location_observed" })
-        locations.edit { $0.services[1].dns["ServerAddresses"] = .list(["192.0.2.9"]) }
-        await state.stopDNS()
-        await state.stopProxy()
-        XCTAssertEqual(try locations.snapshot().services[1].dns["ServerAddresses"], .list(["192.0.2.9"]))
-        XCTAssertEqual(try locations.snapshot().services[1].proxies, original.services[1].proxies)
-        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
-        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
-    }
-
-    func testHelperBecomingAvailableRepairsFailedPACApplicationWithoutRestartingProxy() async throws {
-        var config = makeConfig()
-        config.localPACEnabled = true
-        config.localPACPort = 0
-        harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac))
-        let locations = NetworkLocationFixture.store()
-        locations.refuseWrites(true)
-        harness.locationStore = locations
-        harness.helper.status = .outdated
-        let state = harness.launch()
-        await harness.launchRecovery()
-        await harness.settle("old helper status received") { state.helperStatus == .outdated }
-        try await state.startProxy()
-        let bindings = state.runtimeSnapshot.bindings
-        let url = try XCTUnwrap(bindings.localPACURL)
-        XCTAssertNotEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
-        locations.refuseWrites(false)
-        harness.helper.status = .installed
-        state.refreshPreflight()
-        await harness.settle("new helper repairs PAC", timeoutMilliseconds: 5_000) {
-            (try? locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"]) == .text(url)
-        }
-        await harness.deliveries()
-        XCTAssertEqual(state.runtimeSnapshot.bindings, bindings)
-        XCTAssertTrue(state.eventLog.events.contains { $0.event == "platform.location_reconcile" })
-        await state.stopProxy()
-    }
-
-    func testVPNRewriteOfPACInSameLocationIsRepairedWithoutRestartingProxy() async throws {
-        var config = makeConfig()
-        config.localPACEnabled = true
-        config.localPACPort = 0
-        harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac))
-        let locations = NetworkLocationFixture.store()
-        harness.locationStore = locations
-        let state = harness.launch()
-        await harness.launchRecovery()
-        try await state.startProxy()
-        let bindings = state.runtimeSnapshot.bindings
-        let url = try XCTUnwrap(bindings.localPACURL)
-        let corporatePAC = NetworkSettingValue.text("http://corporate.example/proxy.pac")
-        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = corporatePAC }
-        harness.vpn.emit(.connected)
-        await harness.deliveries()
-        XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
-        XCTAssertEqual(state.runtimeSnapshot.bindings, bindings)
-        await state.stopProxy()
-        XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
-    }
-
-    func testLatePACRewriteRepairsOnSettingsNotificationWithoutAnotherVPNOrPathReport() async throws {
-        var config = makeConfig()
-        config.localPort = 0
-        config.localPACEnabled = true
-        config.localPACPort = 0
-        harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac))
-        let locations = NetworkLocationFixture.store()
-        harness.locationStore = locations
-        let state = harness.launch()
-        await harness.launchRecovery()
-        try await state.startProxy()
-        harness.vpn.emit(.connected)
-        await harness.deliveries()
-        let bindings = state.runtimeSnapshot.bindings
-        let url = try XCTUnwrap(bindings.localPACURL)
-        let corporatePAC = NetworkSettingValue.text("http://corporate.example/late.pac")
-        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = corporatePAC }
-        harness.locationObserver.emitSettingsChange()
-        await harness.deliveries()
-        XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
-        XCTAssertEqual(state.runtimeSnapshot.bindings, bindings)
-        XCTAssertTrue(state.eventLog.events.contains { $0.event == "platform.settings_observed" })
-        // Our own preferences notifications cannot trigger another write.
-        let failuresBefore = state.eventLog.events.filter { $0.event == "platform.location_failed" }.count
-        locations.refuseWrites(true)
-        for _ in 0..<20 { harness.locationObserver.emitSettingsChange() }
-        await harness.deliveries()
-        XCTAssertEqual(state.eventLog.events.filter { $0.event == "platform.location_failed" }.count, failuresBefore)
-        locations.refuseWrites(false)
-        let pending = try XCTUnwrap(harness.locationObserver.pendingSettingsDelivery())
-        await state.stopProxy()
-        let stopped = try locations.snapshot()
-        pending()
-        harness.locationObserver.emitSettingsChange()
-        await harness.deliveries()
-        XCTAssertEqual(try locations.snapshot(), stopped)
-        XCTAssertEqual(stopped.services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
-        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
-    }
-
-    func testContendedRepairRetriesWhenTheWindowReopensWithoutAnotherNotification() async throws {
-        var config = makeConfig()
-        config.localPort = 0
-        config.localPACEnabled = true
-        config.localPACPort = 0
-        harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac))
-        let locations = NetworkLocationFixture.store()
-        harness.locationStore = locations
-        harness.locationLimits = NetworkLocationLimits(maximumDriftRepairs: 1, driftRepairWindow: .milliseconds(300))
-        // The real path monitor's first report is waited for below.
-        harness.networkPathDebounce = 0.05
-        let state = harness.launch()
-        await harness.launchRecovery()
-        try await state.startProxy()
-        // The real path monitor's first report also reconciles; let it land first,
-        // so only the scheduled retry can repair the withheld write below.
-        await harness.settle("the first path report was handled", timeoutMilliseconds: 10_000) {
-            state.eventLog.events.contains { $0.event == "network.path_changed" }
-        }
-        await harness.deliveries()
-        let url = try XCTUnwrap(state.runtimeSnapshot.bindings.localPACURL)
-        let enforced = NetworkSettingValue.text("http://enforced.example/proxy.pac")
-        func pac() throws -> NetworkSettingValue? { try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"] }
-        // Startup's own write is an explicit apply, outside the budget; the first drift repair spends it.
-        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = enforced }
-        harness.locationObserver.emitSettingsChange()
-        await harness.deliveries()
-        XCTAssertEqual(try pac(), .text(url))
-        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = enforced }
-        harness.locationObserver.emitSettingsChange()
-        await harness.deliveries()
-        XCTAssertEqual(try pac(), enforced)
-        XCTAssertEqual(state.eventLog.events.filter { $0.event == "platform.location_contended" }.count, 1)
-        // The other program went quiet: only the scheduled retry can restore Conduit's PAC.
-        await harness.settle("the withheld repair ran when the window reopened", timeoutMilliseconds: 5_000) {
-            (try? locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"]) == .text(url)
-        }
-        await state.stopProxy()
-        XCTAssertEqual(try pac(), enforced)
-        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
-    }
-
-    func testVPNReconcileRetriesDNSInSameLocationAfterInitiallyDisabledService() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemDNS: true))
-        let locations = NetworkLocationFixture.store()
-        locations.edit { $0.services[0].enabled = false }
-        harness.locationStore = locations
-        // The VPN report's reconcile runs after this debounce.
-        harness.dnsReconcileDebounce = 0.05
-        let state = harness.launch()
-        await harness.launchRecovery()
-        await state.startDNS()
-        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
-        locations.edit { $0.services[0].enabled = true }
-        harness.vpn.emit(.connected)
-        await harness.settle("same-location VPN report reapplied DNS", timeoutMilliseconds: 5_000) {
-            harness.journal.hasRecords(for: .systemDNS)
-        }
-        await harness.deliveries()
-        XCTAssertEqual(try locations.snapshot().services[0].dns["ServerAddresses"], .list(["127.0.0.1"]))
-        let port = try XCTUnwrap(state.runtimeSnapshot.bindings.dnsPort)
-        XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(port)])
-        await state.stopDNS()
-    }
-
-    func testLocationNotificationDuringDNSStopCannotRepinStoppedListener() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemDNS: true))
-        let locations = NetworkLocationFixture.store()
-        let original = try locations.snapshot()
-        harness.locationStore = locations
-        let state = harness.launch()
-        await harness.launchRecovery()
-        await state.startDNS()
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.stopDNSRelay.rawValue }
-        let stop = Task { await state.stopDNS() }
-        await harness.hold.waitUntilReached()
-        defer { harness.hold.release() }
-        locations.edit { $0.activeLocationID = NetworkLocationFixture.office }
-        harness.locationObserver.emit(NetworkLocationFixture.office)
-        await harness.settle("location notification arrived during stop") {
-            state.eventLog.events.contains { $0.event == "platform.location_observed" }
-        }
-        harness.hold.release()
-        await stop.value
-        await harness.deliveries()
-        XCTAssertEqual(try locations.snapshot().services, original.services)
-        XCTAssertFalse(harness.machine.dnsRelayRunning)
-        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
-    }
-
-    func testVPNNotificationDuringProxyStopCannotRepinStoppedListener() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
-        let locations = NetworkLocationFixture.store()
-        let original = try locations.snapshot()
-        harness.locationStore = locations
-        let state = harness.launch()
-        await harness.launchRecovery()
-        try await state.startProxy()
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
-            name == "/bin/launchctl" && arguments.first == "unsetenv"
-        }
-        let stop = Task { await state.stopProxy() }
-        await harness.hold.waitUntilReached()
-        defer { harness.hold.release() }
-        harness.vpn.emit(.connected)
-        await harness.settle("proxy recovery waits for the held stop") { state.passesWaitingForLifecycle > 0 }
-        harness.hold.release()
-        await stop.value
-        await harness.deliveries()
-        XCTAssertEqual(try locations.snapshot().services, original.services)
-        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
-    }
-
-    func testSettingsNotificationDuringProxyStopCannotRepinStoppedListener() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
-        let locations = NetworkLocationFixture.store()
-        let original = try locations.snapshot()
-        harness.locationStore = locations
-        let state = harness.launch()
-        await harness.launchRecovery()
-        try await state.startProxy()
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
-            name == "/bin/launchctl" && arguments.first == "unsetenv"
-        }
-        let stop = Task { await state.stopProxy() }
-        await harness.hold.waitUntilReached()
-        defer { harness.hold.release() }
-        harness.locationObserver.emitSettingsChange()
-        await harness.settle("proxy recovery waits for the held stop") { state.passesWaitingForLifecycle > 0 }
-        for _ in 0..<1_000 { harness.locationObserver.emitSettingsChange() }
-        harness.hold.release()
-        await stop.value
-        await harness.deliveries()
-        XCTAssertEqual(try locations.snapshot().services, original.services)
-        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
-        XCTAssertLessThanOrEqual(state.eventLog.events.filter { $0.event == "platform.settings_observed" }.count, 2)
     }
 
     private func makeConfig() -> ProxyConfig {
@@ -666,2371 +279,782 @@ final class AppStateHarnessTests: XCTestCase {
         return config
     }
 
-    private func launch(
+    private func makeHarness(
         platform: PlatformIntegrationConfig = PlatformIntegrationConfig(),
-        helperSocketBindWait: Duration = .seconds(1),
-        settingsSaveDebounce: Duration = .seconds(3600),
-        environmentDriftInterval: Duration = .seconds(3600),
-        networkPathDebounce: TimeInterval = NetworkMonitor.defaultDebounceInterval,
         configure: (inout ProxyConfig) -> Void = { _ in }
-    ) throws -> AppState {
+    ) throws -> AppStateHarness {
         var config = makeConfig()
         configure(&config)
         harness = try AppStateHarness(config: config, platformConfig: platform)
-        harness.helperSocketBindWait = helperSocketBindWait
-        harness.settingsSaveDebounce = settingsSaveDebounce
-        harness.environmentDriftInterval = environmentDriftInterval
-        harness.networkPathDebounce = networkPathDebounce
-        return harness.launch()
+        return harness
     }
 
-    private var machine: FakeMachine { harness.machine }
-    private var wifi: FakeMachine.Service { machine.service("Wi-Fi") }
+    private var wifi: FakeMachine.Service { harness.machine.service("Wi-Fi") }
 
-    // MARK: A busy helper (#197)
+    // MARK: Opening
 
-    /// A ping that ran out of time is not a verdict: the app keeps the one it
-    /// had, says it is checking again, and reads the helper again until an
-    /// answer comes. A helper still finishing another request used to show
-    /// "Installed but not responding" with "Repair Helper".
-    func testABusyHelperKeepsItsVerdictAndIsReadAgain() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
-        harness.helperBusyRecheckDelay = .milliseconds(20)
+    /// The drafts and their baselines come from one editor observation of the files the host opened; nothing was written, and the
+    /// controls are enabled only after readiness.
+    func testOpeningSeedsTheDraftsFromOneObservationBeforeEnablingTheControls() async throws {
+        let harness = try makeHarness { $0.profileName = "Opening witness" }
+        let bytes = try Data(contentsOf: harness.environment.configFile)
         let state = harness.launch()
-        await harness.launchRecovery()
-        await harness.settle("the launch preflight found the helper") { state.helperStatus == .installed }
-
-        harness.helper.status = .busy
-        let readsBefore = harness.helper.statusReads
-        state.refreshPreflight()
-        await harness.settle("the busy reading is noted") { state.helperCheckingAgain }
-        XCTAssertEqual(state.helperStatus, .installed, "a timed-out ping does not overturn the verdict")
-        XCTAssertNotNil(HelperStatusPresentation.primaryActionTitle(for: state.helperStatus))
-        await harness.settle("the helper is read again on its own") { self.harness.helper.statusReads >= readsBefore + 2 }
-
-        harness.helper.status = .installed
-        await harness.settle("an answer ends the re-reads") { !state.helperCheckingAgain }
-        XCTAssertEqual(state.helperStatus, .installed)
+        XCTAssertEqual(state.phase, .opening)
+        XCTAssertFalse(state.controlsEnabled, "nothing acts before the opening is ready")
+        state.toggleProxy()
+        await state.opening?.value
+        await harness.settle("the observation is live") { state.runtime.isLive }
+        XCTAssertTrue(state.controlsEnabled)
+        XCTAssertEqual(harness.wake.startCount, 1, "the built host started its wake observer, so a count of zero elsewhere means no host")
+        XCTAssertEqual(state.config.profileName, "Opening witness")
+        XCTAssertFalse(state.hasUnsavedEdit, "seeding the drafts is not an edit")
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), bytes, "opening wrote nothing")
+        XCTAssertEqual(state.runtime.runtimeStatus.state, .stopped, "the toggle before readiness started nothing")
     }
 
-    /// A reinstall replaces the helper, so the verdict about the old one is
-    /// not kept across a busy first reading of the new one.
-    func testAReinstalledHelperThatIsBusyDoesNotKeepTheOldVerdict() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
-        harness.helperSocketBindWait = .zero
+    /// A corrupt configuration refuses the open: the bytes stay, the journal's configless recovery restores the machine, the banner
+    /// shows, and no control or save acts.
+    func testACorruptConfigIsRefusedKeepsItsBytesAndStillRestoresTheJournaledProxy() async throws {
+        let harness = try makeHarness()
+        let prior = ProxyServiceState(
+            webHost: "prior.example.test", webPort: "8080", webEnabled: true,
+            secureHost: "prior.example.test", securePort: "8080", secureEnabled: true,
+            autoURL: "", autoEnabled: false, bypassDomains: ["*.local"]
+        )
+        harness.journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: prior.journalValues)
+        harness.journal.markApplied(surface: .systemProxy)
+        harness.machine.describe("Wi-Fi") {
+            $0.webProxy = FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "47113")
+            $0.secureWebProxy = $0.webProxy
+        }
+        let corrupt = Data("{".utf8)
+        try corrupt.write(to: harness.environment.configFile)
         let state = harness.launch()
-        await harness.launchRecovery()
-        await harness.settle("the launch preflight found the helper") { state.helperStatus == .installed }
+        await state.opening?.value
 
-        harness.helper.statusAfterInstall = .busy
-        state.installHelper()
-        await harness.settle("the install ran") { self.harness.helper.installs == 1 }
-        await harness.settle("the new helper's busy reading shows") { state.helperStatus == .busy }
-        XCTAssertTrue(state.helperCheckingAgain)
-        XCTAssertNil(HelperStatusPresentation.primaryActionTitle(for: state.helperStatus))
+        XCTAssertEqual(state.phase, .refused)
+        XCTAssertEqual(wifi.webProxy.host, "prior.example.test", "journal recovery proceeds despite the invalid configuration")
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "config.load_rejected" })
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "platform.launch_recovery_restored" })
+        XCTAssertNotNil(state.lastErrorMessage)
+        state.config.localPort = 9
+        state.saveConfig()
+        state.toggleProxy()
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), corrupt, "the refused file keeps its bytes")
+        XCTAssertFalse(state.controlsEnabled)
     }
 
-    /// With no verdict yet, the first reading's `busy` is what shows, and it
-    /// offers no repair.
-    func testABusyHelperAtLaunchShowsBusyWithoutARepair() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
-        harness.helper.status = .busy
+    /// An established install whose configuration was deleted is not a first run: no default replaces the missing policy.
+    func testADeletedConfigInAnEstablishedStateIsRefusedNotDefaulted() async throws {
+        let harness = try makeHarness()
+        try FileManager.default.removeItem(at: harness.environment.configFile)
         let state = harness.launch()
-        await harness.launchRecovery()
-        await harness.settle("the launch preflight read the helper") { state.helperCheckingAgain }
-        XCTAssertEqual(state.helperStatus, .busy)
-        XCTAssertNil(HelperStatusPresentation.primaryActionTitle(for: state.helperStatus))
+        await state.opening?.value
+        XCTAssertEqual(state.phase, .refused)
+        state.saveConfig()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.environment.configFile.path))
     }
 
-    private func isRunning(_ appState: AppState) -> Bool {
-        appState.runtimeSnapshot.runtimeStatus.state == .running
+    /// `--port`, `--no-system-proxy` and `--no-env` are written save-only before the controls are enabled, so the saved Start uses them.
+    func testLaunchOverridesAreSavedBeforeTheControlsAreEnabled() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
+        harness.overrides = AppLaunchOverrides(port: 0, disableSystemProxy: true, disableEnvironment: true)
+        let state = await harness.ready()
+        XCTAssertFalse(try harness.savedPlatform.manageSystemProxy)
+        XCTAssertFalse(try harness.savedPlatform.manageEnvironmentVariables)
+        XCTAssertFalse(state.hasUnsavedEdit, "the override's own receipt rebased the draft")
+        state.toggleProxy()
+        await harness.settle("the proxy runs") { state.runtime.runtimeStatus.state == .running }
+        XCTAssertTrue(harness.machine.privilege.commands(matching: .setWebProxyEndpoint).isEmpty,
+                      "the saved override, not the file's earlier switch, governed the Start")
     }
 
-    // MARK: Saves and the editor
+    /// An override the store did not verify holds every Start: the launch's own input was not saved, so nothing may run the input it
+    /// replaced. The refusal is reported; Quit is unaffected.
+    func testAnUnsavedLaunchOverrideHoldsEveryStart() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemProxy: true))
+        harness.overrides = AppLaunchOverrides(disableSystemProxy: true)
+        harness.stateFiles = RefusingPlatformWrites()
+        let state = await harness.ready()
+        XCTAssertNotNil(state.activationHeld)
+        XCTAssertTrue(try harness.savedPlatform.manageSystemProxy, "the refused write left the file as it was")
+        state.toggleProxy()
+        state.toggleDNS()
+        XCTAssertEqual(state.lastErrorMessage, state.activationHeld, "the held Start says why")
+        XCTAssertEqual(state.runtime.runtimeStatus.state, .stopped)
+        XCTAssertTrue(harness.machine.privilege.commands(matching: .setWebProxyEndpoint).isEmpty)
+        XCTAssertTrue(state.beginQuit())
+        guard case .settled(.completed)? = await state.finishQuit()?.quit else { return XCTFail("the quit completed") }
+    }
 
-    /// The first item on this harness's list. The orchestrator echoes the
-    /// config a pass applies through `onConfigChange`, and wiring that echo
-    /// back into the editor replaced edits made after the save with the
-    /// older save. The reconciler tests cannot reach this: it is wiring.
-    func testAnEditMadeAfterASaveSurvivesTheSavesPass() async throws {
-        let appState = try launch()
-
-        appState.config.profileName = "saved"
-        appState.saveConfig()
-        // Before the pass runs: it is a task queued behind this call.
-        appState.config.profileName = "edited afterwards"
-        await appState.reconciler.drain()
-
-        XCTAssertEqual(appState.config.profileName, "edited afterwards", "the pass must not write its save over newer edits")
-        XCTAssertEqual(appState.reconciler.lastReconciledConfig.profileName, "saved", "the pass applied its own save")
-        XCTAssertTrue(
-            appState.eventLog.events.contains { $0.event == "config.metadata_changed" },
-            "and the runtime took the save: \(appState.eventLog.events.map(\.event))"
+    /// A journaled proxy a crashed run left on Wi-Fi: launch recovery, which only a built host runs, would restore the prior.
+    private func leaveACrashedRunsProxy(_ harness: AppStateHarness) {
+        let prior = ProxyServiceState(
+            webHost: "prior.example.test", webPort: "8080", webEnabled: true,
+            secureHost: "prior.example.test", securePort: "8080", secureEnabled: true,
+            autoURL: "", autoEnabled: false, bypassDomains: ["*.local"]
         )
-    }
-
-    /// #246, the twin of the host's reload witness: a Settings save that only respells the PAC URL (see `Respelled`) writes the new
-    /// bytes, and the reconciler pushes them to the runtime rather than skipping the save as already applied.
-    func testASaveThatOnlyRespellsThePACURLReachesTheRuntime() async throws {
-        let composed = "https://pac.example.test/\(Respelled.composed).pac"
-        let decomposed = "https://pac.example.test/\(Respelled.decomposed).pac"
-        let appState = try launch(configure: { $0.pacURL = composed })
-
-        appState.config.pacURL = decomposed
-        appState.saveConfig()
-        await appState.reconciler.drain()
-
-        assertSameUTF8(try ProxyConfigPersistence.load(in: harness.environment).pacURL, decomposed, "the save wrote the new bytes")
-        assertSameUTF8(appState.reconciler.lastReconciledConfig.pacURL, decomposed, "the runtime baseline holds them")
-        XCTAssertTrue(appState.eventLog.events.contains { $0.event == "config.routing_changed" },
-                      "\(appState.eventLog.events.map(\.event))")
-    }
-
-    /// The import gate refuses a newer file before the editor is assigned: the editor keeps its config and the source keeps
-    /// its bytes. A current file then reaches the editor through the same `importConfiguration` path.
-    func testAnImportOfANewerFileLeavesTheEditorUnchanged() throws {
-        let appState = try launch()
-        appState.config.profileName = "kept"
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("import-\(UUID().uuidString).json")
-        let newer = Data(#"{"schemaVersion":3,"profileName":"imported"}"#.utf8)
-        try newer.write(to: url)
-        XCTAssertThrowsError(try appState.importConfiguration(from: url))
-        XCTAssertEqual(appState.config.profileName, "kept", "a refused import never reaches the editor")
-        XCTAssertEqual(try Data(contentsOf: url), newer, "the refused source keeps its bytes")
-
-        try Data(#"{"schemaVersion":2,"profileName":"imported"}"#.utf8).write(to: url)
-        try appState.importConfiguration(from: url)
-        XCTAssertEqual(appState.config.profileName, "imported", "a current file is assigned through the same gate")
-        try FileManager.default.removeItem(at: url)
-    }
-
-    /// `startDNS` flips `dnsForwarderEnabled` and saves. That flip is the
-    /// lifecycle's own work, already live in the runtime; a pass that
-    /// treated it as an edit would restart the forwarder it just started.
-    func testStartingTheDNSForwarderAbsorbsItsOwnSave() async throws {
-        let appState = try launch()
-
-        await appState.startDNS()
-
-        XCTAssertEqual(appState.runtimeSnapshot.dnsRunState, .running)
-        XCTAssertTrue(appState.config.dnsForwarderEnabled, "the persisted intent follows the lifecycle")
-        XCTAssertFalse(appState.reconciler.hasPassInFlight, "the save queued no pass")
-        XCTAssertFalse(
-            appState.eventLog.events.contains { $0.event == "config.dns_restart" },
-            "the forwarder was not restarted by its own save"
-        )
-        XCTAssertTrue(
-            try ProxyConfigPersistence.loadAllMigrating(in: harness.environment).config.dnsForwarderEnabled,
-            "and the flag reached disk, so the next launch brings DNS up with the proxy"
-        )
-    }
-
-    // MARK: Off the main actor
-
-    /// The relay restart is a helper round trip and then a probe of up to
-    /// two seconds, every thirty seconds while the pipeline is down. It ran
-    /// on the main actor (#47).
-    func testAFailedLivenessProbeRestartsTheRelayOffTheMainThread() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true))
-        await appState.startDNS()
-        XCTAssertTrue(machine.dnsRelayRunning, "system DNS came up through the relay")
-        let startsBefore = machine.privilege.commands(matching: .startDNSRelay).count
-        let onMainBefore = machine.privilege.mainThreadOperations.filter { $0 == .startDNSRelay }.count
-        XCTAssertEqual(onMainBefore, 0, "`startDNS` asks from the platform work queue too")
-
-        let token = appState.dnsObservationToken
-        appState.handleDNSHealthResult(alive: false, armedBy: token)
-        // A second tick while the first restart is out adds nothing.
-        appState.handleDNSHealthResult(alive: false, armedBy: token)
-        await harness.deliveries()
-
-        XCTAssertEqual(machine.privilege.commands(matching: .startDNSRelay).count, startsBefore + 1, "one restart for the two ticks")
-        XCTAssertEqual(
-            machine.privilege.mainThreadOperations.filter { $0 == .startDNSRelay }.count,
-            onMainBefore,
-            "and the main thread did not wait on the helper for it"
-        )
-    }
-
-    /// The start and stop surface work: 15 to 30 helper round trips and
-    /// `networksetup` reads on a machine with several services, which held
-    /// the main thread for as long as they took (#47). Every privileged
-    /// write the four paths make is asked for from the platform work queue.
-    func testProxyAndDNSStartAndStopWaitOnTheHelperOffTheMainThread() async throws {
-        let appState = try launch(
-            platform: PlatformIntegrationConfig(
-                manageSystemProxy: true,
-                manageEnvironmentVariables: true,
-                manageDNSResolvers: true,
-                manageSystemDNS: true
-            )
-        )
-        await harness.setVPN(.connected)
-
-        try await appState.startProxy()
-        await appState.startDNS()
-        XCTAssertTrue(wifi.routesThroughAProxy)
-        XCTAssertTrue(machine.dnsRelayRunning)
-        XCTAssertEqual(machine.resolverFile(for: "corp.example"), "nameserver 10.0.0.53")
-        await appState.stopDNS()
-        await appState.stopProxy()
-        XCTAssertFalse(wifi.routesThroughAProxy)
-        XCTAssertFalse(machine.dnsRelayRunning)
-        XCTAssertNil(machine.resolverFile(for: "corp.example"))
-
-        let asked = Set(machine.privilege.commands.map(\.command))
-        XCTAssertTrue(
-            asked.isSuperset(of: [.applySystemProxy, .applyDNS, .removeDNS, .setDNSServers, .startDNSRelay, .stopDNSRelay, .setWebProxyEndpoint]),
-            "the starts and the stops reached the helper: \(asked)"
-        )
-        XCTAssertEqual(machine.privilege.mainThreadOperations, [], "and none of it from the main thread")
-    }
-
-    /// The start's surface work is held on the queue, and a stop is issued
-    /// then. The stop's clear is queued behind the start's apply, so the
-    /// machine ends cleared; and the start, overtaken, goes no further — no
-    /// login-item repair, no save, no "Proxy Enabled" for a proxy that is
-    /// down.
-    func testAStopIssuedWhileTheStartAppliesLandsLastAndTheStartGoesNoFurther() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
-        await harness.launchRecovery()
-        // The start's first read of the machine, once its listeners are up.
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
-            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        harness.journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: prior.journalValues)
+        harness.journal.markApplied(surface: .systemProxy)
+        harness.machine.describe("Wi-Fi") {
+            $0.webProxy = FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "47113")
+            $0.secureWebProxy = $0.webProxy
         }
+    }
 
-        let start = Task { try await appState.startProxy() }
-        await harness.hold.waitUntilReached()
-        XCTAssertFalse(harness.hold.reachedOnMainThread, "the start's surface work is off the main thread")
-        let stop = Task { await appState.stopProxy() }
-        // The stop takes the listeners down and then queues its clear, which
-        // waits behind the held apply.
-        await harness.settle("the stop has taken the listeners down") {
-            appState.runtimeSnapshot.runtimeStatus.state == .stopped
+    /// The explicit reload runs one at a time, refusing a second with a message, and re-evaluates the launch options' hold from what it
+    /// read: a file repaired outside the app to hold `--no-system-proxy` releases it, and the Start then runs without the system proxy.
+    func testAReloadIsSingleFlightAndReevaluatesTheLaunchOptionsHold() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemProxy: true))
+        harness.overrides = AppLaunchOverrides(disableSystemProxy: true)
+        harness.stateFiles = RefusingPlatformWrites()
+        let state = await harness.ready()
+        XCTAssertNotNil(state.activationHeld)
+        try PlatformConfigPersistence.save(PlatformIntegrationConfig(manageSystemProxy: false), in: harness.environment)
+        state.reloadConfigurationFromDisk()
+        state.reloadConfigurationFromDisk()
+        XCTAssertEqual(state.lastErrorMessage, "A reload from disk is already running.")
+        await state.reloadTask?.value
+        XCTAssertNil(state.activationHeld, "the saved values now hold the launch option")
+        XCTAssertFalse(state.platformConfig.manageSystemProxy)
+        state.toggleProxy()
+        await harness.settle("the proxy runs") { state.runtime.runtimeStatus.state == .running }
+        XCTAssertTrue(harness.machine.privilege.commands(matching: .setWebProxyEndpoint).isEmpty)
+    }
+
+    /// A quit while the host's startup read is held joins the opening within its own total. The opening was cancelled in the quit's
+    /// turn, so once the read is released the factory refuses before construction: no host, no launch recovery, no observer, and the
+    /// opening never finishes ready.
+    func testAQuitDuringAHeldOpeningBuildsNoHostAndTheOpeningNeverBecomesReady() async throws {
+        let harness = try makeHarness()
+        leaveACrashedRunsProxy(harness)
+        let held = HeldStateFileRead()
+        harness.stateFiles = held
+        harness.timing.quitTotal = .seconds(5)
+        held.hold.arm(onQueueLabeled: ".configuration-store") { name, _ in name == "read" }
+        let state = harness.launch()
+        await held.hold.waitUntilReached()
+        let begun = ContinuousClock.now
+        XCTAssertTrue(state.beginQuit())
+        XCTAssertFalse(state.beginQuit(), "a second request joins the first")
+        Task { @MainActor in
+            try await Task.sleep(for: .milliseconds(100))
+            held.hold.release()
         }
-        harness.hold.release()
-        try await start.value
-        await stop.value
-
-        XCTAssertFalse(wifi.routesThroughAProxy, "the stop's clear landed after the start's apply")
-        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
-        XCTAssertEqual(harness.loginItems.registrations, [], "the overtaken start did nothing after its apply")
-        XCTAssertEqual(
-            appState.eventLog.events.supersededValues,
-            [LifecycleSuperseded(operation: .proxyStart, generation: 1, current: 2, reason: .superseded)]
-        )
-        XCTAssertEqual(
-            appState.eventLog.events.filter { $0.event == "lifecycle.superseded" }.map(\.detail),
-            ["operation=proxy_start generation=1 current=2 reason=superseded"],
-            "golden: the human line operators read"
-        )
+        let result = await state.finishQuit()
+        XCTAssertLessThan(begun.duration(to: .now), .seconds(5), "the quit ended within its total")
+        XCTAssertNil(result, "no host was built, so there was nothing to fence")
+        await state.opening?.value
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(harness.wake.startCount, 0, "no host was constructed")
+        XCTAssertEqual(harness.machine.service("Wi-Fi").webProxy.port, "47113", "no launch recovery ran")
+        XCTAssertFalse(harness.journal.knowsSurfaceIsIdle(.systemProxy), "the recovery record is kept for the next launch")
+        XCTAssertFalse(harness.hostEventsText.contains("phase=startup"), "the startup observation was never emitted by a host")
+        XCTAssertEqual(state.phase, .quitting)
+        XCTAssertNil(state.editor, "the fenced opening seeded nothing")
+        XCTAssertFalse(state.controlsEnabled)
+        XCTAssertEqual(state.runtime.observation, .ended)
     }
 
-    /// A start held on its PAC fetch, before its listener binds, and a stop
-    /// issued then. Released, the overtaken start binds nothing, applies
-    /// nothing and reports no failure of its own, and the next start comes
-    /// up rather than finding a stale `running` and doing nothing. Twin of
-    /// `DaemonRuntimeHostTests.testAStopAdmittedBeforeTheBindLeavesNoListenerRunning`.
-    func testAStopIssuedBeforeTheBindLeavesNoListenerAndTheNextStartComesUp() async throws {
-        let appState = try await launchHoldingTheFirstPACFetch()
-        let fetch = try XCTUnwrap(harness.pacEvaluator as? HeldPACFetch)
-
-        let start = Task { try await appState.startProxy() }
-        await harness.settle("the start is held before its bind") { fetch.isHeld }
-        await appState.stopProxy()
-        fetch.release()
-        try await start.value
-
-        XCTAssertEqual(appState.runtimeSnapshot.runtimeStatus.state, .stopped, "the stop stands")
-        XCTAssertNil(appState.runtimeSnapshot.bindings.proxyPort, "the overtaken start left no listener")
-        XCTAssertFalse(wifi.routesThroughAProxy, "the overtaken start applied no system proxy")
-
-        try await appState.startProxy()
-        XCTAssertNotNil(appState.runtimeSnapshot.bindings.proxyPort, "the next start binds")
-        XCTAssertTrue(wifi.routesThroughAProxy, "the next start applies the system proxy")
+    /// A quit whose total ends while the host's startup read is still held returns at that deadline, with nothing fenced or saved. The
+    /// read, released only after the quit returned, builds no host: no recovery mutation, no observer start, no phase change.
+    func testAQuitWhoseTotalEndsDuringAHeldOpeningReturnsAtItsDeadlineAndALateReleaseBuildsNothing() async throws {
+        let harness = try makeHarness()
+        leaveACrashedRunsProxy(harness)
+        let held = HeldStateFileRead()
+        harness.stateFiles = held
+        harness.timing.quitTotal = .milliseconds(300)
+        held.hold.arm(onQueueLabeled: ".configuration-store") { name, _ in name == "read" }
+        let state = harness.launch()
+        await held.hold.waitUntilReached()
+        let begun = ContinuousClock.now
+        XCTAssertTrue(state.beginQuit())
+        XCTAssertEqual(state.phase, .quitting, "fenced in the same turn")
+        let result = await state.finishQuit()
+        let waited = begun.duration(to: .now)
+        XCTAssertNil(result, "no client existed when the total ended")
+        XCTAssertLessThan(waited, .seconds(2), "the quit returned at its deadline while the opening was still held")
+        held.hold.release()
+        await state.opening?.value
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(harness.wake.startCount, 0, "the late release constructed no host")
+        XCTAssertEqual(harness.machine.service("Wi-Fi").webProxy.port, "47113", "no launch recovery ran after the quit")
+        XCTAssertFalse(harness.journal.knowsSurfaceIsIdle(.systemProxy), "the recovery record is kept for the next launch")
+        XCTAssertEqual(state.phase, .quitting)
+        XCTAssertNil(state.editor)
+        XCTAssertFalse(state.controlsEnabled)
     }
 
-    /// A stop, then a newer start, while the first start is held before its
-    /// bind. The newer start joins the PAC refresh the older one holds, so
-    /// both are released together. The older start is superseded: it must
-    /// not revert the surfaces or stop the listener the newer start owns.
-    /// Twin of `DaemonRuntimeHostTests.testAStaleStartReleasedAfterANewerStartLeavesTheNewerListenerRunning`.
-    func testAStaleStartReleasedWithANewerStartLeavesTheNewerListenerRunning() async throws {
-        let appState = try await launchHoldingTheFirstPACFetch()
-        let fetch = try XCTUnwrap(harness.pacEvaluator as? HeldPACFetch)
+    // MARK: Saves
 
-        let older = Task { try await appState.startProxy() }
-        await harness.settle("the older start is held before its bind") { fetch.isHeld }
-        await appState.stopProxy()
-        // Admitted before the gate opens: the kernel publishes `starting` at admission. Every task is awaited after the release.
-        let newer = Task { try await appState.startProxy() }
-        await harness.settle("the newer start is admitted behind the held refresh") {
-            appState.runtimeSnapshot.runtimeStatus.state == .starting
+    /// An edit saves once edits pause; its own receipt makes the draft clean, and the file holds it.
+    func testASettingsEditSavesWhenEditsPauseAndItsOwnReceiptCleansIt() async throws {
+        let harness = try makeHarness()
+        harness.timing.settingsSaveDebounce = .milliseconds(10)
+        let state = await harness.ready()
+        state.config.health.checkInterval = 47
+        XCTAssertTrue(state.hasUnsavedEdit)
+        await harness.settle("the save settled") { !state.hasUnsavedEdit }
+        XCTAssertEqual(try harness.savedConfig.health.checkInterval, 47)
+    }
+
+    /// An edit made after a save froze its values survives that save's receipt: the receipt advances the baselines the save was submitted
+    /// under and never marks the newer draft clean. The next save carries the newer value under those baselines.
+    func testAnEditMadeWhileASaveIsInFlightStaysUnsavedAfterItsReceipt() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        let editor = try XCTUnwrap(state.editor)
+        state.config.health.checkInterval = 47
+        state.saveConfig()
+        await harness.settle("the save is in flight") { editor.ledger.active != nil }
+        state.config.health.checkInterval = 53
+        await editor.settle()
+        XCTAssertEqual(try harness.savedConfig.health.checkInterval, 47, "the receipt is the first save's")
+        XCTAssertTrue(state.hasUnsavedEdit, "the newer edit keeps its own version")
+        XCTAssertEqual(state.config.health.checkInterval, 53, "no receipt rewrites a draft")
+        state.saveConfig()
+        await editor.settle()
+        XCTAssertEqual(try harness.savedConfig.health.checkInterval, 53)
+        XCTAssertFalse(state.hasUnsavedEdit)
+        XCTAssertTrue(editor.ledger.filesNeedingReload.isEmpty, "the causal chain held: no own write read as a conflict")
+    }
+
+    /// A refused preferences write names only the file (no value, no private path), leaves the runtime save beside it saved, keeps the
+    /// preferences draft unsaved, and the quit's own preferences final save writes it once the file takes writes again.
+    func testARefusedPreferencesWriteNamesOnlyTheFileAndTheQuitTriesItAgain() async throws {
+        let harness = try makeHarness()
+        let refusing = RefusingWrites(of: .preferences)
+        harness.stateFiles = refusing
+        let state = await harness.ready()
+        state.appPreferences.floatingWindowEnabled.toggle()
+        let wanted = state.appPreferences.floatingWindowEnabled
+        state.config.health.checkInterval = 47
+        state.saveConfig()
+        await state.awaitPendingSave()
+        XCTAssertEqual(try harness.savedConfig.health.checkInterval, 47, "the runtime save is independent of the preferences file")
+        XCTAssertNotEqual(try AppPreferencesPersistence.load(in: harness.environment).floatingWindowEnabled, wanted)
+        XCTAssertTrue(state.hasUnsavedEdit, "the preferences draft stays unsaved")
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "config.save_unverified" && ($0.detail ?? "").contains("file=preferences") })
+        let banner = try XCTUnwrap(state.lastErrorMessage)
+        XCTAssertTrue(banner.hasPrefix("Preferences were not saved"), banner)
+        XCTAssertFalse(banner.contains(harness.stateDirectory.path), "no private path in the banner")
+
+        refusing.refusing = false
+        XCTAssertTrue(state.beginQuit())
+        let finished = await state.finishQuit()
+        let result = try XCTUnwrap(finished)
+        guard case .settled(.preferencesSettled(let receipt)) = result.preferences else {
+            return XCTFail("the quit's preferences save settled: \(result.preferences)")
         }
-
-        fetch.release()
-        try await older.value
-        try await newer.value
-        await appState.reconciler.drain()
-
-        let port = try XCTUnwrap(appState.runtimeSnapshot.bindings.proxyPort, "the newer start binds a listener")
-        XCTAssertNotEqual(appState.runtimeSnapshot.runtimeStatus.state, .stopped, "the stale start did not stop the newer runtime")
-        XCTAssertTrue(wifi.routesThroughAProxy, "the stale start did not revert the newer start's surfaces")
-        await appState.stopProxy()
-        XCTAssertNil(appState.runtimeSnapshot.bindings.proxyPort, "a final stop closes the listener on \(port)")
-        XCTAssertFalse(wifi.routesThroughAProxy)
+        XCTAssertTrue(receipt.preferences.write.isVerified)
+        XCTAssertEqual(try AppPreferencesPersistence.load(in: harness.environment).floatingWindowEnabled, wanted)
     }
 
-    /// A harness whose first PAC fetch is held, so a start can be overtaken before its listener binds.
-    private func launchHoldingTheFirstPACFetch() async throws -> AppState {
-        var config = makeConfig()
-        config.pacRoutingEnabled = true
-        config.pacURL = "http://pac.example.test/held.pac"
-        harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
-        harness.pacEvaluator = HeldPACFetch()
-        let appState = harness.launch()
-        await harness.launchRecovery()
-        return appState
-    }
-
-    /// A VPN drop handled while the start's apply is out reconciles the
-    /// entry files before the apply has written them, and the apply then
-    /// writes them for the tunnel as it was when it was queued. The start
-    /// puts them where the gate is once its apply returns: a split-DNS file
-    /// left with the tunnel down sends its domain, the VPN gateway's own
-    /// name included, to servers only the tunnel reaches.
-    func testAVPNDropWhileTheStartAppliesLeavesNoEntryFile() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageDNSResolvers: true))
-        await harness.setVPN(.connected)
-        await harness.launchRecovery()
-        // The start's first read of the machine: the entry files come after.
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
-            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+    /// A pause does not save an edit that would block a start or replace a listener; a commit does, save-only for the blocking one.
+    func testAPauseHoldsAStartBlockingEditAndACommitSavesItWithoutApplying() async throws {
+        let harness = try makeHarness()
+        harness.timing.settingsSaveDebounce = .milliseconds(10)
+        let state = await harness.ready()
+        state.config.proxy.port = 70_000
+        await harness.settle("the pause decided") {
+            state.eventLog.events.contains { $0.event == "config.autosave_held" }
         }
+        XCTAssertNotEqual(try harness.savedConfig.proxy.port, 70_000)
+        state.commitPendingEdit(trigger: .submit)
+        await state.awaitPendingSave()
+        XCTAssertEqual(try harness.savedConfig.proxy.port, 70_000)
+        XCTAssertEqual(state.eventLog.events.filter { $0.event == "config.apply_held" }.count, 1)
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "config.edit_committed" })
+    }
 
-        let start = Task { try await appState.startProxy() }
-        await harness.hold.waitUntilReached()
-        XCTAssertFalse(harness.hold.reachedOnMainThread, "the start's surface work is off the main thread")
-        harness.vpn.emit(.disconnected(reason: .userInitiated))
-        // Proxy reconciliation now waits for the held start; observe the VPN
-        // transition first, then drain recovery after releasing that start.
-        await harness.settle("the VPN drop reached the orchestrator") {
-            appState.runtimeSnapshot.vpnState == .disconnected(reason: .userInitiated)
+    func testAListenerEditWaitsForACommit() async throws {
+        let harness = try makeHarness()
+        harness.timing.settingsSaveDebounce = .milliseconds(10)
+        let state = await harness.ready()
+        state.config.socksEnabled.toggle()
+        XCTAssertTrue(state.listenerEditAwaitingCommit)
+        await harness.settle("the pause decided") {
+            state.eventLog.events.contains { $0.event == "config.autosave_held" && ($0.detail ?? "").contains("listener_change") }
         }
-        XCTAssertNil(machine.resolverFile(for: "corp.example"), "the drop found nothing to remove yet")
-        harness.hold.release()
-        try await start.value
-        await harness.deliveries()
-
-        XCTAssertTrue(isRunning(appState))
-        XCTAssertNil(machine.resolverFile(for: "corp.example"), "no entry file with the tunnel down")
-        XCTAssertFalse(harness.journal.hasRecords(for: .resolverFile))
-    }
-
-    /// A settings change reconciled while a start's platform block is still
-    /// out. The block acts on the flags it read when it began; a pass that
-    /// cleared the environment in the middle of it had the block publish the
-    /// variables again afterwards, with the switch off. The pass waits for
-    /// the start and runs after it.
-    ///
-    /// The lanes count every caller waiting on them, and observer work, such
-    /// as the launch preflight finding the helper or a network path report,
-    /// waits for the start too, so the count only says something is waiting.
-    /// The order is read off the machine: once the pass has run, the start's
-    /// system proxy step, the one held here, has landed.
-    func testASettingsChangeWhileTheStartAppliesIsReconciledAfterIt() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
-        await harness.launchRecovery()
-        // The system proxy step, before the environment one.
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
-            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
-        }
-        let start = Task { try await appState.startProxy() }
-        await harness.hold.waitUntilReached()
-        XCTAssertFalse(harness.hold.reachedOnMainThread)
-
-        appState.platformConfig.manageEnvironmentVariables = false
-        appState.saveConfig()
-        // What the machine held when the pass had run. Awaited after the release, on every path.
-        let pass = Task { @MainActor in
-            await appState.reconciler.drain()
-            return self.wifi.routesThroughAProxy
-        }
-        // Either something is waiting for the start, or the pass has run.
-        await harness.settle("the pass is waiting for the start, or done") {
-            appState.passesWaitingForLifecycle > 0 || !appState.reconciler.hasPassInFlight
-        }
-        XCTAssertTrue(appState.reconciler.hasPassInFlight, "the pass waits for the start's platform work")
-        harness.hold.release()
-        let startHadAppliedTheSystemProxy = await pass.value
-        try await start.value
-        await appState.reconciler.drain()
-
-        XCTAssertTrue(startHadAppliedTheSystemProxy, "the pass ran after the start's platform work, not beside it")
-        XCTAssertTrue(isRunning(appState))
-        XCTAssertTrue(wifi.routesThroughAProxy, "the system proxy switch is still on")
-        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"], "the environment follows the switch the user turned off")
-        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.launchdEnvironment))
-        let zshrc = (try? String(contentsOf: harness.homeDirectory.appendingPathComponent(".zshrc"), encoding: .utf8)) ?? ""
-        XCTAssertFalse(zshrc.contains("Conduit"), "and no shell block is left behind")
-    }
-
-    /// #171: Settings has no Save button. An edit is saved and reconciled
-    /// once edits pause, with its section still open: the bypass list
-    /// reaches the config file, and the environment switch turned on
-    /// publishes the variables.
-    func testASettingsEditSavesAndReconcilesWhenEditsPause() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: false),
-                                  settingsSaveDebounce: .milliseconds(20))
-        await harness.launchRecovery()
-        try await appState.startProxy()
-
-        appState.config.noProxyHosts.append("first.example")
-        appState.config.noProxyHosts.append("autosave.example")
-        appState.platformConfig.manageEnvironmentVariables = true
-        await appState.awaitPendingSave()
-        await appState.reconciler.drain()
-
-        let saved = try ProxyConfigPersistence.load(in: harness.environment)
-        XCTAssertTrue(saved.noProxyHosts.contains("first.example"))
-        XCTAssertTrue(saved.noProxyHosts.contains("autosave.example"), "the last edit before the pause is saved")
-        XCTAssertTrue(try PlatformConfigPersistence.load(in: harness.environment).manageEnvironmentVariables)
-        XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:\(appState.config.localPort)",
-                       "the reconcile ran without the section going away")
-        XCTAssertTrue(appState.config.noProxyHosts.allSatisfy { machine.launchdEnvironment["NO_PROXY"]?.contains($0) == true })
-    }
-
-    /// A problem that does not block a start does not hold the save back:
-    /// otherwise one refused intercept rule would stop every later edit from
-    /// saving. The intercept IP is invalid but representable, so the file
-    /// keeps it as typed, and the edit is an unrelated health field.
-    func testAPauseOnANonBlockingProblemStillSaves() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(), settingsSaveDebounce: .milliseconds(20),
-                                  configure: { $0.dns.interceptRules = [DNSInterceptRule(pattern: "*.intercept.test", interceptIP: "127.44.3")] })
-        await harness.launchRecovery()
-
-        XCTAssertFalse(appState.config.validate().isEmpty)
-        XCTAssertFalse(appState.config.validate().contains(where: \.blocksProxyStart))
-        XCTAssertTrue(appState.config.startBlockingProblems.isEmpty)
-
-        appState.config.health.checkInterval = 45
-        await appState.awaitPendingSave()
-
-        let saved = try ProxyConfigPersistence.load(in: harness.environment)
-        XCTAssertEqual(saved.health.checkInterval, 45, "the unrelated edit saved")
-        XCTAssertEqual(saved.dns.interceptRules.first?.interceptIP, "127.44.3", "the representable IP is saved as typed")
-        XCTAssertEqual(count("config.autosave_held", in: appState), 0, "a non-blocking problem is not a held save")
-        XCTAssertFalse(appState.hasUnsavedEdit)
-    }
-
-    /// A bypass list over the 256-entry cap is refused by the file writer: the
-    /// file keeps its last good contents, the edit stays unsaved, and the
-    /// refusal is an event. Bringing the draft back under the cap saves it.
-    func testAnOverlimitBypassCountIsRefusedAndKeepsTheFile() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(), settingsSaveDebounce: .milliseconds(20))
-        await harness.launchRecovery()
-        let before = try Data(contentsOf: harness.environment.configFile)
-
-        appState.config.noProxyHosts = Array(repeating: "short.example", count: ProxyBypassSyntax.maximumEntries + 1)
-        await appState.awaitPendingSave()
-
-        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), before, "the refused list was not written")
-        XCTAssertTrue(appState.hasUnsavedEdit)
-        XCTAssertEqual(count("config.save_rejected", in: appState), 1)
-        XCTAssertNotNil(appState.lastErrorMessage)
-
-        appState.config.noProxyHosts = Array(repeating: "short.example", count: ProxyBypassSyntax.maximumEntries)
-        await appState.awaitPendingSave()
-
-        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).noProxyHosts.count,
-                       ProxyBypassSyntax.maximumEntries, "the corrected list saves")
-        XCTAssertFalse(appState.hasUnsavedEdit)
-        XCTAssertEqual(count("config.save_rejected", in: appState), 1, "the corrected save is not refused")
-    }
-
-    /// A pause on an edit that would block a start saves nothing: a
-    /// half-typed listen host must not reach a reconcile that restarts the
-    /// listener. Leaving the section saves it and reports the problem.
-    func testAPauseOnAnInvalidEditWaitsForTheSectionToClose() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(), settingsSaveDebounce: .milliseconds(20))
-        await harness.launchRecovery()
-
-        appState.config.localHost = "127.0."
-        await appState.awaitPendingSave()
-        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localHost, "127.0.0.1",
-                       "the timer did not save a config that does not validate")
-        XCTAssertTrue(appState.hasUnsavedEdit)
-        XCTAssertNil(appState.lastErrorMessage, "nothing is reported mid-edit")
-        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.autosave_held" }.map(\.detail),
-                       ["reason=start_blocking_problems problems=1 trigger=pause"], "the decision not to save is an event")
-
-        appState.flushPendingSave()
-        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localHost, "127.0.")
-        XCTAssertNotNil(appState.lastErrorMessage, "leaving the section reports the problem")
-        XCTAssertFalse(appState.hasUnsavedEdit)
-    }
-
-    /// A lifecycle save carries the whole config, so a start-blocking edit
-    /// still waiting must not ride along into a reconcile; the save waits.
-    /// Stopping DNS absorbs only its own flag: a bypass edit waiting beside
-    /// it is still reconciled by its own save.
-    func testALifecycleSaveDoesNotCarryAStartBlockingEdit() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig())
-        await harness.launchRecovery()
-        await appState.startDNS()
-
-        appState.config.localHost = "127.0."
-        await appState.stopDNS()
-        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localHost, "127.0.0.1",
-                       "the DNS stop did not save the half-typed host")
-        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.autosave_held" }.last?.detail,
-                       "reason=start_blocking_problems problems=1 trigger=lifecycle")
-        XCTAssertTrue(appState.hasUnsavedEdit)
-
-        appState.config.localHost = "127.0.0.1"
-        appState.config.noProxyHosts.append("waiting.example")
-        appState.flushPendingSave()
-        let saved = try ProxyConfigPersistence.load(in: harness.environment)
-        XCTAssertFalse(saved.dnsForwarderEnabled, "the held DNS flag is written by the edit's save")
-        XCTAssertTrue(saved.noProxyHosts.contains("waiting.example"))
-        await appState.reconciler.drain()
-        XCTAssertTrue(appState.reconciler.lastReconciledConfig.noProxyHosts.contains("waiting.example"),
-                      "the DNS stop absorbed only its own flag")
-    }
-
-    /// Leaving a section saves a waiting edit at once instead of after the
-    /// pause.
-    /// The edit was written, but the system proxy clear it asked for did not
-    /// land. Leaving the section retries it, as it did before autosave.
-    func testLeavingASectionRetriesAnActionThatDidNotLand() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
-        try await appState.startProxy()
-        machine.privilege.failing = [.setWebProxyEndpoint]
-        appState.platformConfig.manageSystemProxy = false
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        XCTAssertFalse(appState.hasUnsavedEdit, "written")
-        XCTAssertTrue(wifi.routesThroughAProxy, "but the clear did not land")
-
-        machine.privilege.failing = []
-        appState.flushPendingSave()
-        await appState.reconciler.drain()
-
-        XCTAssertFalse(wifi.routesThroughAProxy, "retried on leaving the section")
-        XCTAssertFalse(appState.reconciler.lags(config: appState.config, platformConfig: appState.platformConfig))
-    }
-
-    /// The section closes while the pass is still queued: the baseline has not
-    /// moved, so the flag still lags the request. The clear then fails and
-    /// leaves its flag where the machine is. The close still gets its retry,
-    /// once the pass drains.
-    func testLeavingASectionDuringAPassRetriesWhenItFails() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
-        try await appState.startProxy()
-        machine.privilege.failing = [.setWebProxyEndpoint]
-        func decisions() -> Int { appState.eventLog.events.filter { $0.event == "config.platform_integration" }.count }
-        let before = decisions()
-
-        appState.platformConfig.manageSystemProxy = false
-        appState.saveConfig()
-        XCTAssertTrue(appState.reconciler.hasPassInFlight)
-        XCTAssertTrue(
-            appState.reconciler.lags(config: appState.config, platformConfig: appState.platformConfig),
-            "queued, not yet held: the baseline still names the flag the machine holds"
-        )
-        appState.flushPendingSave()
-        await appState.reconciler.drain()
-        await appState.awaitSectionCloseRetry()
-        await appState.reconciler.drain()
-
-        XCTAssertEqual(decisions() - before, 2, "the pass, then the close's retry after it drained")
-    }
-
-    /// As above, but a newer edit is waiting when the section closes: the pass
-    /// that flush starts diffs from the baseline the first pass left, so it
-    /// cannot retry A's failed clear, and the post-drain check must still run.
-    func testLeavingASectionWithANewerEditDuringAPassStillRetries() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
-        try await appState.startProxy()
-        machine.privilege.failing = [.setWebProxyEndpoint]
-        func decisions() -> Int { appState.eventLog.events.filter { $0.event == "config.platform_integration" }.count }
-        let before = decisions()
-
-        appState.platformConfig.manageSystemProxy = false
-        appState.saveConfig()
-        appState.config.profileName = "Edited"
-        XCTAssertTrue(appState.hasUnsavedEdit)
-        appState.flushPendingSave()
-        await appState.reconciler.drain()
-        await appState.awaitSectionCloseRetry()
-        await appState.reconciler.drain()
-
-        XCTAssertEqual(decisions() - before, 2, "A's clear, then the retry after it drained")
-    }
-
-    /// An edit made after the close, here one that would block a start,
-    /// stays under its own debounce and gate: the post-drain check retries
-    /// what the close saved, and neither saves nor reconciles the edit.
-    func testThePostDrainCheckRetriesTheCloseAndLeavesALaterEdit() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
-        try await appState.startProxy()
-        machine.privilege.failing = [.setWebProxyEndpoint]
-        func decisions() -> Int { appState.eventLog.events.filter { $0.event == "config.platform_integration" }.count }
-        let before = decisions()
-        appState.platformConfig.manageSystemProxy = false
-        appState.saveConfig()
-        appState.flushPendingSave()
-
-        appState.config.localHost = "127.0."
-        XCTAssertTrue(appState.hasUnsavedEdit)
-        await appState.reconciler.drain()
-        await appState.awaitSectionCloseRetry()
-        await appState.reconciler.drain()
-
-        XCTAssertEqual(decisions() - before, 2, "the clear, then its retry")
-        XCTAssertTrue(appState.hasUnsavedEdit, "still waiting on its own save")
-        XCTAssertNotEqual(try ProxyConfigPersistence.load(in: harness.environment).localHost, "127.0.")
-        XCTAssertNotEqual(appState.reconciler.lastReconciledConfig.localHost, "127.0.", "not reconciled either")
-    }
-
-    /// A config a section close saved invalid holds back only a further
-    /// config edit, not a toggle elsewhere.
-    func testAnInvalidSavedConfigDoesNotHoldBackAPlatformEdit() async throws {
-        let appState = try launch(settingsSaveDebounce: .milliseconds(10))
-        appState.config.localHost = "127.0."
-        appState.flushPendingSave()
-        XCTAssertFalse(appState.hasUnsavedEdit)
-
-        appState.platformConfig.launchAtLogin = true
-        await appState.awaitPendingSave()
-
-        XCTAssertFalse(appState.hasUnsavedEdit)
-        XCTAssertTrue(try PlatformConfigPersistence.load(in: harness.environment).launchAtLogin)
-        XCTAssertFalse(appState.eventLog.events.contains { $0.event == "config.autosave_held" })
-    }
-
-    func testLeavingASectionSavesAWaitingEditAtOnce() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig())
-        await harness.launchRecovery()
-
-        appState.config.noProxyHosts.append("leave.example")
-        XCTAssertFalse(try ProxyConfigPersistence.load(in: harness.environment).noProxyHosts.contains("leave.example"),
-                       "the edit is waiting for its pause")
-        appState.flushPendingSave()
-        XCTAssertTrue(try ProxyConfigPersistence.load(in: harness.environment).noProxyHosts.contains("leave.example"))
-        await appState.awaitPendingSave()
-    }
-
-    /// Quitting with an edit still waiting writes it to disk but does not
-    /// reconcile it: termination cleanup is tearing the surfaces down, and
-    /// an apply started at quit would race it.
-    func testQuittingPersistsAWaitingEditWithoutReconcilingIt() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: false))
-        await harness.launchRecovery()
-        try await appState.startProxy()
-
-        appState.platformConfig.manageEnvironmentVariables = true
-        appState.persistPendingEditForTermination()
-        await appState.reconciler.drain()
-
-        XCTAssertTrue(try PlatformConfigPersistence.load(in: harness.environment).manageEnvironmentVariables,
-                      "the next launch starts from the edit")
-        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"], "nothing was applied on the way out")
-        await appState.awaitPendingSave()
-    }
-
-    /// The login item needs no runtime, so quitting with the switch still
-    /// unsaved registers it: the next launch reads the saved flag as its
-    /// baseline and would never notice the machine disagrees.
-    /// Autosaved, but the registration failed and rewound. Nothing is
-    /// unsaved at quit; the next launch would trust the file. Quit retries.
-    func testQuittingRetriesALoginItemRegistrationThatFailed() async throws {
-        let appState = try launch()
-        harness.loginItems.fails = true
-        appState.platformConfig.launchAtLogin = true
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        XCTAssertFalse(appState.hasUnsavedEdit)
-        XCTAssertEqual(harness.loginItems.registrations, [true], "tried once, refused")
-
-        harness.loginItems.fails = false
-        appState.persistPendingEditForTermination()
-
-        XCTAssertEqual(harness.loginItems.registrations, [true, true], "retried at quit")
-    }
-
-    func testQuittingWithAnUnsavedLoginItemFlipRegistersIt() throws {
-        let appState = try launch()
-
-        appState.platformConfig.launchAtLogin = true
-        appState.persistPendingEditForTermination()
-
-        XCTAssertTrue(try PlatformConfigPersistence.load(in: harness.environment).launchAtLogin)
-        XCTAssertEqual(harness.loginItems.registrations, [true])
-    }
-
-    /// The platform file written but a later one not: the next launch
-    /// reads the flip from the platform file as its baseline, so quit
-    /// registers the login item anyway.
-    func testQuittingWithAPartialWriteStillRegistersTheLoginItem() throws {
-        let appState = try launch()
-        let preferences = harness.environment.preferencesFile
-        try FileManager.default.removeItem(at: preferences)
-        try FileManager.default.createDirectory(at: preferences, withIntermediateDirectories: false)
-
-        appState.platformConfig.launchAtLogin = true
-        appState.persistPendingEditForTermination()
-
-        XCTAssertTrue(try PlatformConfigPersistence.load(in: harness.environment).launchAtLogin)
-        XCTAssertEqual(harness.loginItems.registrations, [true])
-    }
-
-    /// A save that fails to write keeps the edit unsaved, so leaving the
-    /// section tries again instead of finding nothing to do.
-    func testAFailedWriteKeepsTheEditUnsaved() throws {
-        let appState = try launch()
-        let configFile = harness.environment.configFile
-        try FileManager.default.removeItem(at: configFile)
-        try FileManager.default.createDirectory(at: configFile, withIntermediateDirectories: false)
-
-        appState.config.noProxyHosts.append("retry.example")
-        appState.flushPendingSave()
-        XCTAssertTrue(appState.hasUnsavedEdit, "the write failed")
-        XCTAssertNotNil(appState.lastErrorMessage)
-
-        try FileManager.default.removeItem(at: configFile)
-        appState.flushPendingSave()
-        XCTAssertFalse(appState.hasUnsavedEdit)
-        XCTAssertTrue(try ProxyConfigPersistence.load(in: harness.environment).noProxyHosts.contains("retry.example"))
-    }
-
-    // MARK: Listener edits wait for a commit
-
-    /// A loopback port nothing listens on a moment ago, so a scenario can
-    /// type a real port without fixing one the machine may be using.
-    private func freeLoopbackPort() throws -> Int {
-        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { throw POSIXError(.EBADF) }
-        defer { Darwin.close(fd) }
-        var address = sockaddr_in()
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = 0
-        address.sin_addr.s_addr = inet_addr("127.0.0.1")
-        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let bound = withUnsafeMutablePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
-                Darwin.bind(fd, socketAddress, length) == 0 && getsockname(fd, socketAddress, &length) == 0
-            }
-        }
-        guard bound else { throw POSIXError(.EADDRINUSE) }
-        return Int(UInt16(bigEndian: address.sin_port))
-    }
-
-    private func count(_ event: String, in appState: AppState) -> Int {
-        appState.eventLog.events.filter { $0.event == event }.count
-    }
-
-    /// Typing a port, with pauses between the digits, used to restart the
-    /// listener on every value the pause saved. The runtime now sees only
-    /// a committed edit: nothing is saved, rebound or advertised until the
-    /// section closes, which binds the last value once. The commit is
-    /// driven through the call the section's `onDisappear` makes; the
-    /// SwiftUI wiring itself (Return, Apply, disappearance) is not
-    /// reachable from the harness.
-    func testTypingAPortDoesNotRebindUntilTheSectionCloses() async throws {
-        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
-        try await appState.startProxy()
-        let boundBefore = try XCTUnwrap(appState.runtimeSnapshot.bindings.proxyPort)
-        let typed = try (0..<3).map { _ in try freeLoopbackPort() }
-
-        for port in typed {
-            appState.config.localPort = port
-            await appState.awaitPendingSave()
-            await appState.reconciler.drain()
-        }
-
-        XCTAssertEqual(count("config.proxy_restart", in: appState), 0, "no intermediate value was bound")
-        XCTAssertEqual(appState.runtimeSnapshot.bindings.proxyPort, boundBefore)
-        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localPort, 0, "nor saved")
-
-        appState.flushPendingSave()
-        await appState.reconciler.drain()
-
-        XCTAssertEqual(count("config.proxy_restart", in: appState), 1, "the commit rebinds once")
-        XCTAssertEqual(appState.runtimeSnapshot.bindings.proxyPort, typed.last)
-        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localPort, typed.last)
-    }
-
-    /// Return commits the held edit, and the decisions are events: each
-    /// pause held it, the Return committed it.
-    func testReturnCommitsAHeldPortEdit() async throws {
-        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
-        try await appState.startProxy()
-        let port = try freeLoopbackPort()
-
-        appState.config.localPort = port
-        XCTAssertTrue(appState.listenerEditAwaitingCommit, "the note shows as soon as the draft holds one")
-        await appState.awaitPendingSave()
-        XCTAssertEqual(appState.runtimeConfig.localPort, 0, "the runtime still holds the committed port")
-        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.autosave_held" }.map(\.detail),
-                       ["reason=listener_change trigger=pause"])
-
-        appState.commitPendingEdit(trigger: .submit)
-        await appState.reconciler.drain()
-
-        XCTAssertFalse(appState.listenerEditAwaitingCommit)
-        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.edit_committed" }.map(\.detail),
-                       ["trigger=submit listener_change=true"])
-        XCTAssertEqual(count("config.proxy_restart", in: appState), 1)
-        XCTAssertEqual(appState.runtimeSnapshot.bindings.proxyPort, port)
-        XCTAssertEqual(appState.runtimeConfig.localPort, port)
-    }
-
-    /// The "Configuration problem" banner a save sets clears once a later
-    /// save validates; it does not wait for a dismiss or a restart.
-    func testFixingAnInvalidEditClearsItsConfigurationProblem() async throws {
-        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
-
-        appState.config.localPort = 99999
-        appState.commitPendingEdit(trigger: .submit)
-        await appState.reconciler.drain()
-        XCTAssertTrue(appState.lastErrorMessage?.hasPrefix("Configuration problem:") == true)
-
-        appState.config.localPort = try freeLoopbackPort()
-        appState.commitPendingEdit(trigger: .submit)
-        await appState.reconciler.drain()
-        XCTAssertNil(appState.lastErrorMessage)
-    }
-
-    /// Only the banner the save set is cleared: an error shown after it
-    /// stays until it is dealt with.
-    func testFixingAnInvalidEditLeavesALaterErrorShown() async throws {
-        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
-
-        appState.config.localPort = 99999
-        appState.commitPendingEdit(trigger: .submit)
-        await appState.reconciler.drain()
-        appState.lastErrorMessage = "Helper install failed"
-
-        appState.config.localPort = try freeLoopbackPort()
-        appState.commitPendingEdit(trigger: .submit)
-        await appState.reconciler.drain()
-        XCTAssertEqual(appState.lastErrorMessage, "Helper install failed")
-    }
-
-    /// Apply ends the field's editing before it commits. The field's write
-    /// may land at once or on a later main-actor turn, and the commit
-    /// carries it either way, leaving no fresh held edit behind.
-    func testApplyCommitsTheTextAFieldWritesWhenEditingEnds() async throws {
-        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
-        try await appState.startProxy()
-        let typedPort = try freeLoopbackPort()
-        let typedSOCKSPort = try freeLoopbackPort()
-        appState.config.socksEnabled = true
-        await appState.awaitPendingSave()
-        XCTAssertTrue(appState.listenerEditAwaitingCommit)
-
-        let commit = appState.commitPendingEdit(trigger: .apply) {
-            appState.config.localPort = typedPort
-            Task { @MainActor in appState.config.socksPort = typedSOCKSPort }
-        }
-        await commit.value
-        await appState.reconciler.drain()
-
-        XCTAssertFalse(appState.listenerEditAwaitingCommit, "no edit is left held after Apply")
-        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.edit_committed" }.map(\.detail),
-                       ["trigger=apply listener_change=true"])
-        XCTAssertEqual(appState.runtimeConfig.localPort, typedPort)
-        XCTAssertEqual(appState.runtimeConfig.socksPort, typedSOCKSPort)
-    }
-
-    /// Typing back to the committed value leaves nothing to commit.
-    func testTypingBackToTheCommittedPortRebindsNothing() async throws {
-        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
-        try await appState.startProxy()
-
-        appState.config.localPort = try freeLoopbackPort()
-        await appState.awaitPendingSave()
-        appState.config.localPort = 0
-        XCTAssertFalse(appState.listenerEditAwaitingCommit)
-        await appState.awaitPendingSave()
-        appState.commitPendingEdit(trigger: .submit)
-        await appState.reconciler.drain()
-
-        XCTAssertEqual(count("config.proxy_restart", in: appState), 0)
-    }
-
-    /// A switch has no Return: Apply commits it. Until then the listener
-    /// keeps its committed shape.
-    func testAListenerSwitchWaitsForApply() async throws {
-        let appState = try launch(settingsSaveDebounce: .milliseconds(20)) { $0.socksPort = 0 }
-        try await appState.startProxy()
-
-        appState.config.socksEnabled = true
-        await appState.awaitPendingSave()
-        await appState.reconciler.drain()
-        XCTAssertTrue(appState.listenerEditAwaitingCommit)
-        XCTAssertEqual(count("config.proxy_restart", in: appState), 0)
-        XCTAssertNil(appState.runtimeSnapshot.bindings.socksPort)
-
-        appState.commitPendingEdit(trigger: .apply)
-        await appState.reconciler.drain()
-
-        XCTAssertEqual(count("config.proxy_restart", in: appState), 1)
-        XCTAssertNotNil(appState.runtimeSnapshot.bindings.socksPort)
-        XCTAssertFalse(appState.listenerEditAwaitingCommit)
-    }
-
-    /// An edit that replaces nothing still saves on its pause, and reaches
-    /// the runtime only through that save, not keystroke by keystroke.
-    func testAnEditThatReplacesNoListenerReachesTheRuntimeOnItsPause() async throws {
-        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
-        try await appState.startProxy()
-
-        appState.config.noProxyHosts.append("pause.example")
-        XCTAssertFalse(appState.runtimeConfig.noProxyHosts.contains("pause.example"), "the draft is not the runtime's")
-        XCTAssertFalse(appState.listenerEditAwaitingCommit)
-        await appState.awaitPendingSave()
-        await appState.reconciler.drain()
-
-        XCTAssertTrue(appState.runtimeConfig.noProxyHosts.contains("pause.example"))
-        XCTAssertFalse(appState.hasUnsavedEdit)
-        XCTAssertFalse(appState.eventLog.events.contains { $0.event == "config.autosave_held" })
-    }
-
-    /// A start binds the committed config, not a port still being typed,
-    /// and its own save does not commit the draft either.
-    func testStartingWithAHeldPortEditBindsTheCommittedPort() async throws {
-        let appState = try launch()
-        let port = try freeLoopbackPort()
-
-        appState.config.localPort = port
-        try await appState.startProxy()
-
-        XCTAssertNotEqual(appState.runtimeSnapshot.bindings.proxyPort, port)
-        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localPort, 0,
-                       "the start's save waited with the edit")
-        XCTAssertTrue(appState.hasUnsavedEdit)
-    }
-
-    /// Quit writes the held edit for the next launch and applies nothing:
-    /// termination cleanup is tearing the surfaces down.
-    func testQuittingWritesAHeldPortEditWithoutBindingIt() async throws {
-        let appState = try launch()
-        try await appState.startProxy()
-        let boundBefore = appState.runtimeSnapshot.bindings.proxyPort
-        let port = try freeLoopbackPort()
-
-        appState.config.localPort = port
-        appState.persistPendingEditForTermination()
-        await appState.reconciler.drain()
-
-        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localPort, port)
-        XCTAssertEqual(appState.runtimeSnapshot.bindings.proxyPort, boundBefore)
-        XCTAssertEqual(count("config.proxy_restart", in: appState), 0)
-        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.edit_committed" }.map(\.detail),
-                       ["trigger=quit listener_change=true"])
-    }
-
-    /// Quit does not make a half-typed value the next launch's config: the
-    /// autosave never saves one. The flags beside it, which that check
-    /// does not cover, are still written and the login item registered.
-    func testQuittingDiscardsAHeldEditThatWouldBlockAStart() async throws {
-        let appState = try launch()
-
-        appState.config.localHost = "127.0."
-        appState.platformConfig.launchAtLogin = true
-        appState.persistPendingEditForTermination()
-
-        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localHost, "127.0.0.1",
-                       "the config file is unchanged")
-        XCTAssertTrue(try PlatformConfigPersistence.load(in: harness.environment).launchAtLogin)
-        XCTAssertEqual(harness.loginItems.registrations, [true])
-        let discarded = appState.eventLog.events.filter { $0.event == "config.edit_discarded" }.compactMap(\.detail)
-        XCTAssertEqual(discarded.count, 1)
-        XCTAssertTrue(discarded.first?.hasPrefix("trigger=quit reason=start_blocking_problems check=") == true, "\(discarded)")
-        XCTAssertFalse(discarded.first?.contains("127.0.") == true, "names the check, not the value")
-        XCTAssertFalse(appState.eventLog.events.contains { $0.event == "config.edit_committed" })
-    }
-
-    /// A commit whose config write failed leaves the reconciler's request at
-    /// the prior config, so quit must validate the draft itself rather than
-    /// trust the request, and must not write the invalid draft.
-    func testQuittingDiscardsAnInvalidEditWhoseCommitFailedToWrite() async throws {
-        let appState = try launch()
-        let configFile = harness.environment.configFile
-        let priorRequest = appState.reconciler.requestedConfig
-        try FileManager.default.removeItem(at: configFile)
-        try FileManager.default.createDirectory(at: configFile, withIntermediateDirectories: false)
-
-        appState.config.localHost = "127.0."
-        appState.commitPendingEdit(trigger: .submit)
-        XCTAssertTrue(appState.hasUnsavedEdit, "the write failed")
-        XCTAssertEqual(appState.reconciler.requestedConfig, priorRequest, "a failed config write does not advance the request")
-        XCTAssertEqual(appState.config.localHost, "127.0.", "the invalid draft stays in the editor")
-        XCTAssertNotNil(appState.lastErrorMessage)
-        try FileManager.default.removeItem(at: configFile)
-
-        appState.persistPendingEditForTermination()
-
-        XCTAssertFalse(FileManager.default.fileExists(atPath: configFile.path), "the invalid draft was not written")
-        XCTAssertEqual(count("config.edit_discarded", in: appState), 1)
-        await appState.reconciler.drain()
-    }
-
-    /// A listen-host commit replaces the HTTP listener and leaves the DNS
-    /// forwarder where the resolver files and the relay point.
-    func testCommittingAListenHostLeavesTheDNSForwarderOnLoopback() async throws {
-        let appState = try launch()
-        try await appState.startProxy()
-        await appState.startDNS()
-        let dnsPort = appState.runtimeSnapshot.bindings.dnsPort
-
-        appState.config.localHost = "::1"
-        appState.commitPendingEdit(trigger: .submit)
-        await appState.reconciler.drain()
-
-        XCTAssertEqual(count("config.proxy_restart", in: appState), 1)
-        XCTAssertEqual(count("config.dns_restart", in: appState), 0)
-        XCTAssertEqual(appState.runtimeSnapshot.dnsRunState, .running)
-        XCTAssertEqual(appState.runtimeSnapshot.bindings.dnsHost, "127.0.0.1")
-        XCTAssertEqual(appState.runtimeSnapshot.bindings.dnsPort, dnsPort)
-    }
-
-    /// The DNS lifecycle's flag reaches the runtime, which reserves the
-    /// forwarder's port by it, and a pass queued before the lifecycle ran
-    /// does not put the old value back.
-    func testTheDNSLifecycleFlagReachesTheRuntimeOverAQueuedPass() async throws {
-        let appState = try launch()
-
-        appState.config.profileName = "queued before the start"
-        appState.saveConfig()
-        await appState.startDNS()
-        await appState.reconciler.drain()
-        XCTAssertTrue(appState.runtimeConfig.dnsForwarderEnabled)
-        XCTAssertEqual(appState.runtimeConfig.profileName, "queued before the start")
-        XCTAssertEqual(count("config.dns_restart", in: appState), 0)
-
-        appState.config.profileName = "queued before the stop"
-        appState.saveConfig()
-        await appState.stopDNS()
-        await appState.reconciler.drain()
-        XCTAssertFalse(appState.runtimeConfig.dnsForwarderEnabled)
-        XCTAssertEqual(appState.runtimeConfig.profileName, "queued before the stop")
-    }
-
-    /// #175: a bypass edit reaches the surfaces that advertise the list to
-    /// other programs while the proxy runs: the shell environment's
-    /// `NO_PROXY`, and in manual mode the system proxy's `ExceptionsList`.
-    /// It used to wait for a listener change or a restart.
-    func testABypassEditReachesTheAdvertisedSurfacesInManualMode() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(
-            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .manual))
-        await harness.launchRecovery()
-        try await appState.startProxy()
-
-        appState.config.noProxyHosts.append("bypass.example")
-        appState.saveConfig()
-        await appState.reconciler.drain()
-
-        XCTAssertTrue(machine.launchdEnvironment["NO_PROXY"]?.contains("bypass.example") == true)
-        let zshrc = try String(contentsOf: harness.homeDirectory.appendingPathComponent(".zshrc"), encoding: .utf8)
-        XCTAssertTrue(zshrc.contains("bypass.example"))
-        XCTAssertTrue(wifi.bypassDomains.contains("bypass.example"), "manual mode's ExceptionsList follows")
-        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.advertised_bypass_changed" }.map(\.detail),
-                       ["surfaces=environment,system_proxy"])
-    }
-
-    /// PAC mode's settings do not carry the list, so they are not rewritten.
-    func testABypassEditInPACModeLeavesTheSystemProxyAlone() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(
-            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .pac))
-        await harness.launchRecovery()
-        try await appState.startProxy()
-        let bypassBefore = wifi.bypassDomains
-
-        appState.config.noProxyHosts.append("bypass.example")
-        appState.saveConfig()
-        await appState.reconciler.drain()
-
-        XCTAssertTrue(machine.launchdEnvironment["NO_PROXY"]?.contains("bypass.example") == true)
-        XCTAssertEqual(wifi.bypassDomains, bypassBefore)
-        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.advertised_bypass_changed" }.map(\.detail),
-                       ["surfaces=environment"])
-    }
-
-    /// The local PAC server rebinds on a port edit, and PAC mode's system
-    /// proxy advertises its URL: the URL follows in the same pass, not at
-    /// the next drift trigger (#194).
-    func testALocalPACPortEditRepointsTheSystemProxy() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac)) {
-            $0.localPACEnabled = true
-            $0.localPACPort = 0
-        }
-        await harness.launchRecovery()
-        try await appState.startProxy()
-        let before = try XCTUnwrap(appState.runtimeSnapshot.bindings.localPACURL)
-        XCTAssertEqual(wifi.autoproxyURL, before)
-
-        let port = try reserveLoopbackPort()
-        appState.config.localPACPort = port
-        appState.saveConfig()
-        await appState.reconciler.drain()
-
-        XCTAssertEqual(appState.runtimeSnapshot.bindings.localPACPort, port)
-        XCTAssertEqual(wifi.autoproxyURL, appState.runtimeSnapshot.bindings.localPACURL)
-        XCTAssertTrue(wifi.autoproxyURL.contains(":\(port)/"))
-        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.advertised_pac_changed" }.map(\.detail),
-                       ["surfaces=system_proxy"])
-    }
-
-    /// With autosave a bypass edit re-applies on every pause, so its
-    /// `launchctl` writes must not run on the main actor.
-    func testABypassEditReappliesOffTheMainActor() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
-        await harness.launchRecovery()
-        try await appState.startProxy()
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, values in
-            name == "/bin/launchctl" && values.first == "setenv" && values.dropFirst().first == "NO_PROXY"
-        }
-
-        appState.config.noProxyHosts.append("bypass.example")
-        appState.saveConfig()
-        await harness.hold.waitUntilReached()
-        XCTAssertFalse(harness.hold.reachedOnMainThread, "held on the platform queue, not let through on main")
-        harness.hold.release()
-        await appState.reconciler.drain()
-
-        XCTAssertTrue(machine.launchdEnvironment["NO_PROXY"]?.contains("bypass.example") == true)
-    }
-
-    // MARK: Failed re-apply retry (#194)
-
-    private func reapplyEvents(_ appState: AppState) -> [String] {
-        appState.eventLog.events.filter { $0.event.hasPrefix("config.reapply_") }.map { "\($0.event) \($0.detail ?? "")" }
-    }
-
-    /// A short schedule: the retry scenarios fix the machine right after the
-    /// failed pass drains, well inside the first delay, and accept recovery
-    /// on any of the three attempts.
-    private static let shortRetries = ConfigReapplyRetry.Schedule(delays: [.milliseconds(100), .milliseconds(100), .milliseconds(100)])
-
-    /// A port edit whose system-proxy write fails used to be a log line:
-    /// the baseline had moved on, and with no periodic tick macOS kept
-    /// pointing at the closed port until the next wake, network, VPN or
-    /// settings report. Now it is reported, and the drift pass runs again
-    /// on its own.
-    func testAFailedSystemProxyReapplyIsReportedAndRetried() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
-        harness.reapplyRetrySchedule = Self.shortRetries
-        let locations = NetworkLocationFixture.store()
-        harness.locationStore = locations
-        let appState = harness.launch()
-        await harness.launchRecovery()
-        try await appState.startProxy()
-        let port = try reserveLoopbackPort()
-
-        locations.refuseWrites(true)
-        appState.config.localPort = port
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        XCTAssertNotEqual(try locations.snapshot().services[0].proxies["HTTPPort"], .number(port))
-        let failed = try XCTUnwrap(reapplyEvents(appState).first)
-        XCTAssertTrue(failed.hasPrefix("config.reapply_failed surface=system_proxy cause=config_change retry_in_seconds=1 attempts=3 reason="), failed)
-
-        locations.refuseWrites(false)
-        await appState.reapplyRetry.drain()
-
-        XCTAssertEqual(try locations.snapshot().services[0].proxies["HTTPPort"], .number(port))
-        let events = reapplyEvents(appState)
-        XCTAssertEqual(events.filter { $0.hasPrefix("config.reapply_recovered surface=system_proxy") }.count, 1, "\(events)")
-        XCTAssertFalse(events.contains { $0.hasPrefix("config.reapply_abandoned") }, "\(events)")
-        XCTAssertTrue(appState.reapplyRetry.pending.isEmpty)
-    }
-
-    /// The switch turned on while the proxy runs: a refused write rewinds
-    /// the flag for the next save, as before, and is now also retried.
-    func testASystemProxySwitchThatFailsToApplyIsRetried() async throws {
-        // A fixed port: the system proxy advertises the configured one.
-        var config = makeConfig()
-        config.localPort = try reserveLoopbackPort()
-        harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig())
-        harness.reapplyRetrySchedule = Self.shortRetries
-        let locations = NetworkLocationFixture.store()
-        harness.locationStore = locations
-        let appState = harness.launch()
-        await harness.launchRecovery()
-        try await appState.startProxy()
-        let port = config.localPort
-
-        locations.refuseWrites(true)
-        appState.platformConfig.manageSystemProxy = true
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        XCTAssertTrue(appState.reconciler.requestLags, "the flag is rewound for the next save")
-        XCTAssertEqual(reapplyEvents(appState).first?.hasPrefix("config.reapply_failed surface=system_proxy cause=switch_on"), true,
-                       "\(reapplyEvents(appState))")
-
-        locations.refuseWrites(false)
-        await appState.reapplyRetry.drain()
-
-        XCTAssertEqual(try locations.snapshot().services[0].proxies["HTTPPort"], .number(port))
-        XCTAssertEqual(reapplyEvents(appState).filter { $0.hasPrefix("config.reapply_recovered surface=system_proxy") }.count, 1,
-                       "\(reapplyEvents(appState))")
-    }
-
-    /// The switch stays on and only its mode changes: the same apply
-    /// action, but no switch was turned on, and the report says so.
-    func testAFailedSystemProxyModeChangeIsReportedAsOne() async throws {
-        harness = try AppStateHarness(config: makeConfig(),
-                                      platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .manual))
-        let locations = NetworkLocationFixture.store()
-        harness.locationStore = locations
-        let appState = harness.launch()
-        await harness.launchRecovery()
-        try await appState.startProxy()
-
-        locations.refuseWrites(true)
-        appState.platformConfig.systemProxyMode = .pac
-        appState.saveConfig()
-        await appState.reconciler.drain()
-
-        XCTAssertEqual(reapplyEvents(appState).first?.hasPrefix("config.reapply_failed surface=system_proxy cause=mode_change"), true,
-                       "\(reapplyEvents(appState))")
-    }
-
-    /// The retry is bounded: past its attempts it says so and stops, and the
-    /// surface is left to the ordinary triggers.
-    func testARetryThatKeepsFailingIsAbandonedAfterItsAttempts() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
-        harness.reapplyRetrySchedule = .init(delays: [.zero, .zero, .zero])
-        let locations = NetworkLocationFixture.store()
-        harness.locationStore = locations
-        let appState = harness.launch()
-        await harness.launchRecovery()
-        try await appState.startProxy()
-
-        locations.refuseWrites(true)
-        appState.config.localPort = try reserveLoopbackPort()
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        await appState.reapplyRetry.drain()
-
-        let events = reapplyEvents(appState)
-        XCTAssertEqual(events.filter { $0.hasPrefix("config.reapply_retry surface=system_proxy") }.count, 3, "\(events)")
-        XCTAssertEqual(events.last, "config.reapply_abandoned surface=system_proxy reason=exhausted attempts=3")
-        XCTAssertTrue(appState.reapplyRetry.pending.isEmpty)
-    }
-
-    /// `EnvironmentManager.apply` reports a variable it could not publish
-    /// instead of throwing; the re-apply read that as success. It counts as
-    /// a failure now, and the retry's drift pass publishes it.
-    func testAPartialEnvironmentReapplyIsReportedAndRetried() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
-        await harness.launchRecovery()
-        try await appState.startProxy()
-        let port = try reserveLoopbackPort()
-
-        machine.failingSetenv = ["HTTP_PROXY"]
-        appState.config.localPort = port
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        XCTAssertNotEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:\(port)")
-        XCTAssertEqual(reapplyEvents(appState).first,
-                       "config.reapply_failed surface=environment cause=config_change retry_in_seconds=3600 attempts=1 "
-                           + "reason=partial profiles_left= launchd_left=HTTP_PROXY")
-        XCTAssertEqual(appState.reapplyRetry.pending, [.environment])
-    }
-
-    func testAPartialEnvironmentReapplyRecoversOnTheRetry() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageEnvironmentVariables: true))
-        harness.reapplyRetrySchedule = Self.shortRetries
-        let appState = harness.launch()
-        await harness.launchRecovery()
-        try await appState.startProxy()
-        let port = try reserveLoopbackPort()
-
-        machine.failingSetenv = ["HTTP_PROXY"]
-        appState.config.localPort = port
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        machine.failingSetenv = []
-        await appState.reapplyRetry.drain()
-
-        XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:\(port)")
-        let events = reapplyEvents(appState)
-        XCTAssertEqual(events.filter { $0.hasPrefix("config.reapply_recovered surface=environment") }.count, 1, "\(events)")
-    }
-
-    /// A stop after the failure owns the surface: the retry gives up rather
-    /// than write behind it.
-    func testAStopAfterAFailedReapplyAbandonsTheRetry() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
-        harness.reapplyRetrySchedule = Self.shortRetries
-        let locations = NetworkLocationFixture.store()
-        harness.locationStore = locations
-        let appState = harness.launch()
-        await harness.launchRecovery()
-        try await appState.startProxy()
-
-        locations.refuseWrites(true)
-        appState.config.localPort = try reserveLoopbackPort()
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        locations.refuseWrites(false)
-        await appState.stopProxy()
-        let afterStop = try locations.snapshot().services[0].proxies
-        await appState.reapplyRetry.drain()
-
-        XCTAssertEqual(try locations.snapshot().services[0].proxies, afterStop, "nothing written after the stop")
-        XCTAssertEqual(reapplyEvents(appState).last?.hasPrefix("config.reapply_abandoned surface=system_proxy reason=superseded"), true,
-                       "\(reapplyEvents(appState))")
-    }
-
-    // MARK: Shell environment drift (#175)
-
-    /// What was found on the owner's machine: every block stripped and the
-    /// launchd variables unset, by something other than Conduit.
-    private func wipeEnvironment() throws {
-        let zshrc = harness.homeDirectory.appendingPathComponent(".zshrc")
-        try "export A=1\n".write(to: zshrc, atomically: true, encoding: .utf8)
-        _ = try machine.run("/bin/launchctl", ["unsetenv", "HTTP_PROXY"])
-    }
-
-    func testAWipedEnvironmentIsRepairedOnTheNextSettingsNotification() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
-        await harness.launchRecovery()
-        try await appState.startProxy()
-        try wipeEnvironment()
-
-        harness.locationObserver.emitSettingsChange()
-        await harness.deliveries()
-
-        XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:\(appState.config.localPort)")
-        let zshrc = try String(contentsOf: harness.homeDirectory.appendingPathComponent(".zshrc"), encoding: .utf8)
-        XCTAssertTrue(zshrc.hasPrefix("export A=1\n") && zshrc.contains("# >>> Conduit >>>"))
-        let names = appState.eventLog.events.map(\.event)
-        XCTAssertEqual(names.filter { $0.hasPrefix("platform.environment_") },
-                       ["platform.environment_drift", "platform.environment_repaired"])
-    }
-
-    /// No wake, path, VPN or settings report follows a silent wipe for sure;
-    /// the periodic tick finds it anyway. The real path monitor's first
-    /// report would also run a pass, and on a slow runner it wins the race,
-    /// so it is held off past the test. So would the launch preflight's
-    /// pass on finding the helper, so the test waits it out before wiping.
-    func testThePeriodicTickRepairsAWipeNoNotificationReports() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true),
-                                  environmentDriftInterval: .milliseconds(50), networkPathDebounce: 3600)
-        await harness.launchRecovery()
-        try await appState.startProxy()
-        await harness.settle("the launch preflight found the helper") { appState.helperStatusState == .installed }
-        await harness.deliveries()
-        try wipeEnvironment()
-
-        await harness.settle("the tick repairs the wipe") {
-            appState.eventLog.events.contains { $0.event == "platform.environment_repaired" }
-        }
-        XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:\(appState.config.localPort)")
-        XCTAssertTrue(appState.eventLog.events.contains { $0.event == "platform.environment_drift" && $0.detail?.hasPrefix("trigger=timer") == true })
-    }
-
-    /// A start-blocking edit held back by autosave is a draft in `config`,
-    /// not what the listener runs on: a drift pass repairs the system proxy
-    /// and the environment to the applied endpoint, never the half-typed one.
-    func testADriftPassRepairsToTheAppliedConfigNotAHeldDraft() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true),
-                                  settingsSaveDebounce: .milliseconds(10))
-        await harness.launchRecovery()
-        try await appState.startProxy()
-        let applied = "http://127.0.0.1:\(appState.config.localPort)"
-
-        appState.config.localHost = "127.0."
-        await appState.awaitPendingSave()
-        XCTAssertTrue(appState.eventLog.events.contains { $0.event == "config.autosave_held" })
-        try wipeEnvironment()
-        harness.locationObserver.emitSettingsChange()
-        await harness.deliveries()
-
-        XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], applied)
-        XCTAssertEqual(wifi.webProxy.host, "127.0.0.1")
-        XCTAssertEqual(wifi.secureWebProxy.host, "127.0.0.1")
-    }
-
-    /// The pass belongs to the switch and the running proxy: off, or
-    /// stopped, it inspects and writes nothing.
-    func testTheDriftPassLeavesTheEnvironmentAloneWhenTheSwitchIsOffOrTheProxyStopped() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: false))
-        await harness.launchRecovery()
-        try await appState.startProxy()
-        harness.locationObserver.emitSettingsChange()
-        await harness.deliveries()
-        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"])
-
-        appState.platformConfig.manageEnvironmentVariables = true
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        await appState.stopProxy()
-        try wipeEnvironment()
-        harness.locationObserver.emitSettingsChange()
-        await harness.deliveries()
-        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"])
-        XCTAssertFalse(appState.eventLog.events.contains { $0.event == "platform.environment_drift" })
-    }
-
-    /// Repeated DNS stops while the first is held on a slow helper. Each
-    /// used to queue its own teardown behind the first, unbounded; now they
-    /// join the one in flight, and one teardown runs.
-    func testRepeatedDNSStopsWhileTheFirstIsHeldRunOneTeardown() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true))
-        await appState.startDNS()
-        XCTAssertTrue(machine.dnsRelayRunning)
-        let relayStopsBefore = machine.privilege.commands(matching: .stopDNSRelay).count
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.stopDNSRelay.rawValue }
-
-        let first = Task { await appState.stopDNS() }
-        await harness.hold.waitUntilReached()
-        XCTAssertFalse(harness.hold.reachedOnMainThread)
-        let more = (0..<4).map { _ in Task { await appState.stopDNS() } }
-        await harness.settle("the four later stops have arrived") {
-            appState.eventLog.events.coalescedValues.count == 4
-                || appState.lifecycleGenerations.dns >= 6
-        }
-        harness.hold.release()
-        await first.value
-        for task in more { await task.value }
-
-        XCTAssertEqual(machine.privilege.commands(matching: .stopDNSRelay).count - relayStopsBefore, 1, "one teardown for five stops")
-        XCTAssertEqual(appState.lifecycleGenerations.dns, 2, "the start and one stop")
-        XCTAssertEqual(
-            appState.eventLog.events.coalescedValues,
-            Array(repeating: LifecycleCoalesced(operation: .dnsStop, joined: 2), count: 4)
-        )
-        XCTAssertEqual(
-            appState.eventLog.events.filter { $0.event == "lifecycle.coalesced" }.map(\.detail),
-            Array(repeating: "operation=dns_stop joined=2", count: 4),
-            "golden: the human line operators read"
-        )
-        XCTAssertFalse(machine.dnsRelayRunning)
-        XCTAssertEqual(appState.runtimeSnapshot.dnsRunState, .stopped)
-    }
-
-    /// Quit while a start's platform step is held on a slow helper. Quit
-    /// waits for the queue only so long, then clears; the held step's own
-    /// manager is cleared after the step, by that manager's lock, and the
-    /// start stops at its next step.
-    func testQuitWhileAStartIsHeldProceedsAfterTheDeadline() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true, manageDNSResolvers: true))
-        appState.terminationDrainDeadlineMilliseconds = 200
-        await harness.setVPN(.connected)
-        await harness.launchRecovery()
-        // The environment step: the system proxy is already applied.
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
-            name == "/bin/launchctl" && arguments.first == "setenv"
-        }
-        let start = Task { try await appState.startProxy() }
-        await harness.hold.waitUntilReached()
-        XCTAssertFalse(harness.hold.reachedOnMainThread)
-        XCTAssertTrue(wifi.routesThroughAProxy, "the system proxy step landed before the hold")
-
-        // Quit blocks the main thread, so the hold is watched and let go from
-        // another. It releases as soon as quit has cleared the system proxy
-        // with the start still held; the cap only ends a quit that never does.
-        let machine = self.machine
-        let hold = harness.hold
-        let clearedWhileHeld = LockedCount()
-        DispatchQueue.global().async {
-            var cleared = 0
-            for _ in 0..<10_000 {
-                if !machine.service("Wi-Fi").routesThroughAProxy { cleared = 1; break }
-                usleep(1_000)
-            }
-            clearedWhileHeld.set(cleared)
-            hold.release()
-        }
-        appState.performTerminationCleanup()
-        try await start.value
-
-        XCTAssertEqual(clearedWhileHeld.value, 1, "quit cleared the system proxy while the start was still held")
-        XCTAssertTrue(
-            appState.eventLog.events.lifecycleValues.contains(.terminationDrainExpired(LifecycleTerminationDrainExpired(deadlineMilliseconds: 200))),
-            "and said it stopped waiting"
-        )
-        XCTAssertFalse(wifi.routesThroughAProxy)
-        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"], "the held environment step was cleared after it landed")
-        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.launchdEnvironment))
-        XCTAssertEqual(machine.privilege.commands(matching: .applyDNS), [], "the step after the held one never ran")
-        XCTAssertNil(machine.resolverFile(for: "corp.example"))
-    }
-
-    /// A restart whose start a stop overtakes did not restart anything, and
-    /// must not say it did.
-    func testARestartOvertakenByAStopDoesNotReportARestart() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
-        await harness.launchRecovery()
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
-            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
-        }
-        let restart = Task { await appState.restartProxyLifecycle() }
-        await harness.hold.waitUntilReached()
-        let stop = Task { await appState.stopProxy() }
-        await harness.settle("the stop has begun") { appState.lifecycleGenerations.proxy == 2 }
-        harness.hold.release()
-        let outcome = await restart.value
-        await stop.value
-
-        XCTAssertEqual(outcome, .notStarted, "no \"Proxy Restarted\" for a proxy the stop took down")
-        XCTAssertFalse(wifi.routesThroughAProxy)
-    }
-
-    func testQuittingWhileAStartAppliesClearsAfterTheApply() async throws {
-        let appState = try launch(
-            platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true, manageSystemDNS: true)
-        )
-        await harness.launchRecovery()
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
-            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
-        }
-        let start = Task { try await appState.startProxy() }
-        await harness.hold.waitUntilReached()
-        XCTAssertFalse(harness.hold.reachedOnMainThread, "the start's surface work is off the main thread")
-
-        // Termination blocks the main thread, so the hold is let go from
-        // another. What it finds is counted: with the wait, termination has
-        // asked the helper for nothing while the apply is still held. The
-        // pause only gives a termination that does not wait the time to
-        // show it; one that waits passes whatever it is.
-        let machine = self.machine
-        let hold = harness.hold
-        let commandsBefore = machine.privilege.commands.count
-        let commandsAtRelease = LockedCount()
-        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(300)) {
-            commandsAtRelease.set(machine.privilege.commands.count)
-            hold.release()
-        }
-        appState.performTerminationCleanup()
-        try await start.value
-
-        XCTAssertEqual(commandsAtRelease.value, commandsBefore, "termination asked for nothing while the apply was out")
-        XCTAssertFalse(wifi.routesThroughAProxy, "termination's clear landed after the start's apply")
-        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"])
-        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
-        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.launchdEnvironment))
-        XCTAssertEqual(harness.loginItems.registrations, [], "and the start went no further")
-    }
-
-    /// The same for the DNS forwarder: a stop issued while the start points
-    /// the interfaces at the relay restores them after it, and the start
-    /// neither persists "DNS on" nor leaves a health timer that would
-    /// restart the relay the stop took down.
-    func testADNSStopIssuedWhileTheStartAppliesLandsLast() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true))
-        machine.describe("Wi-Fi") { $0.dnsServers = ["192.0.2.53"] }
-        await harness.launchRecovery()
-        // The relay start inside `SystemDNSManager.apply`, after the capture.
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.startDNSRelay.rawValue }
-
-        let start = Task { await appState.startDNS() }
-        await harness.hold.waitUntilReached()
-        XCTAssertFalse(harness.hold.reachedOnMainThread, "the start's surface work is off the main thread")
-        let stop = Task { await appState.stopDNS() }
-        await harness.settle("the stop has begun") { appState.lifecycleGenerations.dns == 2 }
-        harness.hold.release()
-        await start.value
-        await stop.value
-
-        XCTAssertFalse(machine.dnsRelayRunning, "the stop's restore landed after the start's apply")
-        XCTAssertEqual(wifi.dnsServers, ["192.0.2.53"])
-        XCTAssertFalse(appState.config.dnsForwarderEnabled, "the overtaken start did not persist DNS as on")
-        XCTAssertFalse(appState.hasDNSHealthTimer, "nor start a health timer")
-        XCTAssertEqual(appState.runtimeSnapshot.dnsRunState, .stopped)
-        XCTAssertEqual(
-            appState.eventLog.events.supersededValues,
-            [LifecycleSuperseded(operation: .dnsStart, generation: 1, current: 2, reason: .superseded)]
-        )
-        XCTAssertEqual(
-            appState.eventLog.events.filter { $0.event == "lifecycle.superseded" }.map(\.detail),
-            ["operation=dns_start generation=1 current=2 reason=superseded"],
-            "golden: the human line operators read"
-        )
-    }
-
-    /// The probe that asks for a restart ran a moment ago. A stop that
-    /// finished since has released the surface, and a relay started after it
-    /// would hold :53 and forward to a port nothing listens on.
-    func testARelayRestartThatFindsSystemDNSReleasedStartsNothing() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true))
-        await appState.startDNS()
-        await appState.stopDNS()
-        XCTAssertFalse(machine.dnsRelayRunning)
-        let startsBefore = machine.privilege.commands(matching: .startDNSRelay).count
-
-        // The Stop's own run is current, so this reaches the manager, whose check is what is tested here.
-        appState.handleDNSHealthResult(alive: false, armedBy: appState.dnsObservationToken)
-        await harness.deliveries()
-
-        XCTAssertEqual(machine.privilege.commands(matching: .startDNSRelay).count, startsBefore)
-        XCTAssertFalse(machine.dnsRelayRunning)
-    }
-
-    /// Twin of `RuntimeHostDNSHealthTests`: a health reading belongs to the DNS run whose timer armed it. Once a Stop and a newer Start
-    /// superseded run A, A's late failed reading restarts nothing for run B and degrades nothing. B's own failed reading restarts B's relay
-    /// once. Its degraded display is not asserted: this overlay is transient, the next snapshot may replace it, and it goes at the single
-    /// cut; the persistent degraded and recovered snapshot is the shared host's (`RuntimeHostDNSHealthTests`).
-    func testAHealthReadingFromASupersededDNSRunActsOnNothing() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true))
-        await appState.startDNS()
-        let runA = appState.dnsObservationToken
-        await appState.stopDNS()
-        await appState.startDNS()
-        XCTAssertTrue(runA.isSuperseded)
-        XCTAssertTrue(machine.dnsRelayRunning, "run B points system DNS at the relay")
-        let startsBefore = machine.privilege.commands(matching: .startDNSRelay).count
-
-        appState.handleDNSHealthResult(alive: false, armedBy: runA)
-        await harness.deliveries()
-        XCTAssertEqual(machine.privilege.commands(matching: .startDNSRelay).count, startsBefore, "no relay restart for a superseded run")
-        XCTAssertNil(appState.runtime.dnsError)
-
-        appState.handleDNSHealthResult(alive: false, armedBy: appState.dnsObservationToken)
-        await harness.deliveries()
-        XCTAssertEqual(machine.privilege.commands(matching: .startDNSRelay).count, startsBefore + 1, "run B's own reading restarts its relay")
-    }
-
-    /// An uninstall waits on an admin password dialog. The window that asked
-    /// for it keeps drawing, and a failure still reaches the user.
-    func testHelperUninstallRunsOffTheMainActorAndReportsFailure() async throws {
-        let appState = try launch()
-
-        appState.uninstallHelper()
-        // Dropped: the first is still out.
-        appState.uninstallHelper()
-        await harness.deliveries()
-        XCTAssertEqual(harness.helper.uninstalls, 1)
-        XCTAssertNil(appState.lastErrorMessage)
-
-        harness.helper.fails = true
-        appState.uninstallHelper()
-        await harness.deliveries()
-        XCTAssertNotNil(appState.lastErrorMessage, "the refusal is shown, not dropped")
-    }
-
-    /// Install from Settings (#121): the harness's fake lifecycle is what the
-    /// app reaches, never the real installer, and the caller policy the
-    /// install reported is recorded as an event and kept for Settings.
-    func testHelperInstallReportsTheCallerPolicyItLeft() async throws {
-        let appState = try launch(helperSocketBindWait: .zero)
-        func helperEvents() -> [String] {
-            appState.eventLog.events.filter { $0.event.hasPrefix("helper.") }.map { "\($0.event) \($0.detail ?? "")" }
-        }
-
-        appState.installHelper()
-        await harness.deliveries()
-        XCTAssertEqual(harness.helper.installs, 1, "the fake seam, not the bundled installer")
-        XCTAssertEqual(appState.helperCallerPolicy, .enforced)
-        XCTAssertEqual(helperEvents(), ["helper.installed caller_policy=enforced"])
-
-        harness.helper.callerPolicy = .unenforced
-        appState.installHelper()
-        await harness.deliveries()
-        XCTAssertEqual(appState.helperCallerPolicy, .unenforced)
-        XCTAssertEqual(helperEvents().last, "helper.installed caller_policy=unenforced")
-
-        harness.helper.fails = true
-        appState.installHelper()
-        await harness.deliveries()
-        XCTAssertEqual(helperEvents().last, "helper.install_failed reason=helper lifecycle refused")
-        XCTAssertNotNil(appState.lastErrorMessage)
-        XCTAssertEqual(appState.helperCallerPolicy, .unenforced, "a failed install leaves the last known policy")
-
-        harness.helper.fails = false
-        appState.uninstallHelper()
-        await harness.deliveries()
-        XCTAssertNil(appState.helperCallerPolicy)
-        XCTAssertEqual(helperEvents().last, "helper.uninstalled ")
-    }
-
-    // MARK: Flags and the machine
-
-    /// The login item needs no runtime and must not wait for the pass: a
-    /// quit right after the save would lose it. Pins the registration seam.
-    func testFlippingLaunchAtLoginRegistersBeforeThePassRuns() throws {
-        let appState = try launch()
-
-        appState.platformConfig.launchAtLogin = true
-        appState.saveConfig()
-        XCTAssertEqual(harness.loginItems.registrations, [true], "registered synchronously, inside saveConfig")
-
-        appState.platformConfig.launchAtLogin = false
-        appState.saveConfig()
-        XCTAssertEqual(harness.loginItems.registrations, [true, false])
-    }
-
-    /// The system proxy follows its switch through the whole stack: the
-    /// start applies it, the switch-off save clears it, and the machine
-    /// ends where the last save said, with the journal released.
-    func testTheSystemProxyFollowsItsSwitch() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
-
-        try await appState.startProxy()
-        XCTAssertTrue(isRunning(appState))
-        XCTAssertEqual(wifi.webProxy, FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "0"))
-        XCTAssertEqual(wifi.secureWebProxy.enabled, true)
-        XCTAssertFalse(harness.journal.knowsSurfaceIsIdle(.systemProxy), "the journal holds the prior state")
-
-        appState.platformConfig.manageSystemProxy = false
-        appState.saveConfig()
-        await appState.reconciler.drain()
-
-        XCTAssertFalse(wifi.routesThroughAProxy, "cleared while the proxy keeps running")
-        XCTAssertTrue(isRunning(appState))
-        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy), "and the journal was released")
-    }
-
-    // MARK: Ownership guards on stop
-
-    /// The guard from #13: a stop clears a surface when the switch is on
-    /// *or* the journal says the surface is ours. Here the switch-off pass
-    /// tried to clear and the machine refused, so the switch is off, the
-    /// flag is left unreconciled, and the journal still holds the prior.
-    /// Stop must clear it anyway.
-    func testStopClearsASystemProxyTheSwitchNoLongerNamesWhenTheJournalOwnsIt() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
-        try await appState.startProxy()
-
-        machine.privilege.failing = [.setWebProxyEndpoint]
-        appState.platformConfig.manageSystemProxy = false
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        XCTAssertTrue(wifi.routesThroughAProxy, "the clear did not land")
-        XCTAssertFalse(harness.journal.knowsSurfaceIsIdle(.systemProxy), "so the records were kept")
-        XCTAssertTrue(appState.reconciler.lastReconciledPlatformConfig.manageSystemProxy, "and the flag is unreconciled")
-
-        machine.privilege.failing = []
-        await appState.stopProxy()
-
-        XCTAssertFalse(wifi.routesThroughAProxy, "stop cleared by ownership, not by the switch")
-        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
-    }
-
-    /// Same guard, resolver files: with the switch off only the journal can
-    /// tell our file from one the user keeps by hand for the same domain.
-    func testStopRemovesAResolverFileTheSwitchNoLongerNamesWhenTheJournalOwnsIt() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
-        await harness.setVPN(.connected)
-        try await appState.startProxy()
-        XCTAssertEqual(machine.resolverFile(for: "corp.example"), "nameserver 10.0.0.53")
-
-        machine.privilege.failingDomains = ["corp.example"]
-        appState.platformConfig.manageDNSResolvers = false
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the removal did not land")
-        XCTAssertTrue(harness.journal.hasRecords(for: .resolverFile), "so the file is still recorded as ours")
-
-        machine.privilege.failingDomains = []
-        await appState.stopProxy()
-
-        XCTAssertNil(machine.resolverFile(for: "corp.example"), "stop removed it by ownership")
-        XCTAssertFalse(harness.journal.hasRecords(for: .resolverFile))
-    }
-
-    /// A user's own resolver file for a configured domain, with the switch
-    /// off, is not ours: nothing recorded it, so stop leaves it alone.
-    func testStopLeavesAResolverFileTheUserWroteWhenTheSwitchIsOff() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: false))
-        try machine.strandResolverFile(for: "corp.example", contents: "nameserver 10.0.0.53")
-        try await appState.startProxy()
-
-        await appState.stopProxy()
-
-        XCTAssertEqual(machine.resolverFile(for: "corp.example"), "nameserver 10.0.0.53", "not ours, not touched")
-        XCTAssertTrue(machine.privilege.commands(matching: .removeDNS).isEmpty)
+        state.commitPendingEdit(trigger: .apply)
+        await state.awaitPendingSave()
+        XCTAssertEqual(try harness.savedConfig.socksEnabled, state.config.socksEnabled)
+        XCTAssertFalse(state.listenerEditAwaitingCommit)
+    }
+
+    /// The menu's Start carries no Settings value: an unsaved edit stays a draft, and the runtime binds the saved port.
+    func testTheMenuStartSendsNoUnsavedSettingsValue() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemProxy: true))
+        let state = await harness.ready()
+        state.config.localPort = 1
+        state.toggleProxy()
+        await harness.settle("the proxy runs") { state.runtime.runtimeStatus.state == .running }
+        XCTAssertNotEqual(state.runtime.bindings.proxyPort, 1)
+        XCTAssertEqual(try harness.savedConfig.localPort, 0)
+        XCTAssertTrue(state.hasUnsavedEdit)
+        // The host reports the proxy running once its listener binds, before the Start applies the surfaces.
+        await harness.settle("the saved Start applied the system proxy") { self.wifi.webProxy.host == "127.0.0.1" }
+        state.toggleProxy()
+        await harness.settle("the proxy stopped") { state.runtime.runtimeStatus.state == .stopped }
+        // The host reports the listener stopped before its teardown clears the surfaces (`tearDownProxy`), so the clear is its own edge.
+        await harness.settle("the Stop's clear landed") { !self.wifi.routesThroughAProxy && !harness.journal.hasRecords(for: .systemProxy) }
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy), "the Stop cleared what the Start applied")
+    }
+
+    /// An import passes the startup gate; a newer file is refused and the editor is unchanged.
+    func testAnImportOfANewerFileLeavesTheEditorUnchanged() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        let before = state.config
+        let newer = harness.stateDirectory.appendingPathComponent("newer.json")
+        try Data(#"{"schemaVersion": 999}"#.utf8).write(to: newer)
+        XCTAssertThrowsError(try state.importConfiguration(from: newer))
+        XCTAssertEqual(state.config, before)
+        XCTAssertFalse(state.hasUnsavedEdit)
+    }
+
+    /// Export is the user's document; it may not write a runtime file of the root, and writes anywhere else.
+    func testAnExportRefusesAStateFileAndWritesElsewhere() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        let configBytes = try Data(contentsOf: harness.environment.configFile)
+        XCTAssertThrowsError(try state.exportConfiguration(to: harness.environment.configFile))
+        XCTAssertThrowsError(try state.exportConfiguration(to: harness.environment.platformStateFile))
+        XCTAssertThrowsError(try state.exportConfiguration(to: harness.stateSession.writerLeaseFile))
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), configBytes)
+        let elsewhere = harness.homeDirectory.appendingPathComponent("Conduit-config.json")
+        try state.exportConfiguration(to: elsewhere)
+        XCTAssertEqual(try ProxyConfigPersistence.loadImport(from: elsewhere), state.config)
     }
 
     // MARK: Quit
 
-    /// The pass is a task queued behind the save. A quit that lands before
-    /// it runs must still clear the surface: termination clears whatever
-    /// the journal says is ours, whatever the switch says now.
-    func testQuittingBeforeAQueuedPassRunsStillClearsTheSurface() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
-        try await appState.startProxy()
-        XCTAssertTrue(wifi.routesThroughAProxy)
-
-        appState.platformConfig.manageSystemProxy = false
-        appState.saveConfig()
-        XCTAssertTrue(appState.reconciler.hasPassInFlight, "the pass has not run yet")
-        appState.performTerminationCleanup()
-
-        XCTAssertFalse(wifi.routesThroughAProxy, "quit cleared it before the pass ran")
-        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
-
-        // The pass still runs; its clear finds nothing to do and nothing to undo.
-        await appState.reconciler.drain()
-        XCTAssertFalse(wifi.routesThroughAProxy)
-        XCTAssertEqual(wifi.webProxy.host, "", "the prior had no address, so ours did not stay behind disabled")
-    }
-
-    // MARK: Failed start
-
-    /// A start that fails reverts whatever it finds applied, whether or not
-    /// this process applied it. The residue here is what a killed run
-    /// leaves: a proxied service, a published launchd variable and a
-    /// resolver file, none of it recorded.
-    func testAFailedStartRevertsEverySurfaceItFindsApplied() async throws {
-        let appState = try launch(
-            platform: PlatformIntegrationConfig(
-                manageSystemProxy: true,
-                manageEnvironmentVariables: true,
-                manageDNSResolvers: true
-            ),
-            // Rejected by `ProxyConfig.validate()`, so the start fails at
-            // once instead of spending the bind retry budget. In the file
-            // it launched from: an unsaved edit never reaches the runtime.
-            configure: { $0.maxConnections = 0 }
-        )
-        machine.describe("Wi-Fi") { service in
-            service.webProxy = FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "47113")
-            service.secureWebProxy = service.webProxy
+    /// The client Quit writes the final edit save-only within its total, applies nothing, and settles.
+    func testQuitFlushesTheFinalEditSaveOnlyWithinItsTotal() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        state.toggleProxy()
+        await harness.settle("the proxy runs") { state.runtime.runtimeStatus.state == .running }
+        state.config.health.checkInterval = 61
+        XCTAssertTrue(state.beginQuit())
+        // In the same turn: the fence holds and the final intent is frozen.
+        XCTAssertEqual(state.phase, .quitting)
+        XCTAssertFalse(state.controlsEnabled)
+        state.config.health.checkInterval = 99
+        state.toggleProxy()
+        XCTAssertFalse(state.beginQuit(), "one quit")
+        let finished = await state.finishQuit()
+        let result = try XCTUnwrap(finished)
+        guard case .settled(.completed) = result.quit else { return XCTFail("the quit completed: \(result.quit)") }
+        guard case .settled(.configurationSettled(let receipt)) = result.configuration else {
+            return XCTFail("the final save settled: \(result.configuration)")
         }
-        machine.launchdEnvironment = ["HTTP_PROXY": "http://127.0.0.1:47113", "https_proxy": "http://127.0.0.1:47113"]
-        try machine.strandResolverFile(for: "corp.example", contents: "nameserver 10.0.0.53")
+        XCTAssertTrue(receipt.runtime.write.isVerified)
+        XCTAssertTrue(receipt.modules.isEmpty, "the final save started nothing")
+        XCTAssertNil(receipt.applied, "the final save applied nothing")
+        XCTAssertEqual(result.preferences, .notDeclared, "clean preferences are not saved")
+        XCTAssertEqual(try harness.savedConfig.health.checkInterval, 61, "the draft frozen when the quit began, not a later edit")
+        XCTAssertEqual(state.runtime.observation, .ended)
+    }
 
-        do {
-            try await appState.startProxy()
-            XCTFail("a config the kernel rejects must fail the start")
-        } catch {
-            // Expected.
+    /// A runtime draft that blocks a start is not the next launch's configuration; the platform edit beside it is still written.
+    func testQuitDiscardsAStartBlockingRuntimeDraftButWritesThePlatformEdit() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        let savedPort = try harness.savedConfig.proxy.port
+        state.config.proxy.port = 70_000
+        state.platformConfig.manageEnvironmentVariables = true
+        XCTAssertTrue(state.beginQuit())
+        let finished = await state.finishQuit()
+        let result = try XCTUnwrap(finished)
+        guard case .settled(.configurationSettled) = result.configuration else {
+            return XCTFail("the final save settled: \(result.configuration)")
         }
-
-        XCTAssertFalse(isRunning(appState))
-        XCTAssertFalse(wifi.routesThroughAProxy, "the proxied service was switched off")
-        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"], "the launchd variables were cleared")
-        XCTAssertNil(machine.launchdEnvironment["https_proxy"])
-        XCTAssertNil(machine.resolverFile(for: "corp.example"), "the resolver file was removed")
+        XCTAssertEqual(try harness.savedConfig.proxy.port, savedPort)
+        XCTAssertTrue(try harness.savedPlatform.manageEnvironmentVariables)
+        let discarded = try XCTUnwrap(state.eventLog.events.first { $0.event == "config.edit_discarded" })
+        XCTAssertTrue(discarded.detail?.hasPrefix("trigger=quit reason=start_blocking_problems check=") == true, discarded.detail ?? "")
+        XCTAssertFalse(discarded.detail?.contains("70000") ?? true, "the check is named, never the value")
+        XCTAssertFalse(state.eventLog.events.contains { $0.event == "config.edit_committed" && ($0.detail ?? "").contains("trigger=quit") })
     }
 
-    // MARK: VPN
-
-    /// Entry files live and die with the tunnel their servers sit behind.
-    /// A drop removes them while the proxy keeps running; a reconnect puts
-    /// them back.
-    func testEntryFilesFollowTheVPN() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
-        await harness.setVPN(.connected)
-        try await appState.startProxy()
-        XCTAssertEqual(machine.resolverFile(for: "corp.example"), "nameserver 10.0.0.53")
-
-        await harness.setVPN(.disconnected(reason: .userInitiated))
-        XCTAssertNil(machine.resolverFile(for: "corp.example"), "the entry file is removed")
-        XCTAssertTrue(isRunning(appState), "the proxy itself stays up")
-
-        await harness.setVPN(.connected)
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the entry file is back")
-    }
-
-    private func events(_ appState: AppState, _ name: String) -> [String] {
-        appState.eventLog.events.filter { $0.event == name }.map { $0.detail ?? "" }
-    }
-
-    /// #165, as reported: the helper refuses this build, so the removal on a
-    /// VPN drop fails and the entry file stays with the tunnel down (the
-    /// bootstrap deadlock `SplitDNSVPNGate` exists for). Reinstalling the
-    /// helper from the app removes it, without another VPN report.
-    func testAFailedRemovalIsRetriedWhenAnInstallMakesTheHelperAvailable() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true), helperSocketBindWait: .milliseconds(1))
-        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
-        await harness.launchRecovery()
-        appState.refreshPreflight()
-        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
-        await harness.setVPN(.connected)
-        try await appState.startProxy()
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
-
-        machine.privilege.failingDomains = ["corp.example"]
-        await harness.setVPN(.disconnected(reason: .networkLost))
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the removal was refused")
-        XCTAssertEqual(events(appState, "platform.split_dns_failed").count, 1)
-
-        machine.privilege.failingDomains = []
-        appState.installHelper()
-        await harness.settle("the reinstalled helper removes the entry file") {
-            machine.resolverFile(for: "corp.example") == nil
+    /// A save out when the quit begins meets an outside edit and settles as a conflict, which drops the file's baseline in its own
+    /// settlement. The final save of the newer draft is still declared under the verified baseline it was frozen with, as for an
+    /// unsettled prior: the host compares it with the moved file and refuses it unwritten, and the quit ends on that answer instead of
+    /// holding the host's flush window open to its total.
+    func testAFinalSaveWhosePriorDroppedItsBaselineIsRefusedByTheHostNotLeftToTheDeadline() async throws {
+        let harness = try makeHarness()
+        let held = HeldStateFileRead()
+        harness.stateFiles = held
+        harness.timing.quitTotal = .seconds(6)
+        let state = await harness.ready()
+        let configName = harness.environment.configFile.lastPathComponent
+        held.hold.arm(onQueueLabeled: ".configuration-store") { name, values in
+            name == "read" && values.first?.hasSuffix(configName) == true
         }
-        await harness.deliveries()
-        XCTAssertEqual(events(appState, "platform.split_dns_retry"), ["operation=remove trigger=helper_available managed=true attempt=2"])
-        XCTAssertEqual(events(appState, "platform.split_dns_repaired"), ["operation=remove by=retry failed=remove attempts=1"])
-        XCTAssertTrue(isRunning(appState), "repaired without restarting the proxy")
-        await appState.stopProxy()
-    }
-
-    /// The other direction: the start's write is refused with the tunnel up,
-    /// and the first preflight that finds the helper available writes it.
-    func testAFailedStartWriteIsRetriedWhenThePreflightFindsTheHelperAvailable() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
-        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
-        await harness.launchRecovery()
-        appState.refreshPreflight()
-        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
-        await harness.setVPN(.connected)
-        machine.privilege.failingDomains = ["corp.example"]
-        try await appState.startProxy()
-        XCTAssertNil(machine.resolverFile(for: "corp.example"))
-        XCTAssertEqual(events(appState, "platform.split_dns_failed").first?.hasPrefix("operation=apply source=start attempt=1"), true)
-
-        machine.privilege.failingDomains = []
-        harness.helper.status = .installed
-        appState.refreshPreflight()
-        await harness.settle("the entry file is written") {
-            machine.resolverFile(for: "corp.example") == "nameserver 10.0.0.53"
+        state.config.health.checkInterval = 47
+        state.saveConfig()
+        let reached = await held.hold.waitUntilReached(within: .seconds(5))
+        XCTAssertTrue(reached, "the save is held at its read of the file")
+        var external = try harness.savedConfig
+        external.profileName = "edited outside"
+        try ProxyConfigPersistence.save(external, in: harness.environment)
+        let externalBytes = try Data(contentsOf: harness.environment.configFile)
+        state.config.health.checkInterval = 53
+        let begun = ContinuousClock.now
+        XCTAssertTrue(state.beginQuit())
+        Task { @MainActor in
+            try await Task.sleep(for: .milliseconds(100))
+            held.hold.release()
         }
-        await harness.deliveries()
-        XCTAssertEqual(events(appState, "platform.split_dns_repaired"), ["operation=apply by=retry failed=apply attempts=1"])
-        await appState.stopProxy()
-    }
-
-    /// A helper installed from outside the app (`sudo ./install-helper.sh`)
-    /// sends it nothing; the check that runs while a repair is pending finds
-    /// it. A check that finds it still refusing retries nothing, so no
-    /// write reaches a helper that is not there to take it.
-    func testThePendingRepairsHelperCheckFindsAHelperInstalledOutsideTheApp() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageDNSResolvers: true))
-        harness.splitDNSHelperCheckInterval = .milliseconds(20)
-        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
-        let appState = harness.launch()
-        await harness.launchRecovery()
-        await harness.setVPN(.connected)
-        try await appState.startProxy()
-        machine.privilege.failingDomains = ["corp.example"]
-        await harness.setVPN(.disconnected(reason: .userInitiated))
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
-        let removals = machine.privilege.commands(matching: .removeDNS).count
-        try await Task.sleep(for: .milliseconds(200))
-        await harness.deliveries()
-        XCTAssertEqual(machine.privilege.commands(matching: .removeDNS).count, removals, "no retry while the helper refuses")
-
-        machine.privilege.failingDomains = []
-        harness.helper.status = .installed
-        await harness.settle("the check finds the helper and the retry removes the file") {
-            machine.resolverFile(for: "corp.example") == nil
+        let finished = await state.finishQuit()
+        let result = try XCTUnwrap(finished)
+        XCTAssertLessThan(begun.duration(to: .now), .seconds(4), "the quit ended on the host's answer, not at its total")
+        guard case .settled(.configurationSettled(let prior)) = result.priorUpdate, case .conflict = prior.runtime.write else {
+            return XCTFail("the save out at the quit met the outside edit: \(result.priorUpdate)")
         }
-        await harness.deliveries()
-        XCTAssertEqual(events(appState, "platform.split_dns_retry").first?.contains("trigger=helper_check"), true)
-        XCTAssertEqual(events(appState, "platform.split_dns_repaired").count, 1)
-        await appState.stopProxy()
-    }
-
-    /// PR #211 review: a live edit renames the entry while the helper
-    /// refuses, so the reconcile cannot remove the old domain's file. Only
-    /// the journal names it now; the repair must still own it, or no later
-    /// VPN report or helper recovery would ever remove it.
-    func testARefusedRemovalOnAConfigEditIsRetriedWhenTheHelperIsAvailable() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
-        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
-        await harness.launchRecovery()
-        appState.refreshPreflight()
-        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
-        await harness.setVPN(.connected)
-        try await appState.startProxy()
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
-
-        machine.privilege.failingDomains = ["corp.example"]
-        appState.config.dnsEntries = [DomainDNSEntry(domain: "renamed.example", servers: ["10.0.0.53"])]
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        await harness.deliveries()
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the removal was refused")
-        XCTAssertNotNil(machine.resolverFile(for: "renamed.example"), "the new entry was written")
-        XCTAssertEqual(events(appState, "platform.split_dns_failed").first?.hasPrefix("operation=apply source=config_change attempt=1"), true)
-
-        machine.privilege.failingDomains = []
-        harness.helper.status = .installed
-        appState.refreshPreflight()
-        await harness.settle("the retry sweeps the renamed entry's old file") {
-            machine.resolverFile(for: "corp.example") == nil
+        guard case .settled(.configurationSettled(let final)) = result.configuration else {
+            return XCTFail("the final save was declared, admitted and answered: \(result.configuration)")
         }
-        await harness.deliveries()
-        XCTAssertNotNil(machine.resolverFile(for: "renamed.example"))
-        XCTAssertEqual(events(appState, "platform.split_dns_repaired"), ["operation=apply by=retry failed=apply attempts=1"])
-        await appState.stopProxy()
+        XCTAssertFalse(final.runtime.write.isVerified, "the host refused the moved file")
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), externalBytes, "the outside edit was not overwritten")
+        guard case .settled(.completed) = result.quit else { return XCTFail("the quit completed: \(result.quit)") }
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "config.save_unverified" && ($0.detail ?? "").contains("trigger=quit ") },
+                      "the refused final save is reported, not dropped silently")
     }
 
-    /// PR #211 review: the switch turned off with the VPN up while the
-    /// helper refuses. The teardown leaves the entry file, and with the
-    /// switch off no VPN drop touches it again, so the repair must own it.
-    func testAFailedSwitchOffTeardownIsRetriedWhenTheHelperIsAvailable() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
-        await harness.launchRecovery()
-        await harness.setVPN(.connected)
-        try await appState.startProxy()
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
+    // MARK: Administration
 
-        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
-        appState.refreshPreflight()
-        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
-        machine.privilege.failingDomains = ["corp.example"]
-        appState.platformConfig.manageDNSResolvers = false
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        await harness.deliveries()
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the teardown did not land")
-        XCTAssertEqual(events(appState, "platform.split_dns_failed").last?.hasPrefix("operation=remove source=switch_off attempt=1"), true)
-        await harness.setVPN(.disconnected(reason: .networkLost))
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "a VPN drop with the switch off leaves it")
+    /// The login item is registered only after its platform write verified; a failed registration is reported, and nothing retries it
+    /// until a later trigger (`testARefusedRegistrationIsRetriedOnTheNextSaveAndRepairedByAStart`).
+    func testLaunchAtLoginRegistersOnlyAfterItsVerifiedWrite() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        state.setLaunchAtLogin(true)
+        await harness.settle("the registration followed the write") { harness.loginItems.registrations == [true] }
+        XCTAssertTrue(try harness.savedPlatform.launchAtLogin)
+        XCTAssertTrue(state.platformConfig.launchAtLogin)
+        XCTAssertFalse(state.hasUnsavedEdit, "the admin write is not a draft edit")
 
-        machine.privilege.failingDomains = []
-        harness.helper.status = .installed
-        appState.refreshPreflight()
-        await harness.settle("the retry runs the teardown") { machine.resolverFile(for: "corp.example") == nil }
-        await harness.deliveries()
-        XCTAssertTrue(events(appState, "platform.split_dns_retry").last?.contains("managed=false") == true)
-        XCTAssertEqual(events(appState, "platform.split_dns_repaired").last?.contains("failed=remove"), true)
-        XCTAssertFalse(harness.journal.hasRecords(for: .resolverFile))
-
-        // Codex review: the repaired teardown is the switch's action landing,
-        // so turning the switch back on is a flip the reconciler acts on.
-        await harness.setVPN(.connected)
-        appState.platformConfig.manageDNSResolvers = true
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        XCTAssertEqual(machine.resolverFile(for: "corp.example"), "nameserver 10.0.0.53", "switching back on writes the entry")
-        await appState.stopProxy()
+        harness.loginItems.fails = true
+        state.setLaunchAtLogin(false)
+        await harness.settle("the failure was reported") { state.lastErrorMessage != nil }
+        XCTAssertEqual(harness.loginItems.registrations, [true, false], "nothing retried the refused registration by itself")
     }
 
-    /// Codex review, the reverse: the switch turned on while the helper
-    /// refuses, then a retry writes the entry. Turning it off again must
-    /// still run the teardown.
-    func testARetriedSwitchOnIsTornDownWhenTheSwitchTurnsOffAgain() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: false))
-        await harness.launchRecovery()
-        await harness.setVPN(.connected)
-        try await appState.startProxy()
-        XCTAssertNil(machine.resolverFile(for: "corp.example"))
+    /// After the quit's fence no app administration starts, whatever entry point a late panel or click reaches: the credential store is
+    /// neither written nor cleared, no helper change, update check, PAC preview, login-item write, import or export runs, and a
+    /// preference change starts no automatic checks.
+    func testNoAppAdministrationStartsAfterTheQuitsFence() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        let updaterStarts = harness.updater.starts.count
+        XCTAssertTrue(state.beginQuit())
 
-        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
-        appState.refreshPreflight()
-        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
-        machine.privilege.failingDomains = ["corp.example"]
-        appState.platformConfig.manageDNSResolvers = true
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        await harness.deliveries()
-        XCTAssertNil(machine.resolverFile(for: "corp.example"), "the write was refused")
-        XCTAssertEqual(events(appState, "platform.split_dns_failed").last?.hasPrefix("operation=apply source=switch_on attempt=1"), true)
+        state.savePassword("after-the-fence")
+        XCTAssertFalse(state.credentialManager.hasSavedCredentials(for: state.config), "no Keychain save after the fence")
+        try state.credentialManager.saveHash(SecretBytes(Array(repeating: UInt8(7), count: 16)), for: state.config)
+        state.clearCredentials()
+        XCTAssertTrue(state.credentialManager.hasSavedCredentials(for: state.config), "no Keychain clear after the fence")
 
-        machine.privilege.failingDomains = []
-        harness.helper.status = .installed
-        appState.refreshPreflight()
-        await harness.settle("the retry writes the entry") { machine.resolverFile(for: "corp.example") != nil }
-        await harness.deliveries()
-
-        appState.platformConfig.manageDNSResolvers = false
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        XCTAssertNil(machine.resolverFile(for: "corp.example"), "switching off tears the retried entry down")
-        await appState.stopProxy()
-    }
-
-    /// Codex review after the rebase onto #212: a refused switch-on whose
-    /// entry file a VPN reconnect writes, not a retry. The repair settles
-    /// there, and turning the switch off must still tear the file down.
-    func testASwitchOnSettledByAVPNFlipIsTornDownWhenTheSwitchTurnsOff() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: false))
-        await harness.launchRecovery()
-        await harness.setVPN(.connected)
-        try await appState.startProxy()
-        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
-        appState.refreshPreflight()
-        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
-        machine.privilege.failingDomains = ["corp.example"]
-        appState.platformConfig.manageDNSResolvers = true
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        await harness.deliveries()
-        XCTAssertNil(machine.resolverFile(for: "corp.example"), "the write was refused")
-
-        machine.privilege.failingDomains = []
-        await harness.setVPN(.disconnected(reason: .networkLost))
-        await harness.setVPN(.connected)
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the reconnect wrote the entry")
-        XCTAssertEqual(events(appState, "platform.split_dns_repaired").last?.contains("by=vpn_transition"), true)
-
-        appState.platformConfig.manageDNSResolvers = false
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        XCTAssertNil(machine.resolverFile(for: "corp.example"), "switching off tears the entry down")
-        await appState.stopProxy()
-    }
-
-    /// Codex review after the rebase onto #212: switch-on failed for both
-    /// the entry and the intercept files. The retry writes the entry; the
-    /// intercept refresh fails again and is reported, and the entry is
-    /// still torn down when the switch turns off.
-    func testAnInterceptRefreshThatStillFailsDoesNotStrandARetriedEntry() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: false)) { config in
-            config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.intercept.test", interceptIP: "127.44.3.1", enabled: false)]
-        }
-        await harness.launchRecovery()
-        await harness.setVPN(.connected)
-        try await appState.startProxy()
-        await appState.startDNS()
-        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
-        appState.refreshPreflight()
-        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
-        machine.privilege.failingDomains = ["corp.example", "intercept.test"]
-        appState.platformConfig.manageDNSResolvers = true
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        await harness.deliveries()
-        XCTAssertNil(machine.resolverFile(for: "corp.example"), "the write was refused")
-
-        machine.privilege.failingDomains = ["intercept.test"]
-        harness.helper.status = .installed
-        appState.refreshPreflight()
-        await harness.settle("the retry writes the entry") { machine.resolverFile(for: "corp.example") != nil }
-        await harness.deliveries()
-        XCTAssertEqual(events(appState, "platform.split_dns_intercept_refresh_failed").count, 1)
-
-        machine.privilege.failingDomains = []
-        appState.platformConfig.manageDNSResolvers = false
-        appState.saveConfig()
-        await appState.reconciler.drain()
-        XCTAssertNil(machine.resolverFile(for: "corp.example"), "switching off tears the retried entry down")
-        await appState.stopDNS()
-        await appState.stopProxy()
-    }
-
-    /// PR #211 review: a busy reading keeps `.installed` on display (#210),
-    /// but is no evidence the helper takes writes. No retry until the busy
-    /// recheck reads it answering.
-    func testABusyHelperReadingDoesNotRetryUntilTheRecheckFindsItAnswering() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageDNSResolvers: true))
-        harness.helperBusyRecheckDelay = .milliseconds(20)
-        let appState = harness.launch()
-        await harness.launchRecovery()
-        await harness.settle("the launch preflight found the helper") { appState.helperStatus == .installed }
-        await harness.setVPN(.connected)
-        try await appState.startProxy()
-        machine.privilege.failingDomains = ["corp.example"]
-        await harness.setVPN(.disconnected(reason: .networkLost))
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
-        let retriesBefore = events(appState, "platform.split_dns_retry").count
-
-        harness.helper.status = .busy
-        machine.privilege.failingDomains = []
-        appState.refreshPreflight()
-        await harness.settle("the busy reading is noted") { appState.helperCheckingAgain }
-        await harness.deliveries()
-        XCTAssertEqual(appState.helperStatus, .installed, "the held verdict")
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "no retry on a busy reading")
-        XCTAssertEqual(events(appState, "platform.split_dns_retry").count, retriesBefore)
-
-        harness.helper.status = .installed
-        await harness.settle("the recheck reads the helper answering and the retry removes the file") {
-            machine.resolverFile(for: "corp.example") == nil
-        }
-        await harness.deliveries()
-        XCTAssertEqual(events(appState, "platform.split_dns_retry").last?.contains("trigger=helper_available"), true)
-        await appState.stopProxy()
-    }
-
-    /// PR #211 review: a check left sleeping on a long back-off from an
-    /// earlier episode must not delay a new one. Failed retries push the
-    /// back-off to its limit (16 s here); a VPN flip then settles the repair,
-    /// and a new failure gets a check at the first interval (1 s).
-    func testANewFailureGetsAFreshHelperCheckRatherThanAnEarlierBackOff() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageDNSResolvers: true))
-        harness.splitDNSHelperCheckInterval = .seconds(1)
-        let appState = harness.launch()
-        await harness.launchRecovery()
-        await harness.settle("the launch preflight found the helper") { appState.helperStatus == .installed }
-        await harness.setVPN(.connected)
-        try await appState.startProxy()
-        machine.privilege.failingDomains = ["corp.example"]
-        await harness.setVPN(.disconnected(reason: .networkLost))
-        for _ in 0..<5 {
-            appState.refreshPreflight()
-            let before = events(appState, "platform.split_dns_failed").count
-            await harness.settle("a retry failed") { self.events(appState, "platform.split_dns_failed").count > before }
-            await harness.deliveries()
-        }
-        XCTAssertGreaterThanOrEqual(events(appState, "platform.split_dns_failed").count, 6, "the back-off is at its limit")
-        // Long enough for a check from the first failure to wake once and
-        // go back to sleep on the limit.
-        try await Task.sleep(for: .milliseconds(1_500))
-        await harness.deliveries()
-
-        machine.privilege.failingDomains = []
-        await harness.setVPN(.connected)
-        XCTAssertEqual(events(appState, "platform.split_dns_repaired").last?.contains("by=vpn_transition"), true)
-
-        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
-        appState.refreshPreflight()
-        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
-        machine.privilege.failingDomains = ["corp.example"]
-        await harness.setVPN(.disconnected(reason: .userInitiated))
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
-        machine.privilege.failingDomains = []
-        harness.helper.status = .installed
-        await harness.settle("a fresh check finds the helper within a few intervals", timeoutMilliseconds: 5_000) {
-            machine.resolverFile(for: "corp.example") == nil
-        }
-        await harness.deliveries()
-        XCTAssertEqual(events(appState, "platform.split_dns_retry").last?.contains("trigger=helper_check"), true)
-        await appState.stopProxy()
-    }
-
-    /// A burst of reports from the observer, delivered without waiting for
-    /// each other: every one is stamped on the observer's turn and runs
-    /// through both order gates (the split-DNS gate's and the
-    /// orchestrator's), each keeping its own position, so in-order reports
-    /// are all applied and the last one decides (#155).
-    func testABurstOfVPNReportsEndsOnTheLastOneAndDropsNone() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
-        await harness.setVPN(.connected)
-        try await appState.startProxy()
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
-
-        for state: VPNObservedState in [.disconnected(reason: .userInitiated), .connected, .disconnected(reason: .networkLost)] {
-            harness.vpn.emit(state)
-        }
-        await harness.deliveries()
-
-        XCTAssertEqual(appState.runtimeSnapshot.vpnState, .disconnected(reason: .networkLost))
-        XCTAssertNil(machine.resolverFile(for: "corp.example"), "the gate followed the last report")
-
-        for state: VPNObservedState in [.connected, .disconnected(reason: .userInitiated), .connected] {
-            harness.vpn.emit(state)
-        }
-        await harness.deliveries()
-
-        XCTAssertEqual(appState.runtimeSnapshot.vpnState, .connected)
-        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the gate followed the last report")
-        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "vpn.observation_stale" }.count, 0,
-                       "a gate that took a report never makes the orchestrator drop it")
-        XCTAssertTrue(isRunning(appState))
-    }
-
-    /// The interface name belongs to the delivery it came with, read on the
-    /// observer's turn rather than after the main-actor hop.
-    func testVPNInterfaceNameIsTheOneDeliveredWithTheState() async throws {
-        let appState = try launch()
-        harness.vpn.connectedInterfaceName = "utun4"
-        harness.vpn.emit(.connected)
-        harness.vpn.connectedInterfaceName = "utun9"
-        await harness.deliveries()
-
-        XCTAssertEqual(appState.runtimeSnapshot.vpnState, .connected)
-        XCTAssertEqual(appState.runtimeSnapshot.vpnInterfaceName, "utun4")
-    }
-
-    // MARK: Launch
-
-    /// Crash recovery: a journal recording the user's proxy, a machine still
-    /// pointed at a port nothing serves. Launch restores the user's settings
-    /// before anything else touches the surface, and the start that follows
-    /// captures the user's proxy as the prior — not our own dead port.
-    func testLaunchRestoresTheProxyACrashedRunLeftBehind() async throws {
-        var config = makeConfig()
-        config.localPort = 0
-        let platform = PlatformIntegrationConfig(manageSystemProxy: true)
-        harness = try AppStateHarness(config: config, platformConfig: platform)
-
-        let corporate = ProxyServiceState(
-            webHost: "proxy.corp.example", webPort: "8080", webEnabled: true,
-            secureHost: "proxy.corp.example", securePort: "8080", secureEnabled: true,
-            autoURL: "", autoEnabled: false,
-            bypassDomains: ["*.local"]
-        )
-        let seeded = harness.journal
-        seeded.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: corporate.journalValues)
-        seeded.markApplied(surface: .systemProxy)
-        machine.describe("Wi-Fi") { service in
-            service.webProxy = FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "47113")
-            service.secureWebProxy = service.webProxy
-            service.bypassDomains = ["localhost"]
-        }
-
-        let appState = harness.launch()
-        await harness.launchRecovery()
-        XCTAssertEqual(
-            wifi.webProxy,
-            FakeMachine.ProxyEndpoint(enabled: true, host: "proxy.corp.example", port: "8080"),
-            "recovery restores the corporate proxy"
-        )
-        XCTAssertEqual(wifi.bypassDomains, ["*.local"])
-        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy), "restored, so released")
-        let recovery = appState.eventLog.events.filter { $0.event.hasPrefix("platform.launch_recovery_") }
-        XCTAssertEqual(
-            recovery.map(\.event),
-            ["platform.launch_recovery_nothing_to_do", "platform.launch_recovery_restored", "platform.launch_recovery_adopted"],
-            "one event per surface, in recovery's order"
-        )
-        XCTAssertEqual(recovery.map { $0.detail?.split(separator: " ").first }, ["surface=systemDNS", "surface=systemProxy", "surface=resolverFile"])
-        XCTAssertEqual(recovery.dropFirst().first?.detail, "surface=systemProxy stale=false")
-
-        try await appState.startProxy()
-        XCTAssertEqual(wifi.webProxy, FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "0"))
-        guard case .wasPresent(let prior) = harness.journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
-            return XCTFail("the start recorded a prior for Wi-Fi")
-        }
-        XCTAssertEqual(
-            ProxyServiceState(journalValues: prior).webHost,
-            "proxy.corp.example",
-            "the prior the start captured is the user's proxy, not the crashed run's port"
-        )
-    }
-}
-
-// MARK: - Updates (#111)
-
-extension AppStateHarnessTests {
-    func testCheckForUpdatesStartsTheInjectedUpdater() async throws {
-        let state = try launch()
+        state.installHelper()
+        state.uninstallHelper()
         state.checkForUpdates()
-        await harness.settle("the updater was asked to check") { self.harness.updater.starts == [.interactive] }
-        XCTAssertTrue(state.eventLog.events.contains { $0.event == "update.check_requested" && $0.detail == "source=user" })
-        XCTAssertNotNil(state.updateStatus.lastCheck)
+        state.appPreferences.automaticUpdateChecks.toggle()
+        state.config.routing.pacURL = "https://pac.example.test/p.pac"
+        state.refreshPACResolutionPreview()
+        state.setLaunchAtLogin(true)
+        let exported = harness.homeDirectory.appendingPathComponent("after-the-fence.json")
+        try state.exportConfiguration(to: exported)
+        let before = state.config
+        try state.importConfiguration(from: harness.environment.configFile)
+        _ = await state.finishQuit()
+        try await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertEqual(harness.helper.installs, 0)
+        XCTAssertEqual(harness.helper.uninstalls, 0)
+        XCTAssertEqual(harness.updater.starts.count, updaterStarts)
+        XCTAssertFalse(state.isPACPreviewRunning)
+        XCTAssertNil(state.pacPreviewMessage)
+        XCTAssertTrue(harness.loginItems.registrations.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: exported.path), "no export after the fence")
+        XCTAssertEqual(state.config, before, "no import after the fence")
     }
 
+    /// A login-item write already out when the quit begins is the quit's prior update: it settles within the quit, and no registration
+    /// starts from its late receipt after the fence (decisions 0015 and 0039).
+    func testALoginItemWriteOutAtQuitRegistersNothingAfterTheFence() async throws {
+        let harness = try makeHarness()
+        let held = HeldStateFileRead()
+        harness.stateFiles = held
+        let state = await harness.ready()
+        held.hold.arm(onQueueLabeled: ".configuration-store") { name, values in
+            name == "read" && values.first?.hasSuffix("platform.json") == true
+        }
+        state.setLaunchAtLogin(true)
+        let reached = await held.hold.waitUntilReached(within: .seconds(5))
+        XCTAssertTrue(reached, "the admin write reached the store")
+        XCTAssertTrue(state.beginQuit())
+        Task { @MainActor in
+            try await Task.sleep(for: .milliseconds(100))
+            held.hold.release()
+        }
+        let finished = await state.finishQuit()
+        let result = try XCTUnwrap(finished)
+        guard case .settled(.completed) = result.priorUpdate else {
+            return XCTFail("the admin write settled as the quit's prior: \(result.priorUpdate)")
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(harness.loginItems.registrations.isEmpty, "no registration after the fence")
+    }
+
+    /// A login-item flip while a save is out is refused, not queued where a quit would drop it; the refusal is an event.
+    func testALoginItemFlipWhileASaveIsOutIsRefusedNotQueued() async throws {
+        let harness = try makeHarness()
+        let held = HeldStateFileRead()
+        harness.stateFiles = held
+        let state = await harness.ready()
+        held.hold.arm(onQueueLabeled: ".configuration-store") { name, _ in name == "read" }
+        state.config.health.checkInterval = 47
+        state.saveConfig()
+        let reached = await held.hold.waitUntilReached(within: .seconds(5))
+        XCTAssertTrue(reached)
+        state.setLaunchAtLogin(true)
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "config.save_rejected" && $0.detail == "file=platform reason=editor_busy" })
+        XCTAssertNotNil(state.lastErrorMessage)
+        held.hold.release()
+        await state.awaitPendingSave()
+        XCTAssertFalse(try harness.savedPlatform.launchAtLogin, "the refused flip was never written")
+        XCTAssertTrue(harness.loginItems.registrations.isEmpty)
+    }
+
+    /// A registration the login item refused is owed for the session: the next verified Settings save tries it again, and a proxy Start
+    /// that comes up repairs the registration to the saved flag. Nothing at quit.
+    func testARefusedRegistrationIsRetriedOnTheNextSaveAndRepairedByAStart() async throws {
+        let harness = try makeHarness()
+        harness.timing.settingsSaveDebounce = .milliseconds(10)
+        let state = await harness.ready()
+        harness.loginItems.fails = true
+        state.setLaunchAtLogin(true)
+        await harness.settle("the refusal was reported") { harness.loginItems.registrations == [true] && state.lastErrorMessage != nil }
+        XCTAssertTrue(try harness.savedPlatform.launchAtLogin, "the flag was saved; only the registration failed")
+        harness.loginItems.fails = false
+        state.config.health.checkInterval = 47
+        await harness.settle("the next save retried it") { harness.loginItems.registrations == [true, true] }
+        state.toggleProxy()
+        await harness.settle("the Start that came up repaired it") { harness.loginItems.registrations == [true, true, true] }
+        XCTAssertTrue(state.beginQuit())
+        _ = await state.finishQuit()
+        XCTAssertEqual(harness.loginItems.registrations, [true, true, true], "nothing registers at quit")
+    }
+
+    /// Install is the app's; the host is told the helper was replaced and reads it again.
+    func testHelperInstallTellsTheHostTheHelperWasReplaced() async throws {
+        let harness = try makeHarness()
+        harness.helper.status = .outdated
+        let state = await harness.ready()
+        await harness.settle("the first preflight read") { state.helperStatus == .outdated }
+        harness.helper.callerPolicy = .unenforced
+        state.installHelper()
+        await harness.settle("the replaced helper was read") { state.helperStatus == .installed }
+        XCTAssertEqual(harness.helper.installs, 1)
+        XCTAssertEqual(state.helperCallerPolicy, .unenforced)
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "helper.installed" && $0.detail == "caller_policy=unenforced" })
+    }
+
+    func testAFailedHelperUninstallIsReported() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        harness.helper.fails = true
+        state.uninstallHelper()
+        await harness.settle("the failure was reported") { state.eventLog.events.contains { $0.event == "helper.uninstall_failed" } }
+        XCTAssertEqual(state.lastErrorMessage, FakeHelperLifecycle.Refused().localizedDescription)
+    }
+
+    /// A busy reading keeps the held verdict and asks for one more read; a conclusive one ends the re-read.
+    func testABusyHelperKeepsItsVerdictAndIsReadAgain() async throws {
+        let harness = try makeHarness()
+        harness.timing.helperBusyRecheckDelay = .milliseconds(20)
+        let state = await harness.ready()
+        await harness.settle("the first preflight read") { state.helperStatus == .installed }
+        harness.helper.status = .busy
+        state.refreshPreflight()
+        await harness.settle("the busy reading arrived") { state.helperCheckingAgain }
+        XCTAssertEqual(state.helperStatus, .installed, "a busy reading is no verdict")
+        harness.helper.status = .installed
+        await harness.settle("the re-read was conclusive") { !state.helperCheckingAgain }
+        XCTAssertEqual(state.helperStatus, .installed)
+    }
+
+    // MARK: App log
+
+    /// The app log's refusal lands in the app's own event log, and the config keeps its bytes.
+    func testAnAppLogAliasOfTheConfigIsRefusedThroughTheAppEventLog() async throws {
+        let harness = try makeHarness()
+        let config = harness.environment.configFile
+        XCTAssertEqual(link(config.path, harness.environment.logFile.path), 0)
+        let state = await harness.ready()
+        let before = try Data(contentsOf: config)
+        state.logStore.log(.notice, "composition witness")
+        state.logStore.flushFileLog()
+        let refusals = state.eventLog.events.filter { $0.event == RecordFileDestinationGate.eventName }
+        XCTAssertEqual(refusals.map(\.detail), ["sink=log reason=protected_identity resource=config"])
+        XCTAssertEqual(try Data(contentsOf: config), before)
+    }
+
+    func testAnAppLogAliasOfTheWriterLeaseIsRefusedAndTheLeaseKeepsItsAuthority() async throws {
+        let harness = try makeHarness()
+        let lease = harness.stateSession.writerLeaseFile
+        let before = try writerLeaseFingerprint(lease)
+        XCTAssertEqual(link(lease.path, harness.environment.logFile.path), 0)
+        let state = await harness.ready()
+        state.logStore.log(.notice, "lease witness")
+        state.logStore.flushFileLog()
+        let refusals = state.eventLog.events.filter { $0.event == RecordFileDestinationGate.eventName }
+        XCTAssertEqual(refusals.map(\.detail), ["sink=log reason=protected_identity resource=writer_lease"])
+        XCTAssertEqual(try writerLeaseFingerprint(lease), before, "the lock keeps its bytes and its inode")
+        assertSecondWriterIsBusy(RuntimeEnvironment.isolated(stateDirectory: harness.stateDirectory))
+    }
+
+    // MARK: Updates
+
+    /// The first launch of a new version records the change once, as its typed value, and the update state remembers this version.
     func testTheFirstLaunchOfANewVersionRecordsTheChange() async throws {
-        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
-        // What the previous version's launch left behind.
+        let harness = try makeHarness()
         try UpdateStateStore(file: harness.environment.updateStateFile).save(UpdateState(lastLaunchedVersion: "0.4.1"))
         harness.currentVersion = "0.5.0"
-        let state = harness.launch()
-        XCTAssertEqual(
-            state.eventLog.events.compactMap(\.typed),
-            [.lifecycle(.versionChanged(LifecycleVersionChanged(from: "0.4.1", to: "0.5.0")))]
-        )
-    }
-
-    func testAutomaticChecksFollowThePreference() async throws {
-        let state = try launch()
-        XCTAssertFalse(state.appPreferences.automaticUpdateChecks, "off by default")
-        state.appPreferences.automaticUpdateChecks = true
-        state.saveConfig()
-        XCTAssertTrue(try AppPreferencesPersistence.load(in: harness.environment).automaticUpdateChecks)
-    }
-}
-
-/// A loopback port that was free a moment ago: bound by the OS and released.
-/// For a scenario that has to move a listener to a fixed port.
-func reserveLoopbackPort() throws -> Int {
-    let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-    guard fd >= 0 else { throw POSIXError(.EBADF) }
-    defer { Darwin.close(fd) }
-    var address = sockaddr_in()
-    address.sin_family = sa_family_t(AF_INET)
-    address.sin_port = 0
-    address.sin_addr.s_addr = inet_addr("127.0.0.1")
-    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-    let bound = withUnsafeMutablePointer(to: &address) { pointer in
-        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { address in
-            Darwin.bind(fd, address, length) == 0 && Darwin.getsockname(fd, address, &length) == 0
+        let state = await harness.ready()
+        let changes = state.eventLog.events.compactMap(\.typed).filter {
+            if case .lifecycle(.versionChanged) = $0 { true } else { false }
         }
+        XCTAssertEqual(changes, [.lifecycle(.versionChanged(LifecycleVersionChanged(from: "0.4.1", to: "0.5.0")))])
+        XCTAssertEqual(UpdateStateStore(file: harness.environment.updateStateFile).load().0.lastLaunchedVersion, "0.5.0")
     }
-    guard bound else { throw POSIXError(.EADDRINUSE) }
-    return Int(UInt16(bigEndian: address.sin_port))
+
+    /// Automatic checks are off by default, so the launch schedules none. Turning the preference on reaches the coordinator's schedule:
+    /// it waits the launch delay (the coordinator's own wait, passed through the composition and answered at once here) and then runs a
+    /// background check; the edit itself saves through its own verified receipt. Turning it off again schedules nothing more.
+    func testAutomaticChecksFollowThePreference() async throws {
+        let harness = try makeHarness()
+        let waits = LockedLog<TimeInterval>()
+        harness.timing.updateCheckSleep = { delay in
+            waits.append(delay)
+            // Only the first wait is answered at once; the one the check schedules after it waits until cancelled.
+            if waits.values.count > 1 { try await Task.sleep(for: .seconds(3600)) }
+        }
+        let state = await harness.ready()
+        XCTAssertFalse(state.appPreferences.automaticUpdateChecks, "off by default")
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(waits.values.isEmpty, "nothing is scheduled while they are off")
+        state.appPreferences.automaticUpdateChecks = true
+        await harness.settle("the preference scheduled a background check") { harness.updater.starts == [.background] }
+        XCTAssertEqual(waits.values.first ?? 0, UpdateCheckSchedule.launchDelay, accuracy: 5, "the first waits the launch delay")
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "update.check_requested" && $0.detail == "source=schedule" })
+        state.saveConfig()
+        await state.awaitPendingSave()
+        XCTAssertTrue(try AppPreferencesPersistence.load(in: harness.environment).automaticUpdateChecks)
+        XCTAssertFalse(state.hasUnsavedEdit)
+        let scheduled = waits.values.count
+        state.appPreferences.automaticUpdateChecks = false
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(waits.values.count, scheduled, "turned off, nothing more is scheduled")
+        XCTAssertEqual(harness.updater.starts, [.background])
+    }
+
+    func testCheckForUpdatesStartsTheInjectedUpdater() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        let before = harness.updater.starts.count
+        state.checkForUpdates()
+        await harness.settle("the updater was started") { harness.updater.starts.count == before + 1 }
+        XCTAssertEqual(harness.updater.starts.last, .interactive, "a check the user asked for is interactive")
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "update.check_requested" }, "event first")
+    }
+
+    // MARK: Helper policy (L1)
+
+    /// The caller policy the last install reported is kept through a failed install, which is an event; an uninstall clears it; a second
+    /// uninstall while one runs is dropped.
+    func testTheCallerPolicySurvivesAFailedInstallAndAnUninstallClearsItOnce() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        harness.helper.callerPolicy = .unenforced
+        state.installHelper()
+        await harness.settle("the install reported its policy") { state.helperCallerPolicy == .unenforced }
+        harness.helper.fails = true
+        state.installHelper()
+        await harness.settle("the failed install is an event") { state.eventLog.events.contains { $0.event == "helper.install_failed" } }
+        XCTAssertEqual(state.helperCallerPolicy, .unenforced, "a failed install keeps the last policy")
+        harness.helper.fails = false
+        state.uninstallHelper()
+        state.uninstallHelper()
+        await harness.settle("the uninstall cleared the policy") { state.helperCallerPolicy == nil }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(harness.helper.uninstalls, 1, "a second uninstall while one runs is dropped")
+    }
+
+    /// A reinstalled helper whose first reading is busy does not keep the old helper's verdict: the app tells the host the helper was
+    /// replaced, so the busy reading of the new one is what shows.
+    func testAReinstalledHelperThatIsBusyDoesNotKeepTheOldVerdict() async throws {
+        let harness = try makeHarness()
+        harness.helper.status = .outdated
+        let state = await harness.ready()
+        await harness.settle("the old helper's verdict") { state.helperStatus == .outdated }
+        harness.helper.statusAfterInstall = .busy
+        state.installHelper()
+        await harness.settle("the replaced helper's busy reading shows") { state.helperStatus == .busy }
+    }
+
+    // MARK: Import, banners and Apply (L3)
+
+    /// A valid import passes the startup gate, becomes the draft and is saved as a commit; the source file keeps its bytes.
+    func testAnImportPassesTheGateAndIsSavedAndTheSourceKeepsItsBytes() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        var imported = state.config
+        imported.profileName = "Imported witness"
+        let source = harness.homeDirectory.appendingPathComponent("import.json")
+        try ProxyConfigPersistence.save(imported, to: source)
+        let bytes = try Data(contentsOf: source)
+        try state.importConfiguration(from: source)
+        await state.awaitPendingSave()
+        XCTAssertEqual(try harness.savedConfig.profileName, "Imported witness")
+        XCTAssertFalse(state.hasUnsavedEdit)
+        XCTAssertEqual(try Data(contentsOf: source), bytes)
+    }
+
+    /// The configuration problem a save showed is cleared by a later save that validates; an error shown since is left alone.
+    func testFixingAnInvalidEditClearsOnlyItsOwnConfigurationProblem() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        state.config.proxy.port = 70_000
+        state.commitPendingEdit(trigger: .submit)
+        await state.awaitPendingSave()
+        XCTAssertTrue(state.lastErrorMessage?.hasPrefix("Configuration problem") == true)
+        state.config.proxy.port = 8_080
+        state.commitPendingEdit(trigger: .submit)
+        await state.awaitPendingSave()
+        XCTAssertNil(state.lastErrorMessage, "the fixed edit cleared its own problem")
+
+        state.config.proxy.port = 70_000
+        state.commitPendingEdit(trigger: .submit)
+        await state.awaitPendingSave()
+        state.lastErrorMessage = "a later error"
+        state.config.proxy.port = 8_081
+        state.commitPendingEdit(trigger: .submit)
+        await state.awaitPendingSave()
+        XCTAssertEqual(state.lastErrorMessage, "a later error", "only the problem's own banner is cleared")
+    }
+
+    /// Apply commits the text the active field hands over when editing ends, one hop later.
+    func testApplyCommitsTheTextAFieldWritesWhenEditingEnds() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        let commit = state.commitPendingEdit(trigger: .apply) { state.config.health.checkInterval = 49 }
+        await commit.value
+        await state.awaitPendingSave()
+        XCTAssertEqual(try harness.savedConfig.health.checkInterval, 49)
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "config.edit_committed" && ($0.detail ?? "").contains("trigger=apply") })
+    }
 }

@@ -6,7 +6,9 @@ product code and does not select a profile. Every figure below comes from ONE ru
 
 ## Status
 
-**Passing current run.** All 31 runs (23 modes, with 3 trials each of the four live-A contention modes) exited 0: 481 checks
+> **Activation follow-up under verification:** the current probe now consumes `RuntimeServiceProfile.inProcessApp()` and checks it against its independent codec-derived limits. Its actual-client Quit uses the selected ten-second total (0039). The figures below remain the earlier `ef3e4df` baseline, whose exact probe and runner are preserved in `runs/ef3e4df-OdAmdZ/`. They do not establish the new composition until a new stable-source run completes.
+
+**Passing recorded baseline (`ef3e4df`).** All 31 runs (23 modes, with 3 trials each of the four live-A contention modes) exited 0: 481 checks
 passed, none failed, nothing was inconclusive or pinned, and every scratch root was removed. Nothing was rerun to get a better
 figure, and the product was not edited.
 
@@ -34,7 +36,7 @@ or test process ran during it. The README hash in the metadata is of the text be
   compared here.
 
 The probe changed only its labels after `bwveLh` (see [the profile](#the-profile)). The [labels-only patch](runs/011f589-bwveLh/probe-labels.patch)
-reconstructs its probe from the current frozen `Probe.swift`; metadata records both hashes.
+reconstructs its probe from the archived `ef3e4df` `Probe.swift`; metadata records both hashes.
 
 ## What it drives
 
@@ -95,7 +97,7 @@ The profile label is `CANDIDATE-4K-64K-10K-4M`. Every mode builds it through the
 | Latest snapshot; subscriber record | 65,233 B (the initializer's largest beside a 64 KiB reply); 1,024 B | derived; stated |
 | Collection revisions; proofs; row retention | 2 per kind; 4 per kind; 60 s | reviewed engineering values |
 | Retained-byte budget | 17,082,600 B, the initializer's own budget for these terms, found by bisection | derived |
-| Quit total in `client-quit-widest` | 30 s | **experimental caller budget only.** The Quit total is the owner's choice (proposed decision 0039) and is not selected here |
+| Quit total in the recorded `ef3e4df` `client-quit-widest` | 30 s | **historical experimental caller budget.** The current probe uses the selected ten seconds (0039); its new run is still pending |
 
 **Encoded reservations are not process memory.** The 17,082,600 B budget and the private custody terms (one transfer and one
 admitted input) are encoded-byte ceilings checked by the initializer, not preallocations or application-memory bounds. Actual

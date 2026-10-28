@@ -110,6 +110,9 @@ struct TunnelsSettingsView: View {
 
             ConflictList(conflicts: problems.conflicts(mentioning: ["tunnel"]))
         }
+        // The override's hosts are read only while this section shows them.
+        .onAppear { runtime.showing(.tunnelDNSHosts, true) }
+        .onDisappear { runtime.showing(.tunnelDNSHosts, false) }
     }
 
     // MARK: - Live chips
@@ -128,6 +131,8 @@ struct TunnelsSettingsView: View {
             chips.append(("DNS override host\(hostnames.count == 1 ? "" : "s")", "\(hostnames.count)"))
         case .partial(let succeeded, let failed):
             chips.append(("DNS override", "\(succeeded.count) active, \(failed.count) failed"))
+        case .hostsNotRead(let hostCount):
+            chips.append(("DNS override host\(hostCount == 1 ? "" : "s")", "\(hostCount)"))
         case .unavailable:
             chips.append(("DNS override", "unavailable"))
         case .notNeeded:

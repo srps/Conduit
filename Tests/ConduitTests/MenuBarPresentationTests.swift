@@ -87,8 +87,8 @@ final class MenuBarPresentationTests: XCTestCase {
 
     func testDisplayNameResolvesTheActiveEndpointToItsName() {
         let statuses = [
-            UpstreamRuntimeStatus(id: UUID(), name: "Germany", endpoint: "proxy-de.example:8080", circuitState: .closed, ewmaLatencyMS: 42, consecutiveFailures: 0, openUntil: nil),
-            UpstreamRuntimeStatus(id: UUID(), name: "", endpoint: "proxy-tr.example:8080", circuitState: .closed, ewmaLatencyMS: nil, consecutiveFailures: 0, openUntil: nil),
+            UpstreamStatusDisplay(id: UUID(), name: "Germany", endpoint: "proxy-de.example:8080", circuitState: .closed, ewmaLatencyMS: 42, consecutiveFailures: 0, openUntil: nil),
+            UpstreamStatusDisplay(id: UUID(), name: "", endpoint: "proxy-tr.example:8080", circuitState: .closed, ewmaLatencyMS: nil, consecutiveFailures: 0, openUntil: nil),
         ]
         XCTAssertEqual(MenuBarPresentation.displayName(forActiveUpstream: "proxy-de.example:8080", statuses: statuses), "Germany")
         XCTAssertEqual(MenuBarPresentation.displayName(forActiveUpstream: "proxy-tr.example:8080", statuses: statuses), "proxy-tr.example:8080", "unnamed upstreams fall back to the endpoint")

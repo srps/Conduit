@@ -61,5 +61,5 @@ Each record carries three statuses, because merged does not mean it works:
 | [0035](0035-whole-request-lifecycle-validation.md) | Validate combined editor lifecycle intent as one request | accepted | partial | none |
 | [0036](0036-conditional-dns-activation.md) | Explicit host-checked conditional DNS activation | accepted | partial | none |
 | [0037](0037-saved-command-preparation-capture.md) | Capture saved command input once at preparation | accepted | partial | none |
-| [0038](0038-bounded-runtime-collection-capture.md) | Bound complete runtime collection captures independently of live connections | accepted | planned | none |
-| [0039](0039-total-app-quit-budget.md) | Bound the in-process app's complete Quit wait to ten seconds | accepted | planned | pending |
+| [0038](0038-bounded-runtime-collection-capture.md) | Bound complete runtime collection captures independently of live connections | accepted | implemented | none |
+| [0039](0039-total-app-quit-budget.md) | Bound the in-process app's complete Quit wait to ten seconds | accepted | implemented | pending |

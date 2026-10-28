@@ -306,6 +306,62 @@ extension ControlConfigWorkflowNotAttemptedCause {
     }
 }
 
+// The receipt's wire write back to the domain value, case for case, so a client names a file's write in the domain's own spelling. The
+// two directions are exhaustive both ways; a new case on either side fails to compile here.
+
+extension ConfigurationWorkflowFile {
+    package init(_ file: ControlConfigWorkflowFile) {
+        switch file {
+        case .runtime: self = .runtime
+        case .platform: self = .platform
+        case .preferences: self = .preferences
+        }
+    }
+}
+
+extension ConfigurationWorkflowWrite {
+    package init(_ write: ControlConfigWorkflowWrite) {
+        switch write {
+        case .persisted(let reportedError): self = .persisted(reportedError: reportedError)
+        case .unchanged: self = .unchanged
+        case .notPersisted: self = .notPersisted
+        case .unknown(let cause, let reportedError):
+            self = .unknown(ConfigurationWorkflowUnknownCause(cause), reportedError: reportedError)
+        case .conflict: self = .conflict
+        case .notAttempted(let cause): self = .notAttempted(ConfigurationWorkflowNotAttemptedCause(cause))
+        }
+    }
+}
+
+extension ConfigurationWorkflowUnknownCause {
+    package init(_ cause: ControlConfigWorkflowUnknownCause) {
+        switch cause {
+        case .readbackDiffers: self = .readbackDiffers
+        case .readbackMissing: self = .readbackMissing
+        case .readbackFailed: self = .readbackFailed
+        }
+    }
+}
+
+extension ConfigurationWorkflowNotAttemptedCause {
+    package init(_ cause: ControlConfigWorkflowNotAttemptedCause) {
+        switch cause {
+        case .noBaseline: self = .noBaseline
+        case .baselineMismatch: self = .baselineMismatch
+        case .stagingRefused: self = .stagingRefused
+        case .preReadFailed: self = .preReadFailed
+        case .replacementRefused: self = .replacementRefused
+        case .heldBehindPlatform: self = .heldBehindPlatform
+        case .heldBehindRuntime: self = .heldBehindRuntime
+        case .preservationHeld: self = .preservationHeld
+        case .sourceChanged: self = .sourceChanged
+        case .sourceUnreadable: self = .sourceUnreadable
+        case .versionExhausted: self = .versionExhausted
+        case .superseded: self = .superseded
+        }
+    }
+}
+
 extension ControlConfigWorkflowHoldReason {
     package init(_ reason: ConfigurationWorkflowHoldReason) {
         switch reason {
