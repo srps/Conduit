@@ -280,8 +280,9 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
         )
     }
 
-    @RuntimeActor private func page(_ harness: RuntimeServiceHarness, cursor: ControlPageCursor? = nil) -> RuntimePageSource {
-        harness.core.pageSource(ControlPageRequest(
+    /// One page as its read-lane round reads it, a capture through the shared flight included.
+    @RuntimeActor private func page(_ harness: RuntimeServiceHarness, cursor: ControlPageCursor? = nil) async -> RuntimePageSource {
+        await harness.page(ControlPageRequest(
             expectedIncarnation: RuntimeServiceFixtures.incarnation(1),
             collection: kind,
             cursor: cursor
@@ -302,9 +303,9 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
     @RuntimeActor func testAStaleCursorIsServedFromRetainedRowsAndNamesTheCurrentRevision() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits())
         try publish(harness, revision: 1, hosts: ["a"])
-        _ = page(harness)
+        _ = await page(harness)
         try publish(harness, revision: 2, hosts: ["x", "y"])
-        let source = page(harness, cursor: try ControlPageCursor(revision: rev(1), offset: ControlCount(0)))
+        let source = await page(harness, cursor: try ControlPageCursor(revision: rev(1), offset: ControlCount(0)))
         guard case .rows(let revision, let rows, _, let status) = source else {
             return XCTFail("the retained rows of revision 1 are served, got \(source)")
         }
@@ -317,21 +318,21 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
     @RuntimeActor func testARowEvictedRevisionIsReportedAsExpiredWithItsOwnCapturedTotal() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(collectionRowSets: 1))
         try publish(harness, revision: 1, hosts: ["a", "b"])
-        _ = page(harness)
+        _ = await page(harness)
         try publish(harness, revision: 2, hosts: ["b"])
-        _ = page(harness)
-        let source = page(harness, cursor: try ControlPageCursor(revision: rev(1), offset: ControlCount(0)))
+        _ = await page(harness)
+        let source = await page(harness, cursor: try ControlPageCursor(revision: rev(1), offset: ControlCount(0)))
         XCTAssertEqual(refusal(source), Refusal(reason: .expiredRevision, knownTotal: 2), "the proof's total of revision 1, not the current total")
     }
 
     @RuntimeActor func testAnEvictedProofIsReportedAsNotCapturedWithNoTotalAndAnArbitraryCursorToo() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(collectionProofs: 1))
         try publish(harness, revision: 1, hosts: ["a"])
-        _ = page(harness)
+        _ = await page(harness)
         try publish(harness, revision: 2, hosts: ["b"])
-        _ = page(harness)
+        _ = await page(harness)
         for cursor in [1, 9] {
-            let source = page(harness, cursor: try ControlPageCursor(revision: rev(cursor), offset: ControlCount(0)))
+            let source = await page(harness, cursor: try ControlPageCursor(revision: rev(cursor), offset: ControlCount(0)))
             XCTAssertEqual(
                 refusal(source),
                 Refusal(reason: .notCaptured, knownTotal: nil),
@@ -343,9 +344,9 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
     @RuntimeActor func testAnOverBudgetCaptureIsRefusedWholeWithItsExactTotalAndNoProof() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(collectionCaptureBytes: 60))
         try publish(harness, revision: 1, hosts: ["a", "b", "c"])
-        let first = page(harness)
+        let first = await page(harness)
         XCTAssertEqual(refusal(first), Refusal(reason: .retentionBudgetExceeded, knownTotal: 3), "the snapshot's exact total, and no truncation")
-        _ = page(harness)
+        _ = await page(harness)
         XCTAssertEqual(harness.owner.projectionCount, 2, "nothing was stored, so the next read captures again")
     }
 
@@ -355,7 +356,7 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits())
         let hosts = (1...17).map { "h\($0).example" }
         try publish(harness, revision: 1, hosts: hosts)
-        let source = page(harness)
+        let source = await page(harness)
         XCTAssertEqual(refusal(source), Refusal(reason: .retentionBudgetExceeded, knownTotal: 17))
         XCTAssertEqual(harness.owner.projectionCount, 0, "the owner is not asked to project a collection past the row bound")
         XCTAssertEqual(harness.core.collectionRetention(kind).proofs, 0, "nothing is stored")
@@ -370,17 +371,18 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
             collections: ControlCollectionRevisions(),
             dnsStatus: .active(hostnames: ["a", "b"])
         )
-        XCTAssertEqual(refusal(page(harness)), Refusal(reason: .notCaptured, knownTotal: 2))
+        let source = await page(harness)
+        XCTAssertEqual(refusal(source), Refusal(reason: .notCaptured, knownTotal: 2))
         XCTAssertEqual(harness.owner.projectionCount, 0)
     }
 
     @RuntimeActor func testTheCurrentRevisionIsCapturedAgainOnDemandAfterItsRowsAged() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(collectionRowAge: .seconds(60)))
         try publish(harness, revision: 1, hosts: ["a"])
-        _ = page(harness)
+        _ = await page(harness)
         XCTAssertEqual(harness.owner.projectionCount, 1)
         harness.timing.advance(by: .seconds(61))
-        let source = page(harness)
+        let source = await page(harness)
         guard case .rows(_, let rows, _, let status) = source else { return XCTFail("expected rows, got \(source)") }
         XCTAssertEqual(rows.rowCount, 1)
         XCTAssertEqual(status, .current)
@@ -392,7 +394,7 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
     @RuntimeActor func testACountMismatchIsAnOwnerInvariantFaultWithNoPartialCaptureAndPreservedRetention() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits())
         try publish(harness, revision: 1, hosts: ["a"])
-        _ = page(harness)
+        _ = await page(harness)
         let heldBytes = harness.core.collectionRetention(kind).retainedBytes
         try publish(harness, revision: 2, hosts: ["x", "y"])
         harness.owner.projectionOverride = { _, _ in
@@ -410,7 +412,7 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
             ))
         }
 
-        let source = page(harness)
+        let source = await page(harness)
         guard case .internalFailure = source else { return XCTFail("a count mismatch is an internal failure, got \(source)") }
         XCTAssertEqual(harness.owner.faults, [.projectionCountMismatch], "the owner is told once, with the closed case")
         XCTAssertEqual(observedInCallback?.proofs, 1, "the callback sees the held proof, and no proof of the mismatched capture")
@@ -428,10 +430,10 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
     @RuntimeActor func testAChangedTotalUnderAHeldRevisionIsAnOwnerInvariantFaultAndNothingIsRecaptured() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits())
         try publish(harness, revision: 1, hosts: ["a", "b"])
-        _ = page(harness)
+        _ = await page(harness)
         XCTAssertEqual(harness.owner.projectionCount, 1)
         try publish(harness, revision: 1, hosts: ["a", "b", "c"])
-        let source = page(harness)
+        let source = await page(harness)
         guard case .internalFailure = source else { return XCTFail("a changed total under a held revision is an internal failure, got \(source)") }
         XCTAssertEqual(harness.owner.faults, [.revisionTotalChanged])
         XCTAssertEqual(harness.owner.projectionCount, 1, "nothing is recaptured from an immutable revision")
@@ -444,14 +446,14 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
     @RuntimeActor func testAChangedTotalUnderAnAgedCurrentRevisionIsAnOwnerInvariantFaultAndNothingIsRecaptured() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(collectionRowAge: .seconds(60)))
         try publish(harness, revision: 1, hosts: ["a", "b"])
-        _ = page(harness)
+        _ = await page(harness)
         harness.timing.advance(by: .seconds(61))
         try publish(harness, revision: 1, hosts: ["a", "b", "c"])
         var totalInCallback: Int?
         harness.owner.onFault = { _ in
             totalInCallback = harness.core.collectionProofTotal(self.kind, revision: self.rev(1))?.rawValue
         }
-        let source = page(harness)
+        let source = await page(harness)
         guard case .internalFailure = source else {
             return XCTFail("a changed total under an aged revision is an internal failure, got \(source)")
         }
@@ -466,12 +468,12 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
     @RuntimeActor func testAChangedTotalUnderAReleasedCurrentRevisionIsAnOwnerInvariantFault() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(collectionRowSets: 1))
         try publish(harness, revision: 1, hosts: ["a", "b"])
-        _ = page(harness)
+        _ = await page(harness)
         try publish(harness, revision: 2, hosts: ["x"])
-        _ = page(harness)
+        _ = await page(harness)
         XCTAssertEqual(harness.core.collectionRetention(kind).rowSets, 1, "the capture of revision two released revision one's rows")
         try publish(harness, revision: 1, hosts: ["a", "b", "c"])
-        let source = page(harness)
+        let source = await page(harness)
         guard case .internalFailure = source else {
             return XCTFail("a changed total under a released revision is an internal failure, got \(source)")
         }
@@ -485,12 +487,12 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
     @RuntimeActor func testAForgottenProofLeavesNoOldTotalToCompareSoTheCurrentRevisionIsCapturedAgain() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(collectionProofs: 1))
         try publish(harness, revision: 1, hosts: ["a"])
-        _ = page(harness)
+        _ = await page(harness)
         try publish(harness, revision: 2, hosts: ["b"])
-        _ = page(harness)
+        _ = await page(harness)
         XCTAssertNil(harness.core.collectionProofTotal(kind, revision: rev(1)), "the proof of revision one was evicted")
         try publish(harness, revision: 1, hosts: ["a", "b", "c"])
-        let source = page(harness)
+        let source = await page(harness)
         guard case .rows(let revision, let rows, _, .current) = source else {
             return XCTFail("a revision whose proof was forgotten is captured again, got \(source)")
         }
@@ -504,7 +506,7 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
     @RuntimeActor func testASnapshotFromAnotherIncarnationIsAClosedInternalFailureNotAnInvalidValue() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits())
         harness.owner.snapshotValue = try RuntimeServiceFixtures.snapshot(incarnation: 2)
-        let source = page(harness)
+        let source = await page(harness)
         guard case .internalFailure = source else { return XCTFail("the owner's invariant failure is internal, got \(source)") }
         XCTAssertEqual(harness.owner.faults, [.snapshotIncarnationMismatch])
         XCTAssertEqual(harness.owner.projectionCount, 0, "nothing was projected from the other incarnation")

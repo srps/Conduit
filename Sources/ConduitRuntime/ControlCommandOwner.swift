@@ -71,10 +71,11 @@ protocol ControlCommandOwner: AnyObject {
     /// project its state; the owner reports why itself, and the service answers that read as an internal failure, never a stale value.
     func snapshot() -> ControlRuntimeSnapshot?
 
-    /// The projected rows of one collection, in the same owner turn as the snapshot that names its revision. The owner projects them
-    /// through the shared bounded projection, which stops at the first row past a bound, so an over-budget capture is never built in
-    /// full. The service refuses an over-budget answer as a whole capture, never truncated. An internal failure is a closed fault.
-    func projectedRows(for kind: ControlCollectionKind, within budget: ControlRowBudget) -> ControlProjection
+    /// The projection of one collection, frozen in the same owner turn as the snapshot that names its revision and total: the job holds
+    /// that turn's value and no owner state, so it runs off the owner. It projects through the shared bounded projection, which stops at
+    /// the first row past a bound, so an over-budget capture is never built in full. The service refuses an over-budget answer as a whole
+    /// capture, never truncated. An internal failure is a closed fault. The service asks only after the exact total passed the row bound.
+    func rowSource(for kind: ControlCollectionKind) -> RuntimeRowSource
 
     /// Synchronous admission and fence. `candidate` is the pending stop of the same module, when one exists. `request` is the client's
     /// request ID, which the admitted work names in every store context it reaches (decision 0018).

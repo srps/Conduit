@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 @testable import ConduitRuntime
 import ConduitShared
 @testable import ProxyKernel
@@ -338,20 +339,26 @@ final class FakeCommandOwner: ControlCommandOwner {
         snapshotValue
     }
 
-    /// Replaces the projection for one test, to reach a mismatch or a failure the production projection cannot produce.
-    var projectionOverride: ((ControlCollectionKind, ControlRowBudget) -> ControlProjection)?
+    /// Replaces the projection for one test, to reach a mismatch or a failure the production projection cannot produce, or to hold the
+    /// capture flight's job where it suspends. It runs off the owner, as the job does.
+    var projectionOverride: (@Sendable (ControlCollectionKind, ControlRowBudget) async -> ControlProjection)?
+    /// Awaited off the owner by the default job before it projects its frozen value, so a test can hold the capture flight where it
+    /// suspends, on no thread.
+    var projectionGate: (@Sendable (ControlCollectionKind) async -> Void)?
 
-    /// The production bounded projection, over a kernel snapshot that holds this fake's hostnames. The fake adds no bound of its own.
-    func projectedRows(for kind: ControlCollectionKind, within budget: ControlRowBudget) -> ControlProjection {
+    /// The production bounded projection, over a kernel snapshot that holds this fake's hostnames, frozen in the asking turn as the host
+    /// freezes its own. The fake adds no bound of its own.
+    func rowSource(for kind: ControlCollectionKind) -> RuntimeRowSource {
         projectionCount += 1
         if let projectionOverride {
-            return projectionOverride(kind, budget)
+            return { budget in await projectionOverride(kind, budget) }
         }
-        return RuntimeSnapshotControlProjection.projectRows(
-            kind,
-            from: ProxyOrchestratorSnapshot(tunnelDNSOverrideStatus: .active(hostnames: dnsHostnames)),
-            within: budget
-        )
+        let frozen = ProxyOrchestratorSnapshot(tunnelDNSOverrideStatus: .active(hostnames: dnsHostnames))
+        let gate = projectionGate
+        return { budget in
+            await gate?(kind)
+            return RuntimeSnapshotControlProjection.projectRows(kind, from: frozen, within: budget)
+        }
     }
 
     func fence(
@@ -446,6 +453,19 @@ struct RuntimeServiceHarness {
     func transport() -> RuntimeInMemoryTransport {
         RuntimeInMemoryTransport(core: core, limits: limits, timing: timing.timing, scheduling: scheduling)
     }
+
+    /// One page through the service alone, as its read-lane round reads it: a page waiting on the capture flight runs the flight's commit
+    /// hop, which the job queues from off the owner, then reads again resuming its wait. Bounded: a page still waiting is returned as is.
+    func page(_ request: ControlPageRequest) async -> RuntimePageSource {
+        var source = core.pageSource(request)
+        for _ in 0..<4 {
+            guard case .awaitingCapture(let wait) = source else { break }
+            _ = await awaitState { scheduling.pendingCount > 0 }
+            scheduling.drainAll()
+            source = core.pageSource(request, resuming: wait)
+        }
+        return source
+    }
 }
 
 /// Waits, bounded, until an observable state holds. It yields between checks and returns false after `limit` checks, so a
@@ -471,5 +491,24 @@ func runCall<T: Sendable>(
     let call = Task { try await body() }
     _ = await awaitState { scheduling.pendingCount > 0 }
     scheduling.drainAll()
+    return try await call.value
+}
+
+/// `runCall` for a page that may wait on the capture flight: it keeps running the hops the call queues, the flight's commit hop from off the
+/// owner and the woken round included, until the call has finished or, bounded, no hop comes.
+@RuntimeActor
+func runDrainingCall<T: Sendable>(
+    _ scheduling: ManualOwnerScheduling,
+    _ body: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    let finished = NIOLockedValueBox(false)
+    let call = Task { () async throws -> T in
+        defer { finished.withLockedValue { $0 = true } }
+        return try await body()
+    }
+    while await awaitState({ scheduling.pendingCount > 0 || finished.withLockedValue { $0 } }),
+          !finished.withLockedValue({ $0 }) {
+        scheduling.drainAll()
+    }
     return try await call.value
 }

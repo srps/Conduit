@@ -103,6 +103,15 @@ private struct ReceiverDeadline {
 
 /// The outcome of installing one parked registration. Each failure names what the service found, so a caller reports a
 /// disconnect, a busy slot, or a released reservation as itself.
+/// The capture wait one page exchange parked on, carried from the round that parked to the round its wake runs. Only that exchange's
+/// owner rounds touch it, one at a time.
+@RuntimeActor
+final class RuntimePageRound {
+    var wait: RuntimeCaptureWait?
+
+    nonisolated init() {}
+}
+
 enum RuntimeRegistrationResult {
     case installed
     case subscriberGone
@@ -191,8 +200,9 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
             // The budget ended before arrival completed. Nothing is reserved, queued or admitted.
             return refusal
         }
-        let outcome = await run(lane: lane, deadline: bound.deadline, boundRefusal: bound.budgetRefusal) { _ in
-            self.answer(message, limits: replyLimits)
+        let pageWait = RuntimePageRound()
+        let outcome = await run(lane: lane, deadline: bound.deadline, boundRefusal: bound.budgetRefusal) { gate in
+            self.answer(message, limits: replyLimits, gate: gate, page: pageWait)
         }
         switch outcome {
         case .reply(let bytes): return bytes
@@ -350,9 +360,14 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
     }
 
     /// The owner's answer to one exchange. It runs inside the owner's turn, and every admission it makes is
-    /// recorded before the reply is encoded.
+    /// recorded before the reply is encoded. Nil only for a page that parked on the capture flight; its next round answers it.
     @RuntimeActor
-    private func answer(_ message: ControlRuntimeMessage, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
+    private func answer(
+        _ message: ControlRuntimeMessage,
+        limits: ControlFrameLimits,
+        gate: RuntimeWaitGate,
+        page round: RuntimePageRound
+    ) -> RuntimeWaitOutcome? {
         guard case .request(let envelope) = message.body else {
             // The claim was made, so the owner turn may have run: the answer is possibly sent, never not sent.
             return .failed(.sent(.invalidReply))
@@ -373,7 +388,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
                 return replyOutcome(.response(.failure(.internalFailure)), correlation: correlation, limits: limits)
             }
         case .readPage(let page):
-            return pageOutcome(page, correlation: correlation, limits: limits)
+            return pageOutcome(page, correlation: correlation, limits: limits, gate: gate, round: round)
         case .subscribe:
             // A subscribe is answered by `openStream`, never by an exchange. Reaching this inside a claimed round is possibly sent.
             return .failed(.sent(.invalidReply))
@@ -382,9 +397,42 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
 
     /// A page answer. Each closed source is one closed reply. A failed read is a closed internal failure, not a corrupt transport,
     /// so the client receives a stable wire error. A capture that cannot fit the frame is refused the same way, never truncated.
+    /// A page waiting on the capture flight parks its round on the flight, through the same registration a stream pull uses, and
+    /// returns nil; the flight's end wakes it, and the next round reads again, resuming that wait.
     @RuntimeActor
-    private func pageOutcome(_ page: ControlPageRequest, correlation: ControlRequestID, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
-        switch core.pageSource(page) {
+    private func pageOutcome(
+        _ page: ControlPageRequest,
+        correlation: ControlRequestID,
+        limits: ControlFrameLimits,
+        gate: RuntimeWaitGate,
+        round: RuntimePageRound
+    ) -> RuntimeWaitOutcome? {
+        var source = core.pageSource(page, resuming: round.wait)
+        round.wait = nil
+        if case .awaitingCapture(let wait) = source {
+            let core = self.core
+            let token = wait.token
+            switch installRegistration(
+                gate: gate,
+                park: { wake in core.parkCaptureWait(wait, wake: wake) },
+                release: { core.releaseCaptureWait(token) }
+            ) {
+            case .installed:
+                round.wait = wait
+                return nil
+            case .ticketReleased:
+                // The wait already ended, so nothing will read this answer; the flight lets go of the wait now.
+                core.releaseCaptureWait(token)
+                return .failed(.sent(.invalidReply))
+            case .subscriberGone, .alreadyParked:
+                // Defensive: the flight no longer holds a wait made in this turn, so read once more without parking.
+                source = core.pageSource(page, resuming: wait)
+            }
+        }
+        switch source {
+        case .awaitingCapture:
+            // Unreachable after the read above: a wait no flight holds reads again from the start. Answered closed, never parked twice.
+            return replyOutcome(.response(.failure(.internalFailure)), correlation: correlation, limits: limits)
         case .changedIncarnation:
             return replyOutcome(.response(.failure(.changedIncarnation)), correlation: correlation, limits: limits)
         case .invalidOffset:
@@ -575,9 +623,27 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         gate: RuntimeWaitGate,
         afterRegistration: () -> Void = {}
     ) -> RuntimeRegistrationResult {
+        let core = self.core
+        return installRegistration(
+            gate: gate,
+            park: { wake in core.parkWaiter(subscriber, token: token, wake: wake) },
+            release: { core.releaseWaiter(subscriber, token: token) },
+            afterRegistration: afterRegistration
+        )
+    }
+
+    /// The one registration path, for a stream pull and for a page waiting on the capture flight alike: `park` registers the gate's wake
+    /// in the service, and `release` removes that registration in an owner hop when the wait ends first.
+    @RuntimeActor
+    private func installRegistration(
+        gate: RuntimeWaitGate,
+        park: (_ wake: @escaping @Sendable () -> Void) -> RuntimeParkResult,
+        release: @escaping @RuntimeActor @Sendable () -> Void,
+        afterRegistration: () -> Void = {}
+    ) -> RuntimeRegistrationResult {
         let ticket = gate.ticket
         guard ticket.begin(.waiterCleanup) else { return .ticketReleased }
-        switch core.parkWaiter(subscriber, token: token, wake: { gate.wake() }) {
+        switch park({ gate.wake() }) {
         case .parked:
             break
         case .subscriberGone:
@@ -589,7 +655,6 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
             return .alreadyParked
         }
         afterRegistration()
-        let core = self.core
         let scheduling = self.scheduling
         gate.park { serviceReleased in
             guard !serviceReleased else {
@@ -598,7 +663,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
                 return
             }
             scheduling.hop {
-                core.releaseWaiter(subscriber, token: token)
+                release()
                 ticket.end(.waiterCleanup)
             }
         }

@@ -660,6 +660,15 @@ enum RuntimeHostEffectsScenario {
                 receipt.runtime.write == .unchanged && receipt.prior?.runtime == receipt.runtime.baseline
                     && receipt.committedDNSForwarderEnabled == true
             } ?? false)
+            // A first page through the framed client: its current revision has no rows yet, so the host's one shared capture flight
+            // projects it off the owner, and the page is answered from that capture.
+            let bindings = try await firstPage(clients.control, .tunnelBindings)
+            var bindingsCursor: (incarnation: ControlHostIncarnation, revision: ControlCollectionRevision)?
+            check("a first tunnel-bindings page is captured by the shared flight and served current and whole", {
+                guard case .tunnelBindings(let page) = bindings.reply, page.status == .current else { return false }
+                bindingsCursor = (page.incarnation, page.revision)
+                return page.totalCount == bindings.total && page.rows.count == 1 && page.nextCursor == nil
+            }())
             // The app's preflight and its credentials notice, through the same client: the fake helper answers installed.
             let preflight = try await settleThroughClient(clients.control, .refreshPreflight(helperReplaced: true))
             check("a preflight refresh through the framed client reads the installed helper", {
@@ -706,6 +715,24 @@ enum RuntimeHostEffectsScenario {
                 afterQuit = refused
             }
             check("no Start runs after the quit", afterQuit == .terminated)
+            // After the quit's end no capture starts: a collection never captured is refused as not captured, with the exact total its
+            // current reference names, and the tunnel rows captured earlier still serve their own revision.
+            let health = try await firstPage(clients.control, .upstreamHealth)
+            check("after the quit a collection never captured is refused as not captured with its exact total",
+                  health.reply == .unavailable(.upstreamHealth, .notCaptured, knownTotal: health.total))
+            if let bindingsCursor {
+                let retained = try await clients.control.readPage(
+                    ControlPageRequest(
+                        expectedIncarnation: bindingsCursor.incarnation, collection: .tunnelBindings,
+                        cursor: ControlPageCursor(revision: bindingsCursor.revision, offset: try ControlCount(0))
+                    ),
+                    deadline: RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
+                )
+                check("after the quit the retained tunnel rows still serve their own revision", {
+                    guard case .tunnelBindings(let page) = retained else { return false }
+                    return page.revision == bindingsCursor.revision && page.rows.count == 1
+                }())
+            }
             let seen = await witness?.value ?? StreamWitness()
             witness = nil
             check("the host's own typed events reach the actual stream", seen.dnsStartedEvent)
@@ -931,6 +958,24 @@ enum RuntimeHostEffectsScenario {
         let flushed = if case .settled(let outcome) = result.preferences { written(outcome) } else { false }
         let completed = if case .settled(.completed(let completion)) = result.quit { completion.command == .quit } else { false }
         return (saved, completed, flushed)
+    }
+
+    /// The first page of `kind` through the framed client, beside the exact total the snapshot read just before it names for that kind.
+    @RuntimeActor
+    private static func firstPage(_ control: any RuntimeClient, _ kind: ControlCollectionKind) async throws
+        -> (reply: ControlPageReply, total: ControlCount) {
+        let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
+        let snapshot = try await control.readSnapshot(deadline: deadline)
+        let reference: ControlCollectionReference = switch kind {
+        case .activeConnections: snapshot.collections.activeConnections
+        case .upstreamHealth: snapshot.collections.upstreamHealth
+        case .tunnelBindings: snapshot.collections.tunnelBindings
+        case .tunnelDNSHosts: snapshot.collections.tunnelDNSHosts
+        }
+        let reply = try await control.readPage(
+            ControlPageRequest(expectedIncarnation: snapshot.stamp.incarnation, collection: kind), deadline: deadline
+        )
+        return (reply, reference.totalCount)
     }
 
     /// This scenario's own control-service profile. Every value is explicit and scenario-only, sized for one client and a handful of

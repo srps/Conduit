@@ -90,8 +90,8 @@ private struct RuntimeCollectionRevisionTracker<Source: Equatable> {
     }
 }
 
-/// The revisions the host's snapshots pin for its four collections, each taken in the snapshot's own owner turn. A page captures its rows
-/// in that turn too (`projectedRows`), so the rows are exactly the revision's.
+/// The revisions the host's snapshots pin for its four collections, each taken in the snapshot's own owner turn. A page freezes its rows'
+/// input in that turn too (`rowSource`), so the rows projected later are exactly the revision's.
 struct RuntimeHostCollections {
     private var activeConnections = RuntimeCollectionRevisionTracker<ActiveConnectionStore>()
     private var upstreamHealth = RuntimeCollectionRevisionTracker<[UpstreamRuntimeStatus]>()
@@ -185,8 +185,11 @@ extension RuntimeHost: ControlCommandOwner {
         return nil
     }
 
-    func projectedRows(for kind: ControlCollectionKind, within budget: ControlRowBudget) -> ControlProjection {
-        RuntimeSnapshotControlProjection.projectRows(kind, from: orchestrator.snapshot, within: budget)
+    /// The whole kernel value of this turn, a copy-on-write retain, projected later off the owner. The job holds that value and the kind,
+    /// never the host or the orchestrator.
+    func rowSource(for kind: ControlCollectionKind) -> RuntimeRowSource {
+        let frozen = orchestrator.snapshot
+        return { budget in RuntimeSnapshotControlProjection.projectRows(kind, from: frozen, within: budget) }
     }
 
     func serviceFault(_ fault: ControlServiceFault) {

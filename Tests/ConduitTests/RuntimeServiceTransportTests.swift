@@ -55,7 +55,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
             cursor: cursor
         )
         do {
-            return .success(try await runCall(harness.scheduling) { try await client.readPage(request, deadline: deadline) })
+            return .success(try await runDrainingCall(harness.scheduling) { try await client.readPage(request, deadline: deadline) })
         } catch {
             return .failure(error as? RuntimeClientError ?? .unexpectedReply)
         }
