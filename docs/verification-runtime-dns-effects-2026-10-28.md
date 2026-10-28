@@ -73,6 +73,14 @@ accepts the corrected source, both real regression witnesses and the non-vacuous
 simulator check. Its first attempt failed with a TLS handshake error and is not
 review evidence; the successful retry uses the same authenticated subscription.
 
+[Final executed-evidence review](experiments/runtime-dns-effects/r2-final-acceptance.md)
+also accepts phase 1b and confirms the parity witnesses ran. [Committed-tree
+provenance](experiments/runtime-dns-effects/commit-provenance.json) links both
+`5321612` and the subsequent documentation-only merge to the tested fingerprint.
+[Snapshot comparison](experiments/runtime-dns-effects/snapshot-source-link.json)
+checks all 741 relevant files included in the immutable review byte-for-byte
+against that commit; omitted build resources are listed with their hashes.
+
 ## Ordering tradeoff and revisit
 
 Keep files-before-orchestrator VPN order. The alternative would add a synchronous
