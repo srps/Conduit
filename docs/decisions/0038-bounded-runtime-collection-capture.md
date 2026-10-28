@@ -95,7 +95,9 @@ exercise a complete 10,000-row capture across four revisions through the actual
 observer/client/service and preserve unavailable totals. The collector enforces
 4 MiB and 10,000 rows; the host ledger owns the 8 MiB retained encoded-row budget.
 The display adapter's object/string memory is not included in that host accounting.
-Fresh measurements and native acceptance of the frozen activation remain due.
+The [fresh activation measurements](../verification-appstate-activation-2026-10-28.md)
+pass all 31 Release profile trials and three Debug consumer trials on stable
+source. Native acceptance remains pending; no app RAM bound follows.
 
 Does not prove: production app memory, normal usage row sizes, installed-machine
 behavior or release readiness.

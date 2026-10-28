@@ -1,0 +1,63 @@
+{
+  "head": "2e8d9fe7f8752ea20d0798c29416ed8910d8a417",
+  "command": [
+    "xcrun",
+    "swift",
+    "test",
+    "--filter",
+    "AppStateCollectionCaptureCostTests"
+  ],
+  "trials": [
+    {
+      "trial": 1,
+      "exit": 0,
+      "seconds": 47.736,
+      "observations": [
+        "APPSTATE-COLLECTION scope=debug-xctest rows=10000 encodedBytes=3006968 pages=47 passes=1.355606625 seconds,1.363182875 seconds,1.362891833 seconds,1.3695465 seconds",
+        "APPSTATE-COLLECTION heartbeat wakes=661 maxLateness=0.688771208 seconds over16ms=4 over100ms=4 note=includes-os-timer-and-scheduler-delay",
+        "APPSTATE-COLLECTION apply rows=10000 elapsed=0.00180025 seconds",
+        "APPSTATE-COLLECTION host-retention rowSets=2 retainedBytes=6013936",
+        "APPSTATE-COLLECTION resource stage=before-composition peakRSSBytes=28508160 mallocInUseBytes=1181312 note=debug-test-process-observation",
+        "APPSTATE-COLLECTION resource stage=kernel-built peakRSSBytes=40812544 mallocInUseBytes=7174944 note=debug-test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-pass-1 peakRSSBytes=50692096 mallocInUseBytes=12332208 note=debug-test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-pass-4 peakRSSBytes=61095936 mallocInUseBytes=15274704 note=debug-test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-hide-and-stop peakRSSBytes=61243392 mallocInUseBytes=13290736 note=debug-test-process-observation"
+      ]
+    },
+    {
+      "trial": 2,
+      "exit": 0,
+      "seconds": 9.565,
+      "observations": [
+        "APPSTATE-COLLECTION scope=debug-xctest rows=10000 encodedBytes=3006968 pages=47 passes=1.37645575 seconds,1.367666875 seconds,1.360994167 seconds,1.3707385 seconds",
+        "APPSTATE-COLLECTION heartbeat wakes=663 maxLateness=0.691491709 seconds over16ms=4 over100ms=4 note=includes-os-timer-and-scheduler-delay",
+        "APPSTATE-COLLECTION apply rows=10000 elapsed=0.001843208 seconds",
+        "APPSTATE-COLLECTION host-retention rowSets=2 retainedBytes=6013936",
+        "APPSTATE-COLLECTION resource stage=before-composition peakRSSBytes=28295168 mallocInUseBytes=1176192 note=debug-test-process-observation",
+        "APPSTATE-COLLECTION resource stage=kernel-built peakRSSBytes=40583168 mallocInUseBytes=7169824 note=debug-test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-pass-1 peakRSSBytes=49905664 mallocInUseBytes=12324928 note=debug-test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-pass-4 peakRSSBytes=59310080 mallocInUseBytes=15269456 note=debug-test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-hide-and-stop peakRSSBytes=59490304 mallocInUseBytes=13285488 note=debug-test-process-observation"
+      ]
+    },
+    {
+      "trial": 3,
+      "exit": 0,
+      "seconds": 9.184,
+      "observations": [
+        "APPSTATE-COLLECTION scope=debug-xctest rows=10000 encodedBytes=3006968 pages=47 passes=1.357409458 seconds,1.347716041 seconds,1.35858025 seconds,1.3648265 seconds",
+        "APPSTATE-COLLECTION heartbeat wakes=663 maxLateness=0.677092 seconds over16ms=4 over100ms=4 note=includes-os-timer-and-scheduler-delay",
+        "APPSTATE-COLLECTION apply rows=10000 elapsed=0.001865125 seconds",
+        "APPSTATE-COLLECTION host-retention rowSets=2 retainedBytes=6013936",
+        "APPSTATE-COLLECTION resource stage=before-composition peakRSSBytes=28377088 mallocInUseBytes=1176448 note=debug-test-process-observation",
+        "APPSTATE-COLLECTION resource stage=kernel-built peakRSSBytes=40681472 mallocInUseBytes=7170080 note=debug-test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-pass-1 peakRSSBytes=51789824 mallocInUseBytes=12329584 note=debug-test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-pass-4 peakRSSBytes=59998208 mallocInUseBytes=15270464 note=debug-test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-hide-and-stop peakRSSBytes=60178432 mallocInUseBytes=13290976 note=debug-test-process-observation"
+      ]
+    }
+  ],
+  "source_sha256": "c79e243f274ebfd408effae8c39bc62a8acf9c8e8419ae398796ef23bf5596ce",
+  "stable": true,
+  "scope": "Debug XCTest, fresh process per trial. Heartbeat includes scheduler/timer delay. No app RAM or SwiftUI render bound."
+}

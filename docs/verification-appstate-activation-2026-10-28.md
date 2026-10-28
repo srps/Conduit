@@ -77,7 +77,18 @@ passes on unchanged relevant-source fingerprint
 Swift tests (four skips), all 103 simulator records, performance, packaging and
 standalone regressions. The original run completed with two document-format
 failures; the corrected document-only rechecks pass, with both records preserved.
-Fresh Release/profile and app-consumer measurements, isolated native AppKit
-checks, exact-head hosted CI and applicable real-machine/release acceptance
-remain open. No timing or memory figure from the prior experimental composition
-is claimed for this activation.
+Release builds on clean source `2e8d9fe7f8752ea20d0798c29416ed8910d8a417`.
+[All 31 actual-profile trials](experiments/actual-runtime-client-profile/runs/2e8d9fe-appstate/README.md)
+pass 481 checks with stable source/objects and complete host/lease release. The
+actual widest client Quit routine returns in 974.47 ms under its selected
+10,000 ms total; this is fake-effect timing. Three separate fresh
+[Debug app-consumer observations](experiments/appstate-consumer-observation/README.md)
+pass the structural 10,000-row/four-revision checks. Their observed heartbeat
+lateness is 0.677–0.691 s; it includes scheduler delay and motivates the selected
+isolation work rather than establishing Release UI latency.
+
+The distinct dev bundle builds and launches with owned scratch state. Native UI
+inspection is currently blocked by the locked Mac, so edit/Quit/AppKit checks are
+not claimed. Exact-head hosted CI and applicable real-machine/release acceptance
+also remain open. No installed app/helper replacement or real VPN/auth test has
+occurred. Historical experimental measurements remain separately identified.

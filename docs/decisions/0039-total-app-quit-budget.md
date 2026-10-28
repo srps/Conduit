@@ -74,8 +74,11 @@ uses AppKit terminate-later and replies after the bounded client routine returns
 [`RuntimeServiceShippingProfileTests`](../../Tests/ConduitTests/RuntimeServiceShippingProfileTests.swift)
 pins the selected value, and [`AppStateHarnessTests`](../../Tests/ConduitTests/AppStateHarnessTests.swift)
 cover repeated Quit, expiry, late opening, final save order and refusal. The
-focused activation checkpoint passes 295 tests (two existing skips); full workflow,
-fresh selected-total measurements and native acceptance remain due. The historical
+focused activation checkpoint passes 295 tests (two existing skips). The
+[complete workflow and fresh selected-total run](../verification-appstate-activation-2026-10-28.md)
+pass: the widest actual client Quit routine uses ten seconds total and returns
+in 974.47 ms with fake effects, verified final saves and confirmed cleanup. Native
+acceptance remains pending because UI inspection is blocked by the locked Mac. The historical
 thirty-second probe does not establish the shipping composition.
 
 Does not prove: native AppKit termination timing, real-helper teardown latency,

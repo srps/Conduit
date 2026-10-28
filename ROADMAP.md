@@ -20,7 +20,7 @@ with remaining validation called out separately. An item needs a pillar fit.
 See also [Product Pillars](./README.md#product-pillars), [`AGENTS.md`](./AGENTS.md),
 and [`docs/STYLE.md`](./docs/STYLE.md).
 
-## Immediate priorities (2026-10-27)
+## Immediate priorities (2026-10-28)
 
 The runtime architecture program ([#186](https://github.com/srps/Conduit/issues/186),
 [#180](https://github.com/srps/Conduit/issues/180),

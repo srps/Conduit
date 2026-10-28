@@ -1,12 +1,16 @@
 # Actual runtime client profile probe
 
-A resource and latency probe of the **actual** shared host and native clients, at one measured control-service profile. It is not
-product code and does not select a profile. Every figure below comes from ONE run, **`actual-client-profile-OdAmdZ`** on
-`ef3e4df`. The figures are local observations on one machine: no latency here is a distribution and nothing is a shipping claim.
+The current app composition is measured at clean source `2e8d9fe` using
+`RuntimeServiceProfile.inProcessApp()` and the selected ten-second Quit total.
+[The activation run](runs/2e8d9fe-appstate/README.md) passes all 31 fresh trials and
+481 checks on stable source and linked objects. These are fake/scratch/loopback
+observations, separate from native/real-machine acceptance and app RAM bounds.
 
-## Status
+The older `ef3e4df` measurements below remain historical. Their exact probe and
+runner are recoverable from the immutable Git links in that run's README;
+repeating thousands of unchanged source lines here adds no evidence.
 
-> **Activation follow-up under verification:** the current probe now consumes `RuntimeServiceProfile.inProcessApp()` and checks it against its independent codec-derived limits. Its actual-client Quit uses the selected ten-second total (0039). The figures below remain the earlier `ef3e4df` baseline, whose exact probe and runner are preserved in `runs/ef3e4df-OdAmdZ/`. They do not establish the new composition until a new stable-source run completes.
+## Historical ef3e4df baseline
 
 **Passing recorded baseline (`ef3e4df`).** All 31 runs (23 modes, with 3 trials each of the four live-A contention modes) exited 0: 481 checks
 passed, none failed, nothing was inconclusive or pinned, and every scratch root was removed. Nothing was rerun to get a better
@@ -36,7 +40,7 @@ or test process ran during it. The README hash in the metadata is of the text be
   compared here.
 
 The probe changed only its labels after `bwveLh` (see [the profile](#the-profile)). The [labels-only patch](runs/011f589-bwveLh/probe-labels.patch)
-reconstructs its probe from the archived `ef3e4df` `Probe.swift`; metadata records both hashes.
+reconstructs its probe from the immutable `ef3e4df`-run probe linked above; metadata records both hashes.
 
 ## What it drives
 
