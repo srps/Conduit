@@ -4,8 +4,9 @@ import ProxyKernel
 
 /// Launch-time crash recovery for the platform surfaces a `SIGKILL` can strand,
 /// run off the calling actor and joined before anything else touches them.
-/// Both runtime hosts start one in their initialiser — `AppState` and
-/// `DaemonRuntimeHost` — with the same three calls in the same order.
+/// The shared `RuntimeHost` starts one as it is built, and its configless
+/// recovery runs one when no host can be built, with the same three calls in
+/// the same order.
 ///
 /// Two properties, and the type exists because they pull in opposite directions.
 ///
@@ -34,13 +35,13 @@ package final class LaunchRecovery {
     /// the closure's captures do not outlive the recovery.
     private var task: Task<Void, Never>?
 
-    /// Starts `work` immediately on a detached background task.
-    ///
-    /// Detached rather than `Task { }`: a plain `Task` created in a `@MainActor`
-    /// context inherits that isolation and would run the whole thing back on the
-    /// main actor, which is the freeze this type exists to remove.
-    package init(work: @escaping @Sendable () -> Void) {
-        task = Task.detached(priority: .utility, operation: work)
+    /// Starts `work` on `platformWork`, the caller's blocking-work queue. The
+    /// work blocks its thread for seconds, so it must not run on the calling
+    /// actor or on the concurrency pool, which every task and actor shares. The
+    /// detached task only queues it and waits. When it is queued is not what
+    /// orders it: every surface path awaits `join()` first.
+    package init(on platformWork: PlatformWork, work: @escaping @Sendable () -> Void) {
+        task = Task.detached(priority: .utility) { await platformWork.run(work) }
     }
 
     /// Waits for recovery to finish. Returns immediately once it has.

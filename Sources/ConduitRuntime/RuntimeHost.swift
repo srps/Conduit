@@ -301,7 +301,8 @@ package final class RuntimeHost {
     private let startedAt: Date
     /// Ends the process after a terminal stop. The entry point passes
     /// `exit(0)`; the host itself never exits, so a test can observe the call.
-    let terminalExit: @MainActor () -> Void
+    /// It assumes no actor: an entry point that needs one hops there itself.
+    let terminalExit: @Sendable () -> Void
 
     /// Opens the host over its one configuration owner (decisions 0031 and 0032). The startup observation goes through the store before
     /// the orchestrator and the reconciler take their baselines, so every baseline comes from that observation. A caller that runs a
@@ -315,7 +316,7 @@ package final class RuntimeHost {
         logger: any LogSink,
         startupAllowsMissing: Bool,
         startedAt: Date,
-        terminalExit: @escaping @MainActor () -> Void,
+        terminalExit: @escaping @Sendable () -> Void,
         effects: RuntimeHostEffects,
         networkLocationLimits: NetworkLocationLimits = .init(),
         environmentDriftInterval: Duration = .seconds(300),
@@ -376,7 +377,7 @@ package final class RuntimeHost {
         incarnation: ControlHostIncarnation,
         workflow: RuntimeConfigurationWorkflow,
         startedAt: Date,
-        terminalExit: @escaping @MainActor () -> Void,
+        terminalExit: @escaping @Sendable () -> Void,
         effects: RuntimeHostEffects,
         networkLocationLimits: NetworkLocationLimits = .init(),
         environmentDriftInterval: Duration = .seconds(300),
@@ -567,7 +568,9 @@ package final class RuntimeHost {
             resolversManaged: loadedConfiguration.platformConfig.manageDNSResolvers
         )
         let eventLog = orchestrator.eventLog
-        launchRecovery = LaunchRecovery { [logger] in
+        // On the host's one platform queue, as all its other blocking work. Each surface path joins recovery first or cannot run before
+        // a path that did (`awaitLaunchRecovery`).
+        launchRecovery = LaunchRecovery(on: platformWork) { [logger] in
             LaunchRecovery.recoverPlatformSurfaces(
                 systemDNS: dnsRecovery,
                 systemProxy: proxyRecovery,
@@ -783,7 +786,7 @@ package final class RuntimeHost {
         // The join holds the root's session itself, so the root stays claimed until the warm-up and deliveries have
         // finished, whether or not the caller's deadline or the host's owner has gone. It holds the host weakly: the
         // result is computed on the main actor from the host's state, and only if the host is still there.
-        Task { @MainActor [weak self] in
+        Task { [weak self] in
             await warmup?.value
             await deliveries.drain()
             withExtendedLifetime(session) {}
@@ -1264,7 +1267,7 @@ package final class RuntimeHost {
     private func scheduleSplitDNSHelperCheck() {
         guard splitDNSRepair.pending != nil, splitDNSHelperCheck == nil, let helper = helperStatusSource else { return }
         let base = splitDNSHelperCheckInterval
-        splitDNSHelperCheck = Task { @MainActor [weak self] in
+        splitDNSHelperCheck = Task { [weak self] in
             while let delay = self?.splitDNSHelperCheckDelay(base: base) {
                 // Cancelled: a retry took over, a new episode restarted the
                 // check, or quit. Whoever cancelled it has cleared the handle.
@@ -1380,7 +1383,7 @@ package final class RuntimeHost {
     /// after wake rather than once per missed interval.
     private func startEnvironmentDriftTimer() {
         let interval = environmentDriftInterval
-        environmentDriftTimer = Task { @MainActor [weak self] in
+        environmentDriftTimer = Task { [weak self] in
             while true {
                 do { try await Task.sleep(for: interval) }
                 catch { return }
@@ -1473,11 +1476,16 @@ package final class RuntimeHost {
         // Taken when the timer is armed, not when a probe completes: a probe still out when a Stop or a newer Start begins names the
         // run that asked for it, so its reading is never taken for the newer run's.
         let token = lanes.dns.observationToken
+        // One reading on its way to the owner at a time: a tick while the last one has not landed adds nothing. Sendable, so the
+        // handler assumes no actor on the global queue it fires on.
+        let hopPending = NIOLockedValueBox(false)
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + 30, repeating: 30)
-        timer.setEventHandler { [weak self, manager] in
+        timer.setEventHandler { @Sendable [weak self, manager] in
+            guard hopPending.withLockedValue({ pending in defer { pending = true }; return !pending }) else { return }
             let alive = manager.probeLiveness()
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
+                hopPending.withLockedValue { $0 = false }
                 self?.handleDNSHealthResult(alive: alive, forwarderPort: forwarderPort, armedBy: token)
             }
         }
@@ -1629,7 +1637,8 @@ extension RuntimeHost {
             portProbe: effects.loopbackPortProbe,
             locationRecovery: locationRecovery
         )
-        let recovery = LaunchRecovery {
+        // No host exists to lend its platform queue, so this one call has a worker of its own.
+        let recovery = LaunchRecovery(on: PlatformWork(label: "io.github.srps.Conduit.configless-recovery")) {
             LaunchRecovery.recoverPlatformSurfaces(
                 systemDNS: systemDNS,
                 systemProxy: systemProxy,

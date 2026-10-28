@@ -13,35 +13,36 @@ import ProxyKernel
 /// orchestrator's call (`ProxyOrchestrator.admitNetworkPath`), so both hosts
 /// dedupe alike and the decision is a `RuntimeEvent` (#101). The hosts' DNS
 /// reconcile runs for every report (`NetworkPathReports`).
-package final class NetworkMonitor: NetworkPathObserving {
+///
+/// A cancelled `NWPathMonitor` never reports again, and a host stops and
+/// restarts its observers on one adapter (#260), so each start makes a fresh
+/// monitor and debouncer and each stop cancels them. A report is delivered
+/// only under the generation of the start that made it, so a late one from a
+/// stopped monitor is dropped.
+///
+/// Checked by hand: every mutable property is in `state`, under `lock`; the
+/// callback is called, and the monitor started and cancelled, outside it.
+package final class NetworkMonitor: NetworkPathObserving, @unchecked Sendable {
     /// `NWPathMonitor` reports several updates per wake or roam within a second.
     package static let defaultDebounceInterval: TimeInterval = 2
 
-    private final class Handler: @unchecked Sendable {
-        private let lock = NSLock()
-        private var callback: (@Sendable (NetworkPathState) -> Void)?
-        var value: (@Sendable (NetworkPathState) -> Void)? {
-            get { lock.withLock { callback } }
-            set { lock.withLock { callback = newValue } }
-        }
+    private struct State {
+        var onChange: (@Sendable (NetworkPathState) -> Void)?
+        /// Advanced by every start and every stop that ends one.
+        var generation: UInt64 = 0
+        var active: (monitor: NWPathMonitor, debouncer: TrailingDebouncer<NetworkPathState>)?
     }
 
-    private let monitor = NWPathMonitor()
     private let queue = DispatchQueue(label: "io.github.srps.Conduit.NetworkMonitor")
     private let debounceInterval: TimeInterval
-    /// The one object that crosses to the monitor's queue. Lock-guarded, so the
-    /// callback reads a consistent `onChange` whenever it fires.
-    private let handler = Handler()
-    /// Written only by `start()` and `stop()`, which the owning runtime calls
-    /// serially and without a lock. The path handler captures the debouncer
-    /// that `start()` created, not this property.
-    private var debouncer: TrailingDebouncer<NetworkPathState>?
+    private let lock = NSLock()
+    private var state = State()
 
     /// Fires once per burst of path updates with the newest path. Read at
     /// delivery, so it may be assigned before or after `start()`.
     package var onChange: (@Sendable (NetworkPathState) -> Void)? {
-        get { handler.value }
-        set { handler.value = newValue }
+        get { lock.withLock { state.onChange } }
+        set { lock.withLock { state.onChange = newValue } }
     }
 
     package func setOnChange(_ onChange: @Sendable @escaping (NetworkPathState) -> Void) {
@@ -52,22 +53,46 @@ package final class NetworkMonitor: NetworkPathObserving {
         self.debounceInterval = debounceInterval
     }
 
-    package func start() {
-        let handler = self.handler
-        let debouncer = TrailingDebouncer<NetworkPathState>(interval: debounceInterval, queue: queue) { path in
-            handler.value?(path)
-        }
-        self.debouncer = debouncer
-        monitor.pathUpdateHandler = { path in
-            debouncer.signal(Self.state(of: path))
-        }
-        monitor.start(queue: queue)
+    deinit {
+        state.active?.debouncer.cancel()
+        state.active?.monitor.cancel()
     }
 
+    /// Starts a fresh monitor. A start while one is observing does nothing.
+    package func start() {
+        let monitor: NWPathMonitor? = lock.withLock {
+            guard state.active == nil else { return nil }
+            state.generation &+= 1
+            let generation = state.generation
+            let debouncer = TrailingDebouncer<NetworkPathState>(interval: debounceInterval, queue: queue) { [weak self] path in
+                self?.deliver(path, armedAs: generation)
+            }
+            let monitor = NWPathMonitor()
+            monitor.pathUpdateHandler = { path in
+                debouncer.signal(Self.state(of: path))
+            }
+            state.active = (monitor, debouncer)
+            return monitor
+        }
+        monitor?.start(queue: queue)
+    }
+
+    /// Cancels the monitor observing now, if any.
     package func stop() {
-        debouncer?.cancel()
-        debouncer = nil
-        monitor.cancel()
+        let active = lock.withLock { () -> (monitor: NWPathMonitor, debouncer: TrailingDebouncer<NetworkPathState>)? in
+            defer { state.active = nil }
+            if state.active != nil { state.generation &+= 1 }
+            return state.active
+        }
+        active?.debouncer.cancel()
+        active?.monitor.cancel()
+    }
+
+    /// One debounced report from the start that armed `generation`. The callback is read in the same locked step as the check, so a
+    /// report claimed before a stop can reach only the callback it read then, and one from a stopped monitor reaches none.
+    private func deliver(_ path: NetworkPathState, armedAs generation: UInt64) {
+        let callback = lock.withLock { state.generation == generation ? state.onChange : nil }
+        callback?(path)
     }
 
     /// A field-for-field copy: `NWPath` cannot be constructed in a test, so

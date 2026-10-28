@@ -172,6 +172,7 @@ final class InteractiveHostHarness {
 
         func tearDown() async {
             hold.release()
+            XCTAssertFalse(hold.takenOnCooperativePool, "a held call was let through on the concurrency pool instead of held")
             if let host {
                 await host.stopRuntime()
                 let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))

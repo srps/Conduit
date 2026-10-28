@@ -387,10 +387,15 @@ final class RuntimeHostCredentialsChangeTests: XCTestCase {
         ProxyCredentials(username: "user", domain: "CORP", workstation: workstation, ntHash: SecretBytes(Array(repeating: UInt8(7), count: 16)))
     }
 
-    /// The host's read, on a thread of its own: a read waits on the store's answer.
+    /// The host's read, on a thread of its own: a read waits on the store's answer. A global queue stands in for the event loop a
+    /// handshake reads from, so the wait never holds a thread of the concurrency pool.
     private func hostRead(_ host: RuntimeHost) async -> Result<ProxyCredentials?, any Error> {
         let manager = host.credentialManager, upstream = self.upstream
-        return await Task.detached { Result { try manager.credentials(for: upstream) } }.value
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: Result { try manager.credentials(for: upstream) })
+            }
+        }
     }
 
     private func notify(_ composed: PreflightComposed, on stream: RuntimeSubscription) async throws {

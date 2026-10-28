@@ -177,6 +177,64 @@ final class RuntimeHostAuditTests: XCTestCase {
         XCTAssertEqual(row.outcome, .success)
     }
 
+    /// The orchestrator's connection callbacks through the actual path, under mixed-priority owner load: concurrent connections from
+    /// clients at every task priority, while owner jobs at every priority queue beside the callbacks' hops. A close whose hop ran before
+    /// its open's would find no row to audit and leave a stale one, so the counts are the order witness: no open connection or row is
+    /// left, and every connection has its one audit row. The hops themselves come from the event loop at that thread's priority; what
+    /// varies is the priority of everything queued beside them.
+    func testConnectionTrackingUnderMixedPriorityLoadKeepsEachOpenBeforeItsClose() async throws {
+        let composed = try await compose { logging, _ in logging.auditLogEnabled = true }
+        let originPort = try await startOrigin()
+        let proxyPort = try await startProxy(composed)
+        let connections = 32
+        let priorities: [TaskPriority] = [.background, .utility, .medium, .userInitiated, .high]
+        let host = composed.host
+        let load = (0..<256).map { index in
+            Task(priority: priorities[index % priorities.count]) { @MainActor in _ = host.status() }
+        }
+        let clients = (0..<connections).map { index in
+            Task.detached(priority: priorities[index % priorities.count]) {
+                try await Self.serveOnItsOwnConnection(proxyPort: proxyPort, originPort: originPort, index: index)
+            }
+        }
+        for client in clients { try await client.value }
+        for job in load { await job.value }
+        var metrics = host.status().metrics
+        for _ in 0..<5_000 where !(metrics.requestsHandled >= connections && metrics.openConnections == 0) {
+            try await Task.sleep(for: .milliseconds(1))
+            metrics = host.status().metrics
+        }
+        XCTAssertEqual(metrics.requestsHandled, connections, "the host handled each request")
+        XCTAssertEqual(metrics.failedRequests, 0)
+        XCTAssertEqual(metrics.openConnections, 0, "no connection is left open")
+        XCTAssertEqual(host.orchestrator.snapshot.activeConnections.count, 0, "no stale connection row is left")
+
+        try await stopProxy(composed)
+        let report = await host.flushEvents()
+        XCTAssertEqual(report.audit, .drained)
+        XCTAssertEqual(report.auditStatistics.writtenRecords, UInt64(connections), "every close found its open's row")
+        let rows = try auditRows(at: defaultAuditFile(composed)).rows
+        XCTAssertEqual(Set(rows.map(\.id)).count, connections, "one row for each connection")
+    }
+
+    /// One request on a connection of its own, from whichever task calls it. The client closes the connection once the response's first
+    /// bytes arrive, or after ten seconds, and the host's counts then say what was missing.
+    private nonisolated static func serveOnItsOwnConnection(proxyPort: Int, originPort: Int, index: Int) async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let answered = group.next().makePromise(of: Void.self)
+        let client = try await ClientBootstrap(group: group)
+            .channelInitializer { channel in channel.pipeline.addHandler(FirstReadSignal(answered)) }
+            .connect(host: "127.0.0.1", port: proxyPort)
+            .get()
+        let request = "GET http://127.0.0.1:\(originPort)/v1/item/\(index) HTTP/1.1\r\n"
+            + "Host: 127.0.0.1:\(originPort)\r\nConnection: close\r\n\r\n"
+        try await client.writeAndFlush(client.allocator.buffer(string: request)).get()
+        let timeout = answered.futureResult.eventLoop.scheduleTask(in: .seconds(10)) { answered.succeed(()) }
+        try await answered.futureResult.get()
+        timeout.cancel()
+        try? await client.close()
+    }
+
     func testADisabledAuditWritesNothing() async throws {
         let composed = try await compose { logging, _ in logging.auditLogEnabled = false }
         let served = try await serveOne(composed)
@@ -283,6 +341,26 @@ final class RuntimeHostAuditTests: XCTestCase {
         XCTAssertEqual(written.map(\.detail), [detail], "the events file records the one refusal")
 
         try await stopProxy(composed)
+    }
+}
+
+/// Completes its promise at a connection's first read: the response has begun to arrive.
+private final class FirstReadSignal: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+
+    private let read: EventLoopPromise<Void>
+
+    init(_ read: EventLoopPromise<Void>) {
+        self.read = read
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        read.succeed(())
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        read.succeed(())
+        context.fireChannelInactive()
     }
 }
 

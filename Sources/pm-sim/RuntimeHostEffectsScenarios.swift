@@ -22,7 +22,8 @@ import RuntimeEvents
 /// app or helper is reached.
 ///
 /// It checks a failed start on a held port, a restart on the same host, and a stop, against the fakes; then the configuration workflow;
-/// then a stop admitted before a held start binds, and the next start; then the connection audit of one served loopback request; and, last,
+/// then a stop admitted before a held start binds, and the next start; then the connection audit of one served loopback request and of
+/// a burst of connections under mixed-priority owner load; and, last,
 /// a reload's flag action held on the platform queue while a Stop is admitted.
 /// Every path after
 /// the root is taken ends in one release step: the root's reference is dropped, a fresh acquisition proves the lease
@@ -182,7 +183,8 @@ enum RuntimeHostEffectsScenario {
     /// gets its own wake fake; only the wake exercise keeps and fires its own.
     private static func effects(
         _ fakes: Fakes, home: URL, pac: (any PacEvaluator)? = nil, wake: FakeSystemWakeObserver = FakeSystemWakeObserver(),
-        hold: HeldSetenv? = nil, vpn: FakeVPNStatusObserver = FakeVPNStatusObserver()
+        hold: HeldSetenv? = nil, vpn: FakeVPNStatusObserver = FakeVPNStatusObserver(),
+        path: FakeNetworkPathObserver = FakeNetworkPathObserver()
     ) -> RuntimeHostEffects {
         let machine = fakes.machine
         return RuntimeHostEffects(
@@ -198,7 +200,7 @@ enum RuntimeHostEffectsScenario {
                 return try machine.run(launchPath, arguments)
             },
             dnsResponds: fakes.dns.responds(onPort:),
-            networkPath: FakeNetworkPathObserver(),
+            networkPath: path,
             networkLocation: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil },
             vpnStatusMonitor: { _, _ in vpn },
@@ -1226,7 +1228,7 @@ enum RuntimeHostEffectsScenario {
     /// The connection audit through the actual host, as the app composes it (#222). Audit is on at the root's default path. One loopback
     /// request, its query carrying a value no row may hold, goes through the host's listener; the default no-proxy list routes it DIRECT
     /// to an origin this exercise owns, so no upstream or Kerberos token is involved. After the stop and a confirmed flush, the owned
-    /// `audit.ndjson` holds that request's one row, its query redacted.
+    /// `audit.ndjson` holds that request's one row, its query redacted, and one row for each connection of the mixed-priority burst.
     @MainActor
     private static func exerciseConnectionAudit(
         session: StateRootSession,
@@ -1246,6 +1248,7 @@ enum RuntimeHostEffectsScenario {
         config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
         config.logging.auditLogEnabled = true
         let auditFile = environment.configDirectory.appendingPathComponent("audit.ndjson")
+        let path = FakeNetworkPathObserver()
         let host: RuntimeHost
         do {
             try ProxyConfigPersistence.save(config, in: environment)
@@ -1258,7 +1261,7 @@ enum RuntimeHostEffectsScenario {
                 startupAllowsMissing: false,
                 startedAt: Date(timeIntervalSince1970: 1_700_000_000),
                 terminalExit: {},
-                effects: effects(fakes, home: home)
+                effects: effects(fakes, home: home, path: path)
             )
         } catch {
             notes.append("audit host did not open: \(error.localizedDescription)")
@@ -1295,6 +1298,59 @@ enum RuntimeHostEffectsScenario {
             }
             check("the served request's connection closes", closed)
 
+            // A burst of connections from clients at every task priority, with owner jobs at every priority queued beside the
+            // connection callbacks' hops. A close whose hop ran before its open's would leave a connection counted open and its row
+            // unwritten, so the counts and the rows below witness the order.
+            let burst = 16
+            let priorities: [TaskPriority] = [.background, .utility, .medium, .userInitiated, .high]
+            let load = (0..<128).map { index in
+                Task(priority: priorities[index % priorities.count]) { @MainActor in _ = host.status() }
+            }
+            let requests = (0..<burst).map { index in
+                Task.detached(priority: priorities[index % priorities.count]) { () -> Bool in
+                    let response = try? await RawHTTPAuditClient.request(
+                        group: MultiThreadedEventLoopGroup.singleton, host: "127.0.0.1", port: proxyPort,
+                        request: "GET http://127.0.0.1:\(originPort)/v1/item/\(index) HTTP/1.1\r\n"
+                            + "Host: 127.0.0.1:\(originPort)\r\nConnection: close\r\n\r\n"
+                    )
+                    return response?.hasPrefix("HTTP/1.1 200") == true
+                }
+            }
+            var servedBurst = 0
+            for request in requests {
+                if await request.value { servedBurst += 1 }
+            }
+            for job in load { await job.value }
+            check("every request of the mixed-priority burst is served", servedBurst == burst)
+            var burstClosed = false
+            let burstDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !burstClosed, ContinuousClock.now < burstDeadline {
+                let metrics = host.status().metrics
+                burstClosed = metrics.requestsHandled >= 1 + burst && metrics.openConnections == 0
+                if !burstClosed { try await Task.sleep(for: .milliseconds(1)) }
+            }
+            check("the mixed-priority burst leaves no connection open", burstClosed)
+
+            // The path observer follows the modules (#260): a Stop that leaves none up stops it, the next Start observes again, and a
+            // report delivered after that restart reaches the host's path handling. The real adapter's restart is `NetworkMonitorTests`.
+            check("the path observer runs while the proxy runs", path.isObserving)
+            await host.stopRuntime()
+            check("a Stop that leaves every module down stops the path observer", !path.isObserving)
+            try await host.startRuntime()
+            check("a Start after that Stop observes the path again", path.isObserving)
+            path.emit(NetworkPathState(
+                status: .satisfied, interfaces: [.init(name: "en0", type: "wifi")], gateways: ["192.0.2.1"],
+                supportsIPv4: true, supportsIPv6: false, supportsDNS: true
+            ))
+            var pathHandled = false
+            let pathDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !pathHandled, ContinuousClock.now < pathDeadline {
+                _ = await host.flushEvents()
+                pathHandled = try recordedEvents(in: environment.eventsFile).contains { $0.event == "network.path_changed" }
+                if !pathHandled { try await Task.sleep(for: .milliseconds(10)) }
+            }
+            check("a path report after the restart reaches the host's path handling", pathHandled)
+
             await host.stopRuntime()
             let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
             check("the audit host settles before its root is released", settled == .settled)
@@ -1306,11 +1362,15 @@ enum RuntimeHostEffectsScenario {
             let decoder = ConnectionAuditRecord.canonicalDecoder
             let rows = try text.split(separator: "\n").map { try decoder.decode(ConnectionAuditRecord.self, from: Data($0.utf8)) }
             notes.append("audit rows: \(rows.count)")
-            check("the owned audit file holds the served request's one row", rows.count == 1)
+            let served = rows.filter { $0.target.hasPrefix("http://127.0.0.1:\(originPort)/v1/resource") }
+            check("the owned audit file holds the served request's one row", served.count == 1)
             check("the row keeps the target's authority and path and redacts its query",
-                  rows.first?.target == "http://127.0.0.1:\(originPort)/v1/resource?<redacted>")
-            check("the row records the DIRECT route", rows.first?.chosenUpstream == "DIRECT")
+                  served.first?.target == "http://127.0.0.1:\(originPort)/v1/resource?<redacted>")
+            check("the row records the DIRECT route", served.first?.chosenUpstream == "DIRECT")
             check("no row carries the query value", !text.contains(secret))
+            let burstRows = rows.filter { $0.target.hasPrefix("http://127.0.0.1:\(originPort)/v1/item/") }
+            check("each connection of the mixed-priority burst has its one row",
+                  burstRows.count == burst && Set(burstRows.map(\.id)).count == burst && rows.count == 1 + burst)
         } catch {
             check("the audit exercise completed without error", false)
             // The error path joins the host's work before anything is released: stop, settle, then flush, then judge.
@@ -1611,7 +1671,7 @@ enum RuntimeHostEffectsScenario {
         let probe = fakes.probe
         let pac = fakes.pac
         let gss = fakes.gss
-        var terminalExits = 0
+        let terminalExits = NIOLockedValueBox(0)
 
         let host: RuntimeHost
         do {
@@ -1620,7 +1680,7 @@ enum RuntimeHostEffectsScenario {
                 logger: DiscardingLogSink(),
                 startupAllowsMissing: true,
                 startedAt: Date(timeIntervalSince1970: 1_700_000_000),
-                terminalExit: { terminalExits += 1 },
+                terminalExit: { terminalExits.withLockedValue { $0 += 1 } },
                 effects: effects(fakes, home: home)
             )
         } catch {
@@ -1689,7 +1749,7 @@ enum RuntimeHostEffectsScenario {
             check("each Start's settlements share its group, and the restart's is newer",
                   Set(written.prefix(3).map(\.group)).count == 1 && Set(written.dropFirst(3).map(\.group)).count == 1
                     && (written.first?.group ?? .max) < (written.last?.group ?? .min))
-            check("a non-terminal stop does not call the terminal exit", terminalExits == 0)
+            check("a non-terminal stop does not call the terminal exit", terminalExits.withLockedValue { $0 } == 0)
 
             // The fake refuses a command the scenario did not plan, and the refusal is a failure, not a success.
             let refusal = try machine.run("/usr/bin/security", ["find-generic-password"])

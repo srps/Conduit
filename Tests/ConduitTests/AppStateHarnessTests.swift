@@ -170,6 +170,7 @@ final class AppStateHarness {
     /// Quits the way AppKit's terminate-later does, then removes the scratch state.
     func tearDown() async {
         hold.release()
+        XCTAssertFalse(hold.takenOnCooperativePool, "a held call was let through on the concurrency pool instead of held")
         // A held file log would block the close below.
         appLogHold.release()
         if let appState {

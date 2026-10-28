@@ -46,7 +46,7 @@ final class RuntimeQuitFlush {
         }
         open = !parts.isEmpty
         workflow.setQuitFlush(open: open)
-        timer = Task { @MainActor [weak self] in
+        timer = Task { [weak self] in
             do {
                 try await Task.sleep(until: deadline, clock: .continuous)
             } catch {

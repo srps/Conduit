@@ -11,7 +11,7 @@ import RuntimeEvents
 private let testStartedAt = Date(timeIntervalSince1970: 1_700_000_000)
 
 /// A host test never ends the process. A terminal stop that reaches this hook is a failure.
-private let unexpectedTerminalExit: @MainActor () -> Void = { XCTFail("the runtime host ended the process") }
+private let unexpectedTerminalExit: @Sendable () -> Void = { XCTFail("the runtime host ended the process") }
 
 /// A test asked a harness for a second host while it still owns the first. The request fails before anything is built.
 private enum HarnessHostOwnershipError: Error {
@@ -1611,7 +1611,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         /// The system wake source the host observes from open until its quit.
         let wake = FakeSystemWakeObserver()
         /// Ends a terminal stop. Replaced by a test that asserts on the exit.
-        var terminalExit: @MainActor () -> Void = unexpectedTerminalExit
+        var terminalExit: @Sendable () -> Void = unexpectedTerminalExit
         var locationStore: FakeNetworkLocationStore?
         var locationLimits = NetworkLocationLimits()
         /// As `AppStateHarness.reapplyRetrySchedule`.
@@ -1754,6 +1754,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             // A test that failed mid-hold leaves the hold armed, and the stop would wait on it. Releasing is harmless when
             // nothing waits.
             hold.release()
+            XCTAssertFalse(hold.takenOnCooperativePool, "a held call was let through on the concurrency pool instead of held")
             listings.release()
             if let host = ownedHost {
                 await host.stopRuntime()
@@ -1882,13 +1883,13 @@ final class DaemonRuntimeHostTests: XCTestCase {
         config.dnsForwarderPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
         let snapshotFile = harness.environment.snapshotFile
-        var snapshotWrittenAtExit: [Bool] = []
+        let snapshotWrittenAtExit = LockedLog<Bool>()
         harness.terminalExit = { snapshotWrittenAtExit.append(FileManager.default.fileExists(atPath: snapshotFile.path)) }
         let host = try await harness.makeHost()
         await host.awaitLaunchRecovery()
 
         await host.stopRuntime()
-        XCTAssertEqual(snapshotWrittenAtExit, [], "a stop that does not exit leaves the process running")
+        XCTAssertEqual(snapshotWrittenAtExit.values, [], "a stop that does not exit leaves the process running")
 
         // The ordinary stop submits its snapshot without waiting, so file currency is confirmed by the explicit
         // diagnostic flush. Then remove it, so the hook can only see the one the terminal stop writes before it exits.
@@ -1897,7 +1898,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         try FileManager.default.removeItem(at: snapshotFile)
 
         await host.stopRuntime(exitAfterStop: true)
-        XCTAssertEqual(snapshotWrittenAtExit, [true], "the exit comes once, after the snapshot is written")
+        XCTAssertEqual(snapshotWrittenAtExit.values, [true], "the exit comes once, after the snapshot is written")
     }
 
     /// The `ConduitDaemon --exit-after-ready --start-runtime` sequence, run through the FakeMachine harness rather
@@ -1909,8 +1910,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         config.dnsForwarderPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
         let snapshotFile = harness.environment.snapshotFile
-        var exits = 0
-        harness.terminalExit = { exits += 1 }
+        let exits = LockedLog<Bool>()
+        harness.terminalExit = { exits.append(true) }
         let host = try await harness.makeHost()
         await host.awaitLaunchRecovery()
 
@@ -1918,7 +1919,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.markReady(mode: "runtime-started")
         await host.flushEvents()
         await host.shutdown()
-        XCTAssertEqual(exits, 0, "the shutdown returns and never exits")
+        XCTAssertEqual(exits.values.count, 0, "the shutdown returns and never exits")
         do {
             try await host.startRuntime()
             XCTFail("no Start runs after the process quit")
@@ -2859,14 +2860,15 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// A host built over the crashed-run seed, with launch recovery held on its first `networksetup` listing. Recovery is in flight until
     /// the test releases the hold, so whatever the test admits now waits behind it. The hold is armed before the host exists, because the
-    /// host starts recovery as it is built, on a detached utility task (not the platform queue).
-    private func makeHostWithHeldRecovery(terminalExit: @escaping @MainActor () -> Void) async throws -> RuntimeHost {
+    /// host starts recovery as it is built, on its one platform queue. Strict: a listing made anywhere else is recorded and let
+    /// through, never held, so a recovery that ran on the pool or the main thread fails the placement check instead of hanging.
+    private func makeHostWithHeldRecovery(terminalExit: @escaping @Sendable () -> Void) async throws -> RuntimeHost {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
         seedCrashedRunProxy()
         harness.terminalExit = terminalExit
-        harness.hold.arm { name, arguments in
+        harness.hold.arm(onQueueLabeled: Self.hostPlatformQueue, otherQueues: .recorded) { name, arguments in
             name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
         }
         return try await harness.makeHost()
@@ -2893,6 +2895,31 @@ final class DaemonRuntimeHostTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(1))
         }
         XCTAssertEqual(host.pendingAdmissions, count, "the calls reached admission while recovery is held")
+    }
+
+    /// The host's platform queue, the one worker its blocking effects and its launch recovery run on.
+    private static let hostPlatformQueue = "io.github.srps.Conduit.daemon.platform-work"
+
+    /// Launch recovery runs on the host's platform queue, not the pool or the main thread, and while it is held there the owner still
+    /// answers status and admits a Stop, which waits for recovery before it reaches its lane.
+    func testHeldLaunchRecoveryIsOnThePlatformQueueAndLeavesStatusAndStopAdmissionFree() async throws {
+        let host = try await makeHostWithHeldRecovery(terminalExit: unexpectedTerminalExit)
+        await harness.hold.waitUntilReached()
+        XCTAssertTrue(harness.hold.reachedOnArmedQueue, "recovery was held on \(harness.hold.reachedQueueLabel ?? "nowhere")")
+        XCTAssertFalse(harness.hold.reachedOnCooperativePool)
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+        XCTAssertTrue(harness.hold.isHolding)
+
+        XCTAssertEqual(host.status().daemon?.startedAt, testStartedAt, "status answers while recovery is held")
+        let stop = Task { await host.stopRuntime() }
+        try await waitForPendingAdmissions(host, 1)
+        XCTAssertEqual(host.lifecycleGeneration, 0, "the Stop is admitted and waits for recovery, not for its lane")
+        XCTAssertTrue(harness.hold.isHolding)
+
+        harness.hold.release()
+        await stop.value
+        XCTAssertEqual(host.pendingAdmissions, 0)
+        XCTAssertEqual(harness.wifi.webProxy.host, "prior.example.test", "recovery restored the crashed run's prior proxy")
     }
 
     /// A start admitted during held recovery, then a stop: the stop is the newer intent, so the start stops without applying anything,
@@ -2943,8 +2970,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// A terminal stop admitted during held recovery latches the refusal while recovery is still out: a start called then is refused as
     /// terminating, admits nothing, and the terminal stop exits exactly once after recovery.
     func testAStartIsRefusedDuringAHeldTerminalStopAndTheTerminalStopExitsOnce() async throws {
-        var exits = 0
-        let host = try await makeHostWithHeldRecovery(terminalExit: { exits += 1 })
+        let exits = LockedLog<Bool>()
+        let host = try await makeHostWithHeldRecovery(terminalExit: { exits.append(true) })
         let stop = Task { await host.stopRuntime(exitAfterStop: true) }
         await harness.hold.waitUntilReached()
         try await waitForPendingAdmissions(host, 1)
@@ -2965,7 +2992,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         harness.hold.release()
         await stop.value
-        XCTAssertEqual(exits, 1, "the terminal stop exits once, after recovery")
+        XCTAssertEqual(exits.values.count, 1, "the terminal stop exits once, after recovery")
         XCTAssertEqual(harness.wifi.webProxy.host, "prior.example.test", "no start ran, so the restored prior proxy is all there is")
     }
 

@@ -641,7 +641,7 @@ extension RuntimeHost {
         // call alone, so they are gone when it returns.
         let work = RuntimePrivateWorkBox(update)
         let slot = update.slot
-        Task { @MainActor [self] in
+        Task { [self] in
             let outcome = await runPrivateUpdate(work.take())
             // The work, a Start's teardown included, has ended and its frozen values with it, so custody ends before the settlement is
             // published: a client that submits again on seeing it finds the slot free.

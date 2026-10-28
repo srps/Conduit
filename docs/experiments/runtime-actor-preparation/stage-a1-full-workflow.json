@@ -1,0 +1,391 @@
+{
+  "head": "e62683181a0f0092d136abfed8f9596db98d0088",
+  "source_sha256": "aeb7ba29bbb6cfb31ac80c17b5432aa0f36682c421f9c7494c62b8c0a400d129",
+  "final_source_sha256": "aeb7ba29bbb6cfb31ac80c17b5432aa0f36682c421f9c7494c62b8c0a400d129",
+  "stable": true,
+  "checks": [
+    {
+      "name": "build",
+      "command": [
+        "xcrun",
+        "swift",
+        "build",
+        "-v"
+      ],
+      "exit": 0,
+      "seconds": 5.56
+    },
+    {
+      "name": "dns-ephemeral-pair-rebind",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "dns-ephemeral-pair-rebind"
+      ],
+      "exit": 0,
+      "seconds": 0.09
+    },
+    {
+      "name": "check-kernel-imports",
+      "command": [
+        "python3",
+        "scripts/check-kernel-imports.py"
+      ],
+      "exit": 0,
+      "seconds": 9.44
+    },
+    {
+      "name": "test-kernel-imports",
+      "command": [
+        "python3",
+        "scripts/test-kernel-imports.py"
+      ],
+      "exit": 0,
+      "seconds": 13.64
+    },
+    {
+      "name": "check-third-party-notices",
+      "command": [
+        "python3",
+        "scripts/check-third-party-notices.py"
+      ],
+      "exit": 0,
+      "seconds": 0.19
+    },
+    {
+      "name": "test-third-party-notices",
+      "command": [
+        "python3",
+        "scripts/test-third-party-notices.py"
+      ],
+      "exit": 0,
+      "seconds": 0.76
+    },
+    {
+      "name": "check-event-catalogue",
+      "command": [
+        "python3",
+        "scripts/check-event-catalogue.py"
+      ],
+      "exit": 0,
+      "seconds": 1.2
+    },
+    {
+      "name": "test-event-catalogue",
+      "command": [
+        "python3",
+        "scripts/test-event-catalogue.py"
+      ],
+      "exit": 0,
+      "seconds": 99.98
+    },
+    {
+      "name": "check-decisions",
+      "command": [
+        "python3",
+        "scripts/check-decisions.py",
+        "--require-history"
+      ],
+      "exit": 0,
+      "seconds": 0.19
+    },
+    {
+      "name": "test-decisions",
+      "command": [
+        "python3",
+        "scripts/test-decisions.py"
+      ],
+      "exit": 0,
+      "seconds": 4.77
+    },
+    {
+      "name": "swift-tests",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "-v"
+      ],
+      "exit": 0,
+      "seconds": 281.4
+    },
+    {
+      "name": "app-entry",
+      "command": [
+        "python3",
+        "scripts/test-app-entry.py"
+      ],
+      "exit": 0,
+      "seconds": 12.45
+    },
+    {
+      "name": "kerberos-workers",
+      "command": [
+        "python3",
+        "scripts/test-kerberos-worker.py",
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/Conduit",
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/ConduitDaemon"
+      ],
+      "exit": 0,
+      "seconds": 2.57
+    },
+    {
+      "name": "test-install-helper-args",
+      "command": [
+        "bash",
+        "scripts/test-install-helper-args.sh"
+      ],
+      "exit": 0,
+      "seconds": 0.74
+    },
+    {
+      "name": "test-create-signing-identity",
+      "command": [
+        "bash",
+        "scripts/test-create-signing-identity.sh"
+      ],
+      "exit": 0,
+      "seconds": 0.94
+    },
+    {
+      "name": "test-create-release-identity",
+      "command": [
+        "bash",
+        "scripts/test-create-release-identity.sh"
+      ],
+      "exit": 0,
+      "seconds": 10.05
+    },
+    {
+      "name": "dev-bundle-regressions",
+      "command": [
+        "bash",
+        "scripts/test-dev-bundle.sh"
+      ],
+      "exit": 0,
+      "seconds": 3.09
+    },
+    {
+      "name": "updater-e2e",
+      "command": [
+        "zsh",
+        "scripts/test-updater-e2e.sh"
+      ],
+      "exit": 0,
+      "seconds": 29.39
+    },
+    {
+      "name": "updater-e2e-signed",
+      "command": [
+        "zsh",
+        "scripts/test-updater-e2e.sh",
+        "--signed"
+      ],
+      "exit": 0,
+      "seconds": 28.31
+    },
+    {
+      "name": "appcast-notes",
+      "command": [
+        "python3",
+        "scripts/test-appcast-notes.py"
+      ],
+      "exit": 0,
+      "seconds": 0.05
+    },
+    {
+      "name": "observable-target-redaction",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "observable-target-redaction"
+      ],
+      "exit": 0,
+      "seconds": 0.08
+    },
+    {
+      "name": "security-boundaries",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "security-boundaries"
+      ],
+      "exit": 0,
+      "seconds": 0.14
+    },
+    {
+      "name": "gateway-probe-blocklist",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "gateway-probe-blocklist"
+      ],
+      "exit": 0,
+      "seconds": 0.08
+    },
+    {
+      "name": "connect-early-direct",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "connect-early-direct"
+      ],
+      "exit": 0,
+      "seconds": 0.04
+    },
+    {
+      "name": "connect-early-upstream",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "connect-early-upstream"
+      ],
+      "exit": 0,
+      "seconds": 0.05
+    },
+    {
+      "name": "server-first-connect",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "server-first-connect"
+      ],
+      "exit": 0,
+      "seconds": 0.09
+    },
+    {
+      "name": "server-first-socks5",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "server-first-socks5"
+      ],
+      "exit": 0,
+      "seconds": 0.05
+    },
+    {
+      "name": "target-redaction",
+      "command": [
+        "python3",
+        "scripts/test-observable-target-redaction.py",
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-proxy"
+      ],
+      "exit": 0,
+      "seconds": 0.9
+    },
+    {
+      "name": "security-boundaries-script",
+      "command": [
+        "python3",
+        "scripts/test-security-boundaries.py",
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-proxy"
+      ],
+      "exit": 0,
+      "seconds": 1.54
+    },
+    {
+      "name": "perf-gate",
+      "command": [
+        "bash",
+        "scripts/perf-gate.sh"
+      ],
+      "exit": 0,
+      "seconds": 16.26
+    },
+    {
+      "name": "sim-outcomes",
+      "command": [
+        "python3",
+        "scripts/test-sim-outcomes.py",
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim"
+      ],
+      "exit": 0,
+      "seconds": 3.4
+    },
+    {
+      "name": "pm-sim-all",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "all"
+      ],
+      "exit": 0,
+      "seconds": 155.62
+    },
+    {
+      "name": "http-wire-target",
+      "command": [
+        "python3",
+        "scripts/test-http-wire-target.py",
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-proxy"
+      ],
+      "exit": 0,
+      "seconds": 4.28
+    },
+    {
+      "name": "forced-proxy-precedence",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "forced-proxy-precedence"
+      ],
+      "exit": 0,
+      "seconds": 0.09
+    },
+    {
+      "name": "pac-unsupported-only",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "pac-unsupported-only"
+      ],
+      "exit": 0,
+      "seconds": 0.09
+    },
+    {
+      "name": "strict-direct-reachable",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "strict-direct-reachable"
+      ],
+      "exit": 0,
+      "seconds": 0.09
+    },
+    {
+      "name": "shared-inbound-budget",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "shared-inbound-budget"
+      ],
+      "exit": 0,
+      "seconds": 2.73
+    },
+    {
+      "name": "pac-fetch-bounds",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "pac-fetch-bounds"
+      ],
+      "exit": 0,
+      "seconds": 0.08
+    },
+    {
+      "name": "bounded-writers",
+      "command": [
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-sim",
+        "bounded-writers"
+      ],
+      "exit": 0,
+      "seconds": 0.52
+    },
+    {
+      "name": "dns-shutdown",
+      "command": [
+        "python3",
+        "scripts/test-dns-shutdown.py",
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-dns"
+      ],
+      "exit": 0,
+      "seconds": 0.66
+    },
+    {
+      "name": "status-stream",
+      "command": [
+        "python3",
+        "scripts/test-status-stream.py",
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/out/Products/Debug/pm-proxy"
+      ],
+      "exit": 0,
+      "seconds": 1.8
+    }
+  ]
+}

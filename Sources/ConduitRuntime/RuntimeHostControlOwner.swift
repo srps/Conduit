@@ -265,14 +265,14 @@ extension RuntimeHost: ControlCommandOwner {
         }
         switch admission {
         case .stop(let stop, let module):
-            Task { @MainActor [self] in
+            Task { [self] in
                 let outcome = await runAdmittedStop(stop)
                 report.settled(controlOutcome(of: outcome, module: module, dnsWrite: stop.facts.dnsWrite))
                 report.quiesced()
                 onControlStateChange?()
             }
         case .launchAtLogin(let enabled, let baseline, let request):
-            Task { @MainActor [self] in
+            Task { [self] in
                 defer { pendingAdmissions -= 1 }
                 let outcome = await workflow.commitLaunchAtLogin(enabled, expecting: baseline, requestID: request)
                 emitConfigurationEvents(outcome.events)
@@ -283,7 +283,7 @@ extension RuntimeHost: ControlCommandOwner {
         case .quit(let work, let window):
             // Settled at the first of the quit's end and its deadline; quiesced only when its work has ended, so the operation keeps its
             // capacity, and the host the root, while a late teardown or write still runs.
-            Task { @MainActor [self] in
+            Task { [self] in
                 report.settled(await window.settled() ? completed(.quit) : .failed(.cleanupIncomplete))
                 onControlStateChange?()
                 await work.value
@@ -291,7 +291,7 @@ extension RuntimeHost: ControlCommandOwner {
                 onControlStateChange?()
             }
         case .dnsProbe(let port):
-            Task { @MainActor [self] in
+            Task { [self] in
                 let outcome: ControlOperationOutcome
                 // A port that cannot be named on the wire, as an unbound forwarder configured on port 0, has nothing to probe.
                 if let wirePort = try? ControlPort(port) {
@@ -312,7 +312,7 @@ extension RuntimeHost: ControlCommandOwner {
                 onControlStateChange?()
             }
         case .start(let start, let request):
-            Task { @MainActor [self] in
+            Task { [self] in
                 report.settled(await settleAdmittedStart(start, requestID: request, reportsPrior: true))
                 report.quiesced()
                 onControlStateChange?()
@@ -321,7 +321,7 @@ extension RuntimeHost: ControlCommandOwner {
             // The pass is joined in this launch turn. Quiesced when it ends: the read may outlast the quit, and the operation keeps its
             // capacity, and its pending count, until then.
             let pass = preflightPass()
-            Task { @MainActor [self] in
+            Task { [self] in
                 defer { pendingAdmissions -= 1 }
                 report.settled(await pass.value)
                 report.quiesced()
@@ -335,7 +335,7 @@ extension RuntimeHost: ControlCommandOwner {
             report.quiesced()
             onControlStateChange?()
         case .reload(let captured, let request):
-            Task { @MainActor [self] in
+            Task { [self] in
                 defer { pendingAdmissions -= 1 }
                 let decision = await performReload(capturedAt: captured, requestID: request)
                 report.settled(completed(.reload, result: .reload(Self.reloadResult(decision))))
@@ -504,7 +504,7 @@ extension RuntimeHost: ControlCommandOwner {
         let previous = dnsLivenessProbe?.answer
         let identity = UUID()
         let manager = systemDNSManager
-        let answer = Task { @MainActor [weak self] in
+        let answer = Task { [weak self] in
             _ = await previous?.value
             let answered = await withCheckedContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async { continuation.resume(returning: manager.probeLiveness(port: port)) }

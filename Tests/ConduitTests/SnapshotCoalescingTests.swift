@@ -48,7 +48,7 @@ final class SnapshotCoalescingTests: XCTestCase {
         }
 
         // Wait past the 100ms coalesce window plus generous slack for the
-        // dispatch timer to fire on the main queue.
+        // dispatch timer to fire and its flush to hop to the owner.
         try await Task.sleep(for: .milliseconds(250))
 
         let total = counter.withLockedValue { $0 }
@@ -175,6 +175,61 @@ final class SnapshotCoalescingTests: XCTestCase {
         let net = total - initial
         XCTAssertEqual(net, 2,
                        "Burst + immediate + burst must collapse to: 1 immediate + 1 coalesced flush = 2 emissions (got \(net)).")
+    }
+
+    // MARK: - Off-owner timer
+
+    /// The coalesce timer fires on a global queue and hops to the owner, so its hop can land after an immediate emission cancelled it
+    /// and a newer coalesced emission armed the next timer. That stale hop must flush nothing and leave the newer timer alone.
+    ///
+    /// The order is the main queue's own. One main block arms the first timer, queues the block that emits and re-arms, and then holds
+    /// main past the first timer's window, so that timer fires on its global queue and its hop queues behind the re-arm block. The
+    /// probe block is queued only after the holding block ends. The log is the witness: nothing emits between the re-arm and the probe,
+    /// and the newer timer flushes once afterwards. A hop that flushed regardless of its generation would emit before the probe. Main
+    /// is the owner here; once the owner leaves main, this witness needs the owner's own ordering instead.
+    func testAStaleCoalesceHopAfterAnImmediateEmitAndRearmFlushesNothingEarly() async throws {
+        let log = LockedLog<String>()
+        let orchestrator = await MainActor.run { () -> ProxyOrchestrator in
+            var config = ProxyConfig.testFixture()
+            config.upstreams = []
+            let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
+            orchestrator.onSnapshotChange = { _ in log.append("emit") }
+            return orchestrator
+        }
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    orchestrator.triggerCoalescedSnapshotEmitForTesting()
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            orchestrator.mutateSnapshotForTesting { $0.runtimeStatus.lastHealthSummary = "immediate" }
+                            log.append("rearmed")
+                            orchestrator.triggerCoalescedSnapshotEmitForTesting()
+                        }
+                    }
+                    // Past the first timer's 100 ms window, so its hop queues behind the re-arm block.
+                    _ = DispatchSemaphore(value: 0).wait(timeout: .now() + .milliseconds(400))
+                    log.append("held")
+                }
+                continuation.resume()
+            }
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async {
+                log.append("probe")
+                continuation.resume()
+            }
+        }
+        XCTAssertEqual(log.values, ["emit", "held", "emit", "rearmed", "probe"], "the stale hop flushed nothing early")
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while log.values.count < 6, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(log.values, ["emit", "held", "emit", "rearmed", "probe", "emit"], "the newer timer flushed once, after the probe")
+        withExtendedLifetime(orchestrator) {}
     }
 
     // MARK: - Helpers

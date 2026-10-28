@@ -56,7 +56,8 @@ package typealias RuntimeVPNStatusMonitorFactory = @Sendable (
 /// Every field is required. A caller names each adapter, so no production adapter is chosen by
 /// omitting an argument. Production selects the real adapters in `ConduitDaemon`. Simulator and
 /// test assembly select fakes and owned scratch paths. Pure limits and schedules are not here.
-package struct RuntimeHostEffects {
+/// Sendable, so a composition may hand it to the host's isolation.
+package struct RuntimeHostEffects: Sendable {
     /// Builds the privilege adapters over the caller's event sink.
     package let privilege: RuntimePrivilegeAdaptersFactory
     /// The saved-password store. Production is the login Keychain.

@@ -32,7 +32,7 @@ final class PhysicalLifecycle {
 
     /// Runs a whole start admitted at `epoch` as the joinable completion, and returns or throws its own result.
     func runStart(epoch: Int, _ body: @escaping @MainActor () async throws -> Void) async throws {
-        let completion = Task<Void, Error> { @MainActor in try await body() }
+        let completion = Task<Void, Error> { try await body() }
         start = (epoch, completion)
         defer { if self.start?.completion == completion { self.start = nil } }
         try await completion.value
@@ -60,7 +60,7 @@ final class PhysicalLifecycle {
             _ = await active.result
         }
         guard isCurrent(epoch) else { return false }
-        let effect = Task<Void, Error> { @MainActor in
+        let effect = Task<Void, Error> {
             defer { self.active = nil }
             try await body()
         }

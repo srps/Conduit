@@ -1002,7 +1002,7 @@ extension RuntimeHost {
         let flush = deadline.map { RuntimeQuitFlush(until: $0, admitting: parts, workflow: workflow) }
         quitFlush = flush
         stoppedEffectsJoin?.finish(.superseded)
-        let quit = Task { @MainActor [self] in
+        let quit = Task { [self] in
             defer { pendingAdmissions -= 1 }
             await awaitLaunchRecovery()
             guard case .run(let stop) = beginLanes(Self.allModules, kind: .stop, operation: .runtimeStop,

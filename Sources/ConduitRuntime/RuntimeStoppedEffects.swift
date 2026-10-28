@@ -46,7 +46,7 @@ final class StoppedEffectsJoin {
 
     /// Arms the caller's deadline. The deadline ends only the caller's wait, not the join.
     func armDeadline(_ deadline: ContinuousClock.Instant) {
-        timer = Task { @MainActor [weak self] in
+        timer = Task { [weak self] in
             do {
                 try await Task.sleep(until: deadline, clock: .continuous)
             } catch {

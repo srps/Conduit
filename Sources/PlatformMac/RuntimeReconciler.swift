@@ -239,7 +239,7 @@ package final class RuntimeReconciler {
         guard worker != nil || surfacesOwed != nil || lags(config: new, platformConfig: newPlatform) else { return }
         pending = PassRequest(config: new, platformConfig: newPlatform, isCurrent: isCurrent)
         guard worker == nil else { return }
-        worker = Task { @MainActor in await self.work() }
+        worker = Task { await self.work() }
     }
 
     /// Takes the pending request and runs it, then whatever arrived meanwhile, until none is left. The worker is released in the same turn
@@ -320,7 +320,7 @@ package final class RuntimeReconciler {
     /// Runs one effect and holds its handle while it runs, so quiescence can wait on it. The handle is the only effect state there is: one
     /// effect runs at a time, because only the worker starts one.
     private func runEffect(_ body: @escaping @MainActor () async -> Void) async {
-        let effect = Task { @MainActor in await body() }
+        let effect = Task { await body() }
         activeEffect = effect
         await effect.value
         activeEffect = nil

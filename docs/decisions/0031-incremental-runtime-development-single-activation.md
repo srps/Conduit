@@ -263,3 +263,6 @@ Subsystem actors or broad module splits still require measured contention or
 dependency evidence. Revisit activation sequencing only if a demonstrated
 compatibility need outweighs temporary capabilities, with a concrete ownership
 and deletion plan for owner review.
+
+
+The [isolation preparation checkpoint](../verification-runtime-actor-preparation-2026-10-28.md) makes callback/effect contracts Sendable, preserves bounded generation-checked timer hops and moves launch recovery onto the existing physical worker. Review also fixes observer restart (#260). The control cluster still runs on MainActor; this is a prerequisite rather than completion of the selected whole RuntimeActor move. A2 focused normal/scoped-strict checks pass; independent review and its complete workflow remain pending at this checkpoint.

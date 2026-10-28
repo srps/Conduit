@@ -4,11 +4,14 @@ import NIOConcurrencyHelpers
 import XCTest
 import PlatformMac
 
-/// `AppState.init` and `DaemonRuntimeHost.init` are `@MainActor`, and the two
-/// `restoreIfNeeded` calls each starts block on a 2 s DNS probe and on several
+/// The shared host builds its launch recovery in its `@MainActor` initialiser, and
+/// the two `restoreIfNeeded` calls it starts block on a 2 s DNS probe and on several
 /// `networksetup` subprocesses per network service. These pin the two halves of
-/// the seam that keeps that off the main actor without losing its ordering.
+/// the seam that keeps that off the main actor without losing its ordering, and
+/// the worker it runs on.
 final class LaunchRecoveryTests: XCTestCase {
+    private static let workLabel = "io.github.srps.Conduit.launch-recovery-tests.platform-work"
+    private let work = PlatformWork(label: LaunchRecoveryTests.workLabel)
 
     /// The freeze. Run inline from a `@MainActor` initialiser, launch-time
     /// recovery is seconds of an app that is on screen nowhere and answering
@@ -17,7 +20,7 @@ final class LaunchRecoveryTests: XCTestCase {
     func testRecoveryDoesNotRunOnTheMainThread() async {
         let ranOnMainThread = NIOLockedValueBox(true)
 
-        let recovery = LaunchRecovery {
+        let recovery = LaunchRecovery(on: work) {
             ranOnMainThread.withLockedValue { $0 = Thread.isMainThread }
         }
         await recovery.join()
@@ -29,6 +32,22 @@ final class LaunchRecoveryTests: XCTestCase {
         )
     }
 
+    /// Nor on the concurrency pool, where seconds of blocking take a thread from every task and actor: it runs on the worker it is
+    /// given, which for the host is its one platform queue.
+    @MainActor
+    func testRecoveryRunsOnTheGivenWorkerAndNotOnThePool() async {
+        let label = NIOLockedValueBox("")
+
+        let recovery = LaunchRecovery(on: work) {
+            label.withLockedValue { $0 = HeldCall.currentQueueLabel() }
+        }
+        await recovery.join()
+
+        let ranOn = label.withLockedValue { $0 }
+        XCTAssertEqual(ranOn, Self.workLabel)
+        XCTAssertFalse(HeldCall.isCooperativePool(ranOn), "launch recovery ran on \(ranOn)")
+    }
+
     /// The other half. Recovery restores the *previous* session's settings, so
     /// a `startProxy` that overtook it would have its own settings restored
     /// away — moving the work off the main actor may not also make it unordered.
@@ -36,7 +55,7 @@ final class LaunchRecoveryTests: XCTestCase {
     func testJoinReturnsOnlyAfterRecoveryHasFinished() async {
         let finished = NIOLockedValueBox(false)
 
-        let recovery = LaunchRecovery {
+        let recovery = LaunchRecovery(on: work) {
             Thread.sleep(forTimeInterval: 0.1)
             finished.withLockedValue { $0 = true }
         }
@@ -48,16 +67,14 @@ final class LaunchRecoveryTests: XCTestCase {
         )
     }
 
-    /// `awaitLaunchRecovery()` sits at the head of the app's `startProxy`,
-    /// `stopProxy`, `startDNS` and `stopDNS` and of the daemon's
-    /// `startRuntime`, `stopRuntime` and `reloadConfiguration`, so it is
-    /// called on every lifecycle transition for the life of the process, not
-    /// once.
+    /// `awaitLaunchRecovery()` sits at the head of the host's Start, Stop,
+    /// reload and readiness paths, so it is called on every lifecycle
+    /// transition for the life of the process, not once.
     @MainActor
     func testJoinIsIdempotentAndRunsTheWorkOnce() async {
         let runs = NIOLockedValueBox(0)
 
-        let recovery = LaunchRecovery {
+        let recovery = LaunchRecovery(on: work) {
             runs.withLockedValue { $0 += 1 }
         }
         await recovery.join()
