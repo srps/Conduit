@@ -18,7 +18,7 @@
   - `bytesArrived.succeed` per read;
   - the teardown `fail`s;
   - `awaitSignal`'s timeout failing a promise that is then failed again.
-  
+
   Calls from another thread are executed on the promise's own loop, which is still running until `tearDown`.
 - **No unbounded wait:**
   - Each `awaitSignal` is limited to 5 s by a task scheduled on the promise's loop and cancelled in `defer`. The three waits run one after another, each bounded.
