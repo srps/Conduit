@@ -6,8 +6,7 @@ import XCTest
 @testable import PlatformMac
 @testable import ProxyKernel
 
-/// Production-path integration tests that exercise the real TunnelForwarder,
-/// not the test-only handler replica used in ProxiedTunnelTests.
+/// Production-path integration tests that exercise the real TunnelForwarder.
 final class TunnelForwarderTests: XCTestCase {
 
     private var group: MultiThreadedEventLoopGroup!
@@ -17,7 +16,7 @@ final class TunnelForwarderTests: XCTestCase {
     }
 
     override func tearDown() {
-        try? group.syncShutdownGracefully()
+        XCTAssertNoThrow(try group.syncShutdownGracefully(), "The event loop group should shut down cleanly")
     }
 
     /// Polls `condition` until it holds or `timeout` passes; the caller's
@@ -145,6 +144,219 @@ final class TunnelForwarderTests: XCTestCase {
         await forwarder.stop()
         try await targetServer.close().get()
         try await mockProxy.close().get()
+    }
+
+    // MARK: - A wire protocol through a proxied tunnel
+
+    /// A MongoDB OP_MSG crosses the production proxied tunnel bit for bit, and the real handler logs the protocol it
+    /// detected. The mock proxy holds its dial to the target until that log appears: the handler logs on its first client
+    /// read, while CONNECT is still pending, so the log does not show that any byte reached the target. The test waits for
+    /// the bytes themselves. Teardown joins the mock's dials before the group shuts down, on every path, because
+    /// `forwarder.stop()` closes only the listeners and does not wait for a pending CONNECT.
+    @MainActor
+    func testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol() async throws {
+        let message = Self.buildMongoDBOpMsg()
+        let loop = group.next()
+        let detectionLogged = loop.makePromise(of: Void.self)
+        let logger = TunnelLogSignal(marker: "detected MongoDB wire protocol", signal: detectionLogged)
+        let received = NIOLockedValueBox<[UInt8]>([])
+        let bytesArrived = loop.makePromise(of: Void.self)
+        let dials = MockProxyDials(eventLoop: loop)
+        var target: Channel?
+        var proxy: Channel?
+        var client: Channel?
+        var pool: ConnectionPool?
+        var forwarder: TunnelForwarder?
+        var failure: Error?
+
+        do {
+            let targetServer = try await MockTCPEchoServer.start(group: group, onReceive: { buffer in
+                let count = received.withLockedValue { bytes in
+                    bytes += buffer.getBytes(at: buffer.readerIndex, length: buffer.readableBytes) ?? []
+                    return bytes.count
+                }
+                if count >= message.count { bytesArrived.succeed(()) }
+            })
+            target = targetServer
+            let mockProxy = try await MockConnectProxy.start(group: group, dials: dials)
+            proxy = mockProxy
+
+            let proxyPort = try XCTUnwrap(mockProxy.localAddress?.port)
+            var config = ProxyConfig.testFixture()
+            config.upstreams = [UpstreamProxy(name: "mock", host: "127.0.0.1", port: proxyPort, priority: 0)]
+            let fixedConfig = config
+            let tunnelPool = ConnectionPool(
+                group: group, logger: logger, configProvider: { fixedConfig }, authenticatorProvider: { _ in StubAuthenticator() }
+            )
+            pool = tunnelPool
+            let coordinator = CONNECTCoordinator(pool: tunnelPool, authenticatorProvider: { _ in StubAuthenticator() }, logger: logger)
+            let tunnelForwarder = TunnelForwarder(group: group, connectCoordinator: coordinator, connectionPool: tunnelPool, logger: logger)
+            forwarder = tunnelForwarder
+            let targetPort = try XCTUnwrap(targetServer.localAddress?.port)
+            let result = await tunnelForwarder.start(
+                tunnels: [TunnelDefinition(localPort: 0, remoteHost: "127.0.0.1", remotePort: targetPort, enabled: true, proxied: true, label: "mongodb-e2e")],
+                listenHost: "127.0.0.1"
+            )
+            XCTAssertEqual(result.started, 1, "One proxied tunnel should have started")
+            let tunnelPort = try XCTUnwrap(result.boundPorts.first)
+
+            let tunnelClient = try await ClientBootstrap(group: group)
+                .connectTimeout(.seconds(5))
+                .connect(host: "127.0.0.1", port: tunnelPort)
+                .get()
+            client = tunnelClient
+            var sendBuf = tunnelClient.allocator.buffer(capacity: message.count)
+            sendBuf.writeBytes(message)
+            try await tunnelClient.writeAndFlush(sendBuf).get()
+
+            // The handler has read and classified the OP_MSG while the mock still holds the CONNECT's dial to the target.
+            try await Self.awaitSignal(detectionLogged, "the detection log")
+            try await Self.awaitSignal(dials.requested, "the mock proxy's dial request")
+            XCTAssertEqual(received.withLockedValue { $0 }, [], "No byte may reach the target while its dial is held")
+
+            dials.release()
+            try await Self.awaitSignal(bytesArrived, "the OP_MSG at the target")
+            let bytes = received.withLockedValue { $0 }
+            XCTAssertEqual(bytes, message, "Wire protocol bytes should be bit-identical")
+            var relayed = ByteBufferAllocator().buffer(capacity: bytes.count)
+            relayed.writeBytes(bytes)
+            XCTAssertEqual(ProtocolDetector.detect(relayed), .mongodb, "Protocol detector should identify MongoDB from the relayed bytes")
+            let detections = logger.recording.entries().filter { $0.category == .tunnel && $0.message.contains("detected MongoDB wire protocol") }
+            XCTAssertEqual(detections.map(\.message), ["Proxied tunnel mongodb-e2e: detected MongoDB wire protocol."])
+            XCTAssertEqual(detections.map(\.level), [.info])
+        } catch {
+            failure = error
+        }
+
+        // Teardown on every path leaves no dial in flight when the group shuts down: the client first, then the listeners,
+        // then the mock's dials (any still held end without dialing), then the servers.
+        var cleanupFailures: [String] = []
+        if let failed = await Self.closeFailure(client, "the client") { cleanupFailures.append(failed) }
+        await forwarder?.stop()
+        cleanupFailures += await dials.join()
+        if let failed = await Self.closeFailure(proxy, "the mock proxy") { cleanupFailures.append(failed) }
+        if let failed = await Self.closeFailure(target, "the target") { cleanupFailures.append(failed) }
+        pool?.closeAll()
+        // A signal never seen must still complete, so no promise outlives the test unfulfilled.
+        detectionLogged.fail(TestEnded())
+        bytesArrived.fail(TestEnded())
+        for failed in cleanupFailures {
+            XCTFail("Cleanup failed: \(failed)")
+        }
+        if let failure { throw failure }
+    }
+
+    /// Once joined, the mock proxy's dial record admits no dial, whether or not it was released: a CONNECT that reached the
+    /// mock after teardown's join would otherwise start a dial that nothing waits for. The connect closure never touches the
+    /// network; it counts its calls and fails at once.
+    func testJoinedMockProxyDialsAdmitNoLaterDial() async {
+        let loop = group.next()
+        let connects = NIOLockedValueBox(0)
+        let connect: @Sendable () -> EventLoopFuture<Channel> = {
+            connects.withLockedValue { $0 += 1 }
+            return loop.makeFailedFuture(UnexpectedConnect())
+        }
+
+        // Released before the join: the gate has succeeded, so only the closed record can refuse.
+        let released = MockProxyDials(eventLoop: loop)
+        released.release()
+        let releasedFailures = await released.join()
+        XCTAssertEqual(releasedFailures, [])
+        let afterRelease = await Self.lateDialOutcome(released.dial(connect))
+        XCTAssertNil(afterRelease, "A joined record must refuse a dial after its release")
+
+        // Never released: the gate has failed as well.
+        let held = MockProxyDials(eventLoop: loop)
+        let heldFailures = await held.join()
+        XCTAssertEqual(heldFailures, [])
+        let whileHeld = await Self.lateDialOutcome(held.dial(connect))
+        XCTAssertNil(whileHeld, "A joined record must refuse a dial that was never released")
+
+        XCTAssertEqual(connects.withLockedValue { $0 }, 0, "No connect may start after the join")
+    }
+
+    /// The connect a test expected never to run.
+    private struct UnexpectedConnect: Error {}
+
+    /// Waits for a dial the record should have refused, and says how it ended; nil means it was refused.
+    private static func lateDialOutcome(_ dial: EventLoopFuture<Channel>?) async -> String? {
+        guard let dial else { return nil }
+        do {
+            let channel = try await dial.get()
+            return "admitted and connected to \(String(describing: channel.remoteAddress))"
+        } catch {
+            return "admitted, then failed with \(error)"
+        }
+    }
+
+    /// A promise a test still held when it ended.
+    private struct TestEnded: Error {}
+
+    /// A signal the test waited for that did not arrive.
+    private struct MissingSignal: Error, CustomStringConvertible {
+        let signal: String
+        var description: String { "\(signal) did not arrive within five seconds" }
+    }
+
+    /// Waits for `promise`, failing it after five seconds so a missing signal fails the test instead of hanging it.
+    private static func awaitSignal(_ promise: EventLoopPromise<Void>, _ signal: String) async throws {
+        let timeout = promise.futureResult.eventLoop.scheduleTask(in: .seconds(5)) {
+            promise.fail(MissingSignal(signal: signal))
+        }
+        defer { timeout.cancel() }
+        try await promise.futureResult.get()
+    }
+
+    /// Closes `channel` and describes any failure. A channel its peer already closed is not a failure.
+    private static func closeFailure(_ channel: Channel?, _ name: String) async -> String? {
+        guard let channel else { return nil }
+        do {
+            try await channel.close().get()
+            return nil
+        } catch ChannelError.alreadyClosed {
+            return nil
+        } catch {
+            return "closing \(name): \(error)"
+        }
+    }
+
+    /// A minimal MongoDB OP_MSG (opcode 2013) whose body section holds `{ "hello": 1 }`.
+    static func buildMongoDBOpMsg() -> [UInt8] {
+        // Header: messageLength(4 LE) + requestID(4) + responseTo(4) + opCode(4 LE)
+        // Body section: flagBits(4) + section kind(1) + BSON document
+        let bson = Self.minimalBSON()
+        let flagBits: [UInt8] = [0x00, 0x00, 0x00, 0x00]
+        let sectionKind: [UInt8] = [0x00]  // kind 0 = body
+
+        let headerSize = 16
+        let payloadSize = flagBits.count + sectionKind.count + bson.count
+        let messageLength = Int32(headerSize + payloadSize)
+
+        var bytes: [UInt8] = []
+        bytes.append(contentsOf: withUnsafeBytes(of: messageLength.littleEndian) { Array($0) })
+        bytes.append(contentsOf: withUnsafeBytes(of: Int32(1).littleEndian) { Array($0) })   // requestID
+        bytes.append(contentsOf: withUnsafeBytes(of: Int32(0).littleEndian) { Array($0) })   // responseTo
+        bytes.append(contentsOf: withUnsafeBytes(of: Int32(2013).littleEndian) { Array($0) }) // OP_MSG
+        bytes.append(contentsOf: flagBits)
+        bytes.append(contentsOf: sectionKind)
+        bytes.append(contentsOf: bson)
+        return bytes
+    }
+
+    /// The BSON document `{ "hello": 1 }`.
+    static func minimalBSON() -> [UInt8] {
+        // BSON: length(4 LE) + elements + 0x00 terminator
+        // Element: type(1) + cstring name + value
+        // int32 type = 0x10, value = 1
+        let name = Array("hello\0".utf8)
+        let value = withUnsafeBytes(of: Int32(1).littleEndian) { Array($0) }
+        let elements: [UInt8] = [0x10] + [UInt8](name) + value
+        let docLength = Int32(4 + elements.count + 1) // 4 for length, 1 for terminator
+        var doc: [UInt8] = []
+        doc.append(contentsOf: withUnsafeBytes(of: docLength.littleEndian) { Array($0) })
+        doc.append(contentsOf: elements)
+        doc.append(0x00) // terminator
+        return doc
     }
 
     // MARK: - Server-first bytes through a proxied tunnel
@@ -544,7 +756,7 @@ final class TunnelForwarderTests: XCTestCase {
     }
 }
 
-// MARK: - Shared test helpers (reused from ProxiedTunnelTests)
+// MARK: - Test helpers
 
 private enum MockTCPEchoServer {
     static func start(
@@ -577,11 +789,12 @@ private enum MockTCPEchoServer {
 }
 
 private enum MockConnectProxy {
-    static func start(group: EventLoopGroup) async throws -> Channel {
+    /// Without `dials`, each CONNECT dials its target at once and nothing records the dial.
+    static func start(group: EventLoopGroup, dials: MockProxyDials? = nil) async throws -> Channel {
         try await ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandler(ConnectHandler(group: group))
+                channel.pipeline.addHandler(ConnectHandler(group: group, dials: dials))
             }
             .bind(host: "127.0.0.1", port: 0)
             .get()
@@ -591,11 +804,15 @@ private enum MockConnectProxy {
         typealias InboundIn = ByteBuffer
 
         private let group: EventLoopGroup
+        private let dials: MockProxyDials?
         private var accumulated = ByteBufferAllocator().buffer(capacity: 4096)
         private var upstream: Channel?
         private var tunnelEstablished = false
 
-        init(group: EventLoopGroup) { self.group = group }
+        init(group: EventLoopGroup, dials: MockProxyDials?) {
+            self.group = group
+            self.dials = dials
+        }
 
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             if tunnelEstablished {
@@ -626,13 +843,27 @@ private enum MockConnectProxy {
                 return
             }
             let host = String(hostPort[0])
+            let group = self.group
+            let connect: @Sendable () -> EventLoopFuture<Channel> = {
+                ClientBootstrap(group: group)
+                    .connectTimeout(.seconds(5))
+                    .connect(host: host, port: port)
+            }
+            let dial: EventLoopFuture<Channel>
+            if let dials {
+                guard let recorded = dials.dial(connect) else {
+                    context.close(promise: nil)
+                    return
+                }
+                dial = recorded
+            } else {
+                dial = connect()
+            }
             nonisolated(unsafe) let ctx = context
             let clientEL = context.eventLoop
             let clientChannel = context.channel
 
-            ClientBootstrap(group: group)
-                .connectTimeout(.seconds(5))
-                .connect(host: host, port: port)
+            dial
                 .hop(to: clientEL)
                 .whenComplete { result in
                     switch result {
@@ -679,6 +910,91 @@ private enum MockConnectProxy {
             peer.close(mode: .all, promise: nil)
             context.fireChannelInactive()
         }
+    }
+}
+
+/// The mock proxy's dials to its CONNECT targets, recorded so a test can join them before its group shuts down. Each dial
+/// starts only after `release()`, which lets a test hold a tunnel between the forwarder's CONNECT and the target. The record
+/// has a fixed capacity and closes when joined; the mock refuses a CONNECT it does not admit.
+private final class MockProxyDials: Sendable {
+    static let capacity = 4
+
+    /// Succeeds when the mock first asks to dial.
+    let requested: EventLoopPromise<Void>
+    private let gate: EventLoopPromise<Void>
+    /// One lock covers admission and the list, so no dial is admitted after `join()` takes its snapshot.
+    private let record = NIOLockedValueBox(Record())
+
+    private struct Record {
+        var closed = false
+        var dials: [EventLoopFuture<Channel>] = []
+    }
+
+    /// The gate's failure when a test ends without releasing it: the held dial never starts.
+    private struct NeverReleased: Error {}
+
+    init(eventLoop: EventLoop) {
+        requested = eventLoop.makePromise()
+        gate = eventLoop.makePromise()
+    }
+
+    /// Records a dial that runs `connect` once the dials are released, or returns nil when the record is full or joined.
+    func dial(_ connect: @escaping @Sendable () -> EventLoopFuture<Channel>) -> EventLoopFuture<Channel>? {
+        let dial: EventLoopFuture<Channel>? = record.withLockedValue { record in
+            guard !record.closed, record.dials.count < Self.capacity else { return nil }
+            let dial = gate.futureResult.flatMap { connect() }
+            record.dials.append(dial)
+            return dial
+        }
+        if dial != nil { requested.succeed(()) }
+        return dial
+    }
+
+    func release() {
+        gate.succeed(())
+    }
+
+    /// Closes the record, ends any dial still held without starting it, then waits for every recorded dial to finish. It
+    /// describes each dial that failed for another reason. Once closed, the record admits no dial, released or not. A
+    /// connected dial's channel belongs to the mock, which closes it with its peer.
+    func join() async -> [String] {
+        let dials = record.withLockedValue { record in
+            record.closed = true
+            return record.dials
+        }
+        gate.fail(NeverReleased())
+        requested.fail(NeverReleased())
+        var failures: [String] = []
+        for dial in dials {
+            do {
+                _ = try await dial.get()
+            } catch is NeverReleased {
+                continue
+            } catch {
+                failures.append("a mock proxy dial failed: \(error)")
+            }
+        }
+        return failures
+    }
+}
+
+/// Records every entry, and succeeds `signal` on the first tunnel entry that contains `marker`, so a test can wait for a
+/// log line without polling.
+private final class TunnelLogSignal: LogSink {
+    let recording = RecordingLogSink(minLevel: .debug)
+    private let marker: String
+    private let signal: EventLoopPromise<Void>
+
+    init(marker: String, signal: EventLoopPromise<Void>) {
+        self.marker = marker
+        self.signal = signal
+    }
+
+    var minLevel: LogLevel { recording.minLevel }
+
+    func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
+        recording.logImpl(level, message, category: category)
+        if category == .tunnel, message.contains(marker) { signal.succeed(()) }
     }
 }
 
