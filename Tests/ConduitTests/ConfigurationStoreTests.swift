@@ -1257,10 +1257,10 @@ final class ConfigurationStoreTests: XCTestCase {
                 var modelSource: Int?
                 var adoptedShows = true
                 /// The showMenuBarIcon a load adopts: the sidecar's own value, or the runtime file's legacy value when the sidecar is missing.
-                func loadedShows() -> Bool {
+                @RuntimeActor func loadedShows() -> Bool {
                     external == nil ? runtimeVariant != 1 : externalShows != false
                 }
-                func adoptModel() {
+                @RuntimeActor func adoptModel() {
                     let valueMoved = external == nil && adoptedShows != loadedShows()
                     if !adopted || latched || modelBaseline != external || valueMoved { modelVersion += 1 }
                     if adopted, !latched, modelBaseline == external, valueMoved { valueMovedReloads += 1 }
