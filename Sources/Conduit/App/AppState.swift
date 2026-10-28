@@ -298,16 +298,21 @@ final class AppState: ObservableObject {
         let observer = RuntimeObserver(control: clients.control, presentation: runtime, incarnation: incarnation, rowBudget: rowBudget)
         self.observer = observer
         guard let seeded = seed(observation) else { return refuseUnlessQuitting() }
+        // Weak: the session's operation in flight and the observer's tasks can outlive the app, after a quit whose total ended first, and
+        // must never reach it then. With the app gone the session reads no draft and makes none up, so it starts nothing.
         editor = RuntimeEditorSession(
             control: clients.control, editor: clients.editor, observer: observer, incarnation: incarnation, ledger: seeded,
-            drafts: { [unowned self] in (self.config, self.platformConfig, self.appPreferences) },
-            moduleIntents: { [unowned self] holdApply in self.settingsModuleIntents(holdApply: holdApply) },
-            report: { [unowned self] report in self.handle(report) }
+            drafts: { [weak self] in
+                guard let self else { return nil }
+                return (self.config, self.platformConfig, self.appPreferences)
+            },
+            moduleIntents: { [weak self] holdApply in self?.settingsModuleIntents(holdApply: holdApply) },
+            report: { [weak self] report in self?.handle(report) }
         )
-        observer.onSnapshot = { [unowned self] snapshot in self.observed(snapshot) }
-        observer.onEvents = { [unowned self] events in self.observed(events) }
-        observer.onFailure = { [unowned self] reason in
-            self.logStore.log(.warning, "Runtime observation: \(reason).", category: .system)
+        observer.onSnapshot = { [weak self] snapshot in self?.observed(snapshot) }
+        observer.onEvents = { [weak self] events in self?.observed(events) }
+        observer.onFailure = { [logStore] reason in
+            logStore.log(.warning, "Runtime observation: \(reason).", category: .system)
         }
         runtime.onDemand = { [weak observer] in observer?.scheduleRefresh() }
         observer.start()

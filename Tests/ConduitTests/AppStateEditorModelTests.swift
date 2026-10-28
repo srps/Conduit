@@ -906,6 +906,109 @@ final class RuntimeEditorSessionChainTests: XCTestCase {
             self.harness = nil
         }
     }
+
+    /// The session's operation in flight outlives the app that owns the drafts, whose closures hold it weakly as `AppState.connect`'s do.
+    /// The save frozen before the app went is still sent and settled as frozen. A later trigger then reads no draft and makes none up,
+    /// asks for no module intent, sends nothing, and closes the session, so no write starts after it.
+    func testASaveFrozenBeforeTheOwnerWentSettlesAndALaterTriggerSendsNothingAndClosesTheSession() async throws {
+        let harness = try makeInteractiveHarness(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: false)
+        self.harness = harness
+        let host = try await harness.makeHost()
+        let composition = RuntimeControlComposition(
+            host: host, limits: try RuntimeServiceFixtures.hostLimits(subscribers: 2), timing: .system, scheduling: TaskOwnerScheduling()
+        )
+        let control = try makeFramedRuntimeClient(
+            transport: composition.transport, limits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
+        )
+        let held = HeldPrivateTransport(inner: composition.transport)
+        defer { held.release() }
+        let editorClient = PrivateEditorClient(transport: held)
+        let incarnation = try await control.readSnapshot(deadline: deadline()).stamp.incarnation
+        let reading = deadline()
+        guard case .observation(let observation) = try await editorClient.read(
+            requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: incarnation,
+            budget: try reading.wireBudget(at: .now, cappedAt: .seconds(30)), deadline: reading
+        ) else { return XCTFail("the editor read an observation") }
+        let values = try PrivateConfigurationBridge.makeValues(from: observation)
+        var owner: Drafts? = Drafts(values)
+        weak var released: Drafts?
+        released = owner
+        let original = values.config.health.checkInterval
+        let observer = RuntimeObserver(
+            control: control, presentation: RuntimePresentationAdapter(), incarnation: incarnation,
+            rowBudget: ControlRowBudget(maxRows: 10, maxBytes: 1_024)
+        )
+        self.observer = observer
+        observer.start()
+        var intentsAsked = 0
+        var submitted = 0
+        var settled: [ControlOperationOutcome] = []
+        let session = RuntimeEditorSession(
+            control: control, editor: editorClient, observer: observer, incarnation: incarnation,
+            ledger: RuntimeEditorLedger(
+                observation: observation, config: values.config, platform: values.platform, preferences: values.preferences
+            ),
+            drafts: { [weak owner] in
+                guard let owner else { return nil }
+                return (owner.config, owner.platform, owner.preferences)
+            },
+            moduleIntents: { [weak owner] _ in
+                intentsAsked += 1
+                return owner.map { _ in PrivateModuleSlots(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly) }
+            },
+            report: { report in
+                switch report {
+                case .submitted: submitted += 1
+                case .settled(_, let outcome): settled.append(outcome)
+                default: break
+                }
+            }
+        )
+
+        owner?.config.health.checkInterval = original + 7
+        session.edited(.configuration)
+        held.arm(.beforeSend)
+        session.save(.configuration)
+        await held.waitUntilHeld()
+        // The owner edits again, then goes, while the frozen save is held before its send.
+        owner?.config.health.checkInterval = original + 9
+        session.edited(.configuration)
+        owner = nil
+        XCTAssertNil(released, "the owner is gone while the session's operation is out")
+
+        held.release()
+        await session.settle()
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false).health.checkInterval, original + 7,
+                       "the save frozen before the owner went was sent as frozen")
+        guard settled.count == 1, case .configurationSettled(let receipt) = settled[0] else {
+            return XCTFail("the frozen save settled once: \(settled)")
+        }
+        XCTAssertTrue(receipt.runtime.write.isVerified && receipt.platform.write.isVerified)
+        XCTAssertTrue(session.ledger.isDirty(.configuration), "the later edit is unsaved, not dropped")
+        let runtimeBytes = try Data(contentsOf: harness.environment.configFile)
+        let platformBytes = try Data(contentsOf: harness.environment.platformConfigFile)
+
+        // A later trigger, as a pause's save or a snapshot's retry would be.
+        session.save(.configuration)
+        await session.settle()
+        XCTAssertEqual(intentsAsked, 1, "no intent was asked for, or made up, once the owner was gone")
+        XCTAssertEqual(submitted, 1, "nothing was submitted after the owner went")
+        XCTAssertEqual(settled.count, 1)
+        XCTAssertNil(session.ledger.active)
+        XCTAssertTrue(session.ledger.isDirty(.configuration))
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), runtimeBytes, "nothing was written")
+        XCTAssertEqual(try Data(contentsOf: harness.environment.platformConfigFile), platformBytes, "nothing was written")
+        // Closed: not even the administration the session admits only while idle starts.
+        XCTAssertFalse(session.setLaunchAtLogin(true))
+        session.save(.preferences)
+        XCTAssertTrue(session.isIdle)
+        XCTAssertEqual(submitted, 1)
+
+        observer.stop()
+        self.observer = nil
+        await harness.tearDown()
+        self.harness = nil
+    }
 }
 
 /// A fixed-seed generator, so the model's walks are the same on every run.

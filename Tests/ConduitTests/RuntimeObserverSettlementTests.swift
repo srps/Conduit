@@ -10,6 +10,7 @@ private final class FrameFeed: @unchecked Sendable {
     private let lock = NSLock()
     private var frames: [ControlRuntimeFrame] = []
     private var waiting: CheckedContinuation<ControlRuntimeFrame, Error>?
+    private var ends = 0
 
     func push(_ frame: ControlRuntimeFrame) {
         let resumed = lock.withLock { () -> CheckedContinuation<ControlRuntimeFrame, Error>? in
@@ -37,10 +38,14 @@ private final class FrameFeed: @unchecked Sendable {
     func end() {
         let resumed = lock.withLock { () -> CheckedContinuation<ControlRuntimeFrame, Error>? in
             defer { waiting = nil }
+            ends += 1
             return waiting
         }
         resumed?.resume(throwing: RuntimeClientError.readAborted(.cancelled))
     }
+
+    /// How many times the reader cancelled its subscription: once per read that returned.
+    var endCount: Int { lock.withLock { ends } }
 
     /// Whether every pushed frame was handed to the reader.
     var isDrained: Bool { lock.withLock { frames.isEmpty && waiting != nil } }
@@ -78,10 +83,51 @@ private final class LookupScript: @unchecked Sendable {
     }
 }
 
+/// One page read, held until the test fails it as a host shutting down fails it.
+private final class PageGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var held: CheckedContinuation<Void, Error>?
+    private var reached = false
+    private var reachedWaiter: CheckedContinuation<Void, Never>?
+
+    func read() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let waiter = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+                held = continuation
+                reached = true
+                defer { reachedWaiter = nil }
+                return reachedWaiter
+            }
+            waiter?.resume()
+        }
+    }
+
+    func waitUntilReached() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let already = lock.withLock { () -> Bool in
+                if reached { return true }
+                reachedWaiter = continuation
+                return false
+            }
+            if already { continuation.resume() }
+        }
+    }
+
+    func fail() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Error>? in
+            defer { held = nil }
+            return held
+        }
+        continuation?.resume(throwing: RuntimeClientError.notSent(.transportBusy))
+    }
+}
+
 /// A client whose lookups answer as the script says and whose one subscription delivers what the test pushes. Nothing else is called.
 private struct StubClient: RuntimeClient {
     let feed: FrameFeed
     var script = LookupScript()
+    /// Holds the page reads when set; otherwise each is answered unavailable at once.
+    var pages: PageGate?
 
     func submit(_ command: ControlRuntimeCommand, requestID: ControlRequestID, expectedIncarnation: ControlHostIncarnation,
                 deadline: RuntimeDeadline) async throws -> ControlAdmission { .rejected(.notImplemented) }
@@ -93,7 +139,8 @@ private struct StubClient: RuntimeClient {
         RuntimeSubscription(next: { [feed] _ in try await feed.next() }, cancel: { [feed] in feed.end() })
     }
     func readPage(_ request: ControlPageRequest, deadline: RuntimeDeadline) async throws -> ControlPageReply {
-        .unavailable(request.collection, .notCaptured, knownTotal: nil)
+        try await pages?.read()
+        return .unavailable(request.collection, .notCaptured, knownTotal: nil)
     }
     func readSnapshot(deadline: RuntimeDeadline) async throws -> ControlRuntimeSnapshot {
         throw RuntimeClientError.notSent(.transportBusy)
@@ -251,5 +298,79 @@ final class RuntimeObserverSettlementTests: XCTestCase {
         XCTAssertEqual(outcome, .failed(.effectFailed))
         XCTAssertEqual(presentation.observation, .live)
         observer.stop()
+    }
+
+    /// The quit stops the observer while its one read is still out, and this stub's read, like one a cancellation does not interrupt,
+    /// still returns a frame after the stop. That frame is dropped: the presentation stays ended rather than claiming live again, and no
+    /// callback runs, so nothing reaches an app the quit may already have released.
+    func testAFrameReturnedAfterStopReachesNeitherThePresentationNorTheCallbacks() async throws {
+        let late: [ControlRuntimeFrame] = [
+            .snapshot(try WireSnapshotFixture.snapshot(ProxyOrchestratorSnapshot())),
+            .events(try ControlEventBatch(
+                firstCursor: try XCTUnwrap(ControlEventCursor(rawValue: 1)),
+                events: [.known(ControlRuntimeEvent(timestamp: Date(timeIntervalSince1970: 1), kind: "proxy", event: "test.event"))]
+            )),
+        ]
+        for frame in late {
+            let feed = FrameFeed()
+            let presentation = RuntimePresentationAdapter()
+            let observer = RuntimeObserver(
+                control: StubClient(feed: feed), presentation: presentation,
+                incarnation: WireSnapshotFixture.incarnation, rowBudget: ControlRowBudget(maxRows: 10, maxBytes: 1_024)
+            )
+            var delivered = 0
+            observer.onSnapshot = { _ in delivered += 1 }
+            observer.onEvents = { _ in delivered += 1 }
+            observer.onFailure = { _ in delivered += 1 }
+            observer.start()
+            feed.push(.baseline(try ControlBaseline(
+                incarnation: WireSnapshotFixture.incarnation, snapshot: try WireSnapshotFixture.snapshot(ProxyOrchestratorSnapshot()),
+                highWater: ControlEventCursor(rawValue: 0)!, replay: .live
+            )))
+            // The reader applied the baseline and is waiting for the next frame.
+            for _ in 0..<2_000 where !feed.isDrained { try? await Task.sleep(for: .milliseconds(1)) }
+            XCTAssertTrue(feed.isDrained)
+            XCTAssertEqual(presentation.observation, .live)
+            XCTAssertEqual(delivered, 1, "the baseline's snapshot was handed on")
+
+            observer.stop()
+            XCTAssertEqual(presentation.observation, .ended)
+            feed.push(frame)
+            // The read returned and cancelled its subscription, as it does whether it drops the frame or hands it on.
+            for _ in 0..<2_000 where feed.endCount == 0 { try? await Task.sleep(for: .milliseconds(1)) }
+            XCTAssertEqual(feed.endCount, 1, "the read that was out when the observer stopped has returned")
+            XCTAssertEqual(delivered, 1, "nothing was handed on after the stop: \(frame)")
+            XCTAssertEqual(presentation.observation, .ended, "nothing claims the runtime after the stop: \(frame)")
+        }
+    }
+
+    /// A page read still out when the quit stops the observer, failed afterwards as a host shutting down fails it, ends with the
+    /// observation: it is not reported as a failure of it, so `onFailure` never runs for an app the quit may have released. The same read
+    /// failed while the observer runs is reported within the same bound, so the bound is long enough to see a callback that does come.
+    func testAPageReadFailedAfterStopIsNotReportedAndOneFailedBeforeItIs() async throws {
+        for stops in [false, true] {
+            let feed = FrameFeed()
+            let pages = PageGate()
+            let presentation = RuntimePresentationAdapter()
+            presentation.showing(.activeConnections, true)
+            let observer = RuntimeObserver(
+                control: StubClient(feed: feed, pages: pages), presentation: presentation,
+                incarnation: WireSnapshotFixture.incarnation, rowBudget: ControlRowBudget(maxRows: 10, maxBytes: 1_024)
+            )
+            var failures = 0
+            observer.onFailure = { _ in failures += 1 }
+            observer.start()
+            feed.push(.baseline(try ControlBaseline(
+                incarnation: WireSnapshotFixture.incarnation, snapshot: try WireSnapshotFixture.snapshot(ProxyOrchestratorSnapshot()),
+                highWater: ControlEventCursor(rawValue: 0)!, replay: .live
+            )))
+            // The baseline asked for the shown list, and its read is out.
+            await pages.waitUntilReached()
+            if stops { observer.stop() }
+            pages.fail()
+            for _ in 0..<500 where failures == 0 { try? await Task.sleep(for: .milliseconds(1)) }
+            XCTAssertEqual(failures, stops ? 0 : 1, stops ? "a read failed after the stop is not reported" : "a read failed while observing is")
+            observer.stop()
+        }
     }
 }

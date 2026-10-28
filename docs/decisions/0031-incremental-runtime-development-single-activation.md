@@ -190,8 +190,11 @@ only draft/receipt authority, and
 [`RuntimeObserver`](../../Sources/Conduit/App/RuntimeObserver.swift) owns bounded
 client observation. The [activation checkpoint](../verification-appstate-activation-2026-10-28.md)
 records focused tests, executed guard witnesses and independent source review,
-with full/native/release gates separate. This implementation is under verification
-and unreleased. The complete RuntimeActor move remains unimplemented, so this
+with full/native/release gates separate. A subsequent hosted lifetime crash exposed unsafe unowned UI callbacks. The
+internal client bridge now reads optional owner inputs before submission and
+uses weak UI callbacks; observer Stop fences late results. The checkpoint records
+the failure and corrected workflow evidence. This implementation is under
+verification and unreleased. The complete RuntimeActor move remains unimplemented, so this
 record's overall implementation status remains partial.
 
 ## Open questions

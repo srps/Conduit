@@ -1,0 +1,52 @@
+[
+  {
+    "file": "Sources/Conduit/App/RuntimeObserver.swift",
+    "filter": "RuntimeObserverSettlementTests.testAFrameReturnedAfterStopReachesNeitherThePresentationNorTheCallbacks|RuntimeObserverSettlementTests.testAPageReadFailedAfterStopIsNotReportedAndOneFailedBeforeItIs",
+    "mutations": [
+      {
+        "label": "post-stop-frame-delivery",
+        "old": "guard !ended else { return .cancelled }",
+        "new": "_ = ended"
+      },
+      {
+        "label": "post-stop-page-error",
+        "old": "// A read `stop` cancelled is the end of the observation, not a failure of it.\n                guard !ended else { return }",
+        "new": "// Mutation: report a failed page after stop too."
+      }
+    ]
+  },
+  {
+    "file": "Sources/Conduit/App/AppState.swift",
+    "filter": "AppStateHarnessTests.testAQuitAppIsReleasedAndLateObservationOrEditorWorkNeitherReachesItNorWrites",
+    "mutations": [
+      {
+        "label": "strong-ui-owner-cycle",
+        "old": "observer.onSnapshot = { [weak self] snapshot in self?.observed(snapshot) }",
+        "new": "observer.onSnapshot = { [self] snapshot in self.observed(snapshot) }"
+      }
+    ]
+  },
+  {
+    "file": "Sources/Conduit/App/RuntimeEditorSession.swift",
+    "filter": "RuntimeEditorSessionChainTests.testASaveFrozenBeforeTheOwnerWentSettlesAndALaterTriggerSendsNothingAndClosesTheSession",
+    "mutations": [
+      {
+        "label": "owner-gone-session-stays-open",
+        "old": "private func ownerGone() {\n        close()\n    }",
+        "new": "private func ownerGone() {\n    }"
+      }
+    ]
+  },
+  {
+    "file": "Sources/Conduit/App/AppState.swift",
+    "filter": "AppStateHarnessTests.testAQuitAppIsReleasedAndLateObservationOrEditorWorkNeitherReachesItNorWrites",
+    "expected_stop": "expected_unowned_trap",
+    "mutations": [
+      {
+        "label": "known-unowned-runtime-trap",
+        "old": "observer.onSnapshot = { [weak self] snapshot in self?.observed(snapshot) }",
+        "new": "observer.onSnapshot = { [unowned self] snapshot in self.observed(snapshot) }"
+      }
+    ]
+  }
+]

@@ -62,7 +62,8 @@ final class RuntimeObserver {
         pull = Task { @MainActor [weak self] in await self?.run() }
     }
 
-    /// Stops observing, after the runtime's quit. Nothing is claimed any more, and every caller is resolved unsettled.
+    /// Stops observing, after the runtime's quit. Nothing is claimed any more, and every caller is resolved unsettled. A frame or page
+    /// read still out when it stops is dropped when it returns: nothing reaches the presentation or the callbacks after this.
     func stop() {
         ended = true
         pull?.cancel()
@@ -171,6 +172,8 @@ final class RuntimeObserver {
             } catch {
                 return .lost
             }
+            // A read cancellation does not interrupt can still return a frame after `stop`.
+            guard !ended else { return .cancelled }
             switch frame {
             case .baseline(let baseline):
                 incarnation = baseline.incarnation
@@ -273,8 +276,11 @@ final class RuntimeObserver {
                     deadline: .after(Self.pullWindow, from: .now)
                 )
             } catch {
+                // A read `stop` cancelled is the end of the observation, not a failure of it.
+                guard !ended else { return }
                 return failed(kind, "the \(kind.rawValue) list could not be read (\(error))")
             }
+            guard !ended else { return }
             switch collector.add(reply) {
             case .next(let next):
                 cursor = next
