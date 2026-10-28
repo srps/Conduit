@@ -47,7 +47,21 @@ checked the immutable final patch and full workflow and found no confirmed
 remaining defect in phase 1a. Its snapshot fingerprint covers sources plus
 selected documents; the workflow fingerprint covers sources, tests, scripts,
 workflow and build resources. Both identify this frozen candidate by their
-recorded base and patch. Hosted actor checks and native acceptance remain pending.
+recorded base and patch. [Commit provenance](experiments/runtime-actor-flag-effects/commit-provenance.json)
+independently hashes the committed tree at `4696a62` to the exact workflow
+fingerprint. Hosted actor checks and native acceptance remain pending.
+
+## Sanitizer baseline
+
+The frozen final phase-1a snapshot additionally passes 192 lifecycle,
+reconciler and actual-control-owner tests under ThreadSanitizer, without
+suppressions or reported race warnings. The fresh test binary links the TSan
+runtime; [the command and provenance](experiments/runtime-actor-flag-effects/tsan-results.json),
+linkage and test summary are archived together. The initial sandbox-only attempt
+failed to open the compiler module cache before project compilation; its record
+is preserved separately. The authorized run exited zero. This single baseline
+does not close the older continuation investigation (#118), establish a soak,
+or verify the later actor change.
 
 ## Remaining prerequisites
 
