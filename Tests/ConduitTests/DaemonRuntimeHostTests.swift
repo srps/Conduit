@@ -3576,6 +3576,86 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
+    /// A reload's system DNS switch-on runs on the platform queue (#47). Held there, a DNS Stop is admitted; its teardown waits for the
+    /// action and its settlement, so the health timer the action arms is stopped by the Stop rather than left running past it, and the
+    /// Stop's restore lands after the apply.
+    func testADNSStopDuringAHeldSystemDNSSwitchOnLeavesNoHealthTimer() async throws {
+        let host = try await launch(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: true)
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running)
+        XCTAssertNil(host.dnsHealthTimer, "no timer while system DNS is not managed")
+
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.setDNSServers.rawValue }
+        let reload = Task { try await self.harness.flip(PlatformIntegrationConfig(manageSystemDNS: true), on: host) }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread, "the switch-on's helper call is off the main actor")
+        XCTAssertTrue(harness.machine.dnsRelayRunning, "the apply started the relay before the held write")
+        let stop = Task { await host.stopDNS() }
+        for _ in 0..<5_000 where host.lanes.dns.isIdle {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertFalse(host.lanes.dns.isIdle, "the DNS Stop took its lane while the action is held")
+        harness.hold.release()
+        try await reload.value
+        _ = await stop.value
+
+        XCTAssertTrue(host.completedPlatformBaseline.manageSystemDNS, "the switch-on landed at its save's value")
+        XCTAssertNil(host.dnsHealthTimer, "the Stop's teardown, after the action settled, stopped the timer it armed")
+        XCTAssertFalse(harness.machine.dnsRelayRunning, "the Stop's restore landed after the apply")
+        XCTAssertNotEqual(host.orchestrator.snapshot.dnsRunState, .running)
+    }
+
+    /// The resolver switch-on's entry write is queued with the VPN gate of its decision. Queued behind a held shell-environment drift pass,
+    /// which takes no resolver lock, a VPN drop is handled first and removes nothing. Released, the write lands from the stale gate; its
+    /// outcome is dropped as superseded, and the files are put where the gate is now, so no entry file outlives the tunnel.
+    func testAVPNDropWhileAResolverSwitchOnIsQueuedLeavesNoEntryFile() async throws {
+        let host = try await launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        XCTAssertTrue(host.splitDNSGate.entriesWanted)
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "the switch is off")
+
+        // The drift pass's first `launchctl getenv` holds the platform queue.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/bin/launchctl" && arguments.first == "getenv"
+        }
+        harness.locationObserver.emitSettingsChange()
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+        let reload = Task {
+            try await self.harness.flip(PlatformIntegrationConfig(manageEnvironmentVariables: true, manageDNSResolvers: true), on: host)
+        }
+        let events = host.orchestrator.eventLog
+        func decided() -> Bool {
+            events.events.contains { $0.event == "config.platform_integration" && $0.detail == "applyResolverEntries" }
+        }
+        // The decision is recorded in the turn the action's block is queued.
+        for _ in 0..<5_000 where !decided() {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(decided(), "the switch-on is queued behind the held pass")
+        harness.vpn.emit(.disconnected(reason: .userInitiated))
+        for _ in 0..<5_000 where host.splitDNSGate.entriesWanted {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertFalse(host.splitDNSGate.entriesWanted, "the drop was handled while the write is queued")
+        XCTAssertTrue(harness.machine.privilege.commands(matching: .applyDNS).isEmpty, "nothing was written yet")
+        harness.hold.release()
+        try await reload.value
+        await host.deliveries.drain()
+
+        XCTAssertFalse(harness.machine.privilege.commands(matching: .applyDNS).isEmpty, "the queued write landed from its stale gate")
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "and the files were put where the gate is now")
+        XCTAssertTrue(events.events.contains {
+            $0.event == "platform.split_dns_outcome_superseded" && ($0.detail ?? "").contains("source=switch_on")
+        }, "the stale write's outcome does not overwrite the drop's")
+        XCTAssertTrue(host.completedPlatformBaseline.manageDNSResolvers, "the switch-on landed at its save's value")
+        await host.stopRuntime()
+    }
+
     /// Twin of `AppStateHarnessTests.testAFailedSystemProxyModeChangeIsReportedAsOne`.
     func testAFailedSystemProxyModeChangeOnReloadIsReportedAsOne() async throws {
         var config = GenericDefaults.shared.makeConfig()

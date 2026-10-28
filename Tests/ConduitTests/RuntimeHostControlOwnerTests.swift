@@ -111,10 +111,11 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
     /// `beforeOpen` shapes the scratch root's saved files or the harness's effects before the host opens over them.
     private func compose(
         dnsForwarderEnabled: Bool = true,
+        platform: PlatformIntegrationConfig? = nil,
         stateFiles: (any StateFileAccessing)? = nil,
         beforeOpen: (InteractiveHostHarness) throws -> Void = { _ in }
     ) async throws -> Composed {
-        let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: dnsForwarderEnabled)
+        let harness = try makeInteractiveHarness(platform: platform ?? proxyAndDNS, dnsForwarderEnabled: dnsForwarderEnabled)
         self.harness = harness
         if let stateFiles { harness.stateFiles = stateFiles }
         try beforeOpen(harness)
@@ -1613,6 +1614,71 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertFalse(composed.harness.machine.launchdEnvironment.isEmpty, "the replaced pair's environment clear never ran")
         XCTAssertEqual(composed.host.workflow.revisions, revisions)
         XCTAssertTrue(composed.host.runtimeState().proxyIsUp)
+    }
+
+    /// A mixed apply's flag action runs on the host's platform queue, never inline (#47). Held there, mid-apply, the framed snapshot and
+    /// the status answer and a proxy Stop is admitted; the Stop's teardown waits for the action already running. Released, the partial
+    /// environment apply lands at the value its save carried and its shortfall is still reported, the Stop's clears land after it, and the
+    /// rest of the apply holds: the system DNS clear never runs, no other group is recorded, and the request is left as the save made it.
+    func testAHeldFlagActionLeavesTheOwnerFreeAndAStopAdmittedMeanwhileClearsAfterIt() async throws {
+        let composed = try await compose(
+            dnsForwarderEnabled: false,
+            platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: false, manageSystemDNS: true)
+        )
+        try await composed.host.startRuntime()
+        let machine = composed.harness.machine
+        XCTAssertTrue(machine.launchdEnvironment.isEmpty, "the environment is not managed yet")
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let request = try update(composed, from: observed, modules: PrivateModuleSlots(
+            proxy: .applyWhileRunning(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision), dns: .saveOnly, tunnels: .saveOnly
+        ), editPlatform: {
+            $0.manageEnvironmentVariables = true
+            $0.manageSystemDNS = false
+        }) { $0.noProxyHosts.append("flag-held.example") }
+        machine.failingSetenv = ["HTTP_PROXY"]
+        func decisions(_ action: String) -> Int {
+            composed.host.orchestrator.eventLog.events.filter { $0.event == "config.platform_integration" && $0.detail == action }.count
+        }
+
+        let viewBefore = try await composed.client.readSnapshot(deadline: deadline()).stamp.configRevision.rawValue
+
+        composed.harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/bin/launchctl" && arguments.first == "setenv"
+        }
+        let operation = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+        await composed.harness.hold.waitUntilReached()
+        XCTAssertFalse(composed.harness.hold.reachedOnMainThread, "the flag action's manager call is off the main actor")
+        XCTAssertTrue(composed.host.heldRuntimeConfig.noProxyHosts.contains("flag-held.example"), "the push already ran")
+        XCTAssertEqual(decisions("applyEnvironment"), 1)
+
+        let snapshot = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertEqual(snapshot.proxyState, .running, "the framed snapshot answers while the action is held")
+        XCTAssertGreaterThan(snapshot.stamp.configRevision.rawValue, viewBefore,
+                             "the framed status already names the view the apply adopted before its held action")
+        let stop = try accepted(try await submit(composed, .stop(.proxy)))
+        let waiting = try await eventually { !composed.host.lanes.proxy.isIdle }
+        XCTAssertTrue(waiting, "the Stop took its lane while the action is held")
+        XCTAssertTrue(composed.host.runtimeState().proxyIsUp, "its teardown waits for the action already running")
+        XCTAssertTrue(machine.service("Wi-Fi").routesThroughAProxy)
+        composed.harness.hold.release()
+
+        let outcomes = try await finishedAll([operation, stop], on: stream)
+        XCTAssertEqual(outcomes[stop].flatMap { completed($0) }, .stop)
+        XCTAssertEqual(try receipt(try XCTUnwrap(outcomes[operation])).applied, false, "the Stop left the pair unreconciled")
+        XCTAssertTrue(machine.launchdEnvironment.isEmpty, "the Stop's clear landed after the held apply wrote the environment")
+        XCTAssertFalse(machine.service("Wi-Fi").routesThroughAProxy)
+        XCTAssertFalse(composed.host.runtimeState().proxyIsUp)
+        XCTAssertTrue(composed.host.orchestrator.eventLog.events.contains {
+            $0.event == "config.reapply_failed" && ($0.detail ?? "").hasPrefix("surface=environment cause=switch_on")
+        }, "the partial apply's shortfall is reported though a Stop overtook it")
+        XCTAssertTrue(composed.host.completedPlatformBaseline.manageEnvironmentVariables, "the partial apply landed at its save's value")
+        XCTAssertTrue(composed.host.completedPlatformBaseline.manageSystemDNS, "the skipped clear is not recorded")
+        XCTAssertEqual(decisions("clearSystemDNS"), 0, "no action runs after the Stop")
+        XCTAssertEqual(composed.host.reconciler.requestedPlatformConfig, composed.host.platformConfig, "the request is the save's")
+        XCTAssertTrue(composed.host.reconciler.requestLags)
     }
 
     /// An apply that moves the proxy onto an occupied port: the runtime takes the new input though its listener cannot bind. The receipt says

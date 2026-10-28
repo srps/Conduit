@@ -1714,67 +1714,103 @@ extension RuntimeHost: RuntimeReconcilerHost {
     /// paths use, with their warning-not-throw treatment. Returns whether the
     /// action landed, so the reconciler can leave the flag unreconciled for
     /// the next reload to retry.
+    ///
+    /// What the action reads from the host is taken in the turn it is called,
+    /// and its manager calls are queued on `platformWork` in that turn, so
+    /// they land in the order the pass decided them, beside the lifecycle's
+    /// own blocks, and never hold this actor (#47). What the host records
+    /// after the block returns names the run it was decided under: a retry
+    /// carries that run's proxy token, and a split-DNS outcome the repair
+    /// generation it was queued at.
     package func perform(
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
         previousConfig: ProxyConfig,
         platform: PlatformIntegrationConfig,
         previousPlatform: PlatformIntegrationConfig
-    ) -> Bool {
-        func attempt(_ failure: String, _ body: () throws -> Void) -> Bool {
-            do {
-                try body()
-                return true
-            } catch {
-                logger.log(.warning, "\(failure): \(error.localizedDescription)", category: .system)
-                return false
-            }
-        }
-
+    ) async -> Bool {
+        let logger = self.logger
         switch action {
         case .applySystemProxy:
             // Also for a mode change with the switch left on.
-            return applySystemProxySwitch(config: config, platform: platform,
-                                          cause: previousPlatform.manageSystemProxy ? .modeChange : .switchOn)
+            return await applySystemProxySwitch(config: config, platform: platform,
+                                                cause: previousPlatform.manageSystemProxy ? .modeChange : .switchOn)
         case .clearSystemProxy:
             // The managers report a partial teardown by keeping their records,
             // not by throwing, so the journal is the oracle for "landed":
             // records left means the next reload must try again.
-            return attempt("Could not clear system proxy after the setting changed") {
-                try systemConduit.clear(logger: logger)
-            } && !systemConduit.hasManagedState()
+            let systemProxy = systemConduit
+            return await platformWork.run {
+                attemptFlagStep("Could not clear system proxy after the setting changed", logger: logger) {
+                    try systemProxy.clear(logger: logger)
+                } && !systemProxy.hasManagedState()
+            }
         case .applyEnvironment:
-            return applyEnvironmentSwitch(config: config)
+            return await applyEnvironmentSwitch(config: config)
         case .clearEnvironment:
-            return attempt("Could not clear environment variables after the setting changed") {
-                try environmentManager.clear(logger: logger)
-            } && !environmentManager.hasManagedState()
+            let environment = environmentManager
+            return await platformWork.run {
+                attemptFlagStep("Could not clear environment variables after the setting changed", logger: logger) {
+                    try environment.clear(logger: logger)
+                } && !environment.hasManagedState()
+            }
         case .applyResolverEntries:
             // The switch turned on: entry files follow the gate, as in a
             // config change. The outcome feeds the split-DNS repair, since
             // this pass skips the config-change reconcile.
-            let operation: SplitDNSEntryFileRepair.Operation = splitDNSGate.entriesWanted ? .apply : .remove
-            if dnsManager.isApplied(config: config, vpnConnected: splitDNSGate.entriesWanted) {
-                // The write is skipped; the record must not be. See `adoptAppliedFiles`.
-                dnsManager.adoptAppliedFiles(config: config, vpnConnected: splitDNSGate.entriesWanted)
-                logger.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
-                recordSplitDNS(.succeeded(operation), source: .switchOn)
-                return true
-            }
-            var outcome = SplitDNSEntryFileRepair.Outcome.succeeded(operation)
-            let applied = attempt("Could not apply DNS resolvers after the setting changed") {
-                do {
-                    try dnsManager.apply(config: config, logger: logger, vpnConnected: splitDNSGate.entriesWanted)
-                } catch {
-                    outcome = .failed(operation, error)
-                    throw error
+            let resolvers = dnsManager
+            let vpnConnected = splitDNSGate.entriesWanted
+            let entryGeneration = splitDNSRepair.generation
+            let operation: SplitDNSEntryFileRepair.Operation = vpnConnected ? .apply : .remove
+            let (outcome, applied) = await platformWork.run { () -> (SplitDNSEntryFileRepair.Outcome, Bool) in
+                // One operation: a VPN transition's write cannot land between the check and the write.
+                resolvers.serialized { () -> (SplitDNSEntryFileRepair.Outcome, Bool) in
+                    if resolvers.isApplied(config: config, vpnConnected: vpnConnected) {
+                        // The write is skipped; the record must not be. See `adoptAppliedFiles`.
+                        resolvers.adoptAppliedFiles(config: config, vpnConnected: vpnConnected)
+                        logger.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
+                        return (.succeeded(operation), true)
+                    }
+                    var outcome = SplitDNSEntryFileRepair.Outcome.succeeded(operation)
+                    let applied = attemptFlagStep("Could not apply DNS resolvers after the setting changed", logger: logger) {
+                        do {
+                            try resolvers.apply(config: config, logger: logger, vpnConnected: vpnConnected)
+                        } catch {
+                            outcome = .failed(operation, error)
+                            throw error
+                        }
+                    }
+                    return (outcome, applied)
                 }
             }
-            recordSplitDNS(outcome, source: .switchOn)
+            recordSplitDNS(outcome, source: .switchOn, startedAt: entryGeneration)
+            // A VPN transition handled while the apply was out reconciled the
+            // entry files then, possibly before the apply wrote them from the
+            // gate it was queued with; put them where the gate is now, as
+            // `applyProxySurfaces` does.
+            if splitDNSGate.entriesWanted != vpnConnected {
+                let corrected = splitDNSGate.reconcileEntryFiles(
+                    config: config,
+                    dnsManager: dnsManager,
+                    logger: logger,
+                    runtimeStarted: runtimeStarted
+                )
+                recordSplitDNS(corrected, source: .vpnTransition)
+            }
             return applied
         case .refreshInterceptFiles:
-            let refreshed = attempt("Could not apply intercept resolver files after the setting changed") {
-                try refreshInterceptFiles(for: config, platform: platform)
+            // The rule is `DNSManager.refreshInterceptFiles`, over the DNS
+            // module's bindings when the pass decided this action.
+            let resolvers = dnsManager
+            let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
+            let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
+            let refreshed = await platformWork.run { () -> Bool in
+                guard platform.manageDNSResolvers else { return true }
+                return attemptFlagStep("Could not apply intercept resolver files after the setting changed", logger: logger) {
+                    try resolvers.refreshInterceptFiles(
+                        config: config, interceptReady: interceptReady, forwarderRunning: forwarderRunning, logger: logger
+                    )
+                }
             }
             resolverSwitchInterceptRefreshFailed = !refreshed
             return refreshed
@@ -1784,84 +1820,129 @@ extension RuntimeHost: RuntimeReconcilerHost {
             // The teardown is what a pending repair retries with the switch
             // off, so a failed one is recorded for it: a later VPN drop no
             // longer touches entry files with the switch off.
-            var failure: String?
-            let cleared = attempt("Could not clear DNS resolvers after the setting changed") {
-                do {
-                    try dnsManager.clearRecorded(configs: [previousConfig, config], logger: logger)
-                } catch {
-                    failure = error.localizedDescription
-                    throw error
+            let resolvers = dnsManager
+            let entryGeneration = splitDNSRepair.generation
+            let (cleared, failure) = await platformWork.run { () -> (Bool, String?) in
+                resolvers.serialized { () -> (Bool, String?) in
+                    var failure: String?
+                    let cleared = attemptFlagStep("Could not clear DNS resolvers after the setting changed", logger: logger) {
+                        do {
+                            try resolvers.clearRecorded(configs: [previousConfig, config], logger: logger)
+                        } catch {
+                            failure = error.localizedDescription
+                            throw error
+                        }
+                    } && !resolvers.hasManagedState()
+                    return (cleared, failure)
                 }
-            } && !dnsManager.hasManagedState()
+            }
             recordSplitDNS(
                 SplitDNSEntryFileRepair.Outcome(
                     operation: .remove,
                     failure: cleared ? nil : failure ?? SplitDNSEntryFileRepair.recordedFilesRemainReason
                 ),
-                source: .switchOff
+                source: .switchOff,
+                startedAt: entryGeneration
             )
             return cleared
         case .applySystemDNS:
             // The same three steps as `startRuntime`, in the same order: the
             // prior state is captured before the interfaces are pointed at
             // the relay, and the health timer runs whether or not the apply
-            // succeeded, because its relay restart is the retry.
+            // succeeded, because its relay restart is the retry. A DNS Stop
+            // begun while the apply was out tears down after this settles
+            // (`quiesceEffects`), so it stops the timer armed here.
+            let systemDNS = systemDNSManager
             let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
-            let saved = attempt("Could not save current DNS state (non-fatal)") {
-                try systemDNSManager.saveCurrentDNS(logger: logger)
-            }
-            let applied = attempt("Could not set system DNS after the setting changed") {
-                try systemDNSManager.apply(forwarderPort: forwarderPort, logger: logger)
+            let landed = await platformWork.run { () -> Bool in
+                let saved = attemptFlagStep("Could not save current DNS state (non-fatal)", logger: logger) {
+                    try systemDNS.saveCurrentDNS(logger: logger)
+                }
+                let applied = attemptFlagStep("Could not set system DNS after the setting changed", logger: logger) {
+                    try systemDNS.apply(forwarderPort: forwarderPort, logger: logger)
+                }
+                return saved && applied
             }
             startDNSHealthTimer(forwarderPort: forwarderPort)
-            return saved && applied
+            return landed
         case .clearSystemDNS:
             // Timer first: left running, its 30 s probe would restart the
             // relay the user just asked to remove.
             stopDNSHealthTimer()
-            return attempt("Could not restore system DNS after the setting changed") {
-                try systemDNSManager.clear(logger: logger)
-            } && !systemDNSManager.hasSavedState()
+            let systemDNS = systemDNSManager
+            return await platformWork.run {
+                attemptFlagStep("Could not restore system DNS after the setting changed", logger: logger) {
+                    try systemDNS.clear(logger: logger)
+                } && !systemDNS.hasSavedState()
+            }
         case .setLaunchAtLogin:
-            // The login item is the app's `SMAppService` registration. A
-            // LaunchDaemon has none to keep, so the flag reconciles by being
-            // ignored here; the app applies it when it next runs.
-            return true
+            return performImmediate(action, platform: platform, previousPlatform: previousPlatform)
         }
+    }
+
+    /// The login item is the app's `SMAppService` registration. A
+    /// LaunchDaemon has none to keep, so the flag reconciles by being
+    /// ignored here; the app applies it when it next runs. It is the only
+    /// immediate action, and it has no machine effect.
+    package func performImmediate(
+        _ action: PlatformIntegrationReconciler.Action,
+        platform: PlatformIntegrationConfig,
+        previousPlatform: PlatformIntegrationConfig
+    ) -> Bool {
+        guard case .setLaunchAtLogin = action else {
+            preconditionFailure("\(action) is not an immediate action")
+        }
+        return true
     }
 
     /// The system proxy switch turned on, or its mode changed: a failure is reported to the
     /// retry, and the completed baseline does not move for it, so the switch is
     /// still owed when the retry looks again sooner (#194).
     private func applySystemProxySwitch(config: ProxyConfig, platform: PlatformIntegrationConfig,
-                                        cause: ConfigReapplyRetry.Cause) -> Bool {
-        do {
-            try systemConduit.apply(
-                config: config,
-                mode: platform.systemProxyMode,
-                logger: logger,
-                localPACURL: orchestrator.snapshot.bindings.localPACURL
-            )
-            return true
-        } catch {
-            reapplyRetry.failed(.systemProxy, cause: cause, reason: error.localizedDescription, token: lanes.proxy.observationToken)
-            return false
+                                        cause: ConfigReapplyRetry.Cause) async -> Bool {
+        let systemProxy = systemConduit, logger = self.logger
+        let mode = platform.systemProxyMode, localPACURL = orchestrator.snapshot.bindings.localPACURL
+        let token = lanes.proxy.observationToken
+        let failure = await platformWork.run { () -> String? in
+            do {
+                try systemProxy.apply(config: config, mode: mode, logger: logger, localPACURL: localPACURL)
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
         }
+        guard let failure else { return true }
+        reapplyRetry.failed(.systemProxy, cause: cause, reason: failure, token: token)
+        return false
     }
 
     /// The environment switch turned on: a partial apply lands the
     /// flag, and is reported and retried like a failure (#194).
-    private func applyEnvironmentSwitch(config: ProxyConfig) -> Bool {
-        do {
-            if let shortfall = try environmentManager.apply(config: config, logger: logger).shortfall {
-                reapplyRetry.failed(.environment, cause: .switchOn, reason: shortfall, token: lanes.proxy.observationToken)
+    private func applyEnvironmentSwitch(config: ProxyConfig) async -> Bool {
+        let environment = environmentManager, logger = self.logger
+        let token = lanes.proxy.observationToken
+        let (landed, failure) = await platformWork.run { () -> (Bool, String?) in
+            do {
+                return (true, try environment.apply(config: config, logger: logger).shortfall)
+            } catch {
+                return (false, "apply_error error=\(error.localizedDescription)")
             }
-            return true
-        } catch {
-            reapplyRetry.failed(.environment, cause: .switchOn, reason: "apply_error error=\(error.localizedDescription)",
-                                token: lanes.proxy.observationToken)
-            return false
         }
+        if let failure {
+            reapplyRetry.failed(.environment, cause: .switchOn, reason: failure, token: token)
+        }
+        return landed
+    }
+}
+
+/// One manager call of a flag action, on `platformWork`: a failure is a warning and an action that did not land, never a throw.
+private func attemptFlagStep(_ failure: String, logger: any LogSink, _ body: () throws -> Void) -> Bool {
+    do {
+        try body()
+        return true
+    } catch {
+        logger.log(.warning, "\(failure): \(error.localizedDescription)", category: .system)
+        return false
     }
 }
 

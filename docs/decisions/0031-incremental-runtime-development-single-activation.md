@@ -197,6 +197,19 @@ the failure and corrected workflow evidence. This implementation is under
 verification and unreleased. The complete RuntimeActor move remains unimplemented, so this
 record's overall implementation status remains partial.
 
+### Blocking-effect prerequisite implementation (2026-10-28)
+
+[`RuntimeReconciler`](../../Sources/PlatformMac/RuntimeReconciler.swift) now awaits
+flag effects through the existing single quiescence handle;
+[`RuntimeHost`](../../Sources/ConduitRuntime/RuntimeHost.swift) enqueues their
+physical work on its existing PlatformWork. Per-action landed facts remain
+truthful without stale whole-baseline or desired-intent promotion. The
+[prerequisite checkpoint](../verification-runtime-actor-prerequisites-2026-10-28.md)
+records focused actual-client/host tests and remaining inline/blocking work. This
+is current-isolation preparation, not the whole RuntimeActor move or its
+acceptance. The single owner/store/workflow and selected Stop/Quit policy remain
+unchanged.
+
 ## Open questions
 
 Complete the workflow freshness/private-editor observation API, preserving
