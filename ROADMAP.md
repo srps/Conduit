@@ -35,17 +35,26 @@ publication.
 | Shared owner | PR253 converges DNS, tunnels and proxy on one lifecycle/store path, with preparation-time capture, exact freshness and Stop/Quit policy. PR257 adds guarded host-owned audit parity. | AppState now consumes the single owner; release acceptance is in the final row. |
 | Actual client integration | PR254 connects host admission/observation, private frozen updates, receipts, preferences/admin persistence and final Quit saves through the actual framed clients. | Integrated through AppState; final release gates are in the last row. |
 | Native client completion | PR256 merged saved Start receipts, explicit reload, bounded preflight/credential/wake operations, typed recovery and DNS health after local and hosted checks. | Selected ten-second Quit is integrated and passes the fake production profile; real-machine acceptance remains. |
-| AppState, isolation and release | The single AppState activation (0031) and RuntimeActor isolation are implemented in draft PR #258. The collection profile (0038), 64 KiB ordinary and 8 MiB private frames, production resource and fairness measurements, native Dev checks and exact-head hosted CI pass. | CI on #258's final release head and its merge to main, applicable real-machine acceptance, then release-signed 0.6.0 packaging and publication. |
+| AppState, isolation and release | The single AppState activation (0031) and RuntimeActor isolation are implemented in draft PR #258. The collection profile (0038), 64 KiB ordinary and 8 MiB private frames, production resource and fairness measurements, and source-qualified native Dev checks pass. Final-head CI is tracked below. | CI on #258's final release head and its merge to main, applicable real-machine acceptance, then release-signed 0.6.0 packaging and publication. |
 
 The [RuntimeActor activation verification](./docs/verification-runtime-actor-activation-2026-10-28.md)
-records the RuntimeActor evidence. The [Quit deadline correction](./docs/verification-runtime-quit-deadline-2026-10-28.md) is the current local checkpoint: all 41 checks pass (3,770 tests / four skips / 103 scenarios), with seven affected production Release trials/162 checks. Final hosted and normal real-machine acceptance remain. Product source `f3abd5f` passes all 41 local checks
-(3,766 tests, four existing skips, 103 simulator scenarios), the production
-Release profile, optimized fairness and native Dev checks. Test-maintenance head
-`7d85213` passes all 41 checks (3,768 tests, four existing skips, 103 scenarios)
-and exact-head hosted CI, including the older Swift 6.3.3 compiler. PR #261
-merged into draft PR #258 as `b637ec1`, not into main; that merge head also passes hosted CI.
-The 0.6 metadata tree passes all 41 local checks with the same 3,768 tests, four skips
-and 103 scenarios. Later head e120a5c passes complete hosted Swift, slow-drain and CodeQL; Release’s full suite passes but its optimized build still rejects mutable captures in a model test. The test-only 2e0f4d5 correction replaces those captures with a plain model value and passes all 41 local checks (3,770 tests/four skips/103 scenarios), its optimized build and 33 optimized model tests. Independent review accepts unchanged semantics; new exact-head hosted optimized verification remains. No installed-app acceptance is claimed.
+keeps the source-qualified isolation, collection-fairness, sanitizer and native Dev
+evidence. The [Quit correction](./docs/verification-runtime-quit-deadline-2026-10-28.md)
+is the production checkpoint: seven affected production Release trials/162 checks
+pass with fake effects. Earlier measurements remain scoped to unchanged paths.
+
+The [real-tunnel fixture checkpoint](./docs/verification-runtime-tunnel-fixture-2026-10-28.md)
+records the latest test-only correction, `c6e2c41`: all 41 local checks pass
+(3,770 tests/four skips/103 scenarios), with independent source and causal-control
+reviews. Its optimized build, 90 affected tests and ten fresh Debug tunnel trials also pass. Pushed head `f59dbb9` passes the
+complete hosted Swift workflow, slow-drain and CodeQL; its Release standard suite
+crashed while a legacy fixture was active (origin unproven), before optimized compilation. The correction removes that
+copied path without changing production code. Final-head hosted standard and
+optimized checks, merge to main, normal real-helper/VPN/auth acceptance and
+release-signed packaging remain. Production acceptance requires the owner to quit
+serving 0.5.8 and approve the proposed stable Applications installation: normal
+Start applies the saved login-item flag. Rollback uses preserved 0.5.8 at that
+stable path, never the inactive 0.5.5 copy. No installed-app acceptance is claimed.
 
 Historical checkpoints follow. The [client-owner checkpoint](./docs/verification-runtime-client-owner-2026-10-27.md)
 records the scoped independent review and all 41 passing local gates: 3,619 tests
@@ -170,8 +179,9 @@ not a requirement to finish every event or property test before extraction:
    Collection observation caps are selected in
    [0038](./docs/decisions/0038-bounded-runtime-collection-capture.md);
    the app now consumes the measured production profile and selected ten-second
-   total Quit wait (0039). Release/resource trials, native Dev checks and hosted
-   CI pass; installed real-machine acceptance is pending.
+   total Quit wait (0039). Release/resource trials, source-qualified native Dev checks
+   and earlier-head hosted CI pass. Final-head hosted standard/optimized checks and
+   installed real-machine acceptance remain.
 
    Earlier source/test counts are historical checkpoints, kept in the linked
    [client inventory](./docs/runtime-client-stage1-inventory.md),

@@ -1,0 +1,153 @@
+{
+  "checks": [
+    {
+      "name": "optimized-build-tests",
+      "command": [
+        "xcrun",
+        "swift",
+        "build",
+        "-c",
+        "release",
+        "--build-tests",
+        "-Xswiftc",
+        "-enable-testing"
+      ],
+      "exit": 0,
+      "seconds": 193.0
+    },
+    {
+      "name": "optimized-affected-tests",
+      "command": [
+        "xcrun",
+        "xctest",
+        "-XCTest",
+        "ConduitTests.ConfigurationStoreTests,ConduitTests.ProxiedTunnelTests,ConduitTests.TunnelForwarderTests,ConduitTests.PACPreviewTests,ConduitTests.CFPACEvaluatorTests",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/.build/out/Products/Release/ConduitTests.xctest"
+      ],
+      "exit": 0,
+      "seconds": 1.52
+    },
+    {
+      "name": "debug-fresh-1",
+      "command": [
+        "xcrun",
+        "xctest",
+        "-XCTest",
+        "ConduitTests.TunnelForwarderTests/testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/.build/out/Products/Debug/ConduitTests.xctest"
+      ],
+      "exit": 0,
+      "seconds": 0.13
+    },
+    {
+      "name": "debug-fresh-2",
+      "command": [
+        "xcrun",
+        "xctest",
+        "-XCTest",
+        "ConduitTests.TunnelForwarderTests/testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/.build/out/Products/Debug/ConduitTests.xctest"
+      ],
+      "exit": 0,
+      "seconds": 0.09
+    },
+    {
+      "name": "debug-fresh-3",
+      "command": [
+        "xcrun",
+        "xctest",
+        "-XCTest",
+        "ConduitTests.TunnelForwarderTests/testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/.build/out/Products/Debug/ConduitTests.xctest"
+      ],
+      "exit": 0,
+      "seconds": 0.09
+    },
+    {
+      "name": "debug-fresh-4",
+      "command": [
+        "xcrun",
+        "xctest",
+        "-XCTest",
+        "ConduitTests.TunnelForwarderTests/testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/.build/out/Products/Debug/ConduitTests.xctest"
+      ],
+      "exit": 0,
+      "seconds": 0.08
+    },
+    {
+      "name": "debug-fresh-5",
+      "command": [
+        "xcrun",
+        "xctest",
+        "-XCTest",
+        "ConduitTests.TunnelForwarderTests/testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/.build/out/Products/Debug/ConduitTests.xctest"
+      ],
+      "exit": 0,
+      "seconds": 0.09
+    },
+    {
+      "name": "debug-fresh-6",
+      "command": [
+        "xcrun",
+        "xctest",
+        "-XCTest",
+        "ConduitTests.TunnelForwarderTests/testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/.build/out/Products/Debug/ConduitTests.xctest"
+      ],
+      "exit": 0,
+      "seconds": 0.14
+    },
+    {
+      "name": "debug-fresh-7",
+      "command": [
+        "xcrun",
+        "xctest",
+        "-XCTest",
+        "ConduitTests.TunnelForwarderTests/testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/.build/out/Products/Debug/ConduitTests.xctest"
+      ],
+      "exit": 0,
+      "seconds": 0.08
+    },
+    {
+      "name": "debug-fresh-8",
+      "command": [
+        "xcrun",
+        "xctest",
+        "-XCTest",
+        "ConduitTests.TunnelForwarderTests/testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/.build/out/Products/Debug/ConduitTests.xctest"
+      ],
+      "exit": 0,
+      "seconds": 0.14
+    },
+    {
+      "name": "debug-fresh-9",
+      "command": [
+        "xcrun",
+        "xctest",
+        "-XCTest",
+        "ConduitTests.TunnelForwarderTests/testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/.build/out/Products/Debug/ConduitTests.xctest"
+      ],
+      "exit": 0,
+      "seconds": 0.09
+    },
+    {
+      "name": "debug-fresh-10",
+      "command": [
+        "xcrun",
+        "xctest",
+        "-XCTest",
+        "ConduitTests.TunnelForwarderTests/testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/.build/out/Products/Debug/ConduitTests.xctest"
+      ],
+      "exit": 0,
+      "seconds": 0.08
+    }
+  ],
+  "stable": true,
+  "scope": "Local Swift6.4; exact hosted6.3.3 acceptance remains required."
+}
