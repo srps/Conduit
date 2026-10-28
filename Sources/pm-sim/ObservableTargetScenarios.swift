@@ -9,7 +9,7 @@ import ProxyKernel
 enum ObservableTargetScenarios {
     private struct Failure: Error { let message: String }
 
-    @MainActor
+    @RuntimeActor
     static func redaction() async throws -> ScenarioResult {
         let started = Date()
         let values = [
@@ -48,7 +48,7 @@ enum ObservableTargetScenarios {
         )
     }
 
-    @MainActor
+    @RuntimeActor
     private static func rejectedConnect() async throws {
         let group = MultiThreadedEventLoopGroup.singleton
         let wire = NIOLockedValueBox<String?>(nil)

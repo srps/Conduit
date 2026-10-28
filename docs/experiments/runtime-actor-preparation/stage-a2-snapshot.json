@@ -1,0 +1,13 @@
+{
+  "head": "e62683181a0f0092d136abfed8f9596db98d0088",
+  "review_base": "e62683181a0f0092d136abfed8f9596db98d0088",
+  "snapshot_sha256": "674661b6b266852903bd31b90e254789929ea13b0f7f3bba40b0f6e3541757ad",
+  "files": 795,
+  "author_manifest": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stagea-r2-manifest.json",
+  "new_files_in_patch": [
+    "Tests/ConduitTests/HeldCallTests.swift",
+    "Tests/ConduitTests/NetworkMonitorTests.swift"
+  ],
+  "patch_sha256": "7cd315050605c4954e222682bc938cde57940aed5262fefd84aae7686e082332",
+  "stable": true
+}

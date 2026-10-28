@@ -71,18 +71,18 @@ package final class AutoRecovery: @unchecked Sendable {
     /// stale), the ladder stops with `recovery.abandoned` and returns `false`
     /// without declaring exhaustion (#155). A configuration refusal (`.configurationRefused`)
     /// stops the ladder before any step, or at the first check that returns it, with
-    /// `recovery.skipped`; it is never reported as exhaustion. The ladder runs on the main
-    /// actor, where the orchestrator advances its routing generation, so a
+    /// `recovery.skipped`; it is never reported as exhaustion. The ladder runs on the
+    /// runtime actor, where the orchestrator advances its routing generation, so a
     /// check and the outcome it allows happen in one turn.
     ///
     /// `stamp` is the listener lifecycle the ladder began under; a caller that acts on a failure read earlier passes the stamp it read then.
     /// The ladder also stops once the service's stamp has moved, which a stop or start does even when routing did not change. A recycle that
     /// falls back to a cold start returns the stamp it published under, and the ladder carries that forward, so its own fallback is not refused.
-    @MainActor
+    @RuntimeActor
     package func recover(
         trigger: HealthCheckFailure? = nil,
         since stamp: ListenerStamp? = nil,
-        isCurrent: @MainActor () -> Bool = { true }
+        isCurrent: @RuntimeActor () -> Bool = { true }
     ) async -> Bool {
         guard let service else { return false }
         var expected = stamp ?? service.listenerStamp

@@ -90,8 +90,8 @@ private struct RuntimeCollectionRevisionTracker<Source: Equatable> {
     }
 }
 
-/// The revisions the host's snapshots pin for its four collections, each taken in the snapshot's own owner turn. A page captures its rows
-/// in that turn too (`projectedRows`), so the rows are exactly the revision's.
+/// The revisions the host's snapshots pin for its four collections, each taken in the snapshot's own owner turn. A page freezes its rows'
+/// input in that turn too (`rowSource`), so the rows projected later are exactly the revision's.
 struct RuntimeHostCollections {
     private var activeConnections = RuntimeCollectionRevisionTracker<ActiveConnectionStore>()
     private var upstreamHealth = RuntimeCollectionRevisionTracker<[UpstreamRuntimeStatus]>()
@@ -185,8 +185,11 @@ extension RuntimeHost: ControlCommandOwner {
         return nil
     }
 
-    func projectedRows(for kind: ControlCollectionKind, within budget: ControlRowBudget) -> ControlProjection {
-        RuntimeSnapshotControlProjection.projectRows(kind, from: orchestrator.snapshot, within: budget)
+    /// The whole kernel value of this turn, a copy-on-write retain, projected later off the owner. The job holds that value and the kind,
+    /// never the host or the orchestrator.
+    func rowSource(for kind: ControlCollectionKind) -> RuntimeRowSource {
+        let frozen = orchestrator.snapshot
+        return { budget in RuntimeSnapshotControlProjection.projectRows(kind, from: frozen, within: budget) }
     }
 
     func serviceFault(_ fault: ControlServiceFault) {
@@ -265,14 +268,14 @@ extension RuntimeHost: ControlCommandOwner {
         }
         switch admission {
         case .stop(let stop, let module):
-            Task { @MainActor [self] in
+            Task { [self] in
                 let outcome = await runAdmittedStop(stop)
                 report.settled(controlOutcome(of: outcome, module: module, dnsWrite: stop.facts.dnsWrite))
                 report.quiesced()
                 onControlStateChange?()
             }
         case .launchAtLogin(let enabled, let baseline, let request):
-            Task { @MainActor [self] in
+            Task { [self] in
                 defer { pendingAdmissions -= 1 }
                 let outcome = await workflow.commitLaunchAtLogin(enabled, expecting: baseline, requestID: request)
                 emitConfigurationEvents(outcome.events)
@@ -283,7 +286,7 @@ extension RuntimeHost: ControlCommandOwner {
         case .quit(let work, let window):
             // Settled at the first of the quit's end and its deadline; quiesced only when its work has ended, so the operation keeps its
             // capacity, and the host the root, while a late teardown or write still runs.
-            Task { @MainActor [self] in
+            Task { [self] in
                 report.settled(await window.settled() ? completed(.quit) : .failed(.cleanupIncomplete))
                 onControlStateChange?()
                 await work.value
@@ -291,7 +294,7 @@ extension RuntimeHost: ControlCommandOwner {
                 onControlStateChange?()
             }
         case .dnsProbe(let port):
-            Task { @MainActor [self] in
+            Task { [self] in
                 let outcome: ControlOperationOutcome
                 // A port that cannot be named on the wire, as an unbound forwarder configured on port 0, has nothing to probe.
                 if let wirePort = try? ControlPort(port) {
@@ -312,7 +315,7 @@ extension RuntimeHost: ControlCommandOwner {
                 onControlStateChange?()
             }
         case .start(let start, let request):
-            Task { @MainActor [self] in
+            Task { [self] in
                 report.settled(await settleAdmittedStart(start, requestID: request, reportsPrior: true))
                 report.quiesced()
                 onControlStateChange?()
@@ -321,7 +324,7 @@ extension RuntimeHost: ControlCommandOwner {
             // The pass is joined in this launch turn. Quiesced when it ends: the read may outlast the quit, and the operation keeps its
             // capacity, and its pending count, until then.
             let pass = preflightPass()
-            Task { @MainActor [self] in
+            Task { [self] in
                 defer { pendingAdmissions -= 1 }
                 report.settled(await pass.value)
                 report.quiesced()
@@ -335,7 +338,7 @@ extension RuntimeHost: ControlCommandOwner {
             report.quiesced()
             onControlStateChange?()
         case .reload(let captured, let request):
-            Task { @MainActor [self] in
+            Task { [self] in
                 defer { pendingAdmissions -= 1 }
                 let decision = await performReload(capturedAt: captured, requestID: request)
                 report.settled(completed(.reload, result: .reload(Self.reloadResult(decision))))
@@ -504,7 +507,7 @@ extension RuntimeHost: ControlCommandOwner {
         let previous = dnsLivenessProbe?.answer
         let identity = UUID()
         let manager = systemDNSManager
-        let answer = Task { @MainActor [weak self] in
+        let answer = Task { [weak self] in
             _ = await previous?.value
             let answered = await withCheckedContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async { continuation.resume(returning: manager.probeLiveness(port: port)) }
@@ -587,7 +590,7 @@ package struct RuntimeInMemoryClients: Sendable {
 
 /// The control service composed over one host, and its in-memory transport (decision 0014). The caller supplies every bound and the
 /// clock: no production profile is selected, so a test or a scenario passes its own explicit one. One service per host.
-@MainActor
+@RuntimeActor
 struct RuntimeControlComposition {
     let service: RuntimeServiceCore
     let transport: RuntimeInMemoryTransport

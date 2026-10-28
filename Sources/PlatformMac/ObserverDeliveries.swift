@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import ProxyKernel
 
 /// A settings observer needs the latest state, not a task per notification.
 /// One tracked delivery and one pending pass bound bursts before task creation.
@@ -11,7 +12,7 @@ package final class CoalescedObserverDelivery: @unchecked Sendable {
     package init() {}
 
     package func deliver(using deliveries: ObserverDeliveries,
-                         _ work: @escaping @MainActor @Sendable () async -> Void) {
+                         _ work: @escaping @RuntimeActor @Sendable () async -> Void) {
         lock.withLock {
             if active { pending = true; return }
             active = true
@@ -33,13 +34,13 @@ package final class CoalescedObserverDelivery: @unchecked Sendable {
     }
 }
 
-/// The hops a runtime host makes from an observer's callback onto the main
-/// actor, counted so that something can wait for them.
+/// The hops a runtime host makes from an observer's callback onto its owner,
+/// `RuntimeActor`, counted so that something can wait for them.
 ///
 /// The VPN observer, the path monitor, the wake notification and the
-/// orchestrator's snapshot and event callbacks all arrive off the main actor
+/// orchestrator's snapshot and event callbacks all arrive off the owner
 /// or mid-mutation, and each host hands them over with an unstructured
-/// `Task { @MainActor in ... }`. Nothing held those tasks, so a test that
+/// `Task { @RuntimeActor in ... }`. Nothing held those tasks, so a test that
 /// drove an observer could only poll the snapshot or sleep, and a poll can
 /// pass on a stale intermediate state (#19).
 ///
@@ -69,11 +70,11 @@ package final class ObserverDeliveries: @unchecked Sendable {
         lock.withLock { inFlight }
     }
 
-    /// Runs `work` on the main actor in its own task. Callable from any
+    /// Runs `work` on the owner in its own task. Callable from any
     /// thread, which is where the observers call from.
-    package func deliver(_ work: @escaping @MainActor @Sendable () async -> Void) {
+    package func deliver(_ work: @escaping @RuntimeActor @Sendable () async -> Void) {
         lock.withLock { inFlight += 1 }
-        Task { @MainActor in
+        Task { @RuntimeActor in
             await work()
             self.finishOne()
         }

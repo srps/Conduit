@@ -7,7 +7,7 @@ import ProxyKernel
 /// Holds the full end-to-end pipeline:
 ///   FakeClient → LocalProxyServer (code under test) → FakeUpstreamProxy → FakeOrigin.
 /// The simulator instantiates one of these per scenario and tears it down after.
-@MainActor
+@RuntimeActor
 final class SimHarness {
     let group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton
     // pm-sim is a headless harness that doesn't need a UI ring buffer.

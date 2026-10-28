@@ -1,0 +1,11 @@
+/Users/runner/work/Conduit/Conduit/Tests/ConduitTests/RuntimeActorFairnessTests.swift:411:20: error: pattern that the region-based isolation checker does not understand how to check. Please file a bug
+/Users/runner/work/Conduit/Conduit/Tests/ConduitTests/RuntimeActorFairnessTests.swift:435:20: error: pattern that the region-based isolation checker does not understand how to check. Please file a bug
+/Users/runner/work/Conduit/Conduit/Tests/ConduitTests/RuntimeActorFairnessTests.swift:460:21: error: pattern that the region-based isolation checker does not understand how to check. Please file a bug
+/Users/runner/work/Conduit/Conduit/Tests/ConduitTests/RuntimeActorFairnessTests.swift:461:22: error: pattern that the region-based isolation checker does not understand how to check. Please file a bug
+/Users/runner/work/Conduit/Conduit/Tests/ConduitTests/RuntimeActorFairnessTests.swift:477:21: error: pattern that the region-based isolation checker does not understand how to check. Please file a bug
+/Users/runner/work/Conduit/Conduit/Tests/ConduitTests/RuntimeActorFairnessTests.swift:480:22: error: pattern that the region-based isolation checker does not understand how to check. Please file a bug
+/Users/runner/work/Conduit/Conduit/Tests/ConduitTests/RuntimeActorFairnessTests.swift:497:24: error: pattern that the region-based isolation checker does not understand how to check. Please file a bug
+/Users/runner/work/Conduit/Conduit/Tests/ConduitTests/RuntimeActorFairnessTests.swift:532:20: error: pattern that the region-based isolation checker does not understand how to check. Please file a bug
+/Users/runner/work/Conduit/Conduit/Tests/ConduitTests/RuntimeActorFairnessTests.swift:567:20: error: pattern that the region-based isolation checker does not understand how to check. Please file a bug
+/Users/runner/work/Conduit/Conduit/Tests/ConduitTests/RuntimeActorFairnessTests.swift:630:25: error: pattern that the region-based isolation checker does not understand how to check. Please file a bug
+/Users/runner/work/Conduit/Conduit/Tests/ConduitTests/RuntimeActorFairnessTests.swift:631:26: error: pattern that the region-based isolation checker does not understand how to check. Please file a bug

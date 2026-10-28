@@ -2,20 +2,20 @@
 import XCTest
 @testable import ConduitRuntime
 import ConduitShared
+import ProxyKernel
 
 /// Replay through the production core and its owner turns: the order of events and outcomes, eviction during a catch-up in either log,
 /// the explicit refusals of a replay that could miss history, and the typed end of a stream. Each test states its one rule.
-@MainActor
 final class RuntimeServiceReplayTests: XCTestCase {
     /// Publishes one event, then runs the drain hop it queued.
-    private func ingest(_ harness: RuntimeServiceHarness) {
+    @RuntimeActor private func ingest(_ harness: RuntimeServiceHarness) {
         harness.core.ingest(ControlRuntimeEvent(timestamp: Date(timeIntervalSince1970: 1), kind: "proxy", event: "test.event"))
         harness.scheduling.drainAll()
     }
 
     /// Admits one ordinary command, runs its launch, settles it and quiesces it. The outcome is appended at the current high-water mark.
     /// Nil when the command is not admitted.
-    private func finishOperation(_ harness: RuntimeServiceHarness, request: Int) throws -> ControlOperationID? {
+    @RuntimeActor private func finishOperation(_ harness: RuntimeServiceHarness, request: Int) throws -> ControlOperationID? {
         guard case .accepted(let operation) = harness.core.submit(try RuntimeServiceFixtures.request(request, .testDNS)) else {
             return nil
         }
@@ -26,7 +26,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
     }
 
     /// Opens a replay from one event position, and returns the subscriber with its baseline's replay answer.
-    private func openReplay(_ core: RuntimeServiceCore, from position: Int) throws -> (subscriber: Int, replay: ControlReplayAvailability)? {
+    @RuntimeActor private func openReplay(_ core: RuntimeServiceCore, from position: Int) throws -> (subscriber: Int, replay: ControlReplayAvailability)? {
         let cursor = try XCTUnwrap(ControlEventCursor(rawValue: position))
         let request = ControlSubscriptionRequest.resume(incarnation: RuntimeServiceFixtures.incarnation(1), from: cursor)
         guard case .opened(let subscriber, .baseline(let baseline)) = core.openSubscription(request) else { return nil }
@@ -35,7 +35,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
 
     /// Outcomes are delivered after the events they follow, and before the events that come later, so the order is the order the owner
     /// produced. The replay ends with its caught-up mark, and the live edge follows.
-    func testAReplayDeliversEachOutcomeAfterTheEventsItFollows() throws {
+    @RuntimeActor func testAReplayDeliversEachOutcomeAfterTheEventsItFollows() async throws {
         let harness = try RuntimeServiceHarness()
         ingest(harness)
         let operation = try XCTUnwrap(try finishOperation(harness, request: 1))
@@ -51,7 +51,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
 
     /// A replay whose events have been evicted from the ring while it is catching up ends with a resync, not a silent gap. The subscriber is
     /// released in the same turn, and a replay opened afterwards is refused as expired history.
-    func testEventEvictionDuringACatchUpEndsWithAResync() throws {
+    @RuntimeActor func testEventEvictionDuringACatchUpEndsWithAResync() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(
             ringCapacity: 3,
             replayChunkItems: 1
@@ -73,7 +73,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
 
     /// An outcome evicted from the control log while a replay is catching up ends the replay with a resync. The replay that was opened
     /// before the eviction still held the outcome in range, so nothing in its range can be skipped silently.
-    func testOutcomeEvictionDuringACatchUpEndsWithAResync() throws {
+    @RuntimeActor func testOutcomeEvictionDuringACatchUpEndsWithAResync() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(controlLogCapacity: 2))
         ingest(harness)
         _ = try XCTUnwrap(try finishOperation(harness, request: 1))
@@ -88,7 +88,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
 
     /// A replay whose range may hold an evicted outcome is refused at the baseline, as expired history. Its subscriber reads live from the
     /// high-water mark, so no outcome is replayed partially.
-    func testAReplayThatMayHaveLostAnOutcomeIsRefusedAsExpiredHistory() throws {
+    @RuntimeActor func testAReplayThatMayHaveLostAnOutcomeIsRefusedAsExpiredHistory() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(controlLogCapacity: 1))
         ingest(harness)
         _ = try XCTUnwrap(try finishOperation(harness, request: 1))
@@ -101,7 +101,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
 
     /// A replay across a loss is refused as an observation loss, and a replay that starts after the loss is clean. The loss is an event
     /// too large to retain, which the ingress refuses as a loss marker, so it reserves position two.
-    func testAReplayAcrossALossIsRefusedAndAReplayAfterItIsClean() throws {
+    @RuntimeActor func testAReplayAcrossALossIsRefusedAndAReplayAfterItIsClean() async throws {
         let harness = try RuntimeServiceHarness()
         ingest(harness)
         harness.core.ingest(ControlRuntimeEvent(
@@ -126,7 +126,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
     /// A stream end that fits its caller's frame is the reply. One that does not fit ends the wait as a bounded disconnect, once, with no
     /// refusal substituted. The end is measured, not guessed. This is a direct seam: the real wire cannot reach it with the same cap,
     /// because the baseline that opened the stream is always larger than an end.
-    func testAStreamEndThatDoesNotFitIsABoundedDisconnectAndAFittingEndIsTheReply() throws {
+    @RuntimeActor func testAStreamEndThatDoesNotFitIsABoundedDisconnectAndAFittingEndIsTheReply() async throws {
         let correlation = RuntimeServiceFixtures.requestID(9)
         let roomy = try ControlFrameLimits(maxFrameBytes: 1 << 20)
         let end = try ControlRuntimeCodec.encodeFrame(
@@ -156,7 +156,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
 
     // MARK: - A real outcome larger than the caller's frame
 
-    private func thrownError<T>(_ body: () async throws -> T) async -> RuntimeClientError? {
+    @RuntimeActor private func thrownError<T>(_ body: () async throws -> T) async -> RuntimeClientError? {
         do {
             _ = try await body()
             return nil
@@ -165,7 +165,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
         }
     }
 
-    private func makeClient(_ harness: RuntimeServiceHarness, frame: ControlFrameLimits) throws -> any RuntimeClient {
+    @RuntimeActor private func makeClient(_ harness: RuntimeServiceHarness, frame: ControlFrameLimits) throws -> any RuntimeClient {
         let epoch = harness.timing.now
         return try makeFramedRuntimeClient(
             transport: harness.transport(),
@@ -177,7 +177,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
     }
 
     /// Admits one upstream probe and runs its launch, so the owner holds the operation until the test settles it.
-    private func launchProbe(_ harness: RuntimeServiceHarness) throws -> ControlOperationID {
+    @RuntimeActor private func launchProbe(_ harness: RuntimeServiceHarness) throws -> ControlOperationID {
         let reference = ControlUpstreamReference(
             configRevision: try XCTUnwrap(ControlConfigRevision(rawValue: 2)),
             upstreamID: ControlUpstreamID(rawValue: UUID())
@@ -195,7 +195,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
     }
 
     /// A completed upstream probe, built as the owner builds one: the probe's name and endpoint are owner text, carried as given.
-    private func upstreamOutcome(_ harness: RuntimeServiceHarness, name: String, endpoint: String) throws -> ControlOperationOutcome {
+    @RuntimeActor private func upstreamOutcome(_ harness: RuntimeServiceHarness, name: String, endpoint: String) throws -> ControlOperationOutcome {
         let probe = ControlUpstreamProbe(
             upstreamID: ControlUpstreamID(rawValue: UUID()),
             name: name,
@@ -215,7 +215,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
     /// explicit resync, the subscription is released with the end, and the outcome stays recoverable through the framed lookup. Recovery is
     /// conditional: the outcome is retained, and the lookup's reply fits the caller's frame. A narrow caller learns the size instead. Nothing
     /// is lost silently, and the client never sees an invalid reply.
-    func testAnOutcomeLargerThanTheCallersFrameEndsTheStreamAsAResyncAndTheOutcomeStaysRecoverable() async throws {
+    @RuntimeActor func testAnOutcomeLargerThanTheCallersFrameEndsTheStreamAsAResyncAndTheOutcomeStaysRecoverable() async throws {
         let harness = try RuntimeServiceHarness()
         let operation = try launchProbe(harness)
         let client = try makeClient(harness, frame: try ControlFrameLimits(maxFrameBytes: 2048))
@@ -248,7 +248,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
     }
 
     /// The same stream delivers a probe that fits, so the frame cap is what separated the two outcomes.
-    func testAnOutcomeThatFitsTheCallersFrameIsDeliveredOnTheSameStream() async throws {
+    @RuntimeActor func testAnOutcomeThatFitsTheCallersFrameIsDeliveredOnTheSameStream() async throws {
         let harness = try RuntimeServiceHarness()
         let operation = try launchProbe(harness)
         let client = try makeClient(harness, frame: try ControlFrameLimits(maxFrameBytes: 2048))
@@ -271,25 +271,25 @@ final class RuntimeServiceReplayTests: XCTestCase {
     private static let oversizeName = String(repeating: "\u{0}", count: 1_024)
     private static let oversizeEndpoint = String(repeating: "\u{0}", count: 512)
 
-    private func logEvent(_ log: inout RuntimeObservationLog) {
+    @RuntimeActor private func logEvent(_ log: inout RuntimeObservationLog) {
         let record = ControlRuntimeEventRecord.known(
             ControlRuntimeEvent(timestamp: Date(timeIntervalSince1970: 1), kind: "proxy", event: "test.event")
         )
         log.apply([.event(record, bytes: 100)])
     }
 
-    private func finished(_ value: Int) -> ControlOperationFinished {
+    @RuntimeActor private func finished(_ value: Int) -> ControlOperationFinished {
         ControlOperationFinished(operationID: RuntimeServiceFixtures.operation(value), outcome: .failed(.internalFailure))
     }
 
     /// A completed probe whose encoded outcome is larger than the fixture's control-log bound.
-    private func oversizeOutcome(_ harness: RuntimeServiceHarness) throws -> ControlOperationOutcome {
+    @RuntimeActor private func oversizeOutcome(_ harness: RuntimeServiceHarness) throws -> ControlOperationOutcome {
         try upstreamOutcome(harness, name: Self.oversizeName, endpoint: Self.oversizeEndpoint)
     }
 
     /// The production log, with the replay gap at its own level. Event one, then a skipped outcome at boundary one, then event two.
     /// A replay from one would cross the skipped outcome, so it is refused, while a replay from two is clean.
-    func testAReplayThatWouldCrossASkippedOutcomeIsRefused() throws {
+    @RuntimeActor func testAReplayThatWouldCrossASkippedOutcomeIsRefused() async throws {
         var log = RuntimeObservationLog(limits: try RuntimeServiceFixtures.limits(controlLogByteCapacity: Self.oversizeFixtureBound))
         logEvent(&log)
         log.appendControl(finished(1), bytes: Self.oversizeBytes)
@@ -301,7 +301,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
     }
 
     /// Two skips in a row. The newest lost boundary decides, and a replay that starts after both is clean.
-    func testEverySkippedOutcomeRefusesTheReplaysThatReachIt() throws {
+    @RuntimeActor func testEverySkippedOutcomeRefusesTheReplaysThatReachIt() async throws {
         var log = RuntimeObservationLog(limits: try RuntimeServiceFixtures.limits(controlLogByteCapacity: Self.oversizeFixtureBound))
         logEvent(&log)
         log.appendControl(finished(1), bytes: Self.oversizeBytes)
@@ -314,7 +314,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
     }
 
     /// A retained outcome after a skip is the first outcome of a replay that starts at its boundary. The skip before it is not in that range.
-    func testANormalOutcomeAfterASkipIsReplayedFromItsBoundary() throws {
+    @RuntimeActor func testANormalOutcomeAfterASkipIsReplayedFromItsBoundary() async throws {
         var log = RuntimeObservationLog(limits: try RuntimeServiceFixtures.limits(controlLogByteCapacity: Self.oversizeFixtureBound))
         logEvent(&log)
         log.appendControl(finished(1), bytes: Self.oversizeBytes)
@@ -327,7 +327,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
     }
 
     /// An ordinary eviction records its boundary the same way. Only a replay that reaches the evicted boundary is refused.
-    func testAnEvictedOutcomeRefusesOnlyTheReplaysThatReachIt() throws {
+    @RuntimeActor func testAnEvictedOutcomeRefusesOnlyTheReplaysThatReachIt() async throws {
         let limits = try RuntimeServiceFixtures.limits(controlLogCapacity: 1, controlLogByteCapacity: Self.oversizeFixtureBound)
         var log = RuntimeObservationLog(limits: limits)
         logEvent(&log)
@@ -340,7 +340,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
 
     /// Through the core: a replay that starts before a completed oversize outcome is refused as expired history, never accepted without it.
     /// The outcome itself is still recoverable by lookup, which is a separate path from replay.
-    func testAReplayAcrossAnOversizedOutcomeIsRefusedAsExpiredHistory() throws {
+    @RuntimeActor func testAReplayAcrossAnOversizedOutcomeIsRefusedAsExpiredHistory() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(controlLogByteCapacity: Self.oversizeFixtureBound))
         ingest(harness)
         let operation = try launchProbe(harness)
@@ -357,7 +357,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
     }
 
     /// A replay that starts after a skipped outcome is accepted, and it delivers only the events after its boundary. No outcome is made up for the skip.
-    func testAReplayAfterAnOversizedOutcomeDeliversOnlyTheEventsAfterIt() throws {
+    @RuntimeActor func testAReplayAfterAnOversizedOutcomeDeliversOnlyTheEventsAfterIt() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(controlLogByteCapacity: Self.oversizeFixtureBound))
         ingest(harness)
         let operation = try launchProbe(harness)
@@ -371,7 +371,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
     }
 
     /// A replay that is catching up when a skip lands ends with a resync. Its reader still names the sequence the skip consumed, so it is stale.
-    func testAReplayCatchingUpWhenAnOversizedOutcomeLandsEndsWithAResync() throws {
+    @RuntimeActor func testAReplayCatchingUpWhenAnOversizedOutcomeLandsEndsWithAResync() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(
             controlLogByteCapacity: Self.oversizeFixtureBound,
             replayChunkItems: 1
@@ -387,7 +387,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
     }
 
     /// The same refusal on the framed wire: the baseline answers the replay as expired history, not as a replay without the skipped outcome.
-    func testAReplayAcrossAnOversizedOutcomeIsRefusedOnTheFramedWire() async throws {
+    @RuntimeActor func testAReplayAcrossAnOversizedOutcomeIsRefusedOnTheFramedWire() async throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(controlLogByteCapacity: Self.oversizeFixtureBound))
         ingest(harness)
         let operation = try launchProbe(harness)

@@ -9,7 +9,6 @@ import XCTest
 /// Decision 0037 over the actual workflow and store. The reference tracks symbolic saved pairs and a latched invalidation; it knows no
 /// store receipt, version or production transition. Exhausts 93 histories (three before-capture pairs, then every trace of up to two
 /// reload/Stop/Start operations), including changed-then-restored bytes. Physical bind/surface ordering is outside this model.
-@MainActor
 final class ConfigurationCaptureModelTests: XCTestCase {
     private enum Pair: String, CaseIterable {
         case original, runtimeEdit, platformEdit
@@ -51,7 +50,7 @@ final class ConfigurationCaptureModelTests: XCTestCase {
         let platform: Data
     }
 
-    func testBoundedCaptureHistoriesAgreeWithAnIndependentReference() async throws {
+    @RuntimeActor func testBoundedCaptureHistoriesAgreeWithAnIndependentReference() async throws {
         let fixtures = try Dictionary(uniqueKeysWithValues: Pair.allCases.map { pair in
             (pair, try bytes(for: pair))
         })
@@ -73,7 +72,7 @@ final class ConfigurationCaptureModelTests: XCTestCase {
         XCTAssertEqual(restoredAfterReplacement, 6, "returning to the captured bytes never revives an invalidated command")
     }
 
-    private func exercise(_ beforeCapture: Pair, _ history: [Step], fixtures: [Pair: Bytes]) async throws -> Bool {
+    @RuntimeActor private func exercise(_ beforeCapture: Pair, _ history: [Step], fixtures: [Pair: Bytes]) async throws -> Bool {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pm-capture-model-\(UUID().uuidString)")
         let environment = RuntimeEnvironment.isolated(stateDirectory: directory)
         let session = try acquireScratchStateRoot(environment)
@@ -117,7 +116,7 @@ final class ConfigurationCaptureModelTests: XCTestCase {
         return reference.replaced && reference.observed == reference.captured && !reference.superseded
     }
 
-    private func bytes(for pair: Pair) throws -> Bytes {
+    @RuntimeActor private func bytes(for pair: Pair) throws -> Bytes {
         var runtime = GenericDefaults.shared.makeConfig()
         runtime.profileName = pair == .runtimeEdit ? "B" : "A"
         runtime.dnsForwarderEnabled = false
@@ -125,7 +124,7 @@ final class ConfigurationCaptureModelTests: XCTestCase {
         return Bytes(runtime: try ProxyConfigPersistence.stagedFileData(for: runtime), platform: try PlatformConfigPersistence.stagedData(for: platform))
     }
 
-    private func install(_ bytes: Bytes, in environment: RuntimeEnvironment) throws {
+    @RuntimeActor private func install(_ bytes: Bytes, in environment: RuntimeEnvironment) throws {
         try bytes.runtime.write(to: environment.configFile)
         try bytes.platform.write(to: environment.platformConfigFile)
     }

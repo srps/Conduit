@@ -13,7 +13,6 @@ import XCTest
 /// use the fake file access over a real lease, as `ConfigurationStoreTests` does.
 ///
 /// Known limit, pinned by `testARuntimeEditAfterTheSourceCheckIsNotExcluded`: the check is not a multi-file atomic claim (decision 0027).
-@MainActor
 final class ConfigurationStoreSourceTests: XCTestCase {
     private struct SeedFailure: Error {}
 
@@ -24,7 +23,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
     )
 
     /// The canonical defaults runtime file with extra top-level keys, so a witness can carry legacy values.
-    private func runtimeFile(_ extra: [String: Any] = [:], profileName: String? = nil) throws -> Data {
+    @RuntimeActor private func runtimeFile(_ extra: [String: Any] = [:], profileName: String? = nil) throws -> Data {
         var config = GenericDefaults.shared.makeConfig()
         if let profileName { config.profileName = profileName }
         let staged = try ProxyConfigPersistence.stagedFileData(for: config)
@@ -34,11 +33,11 @@ final class ConfigurationStoreSourceTests: XCTestCase {
         return try JSONSerialization.data(withJSONObject: object)
     }
 
-    private func isPersisted(_ outcome: ConfigurationWriteOutcome) -> Bool {
+    @RuntimeActor private func isPersisted(_ outcome: ConfigurationWriteOutcome) -> Bool {
         if case .persisted = outcome { true } else { false }
     }
 
-    private func adopt(_ fixture: ConfigurationStoreTests.Fixture) async -> ConfigurationLoadOutcome? {
+    @RuntimeActor private func adopt(_ fixture: ConfigurationStoreTests.Fixture) async -> ConfigurationLoadOutcome? {
         guard case .admitted(let report) = await fixture.store.load(context: Self.context) else {
             XCTFail("the load was not admitted")
             return nil
@@ -46,7 +45,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
         return report.outcome
     }
 
-    private func adopted(_ fixture: ConfigurationStoreTests.Fixture) async -> Bool {
+    @RuntimeActor private func adopted(_ fixture: ConfigurationStoreTests.Fixture) async -> Bool {
         guard case .adopted = await adopt(fixture) else {
             XCTFail("the load was not adopted")
             return false
@@ -54,7 +53,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
         return true
     }
 
-    private func commitCoupled(
+    @RuntimeActor private func commitCoupled(
         _ fixture: ConfigurationStoreTests.Fixture,
         _ runtime: ProxyConfig,
         _ platform: PlatformIntegrationConfig,
@@ -71,7 +70,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
         return result
     }
 
-    private func commitPreferences(
+    @RuntimeActor private func commitPreferences(
         _ fixture: ConfigurationStoreTests.Fixture,
         _ preferences: AppPreferences,
         token: ConfigurationBaselineToken?
@@ -84,7 +83,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
     }
 
     /// The physical calls since the last `clearObservations`, by file, so a witness shows where the source read sits.
-    private func phaseShape(_ fixture: ConfigurationStoreTests.Fixture) -> [String] {
+    @RuntimeActor private func phaseShape(_ fixture: ConfigurationStoreTests.Fixture) -> [String] {
         fixture.access.observations.map { observation in
             let (verb, path) = switch observation {
             case .read(let path, _): ("read", path)
@@ -100,7 +99,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
         }
     }
 
-    private func decidedPreferences() -> AppPreferences {
+    @RuntimeActor private func decidedPreferences() -> AppPreferences {
         var decided = AppPreferences()
         decided.preferredBrowserTestURL = "https://example.test/decided"
         return decided
@@ -110,7 +109,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
 
     /// The platform sidecar is missing, so the runtime file's legacy `launchAtLogin` is its value. An external edit flips it, and the reload
     /// adopts the new value. A token issued for the old value must not authorize a write: the caller decided from a value that is gone.
-    func testAReloadThatChangesAMissingPlatformSidecarsLegacyValueRetiresItsToken() async throws {
+    @RuntimeActor func testAReloadThatChangesAMissingPlatformSidecarsLegacyValueRetiresItsToken() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try runtimeFile(["launchAtLogin": true]))
         defer { fixture.close() }
         guard await adopted(fixture) else { return }
@@ -138,7 +137,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
     }
 
     /// The same for the preferences sidecar, through its own commit.
-    func testAReloadThatChangesAMissingPreferencesSidecarsLegacyValueRetiresItsToken() async throws {
+    @RuntimeActor func testAReloadThatChangesAMissingPreferencesSidecarsLegacyValueRetiresItsToken() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try runtimeFile(["showMenuBarIcon": false]))
         defer { fixture.close() }
         guard await adopted(fixture) else { return }
@@ -163,7 +162,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
 
     /// A reload that moves a missing sidecar's version needs a newer version, so a sidecar at its maximum refuses the reload before anything
     /// is adopted, as a changed file of its own does.
-    func testAReloadThatChangesAMissingSidecarsValueAtItsMaximumVersionIsRefused() async throws {
+    @RuntimeActor func testAReloadThatChangesAMissingSidecarsValueAtItsMaximumVersionIsRefused() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try runtimeFile(["showMenuBarIcon": false]))
         defer { fixture.close() }
         guard await adopted(fixture) else { return }
@@ -179,7 +178,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
 
     /// A runtime edit that leaves a missing sidecar's effective value as it was keeps the sidecar's token, and so does any runtime edit
     /// beside a present sidecar, because the sidecar is then its own source.
-    func testAHarmlessRuntimeEditOrAPresentSidecarKeepsTheSidecarToken() async throws {
+    @RuntimeActor func testAHarmlessRuntimeEditOrAPresentSidecarKeepsTheSidecarToken() async throws {
         let missing = try ConfigurationStoreTests.Fixture(runtime: try runtimeFile(["showMenuBarIcon": false]))
         defer { missing.close() }
         guard await adopted(missing) else { return }
@@ -210,7 +209,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
     /// The runtime file carried no legacy preference keys at load, so the missing sidecar's value is the defaults. An external edit then adds a
     /// legacy value to the runtime file, with no reload. The first sidecar write would shadow that value with one decided from the defaults,
     /// so it creates no sidecar, and both the sidecar and the runtime file lose their authority until a reload.
-    func testTheFirstPreferencesWriteAfterAnExternalRuntimeEditAddingLegacyKeysCreatesNoSidecar() async throws {
+    @RuntimeActor func testTheFirstPreferencesWriteAfterAnExternalRuntimeEditAddingLegacyKeysCreatesNoSidecar() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try runtimeFile())
         defer { fixture.close() }
         guard await adopted(fixture) else { return }
@@ -240,7 +239,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
 
     /// The same through the coupled commit, for the platform sidecar. The platform file is considered first, so a held platform write holds
     /// the runtime write behind it, and no platform sidecar is created.
-    func testTheFirstPlatformWriteAfterAnExternalRuntimeEditAddingLegacyKeysCreatesNoSidecar() async throws {
+    @RuntimeActor func testTheFirstPlatformWriteAfterAnExternalRuntimeEditAddingLegacyKeysCreatesNoSidecar() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try runtimeFile())
         defer { fixture.close() }
         guard await adopted(fixture) else { return }
@@ -265,7 +264,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
 
     /// No file existed at load, so every value is a default. Someone else then creates the runtime file with legacy values. A first sidecar
     /// write of either kind creates no sidecar over them.
-    func testTheFirstSidecarWriteAfterAnExternallyCreatedRuntimeFileCreatesNoSidecar() async throws {
+    @RuntimeActor func testTheFirstSidecarWriteAfterAnExternallyCreatedRuntimeFileCreatesNoSidecar() async throws {
         let created = try runtimeFile(["showMenuBarIcon": false, "launchAtLogin": true])
 
         let preferences = try ConfigurationStoreTests.Fixture()
@@ -296,7 +295,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
 
     /// A harmless edit keeps the sidecar's token across a reload, but the check before the first write compares bytes, so before that
     /// reload the write is held. After the reload the store holds the new bytes as the source, and the first write proceeds.
-    func testAHarmlessRuntimeEditHoldsTheFirstWriteUntilAReloadRefreshesTheSource() async throws {
+    @RuntimeActor func testAHarmlessRuntimeEditHoldsTheFirstWriteUntilAReloadRefreshesTheSource() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try runtimeFile())
         defer { fixture.close() }
         guard await adopted(fixture) else { return }
@@ -317,7 +316,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
 
     /// A source read that fails holds the first write with its full typed error, and nothing is latched. The same token then writes once the
     /// read succeeds. No sidecar call is made while the source is not established.
-    func testAnUnreadableSourceHoldsTheFirstPreferencesWriteWithItsTypedErrorAndKeepsAuthority() async throws {
+    @RuntimeActor func testAnUnreadableSourceHoldsTheFirstPreferencesWriteWithItsTypedErrorAndKeepsAuthority() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try runtimeFile())
         defer { fixture.close() }
         guard await adopted(fixture) else { return }
@@ -339,7 +338,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
 
     /// The coupled path: an unreadable platform source holds the platform write with its typed error, and the runtime write behind it. Both
     /// keep their authority, and nothing is written.
-    func testAnUnreadableSourceHoldsTheCoupledCommitBehindThePlatformAndKeepsAuthority() async throws {
+    @RuntimeActor func testAnUnreadableSourceHoldsTheCoupledCommitBehindThePlatformAndKeepsAuthority() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try runtimeFile())
         defer { fixture.close() }
         guard await adopted(fixture) else { return }
@@ -365,7 +364,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
     /// commit writes the platform first, so its first write is checked against the loaded bytes and the runtime write is not checked. The
     /// preferences sidecar's first write is then checked against the runtime bytes the store wrote, and it proceeds. Once that sidecar
     /// exists, it has no source, so a later write makes no runtime read.
-    func testTheStoresOwnRuntimeWriteMovesTheSourceAndTheFirstSidecarWriteClearsIt() async throws {
+    @RuntimeActor func testTheStoresOwnRuntimeWriteMovesTheSourceAndTheFirstSidecarWriteClearsIt() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try runtimeFile())
         defer { fixture.close() }
         guard await adopted(fixture) else { return }
@@ -402,7 +401,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
 
     /// A runtime write that is not persisted leaves the source where it was, so the first sidecar write is checked against the old bytes,
     /// which are still on disk, and proceeds.
-    func testANotPersistedRuntimeWriteLeavesTheSourceOnTheBytesStillOnDisk() async throws {
+    @RuntimeActor func testANotPersistedRuntimeWriteLeavesTheSourceOnTheBytesStillOnDisk() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(
             runtime: try runtimeFile(),
             platform: try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig())
@@ -430,13 +429,13 @@ final class ConfigurationStoreSourceTests: XCTestCase {
     private static let composedURL = "https://example.test/caf\u{00E9}"
     private static let decomposedURL = "https://example.test/cafe\u{0301}"
 
-    private func utf8(_ string: String?) -> [UInt8]? {
+    @RuntimeActor private func utf8(_ string: String?) -> [UInt8]? {
         string.map { Array($0.utf8) }
     }
 
     /// The missing preferences sidecar takes the runtime file's legacy URL. An outside edit replaces it with the other spelling, and the
     /// reload adopts those exact bytes. The effective value changed bytewise, so the token issued for the old spelling must be retired.
-    func testAReloadThatRespellsAMissingSidecarsLegacyURLRetiresItsToken() async throws {
+    @RuntimeActor func testAReloadThatRespellsAMissingSidecarsLegacyURLRetiresItsToken() async throws {
         XCTAssertNotEqual(utf8(Self.composedURL), utf8(Self.decomposedURL), "the fixture's two spellings are byte-distinct")
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try runtimeFile(["preferredBrowserTestURL": Self.composedURL]))
         defer { fixture.close() }
@@ -461,7 +460,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
 
     /// A present sidecar holds one spelling, and the caller saves the other. The request's bytes differ from the file's, so the save must
     /// write them; a verification without a write would report the request as saved while the file keeps the old bytes.
-    func testAPreferencesSaveOfAByteDistinctEquivalentURLWritesTheRequestedBytes() async throws {
+    @RuntimeActor func testAPreferencesSaveOfAByteDistinctEquivalentURLWritesTheRequestedBytes() async throws {
         var stored = AppPreferences()
         stored.preferredBrowserTestURL = Self.composedURL
         let fixture = try ConfigurationStoreTests.Fixture(
@@ -482,7 +481,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
     }
 
     /// The same for the runtime file through the coupled commit: a profile name saved in the other spelling must be written.
-    func testARuntimeSaveOfAByteDistinctEquivalentNameWritesTheRequestedBytes() async throws {
+    @RuntimeActor func testARuntimeSaveOfAByteDistinctEquivalentNameWritesTheRequestedBytes() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(
             runtime: try runtimeFile(profileName: "Caf\u{00E9}"),
             platform: try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig())
@@ -504,7 +503,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
     /// The PAC URL is an applied value, so the pair the store hands over must be the persisted one. The runtime file holds one spelling and
     /// the candidate has the other: the save writes the candidate's bytes, the verified pair carries them, and a reload of the file adopts
     /// the same bytes.
-    func testARuntimeSaveOfAByteDistinctPACURLHandsOverThePersistedBytes() async throws {
+    @RuntimeActor func testARuntimeSaveOfAByteDistinctPACURLHandsOverThePersistedBytes() async throws {
         var stored = GenericDefaults.shared.makeConfig()
         stored.pacURL = Self.composedURL
         let fixture = try ConfigurationStoreTests.Fixture(
@@ -535,7 +534,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
     /// The load adopts a runtime file whose interval is past the runtime's range, so it can be repaired. That value has no canonical
     /// encoding, so the comparison counts it as different: a valid repair is written, not refused, and saving the loaded value itself is
     /// refused by its own staging with the closed reason.
-    func testAnUnrepresentableLoadedRuntimeValueIsRepairedByAValidCandidate() async throws {
+    @RuntimeActor func testAnUnrepresentableLoadedRuntimeValueIsRepairedByAValidCandidate() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(
             runtime: try runtimeFile(["healthCheckIntervalSeconds": 1e300]),
             platform: try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig())
@@ -568,7 +567,7 @@ final class ConfigurationStoreSourceTests: XCTestCase {
     /// The source check reads the runtime file and then replaces the sidecar. A noncooperating editor can change the runtime file in that
     /// window, and the check does not exclude it (decision 0027). This pins the actual loss: the sidecar is created, and the legacy value
     /// added after the check is shadowed by it.
-    func testARuntimeEditAfterTheSourceCheckIsNotExcluded() async throws {
+    @RuntimeActor func testARuntimeEditAfterTheSourceCheckIsNotExcluded() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try runtimeFile())
         defer { fixture.close() }
         guard await adopted(fixture) else { return }

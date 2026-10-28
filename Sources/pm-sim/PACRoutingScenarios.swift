@@ -19,7 +19,7 @@ enum PACRoutingScenarios {
         guard condition else { throw Failure(description: message) }
     }
 
-    @MainActor
+    @RuntimeActor
     private final class Fixture {
         let group = MultiThreadedEventLoopGroup.singleton
         /// Echoes, so a request wrongly sent to it directly fails at once
@@ -144,7 +144,7 @@ enum PACRoutingScenarios {
 
     /// A healthy third proxy and a later DIRECT must stay outside a two-route
     /// cap. Raising the policy to three admits the healthy proxy in place.
-    @MainActor
+    @RuntimeActor
     static func routeBounds(verbose: Bool) async throws -> ScenarioResult {
         let started = Date()
         let fixture = Fixture()
@@ -182,7 +182,7 @@ enum PACRoutingScenarios {
     /// and `QUIC`; the kernel rejects `SOCKS`) routes HTTP, CONNECT and SOCKS5
     /// through the configured upstream, outside strict mode and with the
     /// target cached as directly reachable, and never dials the target.
-    @MainActor
+    @RuntimeActor
     static func unsupportedOnly(verbose: Bool) async throws -> ScenarioResult {
         let started = Date()
         let fixture = Fixture()
@@ -235,7 +235,7 @@ enum PACRoutingScenarios {
     /// through the upstream with no direct dial and no probe. When the
     /// upstream fails, the 502 stands, one probe runs, and one
     /// `routing.strict_direct_reachable` hint is emitted for the host.
-    @MainActor
+    @RuntimeActor
     static func strictDirectReachable(verbose: Bool) async throws -> ScenarioResult {
         let started = Date()
         let fixture = Fixture()
@@ -291,7 +291,7 @@ enum PACRoutingScenarios {
     /// the target answers directly. The upstream answering 502 for another
     /// host is the control: one probe, one hint. The two use different host
     /// names, so the hint cooldown (per host) cannot hide a wrong probe.
-    @MainActor
+    @RuntimeActor
     static func strictHintUpstreamRefusal(verbose: Bool) async throws -> ScenarioResult {
         let started = Date()
         let fixture = Fixture()
@@ -340,7 +340,7 @@ enum PACRoutingScenarios {
     /// connected to, so the target's connection count would show a probe.
     /// Gateway listeners bind 0.0.0.0, so this drives the detector the HTTP
     /// listener uses rather than a gateway listener.
-    @MainActor
+    @RuntimeActor
     static func gatewayProbeBlocklist(verbose: Bool) async throws -> ScenarioResult {
         let started = Date()
         let group = MultiThreadedEventLoopGroup.singleton
@@ -362,7 +362,7 @@ enum PACRoutingScenarios {
         )
     }
 
-    @MainActor
+    @RuntimeActor
     private static func checkGatewayProbeBlocklist(target: FakeOrigin, verbose: Bool) async throws {
         let group = MultiThreadedEventLoopGroup.singleton
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)

@@ -142,7 +142,7 @@ enum ConduitDaemon {
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler {
                 logger.log(.notice, "Received \(name), stopping daemon runtime...", category: .general)
-                Task { @MainActor in
+                Task {
                     await host.stopRuntime(exitAfterStop: true)
                 }
             }
@@ -154,7 +154,7 @@ enum ConduitDaemon {
         await host.markReady(mode: args.contains("--start-runtime") ? "runtime-started" : "runtime-host")
 
         if args.contains("--print-status") {
-            printStatus(host.status())
+            printStatus(await host.status())
         }
 
         await host.flushEvents()

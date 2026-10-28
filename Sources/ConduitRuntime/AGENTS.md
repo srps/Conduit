@@ -1,6 +1,6 @@
 # ConduitRuntime
 
-The shared runtime host, `RuntimeHost` (decision 0031, carrying forward 0013). `ConduitDaemon` and the app compose it. The app holds framed clients rather than live runtime collaborators. Runtime ownership remains MainActor until the whole control cluster moves together to RuntimeActor (0031).
+The shared runtime host, `RuntimeHost` (decision 0031, carrying forward 0013). `ConduitDaemon` and the app compose it. The app holds framed clients rather than live runtime collaborators. RuntimeHost shares RuntimeActor with the whole control-owner cluster (0031); UI and client presentation remain MainActor, and blocking effects stay on the injected physical workers. The global actor supplies isolation only; each host owns its resources explicitly.
 
 - Runtime lifecycle/store policy has one implementation here. Add actual-host/client tests over explicitly injected `FakeMachine` effects and a meaningful `pm-sim` witness for new behavior. App tests cover the thin client and UI composition; do not duplicate runtime policy there.
 - The host never exits the process. A terminal stop calls the `terminalExit` the entry point injected. `ConduitDaemon` passes `exit(0)`, and tests pass a hook they can observe.

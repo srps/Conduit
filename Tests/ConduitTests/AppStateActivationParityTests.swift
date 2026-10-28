@@ -106,27 +106,32 @@ final class AppStateActivationParityTests: XCTestCase {
         for notify in ["vpn", "settings"] {
             let locations = NetworkLocationFixture.store()
             let original = try locations.snapshot()
-            let (harness, state) = try await ready(
-                platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true),
-                prepare: { $0.locationStore = locations }
+            let harness = try AppStateHarness(
+                config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true)
             )
-            await startProxy(state, harness)
-            await observersRun(harness)
-            await harness.settle("the Start's surfaces applied") { harness.machine.launchdEnvironment["HTTP_PROXY"] != nil }
-            harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
-                name == "/bin/launchctl" && arguments.first == "unsetenv"
+            self.harness = harness
+            harness.locationStore = locations
+            // Scoped, so the app is gone before the teardown proves the root free.
+            do {
+                let state = await harness.ready()
+                await startProxy(state, harness)
+                await observersRun(harness)
+                await harness.settle("the Start's surfaces applied") { harness.machine.launchdEnvironment["HTTP_PROXY"] != nil }
+                harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+                    name == "/bin/launchctl" && arguments.first == "unsetenv"
+                }
+                state.toggleProxy()
+                await harness.hold.waitUntilReached()
+                XCTAssertFalse(harness.hold.reachedOnMainThread)
+                if notify == "vpn" {
+                    harness.vpn.emit(.connected)
+                } else {
+                    for _ in 0..<1_000 { harness.locationObserver.emitSettingsChange() }
+                }
+                try await Task.sleep(for: .milliseconds(50))
+                harness.hold.release()
+                await harness.settle("the proxy stopped") { state.runtime.runtimeStatus.state == .stopped }
             }
-            state.toggleProxy()
-            await harness.hold.waitUntilReached()
-            XCTAssertFalse(harness.hold.reachedOnMainThread)
-            if notify == "vpn" {
-                harness.vpn.emit(.connected)
-            } else {
-                for _ in 0..<1_000 { harness.locationObserver.emitSettingsChange() }
-            }
-            try await Task.sleep(for: .milliseconds(50))
-            harness.hold.release()
-            await harness.settle("the proxy stopped") { state.runtime.runtimeStatus.state == .stopped }
             try await Task.sleep(for: .milliseconds(50))
             XCTAssertEqual(try locations.snapshot().services, original.services, notify)
             XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy), notify)
@@ -941,7 +946,6 @@ final class AppStateActivationParityTests: XCTestCase {
 }
 
 /// Saved commands racing each other through the actual framed client over the actual host, where the assertion needs the host itself.
-@MainActor
 final class RuntimeHostInteractiveRestartParityTests: XCTestCase {
     private var harness: InteractiveHostHarness?
     private var control: (any RuntimeClient)?
@@ -959,7 +963,7 @@ final class RuntimeHostInteractiveRestartParityTests: XCTestCase {
     }
 
     /// The host over `platform`, its framed client under test limits, and one live stream past its baseline.
-    private func connect(platform: PlatformIntegrationConfig, prepare: (InteractiveHostHarness) -> Void = { _ in }) async throws -> RuntimeHost {
+    @RuntimeActor private func connect(platform: PlatformIntegrationConfig, prepare: (InteractiveHostHarness) -> Void = { _ in }) async throws -> RuntimeHost {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -981,11 +985,11 @@ final class RuntimeHostInteractiveRestartParityTests: XCTestCase {
 
     private func deadline() -> RuntimeDeadline { .after(.seconds(30), from: .now) }
 
-    private func snapshot() async throws -> ControlRuntimeSnapshot {
+    @RuntimeActor private func snapshot() async throws -> ControlRuntimeSnapshot {
         try await XCTUnwrap(control).readSnapshot(deadline: deadline())
     }
 
-    private func submit(_ command: ControlRuntimeCommand) async throws -> ControlOperationID? {
+    @RuntimeActor private func submit(_ command: ControlRuntimeCommand) async throws -> ControlOperationID? {
         let admission = try await XCTUnwrap(control).submit(
             command, requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: try await snapshot().stamp.incarnation,
             deadline: deadline()
@@ -994,7 +998,7 @@ final class RuntimeHostInteractiveRestartParityTests: XCTestCase {
         return operation
     }
 
-    private func outcome(of operation: ControlOperationID) async throws -> ControlOperationOutcome? {
+    @RuntimeActor private func outcome(of operation: ControlOperationID) async throws -> ControlOperationOutcome? {
         if let known = finished.removeValue(forKey: operation) { return known }
         let stream = try XCTUnwrap(stream)
         for _ in 0..<256 {
@@ -1008,7 +1012,7 @@ final class RuntimeHostInteractiveRestartParityTests: XCTestCase {
     /// A DNS Stop admitted while the explicit DNS Start's system-DNS apply is held fences it: the apply already started completes, the Stop's
     /// restore lands after it and gives the interfaces back the user's servers, the overtaken Start reports no started DNS and arms no health
     /// timer, and the saved intent is the Stop's disable.
-    func testADNSStopWhileItsStartAppliesRestoresSystemDNSAndArmsNoHealthTimer() async throws {
+    @RuntimeActor func testADNSStopWhileItsStartAppliesRestoresSystemDNSAndArmsNoHealthTimer() async throws {
         let host = try await connect(platform: PlatformIntegrationConfig(manageSystemDNS: true)) { harness in
             harness.machine.describe("Wi-Fi") { $0.dnsServers = ["192.0.2.53"] }
         }
@@ -1043,7 +1047,7 @@ final class RuntimeHostInteractiveRestartParityTests: XCTestCase {
     }
 
     /// Repeated DNS Stops while the first is held at its relay stop run one teardown: the relay is stopped once, and every Stop settles.
-    func testRepeatedDNSStopsWhileTheFirstIsHeldStopTheRelayOnce() async throws {
+    @RuntimeActor func testRepeatedDNSStopsWhileTheFirstIsHeldStopTheRelayOnce() async throws {
         let host = try await connect(platform: PlatformIntegrationConfig(manageSystemDNS: true))
         let harness = try XCTUnwrap(self.harness)
         let observed = try await snapshot().stamp.modules
@@ -1067,7 +1071,7 @@ final class RuntimeHostInteractiveRestartParityTests: XCTestCase {
         XCTAssertNotEqual(host.orchestrator.snapshot.dnsRunState, .running)
     }
 
-    func testARestartOvertakenByAStopReportsNoStartedProxy() async throws {
+    @RuntimeActor func testARestartOvertakenByAStopReportsNoStartedProxy() async throws {
         let host = try await connect(platform: PlatformIntegrationConfig(manageSystemProxy: true))
         let harness = try XCTUnwrap(self.harness)
         let observed = try await snapshot().stamp.modules

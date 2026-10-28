@@ -1,0 +1,16 @@
+{
+  "command": [
+    "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/.build/debug/pm-proxy",
+    "--minimal",
+    "--state-dir",
+    "/private/tmp/cdt-sig-e3gh1x0u",
+    "--port",
+    "0"
+  ],
+  "owned_pid": 46733,
+  "ready": true,
+  "exit_after_hup": -6,
+  "rejection_recorded": false,
+  "root": "/private/tmp/cdt-sig-e3gh1x0u",
+  "final_exit": -6
+}

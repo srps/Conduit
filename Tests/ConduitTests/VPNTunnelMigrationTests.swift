@@ -8,7 +8,6 @@ import XCTest
 
 /// #148, #156: a confirmed transition closes the sockets whose path it
 /// removed, at once and again as routes settle; a flap holds the sweeps.
-@MainActor
 final class VPNTunnelMigrationTests: XCTestCase {
     private func migrations(_ events: [RuntimeEvent]) -> [String] {
         events.filter { $0.event == "vpn.tunnels_migrated" }.compactMap(\.detail)
@@ -45,6 +44,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
         return config
     }
 
+    @RuntimeActor
     private func orchestrator(
         reachable: NIOLockedValueBox<Bool> = NIOLockedValueBox(true), logger: any LogSink = DiscardingLogSink(),
         resweeps: [Duration] = [.milliseconds(50)],
@@ -61,7 +61,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
     }
 
     /// A connected socket from `local`, tracked by `orchestrator`.
-    private func tracked(
+    @RuntimeActor private func tracked(
         _ orchestrator: ProxyOrchestrator, local: String, route: OutboundSocketRegistry.Route = .direct
     ) async throws -> EmbeddedChannel {
         let channel = EmbeddedChannel()
@@ -71,7 +71,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
         return channel
     }
 
-    private func until(_ condition: () -> Bool) async throws -> Bool {
+    @RuntimeActor private func until(_ condition: () -> Bool) async throws -> Bool {
         let deadline = ContinuousClock.now + .seconds(3)
         while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
         return condition()
@@ -79,7 +79,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
 
     /// The sweep does not wait for the connectivity probe: the probe can
     /// take its whole connect budget while stranded sockets stall.
-    func testADisconnectClosesStrandedSocketsWhileItsProbeRuns() async throws {
+    @RuntimeActor func testADisconnectClosesStrandedSocketsWhileItsProbeRuns() async throws {
         let reachable = NIOLockedValueBox(true)
         let holdProbe = NIOLockedValueBox(false)
         let gate = Gate()
@@ -94,7 +94,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
         holdProbe.withLockedValue { $0 = true }
         gone.withLockedValue { _ = $0.insert("10.20.30.40") }
 
-        let disconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
+        let disconnect = Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
         while !(await gate.holding) { try await Task.sleep(for: .milliseconds(5)) }
         let closedDuringProbe = try await until { !overVPN.isActive }
         await gate.open()
@@ -110,7 +110,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
 
     /// Routes settle after the VPN report: a DIRECT socket whose route moves
     /// onto the tunnel only after the first pass is closed by a re-sweep.
-    func testAReSweepClosesASocketWhosePathMovedAfterTheFirstPass() async throws {
+    @RuntimeActor func testAReSweepClosesASocketWhosePathMovedAfterTheFirstPass() async throws {
         let orchestrator = orchestrator(resweeps: [.milliseconds(100)])
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
@@ -134,7 +134,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
 
     /// A route missing mid-flap is not a gone path: the pending re-sweeps of
     /// the transition before the flap wait it out, and run once it recovers.
-    func testAFlapHoldsThePendingReSweepsUntilItRecovers() async throws {
+    @RuntimeActor func testAFlapHoldsThePendingReSweepsUntilItRecovers() async throws {
         let orchestrator = orchestrator(resweeps: [.milliseconds(100)])
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
@@ -154,7 +154,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
 
     /// A flap that begins while a sweep is still checking paths stops it
     /// before it closes anything: the verdicts were taken mid-transition.
-    func testAFlapDuringASweepsCheckStopsItsClosures() async throws {
+    @RuntimeActor func testAFlapDuringASweepsCheckStopsItsClosures() async throws {
         let orchestrator = orchestrator()
         try await orchestrator.startProxy()
         let socket = try await tracked(orchestrator, local: "10.20.30.40")
@@ -179,7 +179,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
     /// closes, after the first re-sweep delay, only sockets whose address is
     /// gone (the tunnel came back on another address): a route that moved is
     /// not judged after a flap.
-    func testAFlapRecoveryClosesOnlySocketsWhoseAddressIsGone() async throws {
+    @RuntimeActor func testAFlapRecoveryClosesOnlySocketsWhoseAddressIsGone() async throws {
         // Each wait below for nothing to happen is at least the re-sweep delay.
         let resweep = Duration.milliseconds(40)
         let orchestrator = orchestrator(resweeps: [resweep])
@@ -214,7 +214,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
 
     /// A connected VPN moving to another tunnel interface is a transition:
     /// the old tunnel's sockets are swept.
-    func testATunnelChangeWhileConnectedSweeps() async throws {
+    @RuntimeActor func testATunnelChangeWhileConnectedSweeps() async throws {
         let orchestrator = orchestrator()
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.connected, interfaceName: "utun4")
@@ -234,7 +234,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
 
     /// A flap that a wake recovers, not a monitor report, still runs the
     /// recovery's sweep: the monitor's later `.connected` changes nothing.
-    func testAWakeRecoveryRunsTheHeldSweep() async throws {
+    @RuntimeActor func testAWakeRecoveryRunsTheHeldSweep() async throws {
         let orchestrator = orchestrator(resweeps: [.milliseconds(100)])
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.connected)
@@ -253,7 +253,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
 
     /// The first report after startup is a real transition: `unknown →
     /// connected` sweeps like any other (#160).
-    func testTheFirstConnectedReportSweeps() async throws {
+    @RuntimeActor func testTheFirstConnectedReportSweeps() async throws {
         let orchestrator = orchestrator()
         try await orchestrator.startProxy()
         let beforeVPN = try await tracked(orchestrator, local: "192.168.2.20")
@@ -273,7 +273,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
 
     /// A reconnect that runs while the disconnect handler waits on its probe
     /// owns routing; the stale handler must not sweep on its old verdict.
-    func testADisconnectSupersededDuringItsProbeSkipsTheRoutingSweep() async throws {
+    @RuntimeActor func testADisconnectSupersededDuringItsProbeSkipsTheRoutingSweep() async throws {
         let reachable = NIOLockedValueBox(true)
         let holdNextProbe = NIOLockedValueBox(false)
         let gate = Gate()
@@ -285,7 +285,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
         reachable.withLockedValue { $0 = false }
         holdNextProbe.withLockedValue { $0 = true }
 
-        let disconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
+        let disconnect = Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
         while !(await gate.holding) { try await Task.sleep(for: .milliseconds(5)) }
         reachable.withLockedValue { $0 = true }
         await orchestrator.handleVPNStateChange(.connected)
@@ -299,7 +299,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
 
     /// A reconnect while the listener is stopped (a config restart in
     /// flight) still closes the stranded sockets the restart preserved.
-    func testAReconnectWithTheListenerStoppedStillSweeps() async throws {
+    @RuntimeActor func testAReconnectWithTheListenerStoppedStillSweeps() async throws {
         let orchestrator = orchestrator(reachable: NIOLockedValueBox(false))
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.connected)
@@ -318,7 +318,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
     }
 
     /// On-prem: the probe finds the upstream, so the routing phase closes nothing.
-    func testAReachableUpstreamKeepsItsChannelsInTheRoutingPhase() async throws {
+    @RuntimeActor func testAReachableUpstreamKeepsItsChannelsInTheRoutingPhase() async throws {
         let orchestrator = orchestrator()
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.connected)
@@ -334,7 +334,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
     /// sockets at once, and its routing phase runs once the start probe
     /// decides routing: an upstream tunnel the restart preserved would stall
     /// on proxies behind the gone VPN (#156).
-    func testADisconnectWithTheListenerStoppedRoutesOnceTheStartProbeDecides() async throws {
+    @RuntimeActor func testADisconnectWithTheListenerStoppedRoutesOnceTheStartProbeDecides() async throws {
         let reachable = NIOLockedValueBox(true)
         let orchestrator = orchestrator(reachable: reachable)
         try await orchestrator.startProxy()
@@ -376,13 +376,13 @@ final class VPNTunnelMigrationTests: XCTestCase {
     /// A disconnect that lands after the start probe committed (while the
     /// listener binds) made that verdict stale; startup decides again and
     /// runs the routing phase before it reports running.
-    func testADisconnectAfterTheStartProbeIsRoutedBeforeRunning() async throws {
+    @RuntimeActor func testADisconnectAfterTheStartProbeIsRoutedBeforeRunning() async throws {
         let reachable = NIOLockedValueBox(true)
         let box = NIOLockedValueBox<ProxyOrchestrator?>(nil)
         let hook = ListeningHook {
             guard let orchestrator = box.withLockedValue({ $0 }) else { return }
             reachable.withLockedValue { $0 = false }
-            Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
+            Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
         }
         let orchestrator = orchestrator(reachable: reachable, logger: hook)
         await orchestrator.handleVPNStateChange(.connected)

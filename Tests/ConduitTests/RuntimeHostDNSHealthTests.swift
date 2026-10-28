@@ -8,7 +8,6 @@ import ConduitShared
 /// The host's one DNS health observation through the actual service and framed client, over a `FakeMachine` and a scratch root. The
 /// harness's injected probe answers nothing, so a relay restart's own final probe finds the pipeline unresponsive. A reading is reported
 /// through the host's existing internal entry, with the token its timer would have armed; a held restart parks on its final probe.
-@MainActor
 final class RuntimeHostDNSHealthTests: XCTestCase {
     private var harness: InteractiveHostHarness?
 
@@ -28,7 +27,7 @@ final class RuntimeHostDNSHealthTests: XCTestCase {
     }
 
     /// A running host with DNS managed, its health timer armed, and the framed client over its service.
-    private func composeRunning() async throws -> Composed {
+    @RuntimeActor private func composeRunning() async throws -> Composed {
         let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: true)
         self.harness = harness
         let host = try await harness.makeHost()
@@ -44,26 +43,26 @@ final class RuntimeHostDNSHealthTests: XCTestCase {
         return Composed(host: host, harness: harness, composition: composition, client: client)
     }
 
-    private func deadline() -> RuntimeDeadline {
+    @RuntimeActor private func deadline() -> RuntimeDeadline {
         .after(.seconds(30), from: ContinuousClock.now)
     }
 
     /// A failure bound on real effects: polls an observed boundary, never decides by time.
-    private func eventually(_ condition: @MainActor () -> Bool) async throws -> Bool {
+    @RuntimeActor private func eventually(_ condition: @RuntimeActor () -> Bool) async throws -> Bool {
         for _ in 0..<2_000 where !condition() {
             try await Task.sleep(for: .milliseconds(5))
         }
         return condition()
     }
 
-    private func forwarderPort(_ host: RuntimeHost) -> Int {
+    @RuntimeActor private func forwarderPort(_ host: RuntimeHost) -> Int {
         host.orchestrator.snapshot.bindings.dnsPort ?? host.config.dnsForwarderPort
     }
 
     /// A failed reading restarts the relay; its own final probe finds the pipeline unresponsive, so the host's snapshot carries the fixed
     /// DNS error while the kernel still reports the forwarder running. A subscriber is told without asking, and a later read after the gap
     /// reads the same. An error of the kernel's own wins. An alive reading for the same run clears it, at a newer presentation revision.
-    func testAnUnresponsiveRestartDegradesTheSnapshotAndAnAliveReadingRecoversIt() async throws {
+    @RuntimeActor func testAnUnresponsiveRestartDegradesTheSnapshotAndAnAliveReadingRecoversIt() async throws {
         let composed = try await composeRunning()
         let host = composed.host
         let stream = try await composed.client.subscribe(.live, deadline: deadline())
@@ -107,7 +106,7 @@ final class RuntimeHostDNSHealthTests: XCTestCase {
     /// Readings belong to the run whose timer armed them. A restart for run A whose final probe is held while a Stop begins reports its
     /// result, but sets no observation: the Stop superseded A. In run B, A's late failed reading restarts nothing and its late alive
     /// reading clears nothing; B's own failed reading is B's observation, and B's Stop clears it with its timer.
-    func testAReadingOrRestartOfASupersededRunNeverBecomesTheNewerRunsObservation() async throws {
+    @RuntimeActor func testAReadingOrRestartOfASupersededRunNeverBecomesTheNewerRunsObservation() async throws {
         let composed = try await composeRunning()
         let host = composed.host
         let harness = composed.harness

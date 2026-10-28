@@ -2,15 +2,15 @@
 import XCTest
 @testable import ConduitRuntime
 import ConduitShared
+import ProxyKernel
 
 /// Actual work and its quiescence, driven through the production service with a parked fake owner. Logical settlement and
 /// physical quiescence are separate reports, and each test states which one it delivers.
-@MainActor
 final class RuntimeServiceWorkTests: XCTestCase {
     private let lifecycle = ControlLifecycleRevision(rawValue: 5) ?? ControlLifecycleRevision(rawValue: 0)!
 
     /// A request that must be accepted. Its operation is returned, and a refusal fails the test.
-    private func admitted(_ harness: RuntimeServiceHarness, _ id: Int, _ command: ControlRuntimeCommand) throws -> ControlOperationID {
+    @RuntimeActor private func admitted(_ harness: RuntimeServiceHarness, _ id: Int, _ command: ControlRuntimeCommand) throws -> ControlOperationID {
         let admission = harness.core.submit(try RuntimeServiceFixtures.request(id, command))
         guard case .accepted(let operation) = admission else {
             XCTFail("request \(id) must be accepted, got \(admission)")
@@ -21,7 +21,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
 
     // MARK: - Stop, restart, stop, with the old work held
 
-    func testStopRestartStopKeepsTheOldPhysicalWorkHeldAndNeverLaunchesASupersededStop() throws {
+    @RuntimeActor func testStopRestartStopKeepsTheOldPhysicalWorkHeldAndNeverLaunchesASupersededStop() async throws {
         let harness = try RuntimeServiceHarness()
         harness.owner.answer = { _, _ in .admitted }
 
@@ -51,7 +51,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
         XCTAssertEqual(harness.core.stopSlotState(.dns).active, true)
     }
 
-    func testAStopFloodNeverRunsMoreThanOneActiveAndOneQueuedPerModule() throws {
+    @RuntimeActor func testAStopFloodNeverRunsMoreThanOneActiveAndOneQueuedPerModule() async throws {
         let harness = try RuntimeServiceHarness(aliases: 8)
         harness.owner.answer = { _, _ in .admitted }
 
@@ -69,7 +69,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
         XCTAssertEqual(harness.core.stopSlotState(.dns).queued, true)
     }
 
-    func testAnUnstartedSupersededStopNeverStarts() throws {
+    @RuntimeActor func testAnUnstartedSupersededStopNeverStarts() async throws {
         let harness = try RuntimeServiceHarness()
         harness.owner.answer = { _, _ in .admitted }
 
@@ -81,7 +81,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
 
     // MARK: - Capacity is released only by quiescence
 
-    func testOrdinaryCapacityIsReleasedOnlyByActualQuiescence() throws {
+    @RuntimeActor func testOrdinaryCapacityIsReleasedOnlyByActualQuiescence() async throws {
         let harness = try RuntimeServiceHarness(ordinaryPending: 1)
 
         let first = try admitted(harness, 1, .restart(.proxy, ifLifecycleRevision: lifecycle))
@@ -101,7 +101,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
         }
     }
 
-    func testAStopIsFencedBeforeItsAckEvenWhileOrdinaryCapacityIsFull() throws {
+    @RuntimeActor func testAStopIsFencedBeforeItsAckEvenWhileOrdinaryCapacityIsFull() async throws {
         let harness = try RuntimeServiceHarness(ordinaryPending: 2)
         harness.owner.answer = { _, _ in .admitted }
 
@@ -122,7 +122,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
 
     // MARK: - Reports: idempotent, closed, never resurrecting
 
-    func testQuiesceWithoutSettleClosesTheOperationAsAnInternalFailure() throws {
+    @RuntimeActor func testQuiesceWithoutSettleClosesTheOperationAsAnInternalFailure() async throws {
         let harness = try RuntimeServiceHarness()
         let operation = try admitted(harness, 1, .restart(.proxy, ifLifecycleRevision: lifecycle))
         harness.scheduling.drainAll()
@@ -132,7 +132,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
         XCTAssertEqual(harness.core.liveOperationCount, 0)
     }
 
-    func testDuplicateReportsAreIdempotentAndALateSettlementNeverResurrects() throws {
+    @RuntimeActor func testDuplicateReportsAreIdempotentAndALateSettlementNeverResurrects() async throws {
         let harness = try RuntimeServiceHarness()
         let operation = try admitted(harness, 1, .restart(.proxy, ifLifecycleRevision: lifecycle))
         harness.scheduling.drainAll()
@@ -148,7 +148,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
         XCTAssertEqual(harness.core.liveOperationCount, 0)
     }
 
-    func testALateSettlementAfterSupersessionChangesNothing() throws {
+    @RuntimeActor func testALateSettlementAfterSupersessionChangesNothing() async throws {
         let harness = try RuntimeServiceHarness()
         harness.owner.answer = { _, _ in .admitted }
         let first = try admitted(harness, 1, .stop(.dns))
@@ -162,7 +162,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
 
     // MARK: - Alias floods never pin, and never block a fence
 
-    func testAliasFloodNeverBlocksAFreshStopOrAnotherModuleAndNeverPinsTheOperation() throws {
+    @RuntimeActor func testAliasFloodNeverBlocksAFreshStopOrAnotherModuleAndNeverPinsTheOperation() async throws {
         let harness = try RuntimeServiceHarness(aliases: 8)
         let restartA = try admitted(harness, 90, .restart(.proxy, ifLifecycleRevision: lifecycle))
         let restartB = try admitted(harness, 91, .restart(.tunnels, ifLifecycleRevision: lifecycle))
@@ -202,7 +202,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
 
     /// The minimal ordinary and per-module alias partitions, with ordinary full and every module already holding a pending
     /// candidate. A fresh stop must still be fenced and admitted: aliases never block admission.
-    func testMinimalAliasPartitionsStillFenceAFreshStopWithOrdinaryFullAndEveryModulePending() throws {
+    @RuntimeActor func testMinimalAliasPartitionsStillFenceAFreshStopWithOrdinaryFullAndEveryModulePending() async throws {
         let harness = try RuntimeServiceHarness(aliases: 1, ordinaryPending: 2)
         harness.owner.answer = { _, _ in .admitted }
 
@@ -225,7 +225,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
 
     /// A command that cannot be encoded is reported as the closed fault at its origin. Nothing is recorded or fenced, and no
     /// command body is part of the report, which is only the fault's case.
-    func testAnEncodeFailureIsReportedAsATypedFaultWithItsOriginAndNoBody() throws {
+    @RuntimeActor func testAnEncodeFailureIsReportedAsATypedFaultWithItsOriginAndNoBody() async throws {
         let harness = try RuntimeServiceHarness(encodeCommand: { _ in throw RuntimeServiceTestError.refusedEncoding })
         let admission = harness.core.submit(try RuntimeServiceFixtures.request(1, .stop(.dns)))
         XCTAssertEqual(admission, .rejected(.internalFailure), "the refusal is a typed admission, never an accepted or unknown one")
@@ -238,7 +238,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
     /// complete. The fault callback reads the service from inside the call, and it sees the replacement outcome already retained,
     /// the operation settled and nothing pending. The measure is a fault-injection seam: the current codec encodes every outcome,
     /// so the production path cannot reach this fault without it.
-    func testAnOutcomeEncodeFaultReachesTheOwnerOnlyAfterTheSettlementIsComplete() throws {
+    @RuntimeActor func testAnOutcomeEncodeFaultReachesTheOwnerOnlyAfterTheSettlementIsComplete() async throws {
         let harness = try RuntimeServiceHarness(measureOutcome: { _, _ in throw RuntimeServiceTestError.refusedEncoding })
         harness.owner.answer = { _, _ in .admitted }
         let operation = try admitted(harness, 1, .stop(.dns))
@@ -267,7 +267,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
     /// A superseded candidate whose outcome cannot be measured reports its fault only after the replacement is installed. The
     /// fault callback sees the replacement pending in its stop slot, and the dropped queued candidate already gone. Before the
     /// fix the owner was called inside the settlement, before the replacement existed.
-    func testASupersessionFaultReachesTheOwnerOnlyAfterTheReplacementIsInstalled() throws {
+    @RuntimeActor func testASupersessionFaultReachesTheOwnerOnlyAfterTheReplacementIsInstalled() async throws {
         let harness = try RuntimeServiceHarness(measureOutcome: { outcome, operation in
             if case .superseded = outcome { throw RuntimeServiceTestError.refusedEncoding }
             return try RuntimeServiceCore.measureRetained(outcome, operation)
@@ -298,7 +298,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
 
     /// An unsettled operation that quiesces reports its closing fault only after its physical capacity is returned. The fault
     /// callback sees no live record, no pending operation and a free ordinary slot.
-    func testAQuiescenceFaultReachesTheOwnerOnlyAfterTheCapacityIsReturned() throws {
+    @RuntimeActor func testAQuiescenceFaultReachesTheOwnerOnlyAfterTheCapacityIsReturned() async throws {
         let harness = try RuntimeServiceHarness(measureOutcome: { outcome, operation in
             if case .failed(.internalFailure) = outcome { throw RuntimeServiceTestError.refusedEncoding }
             return try RuntimeServiceCore.measureRetained(outcome, operation)
@@ -327,7 +327,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
     }
 
     /// A reply cap that cannot carry one maximal event in one frame is refused at construction, so every event stays deliverable.
-    func testAReplyCapThatCannotCarryOneMaximalEventIsRefusedAtConstruction() throws {
+    @RuntimeActor func testAReplyCapThatCannotCarryOneMaximalEventIsRefusedAtConstruction() async throws {
         XCTAssertThrowsError(try RuntimeServiceFixtures.limits(replyBytes: 1024))
         XCTAssertNoThrow(try RuntimeServiceFixtures.limits(replyBytes: 64 * 1024))
     }
@@ -337,7 +337,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
     /// Admission history is best-effort. A flood of rejected requests evicts an accepted request's alias, so its lookup is not
     /// recorded while its operation stays pending. A retry under that ID is a fresh request, and the owner fences it again. This
     /// is the selected contract: no exactly-once promise survives eviction, and no retry is replayed blindly.
-    func testAnEvictedAcceptedAliasAnswersNotRecordedAndAFreshRetryIsFencedAgain() throws {
+    @RuntimeActor func testAnEvictedAcceptedAliasAnswersNotRecordedAndAFreshRetryIsFencedAgain() async throws {
         let harness = try RuntimeServiceHarness(aliases: 2)
         let first = try admitted(harness, 1, .restart(.proxy, ifLifecycleRevision: lifecycle))
         harness.owner.answer = { _, _ in .rejected(.hostStopping) }
@@ -359,7 +359,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
 
     // MARK: - Counter exhaustion is safe
 
-    func testObservationPositionStopsAtTheLimitWithoutWrapping() throws {
+    @RuntimeActor func testObservationPositionStopsAtTheLimitWithoutWrapping() async throws {
         let limits = try RuntimeServiceFixtures.limits()
         var log = RuntimeObservationLog(limits: limits, positionSeed: RuntimeObservationLog.maximumPosition - 1)
         let record = ControlRuntimeEventRecord.known(ControlRuntimeEvent(timestamp: Date(timeIntervalSince1970: 1), kind: "proxy", event: "test.event"))
@@ -383,7 +383,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
         XCTAssertEqual(end.pull, .end(.resyncRequired), "an exhausted log resyncs every reader")
     }
 
-    func testMaximumPositionLeavesEveryNextPositionRepresentable() {
+    @RuntimeActor func testMaximumPositionLeavesEveryNextPositionRepresentable() async {
         XCTAssertEqual(RuntimeObservationLog.maximumPosition, Int.max - 1)
         XCTAssertNotNil(RuntimeCounter.successor(RuntimeObservationLog.maximumPosition))
         XCTAssertNil(RuntimeCounter.successor(Int.max))
@@ -392,7 +392,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
 
     // MARK: - Limits: the byte bounds must hold one worst record
 
-    func testAnAliasBoundThatCannotHoldOneWorstRecordIsRefused() throws {
+    @RuntimeActor func testAnAliasBoundThatCannotHoldOneWorstRecordIsRefused() async throws {
         XCTAssertThrowsError(try RuntimeServiceLimits(
             maxRequestBytes: 4096,
             maxReplyBytes: 4096,
@@ -432,7 +432,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
     }
 
     /// The budget is the exact sum of every term it names, computed here independently from the limit values.
-    func testTheRetainedByteBudgetIsTheExactSumOfEveryTerm() throws {
+    @RuntimeActor func testTheRetainedByteBudgetIsTheExactSumOfEveryTerm() async throws {
         let limits = try RuntimeServiceFixtures.limits()
         let modules = ControlModule.allCases.count
         // Ordinary, the quit's, and one per stop module.
@@ -459,7 +459,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
 
     /// The structural terms come from the structures that hold them: every alias partition the table keeps, the quit's partition with
     /// its reserved final saves, and the private custody's terms at the private frame caps, which stay outside the ordinary budget.
-    func testTheStructuralTermsComeFromTheTableTheQuitAndThePrivateCustody() throws {
+    @RuntimeActor func testTheStructuralTermsComeFromTheTableTheQuitAndThePrivateCustody() async throws {
         let limits = try RuntimeServiceFixtures.limits()
         XCTAssertEqual(RuntimePartition.all.count, ControlModule.allCases.count + 2)
         XCTAssertTrue(RuntimePartition.all.contains(.quit))
@@ -479,26 +479,26 @@ final class RuntimeServiceWorkTests: XCTestCase {
     }
 
     /// Doubling the reply cap moves the budget by exactly the reservation and first-frame terms that scale with it.
-    func testDoublingTheReplyCapChangesTheBudgetByItsReservationAndFirstFrameTermsOnly() throws {
+    @RuntimeActor func testDoublingTheReplyCapChangesTheBudgetByItsReservationAndFirstFrameTermsOnly() async throws {
         let small = try RuntimeServiceFixtures.limits(replyBytes: 64 * 1024)
         let large = try RuntimeServiceFixtures.limits(replyBytes: 128 * 1024)
         XCTAssertEqual(large.retainedByteBudget - small.retainedByteBudget, (2 * small.laneCount + small.subscriberLimit) * 64 * 1024)
     }
 
     /// Doubling the request cap moves the budget by the two request-sized lane terms and the operation records, and by nothing else.
-    func testDoublingTheRequestCapChangesTheBudgetByItsCustodyTermsOnly() throws {
+    @RuntimeActor func testDoublingTheRequestCapChangesTheBudgetByItsCustodyTermsOnly() async throws {
         let small = try RuntimeServiceFixtures.limits(requestBytes: 4096)
         let large = try RuntimeServiceFixtures.limits(requestBytes: 8192)
         XCTAssertEqual(large.retainedByteBudget - small.retainedByteBudget, (2 * small.laneCount + small.operationCapacity) * 4096)
     }
 
     /// A configuration whose budget exceeds the owner's ceiling is refused when it is built.
-    func testABudgetAboveTheOwnersCeilingIsRefusedAtConstruction() throws {
+    @RuntimeActor func testABudgetAboveTheOwnersCeilingIsRefusedAtConstruction() async throws {
         XCTAssertThrowsError(try RuntimeServiceFixtures.limits(retainedByteCeiling: 1 << 16))
     }
 
     /// The owner's ceiling is inclusive: the exact budget is accepted, and one byte less is refused at construction.
-    func testTheCeilingAcceptsExactlyTheBudgetAndRefusesOneByteLess() throws {
+    @RuntimeActor func testTheCeilingAcceptsExactlyTheBudgetAndRefusesOneByteLess() async throws {
         let budget = try RuntimeServiceFixtures.limits().retainedByteBudget
         XCTAssertNoThrow(try RuntimeServiceFixtures.limits(retainedByteCeiling: budget))
         XCTAssertThrowsError(try RuntimeServiceFixtures.limits(retainedByteCeiling: budget - 1))
@@ -506,7 +506,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
 
     /// The codec's boundary for one maximal event at its maximal cursor is raw: a frame at its exact size encodes at that cap, and it
     /// fails one byte below. This is a codec fact, so it is checked without any service profile.
-    func testAMaximalEventFrameHasAnExactRawCodecBoundary() throws {
+    @RuntimeActor func testAMaximalEventFrameHasAnExactRawCodecBoundary() async throws {
         let probe = try RuntimeServiceFixtures.limits()
         let (message, exact) = try maximalEventFrame(probe)
         XCTAssertNoThrow(try ControlRuntimeCodec.encodeFrame(message, limits: try ControlFrameLimits(maxFrameBytes: exact)))
@@ -516,7 +516,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
     /// The service's reply cap is the larger of two terms: one maximal event at its exact size, and one baseline that carries the
     /// largest snapshot bound. The snapshot bound is the largest one the event term allows, so both terms meet at one cap, and each side
     /// of it is decided by construction. The boundary is measured, so no term is guessed.
-    func testTheServiceReplyCapIsTheExactBoundOfItsLargerTerm() throws {
+    @RuntimeActor func testTheServiceReplyCapIsTheExactBoundOfItsLargerTerm() async throws {
         let probe = try RuntimeServiceFixtures.limits()
         let (_, exact) = try maximalEventFrame(probe)
         let snapshotBound = exact - probe.baselineFrameOverheadBytes
@@ -527,7 +527,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
     }
 
     /// A maximal event frame at the largest cursor, and its exact encoded size.
-    private func maximalEventFrame(_ probe: RuntimeServiceLimits) throws -> (ControlRuntimeMessage, Int) {
+    @RuntimeActor private func maximalEventFrame(_ probe: RuntimeServiceLimits) throws -> (ControlRuntimeMessage, Int) {
         let record = try maximalEventRecord(bytes: probe.maxEventBytes)
         let cursor = try XCTUnwrap(ControlEventCursor(rawValue: RuntimeObservationLog.maximumPosition))
         let message = ControlRuntimeMessage(
@@ -541,7 +541,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
 
     /// A record whose encoded size is exactly `bytes`. Only the event name varies, and it is plain ASCII, so its JSON size grows by
     /// one byte per character.
-    private func maximalEventRecord(bytes: Int) throws -> ControlRuntimeEventRecord {
+    @RuntimeActor private func maximalEventRecord(bytes: Int) throws -> ControlRuntimeEventRecord {
         func record(_ nameLength: Int) -> ControlRuntimeEventRecord {
             .known(ControlRuntimeEvent(
                 timestamp: Date(timeIntervalSince1970: 0),

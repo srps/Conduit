@@ -20,7 +20,7 @@ import ProxyKernel
 enum SettingsRetryScenarios {
 
     /// `AppState`'s reconcile hooks, reduced to the system proxy.
-    @MainActor
+    @RuntimeActor
     private final class Host: RuntimeReconcilerHost {
         let manager: SystemProxyManager
         let events = RuntimeEventLog(capacity: 64)
@@ -89,7 +89,7 @@ enum SettingsRetryScenarios {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     static func retryRequest() async throws -> ScenarioResult {
         let name = "settings-retry-request"
         let began = Date()

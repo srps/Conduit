@@ -34,7 +34,7 @@ enum PACFetchScenarios {
         )
     }
 
-    @MainActor
+    @RuntimeActor
     static func bounds() async throws -> ScenarioResult {
         let started = Date()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pm-pac-bounds-\(UUID())")

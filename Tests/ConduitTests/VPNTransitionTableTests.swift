@@ -16,12 +16,11 @@ import XCTest
 /// SCDynamicStore, no live system side effects) per AGENTS.md "Never let
 /// pm-proxy touch the host." We start the proxy with empty upstreams so it
 /// boots into direct mode immediately, then exercise the transition table.
-@MainActor
 final class VPNTransitionTableTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func makeOrchestrator() -> ProxyOrchestrator {
+    @RuntimeActor private func makeOrchestrator() -> ProxyOrchestrator {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0  // ephemeral port; no port-conflict flakiness
         config.upstreams = [] // start in direct mode
@@ -31,20 +30,20 @@ final class VPNTransitionTableTests: XCTestCase {
     /// Find an event whose `event` string equals `name` and was emitted after
     /// `since`. Returns nil if none. Filtering by timestamp guards against
     /// startup events (proxy.starting, etc.) leaking into assertions.
-    private func event(named name: String, in log: RuntimeEventLog, since: Date) -> RuntimeEvent? {
+    @RuntimeActor private func event(named name: String, in log: RuntimeEventLog, since: Date) -> RuntimeEvent? {
         log.events.last { $0.event == name && $0.timestamp >= since }
     }
 
-    private func vpnEvents(in log: RuntimeEventLog, since: Date) -> [RuntimeEvent] {
+    @RuntimeActor private func vpnEvents(in log: RuntimeEventLog, since: Date) -> [RuntimeEvent] {
         log.events.filter { $0.kind == .vpn && $0.timestamp >= since }
     }
 
     // MARK: - .reasserting transition
 
-    func testReassertingSetsTransientCauseAndEmitsFlapStart() async throws {
+    @RuntimeActor func testReassertingSetsTransientCauseAndEmitsFlapStart() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         // Prime: VPN was connected. (orchestrator booted in .unknown; we
         // need to walk through .connected first so .reasserting has something
@@ -68,10 +67,10 @@ final class VPNTransitionTableTests: XCTestCase {
 
     /// Every VPN transition, and every direct-mode change, stamps the signal
     /// the strict-mode hint reads; an interface-only change does not.
-    func testVPNTransitionsStampTheRoutingTransitionSignal() async throws {
+    @RuntimeActor func testVPNTransitionsStampTheRoutingTransitionSignal() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
         let signal = orchestrator.routingTransitions
 
         var last = signal.current.completed
@@ -97,7 +96,7 @@ final class VPNTransitionTableTests: XCTestCase {
     /// A handler reads the direct-mode cause, then the signal. It must never
     /// see a new cause while the signal still says settled: the signal is
     /// stamped before the cause is published, entering or leaving (#97).
-    func testDirectModeChangeStampsTheSignalBeforePublishingTheCause() {
+    @RuntimeActor func testDirectModeChangeStampsTheSignalBeforePublishingTheCause() async {
         let box = NIOLockedValueBox<(isDirect: Bool, cause: DirectModeCause)>((true, .upstreamsUnreachable))
         let seenAtStamp = NIOLockedValueBox<[DirectModeCause]>([])
         let signal = RoutingTransitionSignal(now: {
@@ -115,10 +114,10 @@ final class VPNTransitionTableTests: XCTestCase {
 
     // MARK: - Interface name
 
-    func testInterfaceNameFollowsTheObserverAndClearsOffConnected() async throws {
+    @RuntimeActor func testInterfaceNameFollowsTheObserverAndClearsOffConnected() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected, interfaceName: "utun4")
         XCTAssertEqual(orchestrator.snapshot.vpnInterfaceName, "utun4")
@@ -142,10 +141,10 @@ final class VPNTransitionTableTests: XCTestCase {
 
     // MARK: - .reasserting → .connected (flap recovery)
 
-    func testReassertingToConnectedEmitsFlapRecoveredWithDuration() async throws {
+    @RuntimeActor func testReassertingToConnectedEmitsFlapRecoveredWithDuration() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
         await orchestrator.handleVPNStateChange(.reasserting)
@@ -166,7 +165,7 @@ final class VPNTransitionTableTests: XCTestCase {
                        "Recovered event detail must include preserved-stream count")
     }
 
-    func testSystemWakeRecoversStaleReassertingWhenUpstreamIsReachable() async throws {
+    @RuntimeActor func testSystemWakeRecoversStaleReassertingWhenUpstreamIsReachable() async throws {
         let serverChannel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
@@ -216,10 +215,10 @@ final class VPNTransitionTableTests: XCTestCase {
 
     // MARK: - .disconnected(.userInitiated)
 
-    func testUserInitiatedDisconnectSetsVpnDisconnectedCauseImmediately() async throws {
+    @RuntimeActor func testUserInitiatedDisconnectSetsVpnDisconnectedCauseImmediately() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
         let cutoff = Date()
@@ -236,7 +235,7 @@ final class VPNTransitionTableTests: XCTestCase {
         XCTAssertEqual(userEvt?.kind, .vpn)
     }
 
-    func testDisconnectKeepsProxyRoutingWhenOnPremProxyProbeSucceeds() async throws {
+    @RuntimeActor func testDisconnectKeepsProxyRoutingWhenOnPremProxyProbeSucceeds() async throws {
         let serverChannel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
@@ -263,7 +262,7 @@ final class VPNTransitionTableTests: XCTestCase {
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.connected)
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         XCTAssertEqual(orchestrator.snapshot.vpnState, .disconnected(reason: .userInitiated))
         XCTAssertEqual(orchestrator.snapshot.directModeCause, .none,
@@ -273,10 +272,10 @@ final class VPNTransitionTableTests: XCTestCase {
 
     // MARK: - .disconnected(.networkLost)
 
-    func testNetworkLostDisconnectEmitsLostEventAtWarningSeverity() async throws {
+    @RuntimeActor func testNetworkLostDisconnectEmitsLostEventAtWarningSeverity() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
         let cutoff = Date()
@@ -289,10 +288,10 @@ final class VPNTransitionTableTests: XCTestCase {
 
     // MARK: - .disconnected → .connected (real outage recovery)
 
-    func testReconnectAfterDisconnectEmitsConnectedAndResetsBreakers() async throws {
+    @RuntimeActor func testReconnectAfterDisconnectEmitsConnectedAndResetsBreakers() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
@@ -310,10 +309,10 @@ final class VPNTransitionTableTests: XCTestCase {
 
     // MARK: - Idempotence
 
-    func testRepeatedSameStateProducesNoEventStorm() async throws {
+    @RuntimeActor func testRepeatedSameStateProducesNoEventStorm() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         // Establish the .connected state, then count VPN events emitted so far.
         // Subsequent identical .connected calls must NOT add to that count.
@@ -335,10 +334,10 @@ final class VPNTransitionTableTests: XCTestCase {
 
     // MARK: - Cause derivation priority (VPN signal > probe)
 
-    func testVPNDisconnectedOverridesProbeDerivedCause() async throws {
+    @RuntimeActor func testVPNDisconnectedOverridesProbeDerivedCause() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         // Empty upstreams => probe-derived would be .noUpstreamsConfigured.
         XCTAssertEqual(orchestrator.snapshot.directModeCause, .noUpstreamsConfigured)
@@ -349,10 +348,10 @@ final class VPNTransitionTableTests: XCTestCase {
                        "VPN-driven cause must win over probe-derived cause")
     }
 
-    func testReassertingOverridesProbeDerivedCause() async throws {
+    @RuntimeActor func testReassertingOverridesProbeDerivedCause() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
         await orchestrator.handleVPNStateChange(.reasserting)
@@ -375,10 +374,10 @@ final class VPNTransitionTableTests: XCTestCase {
     /// that increments the four flap-telemetry counters on `ProxyMetrics`.
     /// Verifies the wiring added in Phase 7: count, total-duration accumulator,
     /// last-flap timestamp, and streams-preserved tally all advance together.
-    func testFlapRecoveryIncrementsTelemetryMetrics() async throws {
+    @RuntimeActor func testFlapRecoveryIncrementsTelemetryMetrics() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         let beforeMetrics = orchestrator.snapshot.runtimeStatus.metrics
         XCTAssertEqual(beforeMetrics.vpnFlapCount, 0)
@@ -419,10 +418,10 @@ final class VPNTransitionTableTests: XCTestCase {
     /// increment the flap counters — they're outage events, not flaps. The
     /// fuser-level debounce already absorbs blips silently; flap metrics
     /// represent only successful recovery from the .reasserting state.
-    func testDisconnectedTransitionDoesNotIncrementFlapMetrics() async throws {
+    @RuntimeActor func testDisconnectedTransitionDoesNotIncrementFlapMetrics() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
         let beforeFlapCount = orchestrator.snapshot.runtimeStatus.metrics.vpnFlapCount
@@ -439,10 +438,10 @@ final class VPNTransitionTableTests: XCTestCase {
     /// Multiple successive flaps each contribute an increment. Sub-window
     /// blips never reach the orchestrator (they're absorbed by VPNStateFuser),
     /// so every transition we see here is a real flap and counts.
-    func testMultipleFlapsAccumulateCounters() async throws {
+    @RuntimeActor func testMultipleFlapsAccumulateCounters() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
 
@@ -472,7 +471,7 @@ final class VPNTransitionTableTests: XCTestCase {
     /// populated across such transitions; the equivalent `.reasserting` /
     /// `.disconnected` flap path already honors that, and the config-reload
     /// path now does too.
-    func testPreservedActiveConnectionsDropsEverythingForAllAndIdleOnly() {
+    @RuntimeActor func testPreservedActiveConnectionsDropsEverythingForAllAndIdleOnly() async {
         let tunnel = ActiveConnectionInfo(
             destination: "example.com:443",
             upstream: "proxy-a.example.test:8080",
@@ -496,7 +495,7 @@ final class VPNTransitionTableTests: XCTestCase {
         }
     }
 
-    func testPreservedActiveConnectionsKeepsTunnelsForAllButDedicated() {
+    @RuntimeActor func testPreservedActiveConnectionsKeepsTunnelsForAllButDedicated() async {
         let tunnelID = UUID()
         let exchangeID = UUID()
         let tunnel = ActiveConnectionInfo(
@@ -525,7 +524,7 @@ final class VPNTransitionTableTests: XCTestCase {
                        "exchange entries (whose pool connections are closed here).")
     }
 
-    func testPreservedActiveConnectionsIsStableForEmptyInput() {
+    @RuntimeActor func testPreservedActiveConnectionsIsStableForEmptyInput() async {
         for scope in [CloseScope.all, .allButDedicated, .idleOnly] {
             XCTAssertTrue(
                 ProxyOrchestrator.preservedActiveConnections(from: [], scope: scope).isEmpty,
@@ -539,7 +538,7 @@ final class VPNTransitionTableTests: XCTestCase {
     /// OverviewView `showsTelemetry` comment depend on this — without the
     /// reset, the strip would reappear on next start carrying activity from a
     /// prior session, lying about the new cycle.
-    func testStopProxyResetsFlapTelemetryCounters() async throws {
+    @RuntimeActor func testStopProxyResetsFlapTelemetryCounters() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
 
@@ -564,7 +563,7 @@ final class VPNTransitionTableTests: XCTestCase {
                        "stopProxy must reset streamsPreservedAcrossFlaps")
     }
 
-    func testUnknownVPNKeepsProxyRoutingWhenProxyProbeIsUsable() async throws {
+    @RuntimeActor func testUnknownVPNKeepsProxyRoutingWhenProxyProbeIsUsable() async throws {
         let serverChannel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
@@ -589,7 +588,7 @@ final class VPNTransitionTableTests: XCTestCase {
         let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
 
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         XCTAssertEqual(orchestrator.snapshot.vpnState, .unknown)
         XCTAssertEqual(orchestrator.snapshot.directModeCause, .none,
@@ -597,7 +596,7 @@ final class VPNTransitionTableTests: XCTestCase {
         XCTAssertNotEqual(orchestrator.snapshot.runtimeStatus.activeUpstream, "DIRECT")
     }
 
-    func testUnknownVPNFallsBackToDirectWhenEndpointIsReachableButNotAProxy() async throws {
+    @RuntimeActor func testUnknownVPNFallsBackToDirectWhenEndpointIsReachableButNotAProxy() async throws {
         let serverChannel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
@@ -621,7 +620,7 @@ final class VPNTransitionTableTests: XCTestCase {
         let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
 
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         XCTAssertEqual(orchestrator.snapshot.vpnState, .unknown)
         XCTAssertEqual(orchestrator.snapshot.directModeCause, .vpnDisconnected,
@@ -629,7 +628,7 @@ final class VPNTransitionTableTests: XCTestCase {
         XCTAssertEqual(orchestrator.snapshot.runtimeStatus.activeUpstream, "DIRECT")
     }
 
-    func testConnectedVPNMarks503ProxyAsUpstreamsUnreachableWithFastReprobe() async throws {
+    @RuntimeActor func testConnectedVPNMarks503ProxyAsUpstreamsUnreachableWithFastReprobe() async throws {
         let response = MutableRawHTTPResponse(
             "HTTP/1.1 407 Proxy Authentication Required\r\n" +
             "Proxy-Authenticate: Negotiate\r\n" +
@@ -655,7 +654,7 @@ final class VPNTransitionTableTests: XCTestCase {
         let orchestrator = ProxyOrchestrator(config: config, logger: logger)
 
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
         XCTAssertEqual(orchestrator.snapshot.directModeCause, .none)
 
         response.update(
@@ -677,7 +676,7 @@ final class VPNTransitionTableTests: XCTestCase {
 
     // MARK: - Reactions skipped while proxy is stopped
 
-    func testHandleVPNStateChangeIsNoOpWhileProxyStopped() async throws {
+    @RuntimeActor func testHandleVPNStateChangeIsNoOpWhileProxyStopped() async throws {
         let orchestrator = makeOrchestrator()
         // Don't start the proxy.
         let cutoff = Date()
@@ -782,7 +781,6 @@ private final class MutableRawHTTPResponseHandler: ChannelInboundHandler, @unche
 
 /// Phase 4 reprobe-cadence tests. The contract is slow for expected direct
 /// states and fast for the unexpected `.upstreamsUnreachable` state.
-@MainActor
 final class DirectModeReprobeIntervalTests: XCTestCase {
 
     func testExpectedCausesReprobeSlowly() {
@@ -798,7 +796,6 @@ final class DirectModeReprobeIntervalTests: XCTestCase {
 /// Phase 4 tests `ConnectionPool.resetCircuitsAfterFlap()`. The pool's
 /// breaker state is per-upstream; the reset must be applied to ALL upstreams
 /// while preserving each one's EWMA latency.
-@MainActor
 final class ResetCircuitsAfterFlapTests: XCTestCase {
 
     func testResetCircuitsClosesOpenBreakerAndPreservesEWMA() {

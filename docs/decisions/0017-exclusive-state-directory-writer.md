@@ -116,3 +116,7 @@ Concrete lease/store APIs, acquisition failures and writer inventory are
 implementation obligations. Prove the old-version upgrade ordering and select
 measured total shutdown/helper budgets before adoption. Config field projection,
 coupled receipts and listener handoff remain separate affected-slice gates.
+
+### Diagnostic writer lifetime checkpoint — 2026-10-28
+
+[StateRootSession.retainingAuthority](../../Sources/PlatformMac/StateRootSession.swift) wraps the existing destination-guard protocol with a private immutable session holder. Host events, snapshots, audit, configless recovery and app logs retain it through queued physical writes. [The test-first authority regression and review](../verification-runtime-actor-activation-2026-10-28.md) reproduce early root acquisition without the wrapper and require busy until the held writer drains with it. This implements the existing queued-write authority rule without changing the lease policy. Production entry points continue to pin the session until process exit.

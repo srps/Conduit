@@ -85,7 +85,7 @@ package enum RuntimeReloadApply: Equatable, Sendable {
 /// - Only a Start clears the fence. A reload never clears it, and it never restores an enabled flag a Stop left behind.
 /// - A reload captures the generation before its read and compares it after. A stale observation stays a durable observation, but it
 ///   cannot change the applied view, the reconciler's requested configuration or its retry baseline.
-@MainActor
+@RuntimeActor
 final class RuntimeConfigurationWorkflow {
     /// One admitted facade Start: the group the module intents gave it. It is current while that group is the latest admission and still
     /// holds a member. It carries no configuration value until its preparation captures one (decision 0037).
@@ -217,7 +217,7 @@ final class RuntimeConfigurationWorkflow {
     /// The process quit's one wait for the store operations already begun. One slot: the host runs a single quit.
     private var idleWaiter: CheckedContinuation<Void, Never>?
 
-    /// Whether no store-using operation is in flight on this workflow. Read on the main actor.
+    /// Whether no store-using operation is in flight on this workflow. Read on the owner.
     var isIdle: Bool {
         operationsInFlight == 0
     }
@@ -244,13 +244,13 @@ final class RuntimeConfigurationWorkflow {
         self.intent = NIOLockedValueBox(RuntimeModuleIntents(counter: generation, dnsEnabled: false))
     }
 
-    /// Whether the whole-host Stop fence is in force: every module is fenced. Read on the main actor, for the host's view of its own
+    /// Whether the whole-host Stop fence is in force: every module is fenced. Read on the owner, for the host's view of its own
     /// admission. A Stop of one module fences only that module.
     var stopFenced: Bool {
         intent.withLockedValue { $0.allFenced }
     }
 
-    /// The counter value the latest admission took. Read on the main actor.
+    /// The counter value the latest admission took. Read on the owner.
     var generation: Int {
         intent.withLockedValue { $0.counter }
     }
@@ -377,7 +377,7 @@ final class RuntimeConfigurationWorkflow {
         }
     }
 
-    /// Each module's lifecycle revision now: what a caller observes before it names expected revisions. Read on the main actor.
+    /// Each module's lifecycle revision now: what a caller observes before it names expected revisions. Read on the owner.
     var revisions: PrivateModuleSlots<Int> {
         intent.withLockedValue { state in
             PrivateModuleSlots(proxy: state.modules.proxy.revision, dns: state.modules.dns.revision, tunnels: state.modules.tunnels.revision)
@@ -523,7 +523,7 @@ final class RuntimeConfigurationWorkflow {
         intent.withLockedValue { ($0.dnsConfigured, $0.modules.dns.fenced) }
     }
 
-    /// Whether a terminal stop has latched. Read on the main actor.
+    /// Whether a terminal stop has latched. Read on the owner.
     var isTerminal: Bool {
         intent.withLockedValue { $0.terminal }
     }

@@ -35,7 +35,7 @@ extension RuntimeHost {
     func preflightPass() -> Task<ControlOperationOutcome, Never> {
         if let pending = preflight.pending { return pending }
         let previous = preflight.running
-        let pass = Task { @MainActor [weak self] () -> ControlOperationOutcome in
+        let pass = Task { [weak self] () -> ControlOperationOutcome in
             _ = await previous?.value
             guard let self else { return .failed(.internalFailure) }
             // This pass begins, and it is the pending one: only its own start clears that slot. A request from here on makes the next pass.

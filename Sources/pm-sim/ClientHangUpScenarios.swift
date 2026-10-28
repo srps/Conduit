@@ -25,7 +25,7 @@ enum ClientHangUpScenarios {
         func routeChain(for entries: [String]) -> PACChain { CFPACEvaluator().routeChain(for: entries) }
     }
 
-    @MainActor
+    @RuntimeActor
     static func run(verbose: Bool) async throws -> ScenarioResult {
         let name = "client-hangup-after-response"
         let group = MultiThreadedEventLoopGroup.singleton
@@ -112,8 +112,8 @@ enum ClientHangUpScenarios {
     }
 
     /// Polls a condition; the deadline only keeps a regression from hanging pm-sim.
-    @MainActor
-    private static func waitUntil(_ condition: @MainActor () -> Bool) async throws {
+    @RuntimeActor
+    private static func waitUntil(_ condition: @RuntimeActor () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while !condition(), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))

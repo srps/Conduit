@@ -1,0 +1,34 @@
+{
+  "stage": "Probe.swift label and comment correction only, after runtime-final-evidence-initial-review.md",
+  "file": "docs/experiments/actual-runtime-client-profile/Probe.swift",
+  "prior_file_preserved_by_parent": "runtime-profile-before-label-correction.swift (sha af37...)",
+  "hash": "not computed in this lane (Bash limited to the fixed verifier); the parent should hash the edited Probe.swift and diff it against the preserved prior file",
+  "frozen_after_edit": true,
+  "not_touched": "Source (f3 stays frozen), Tests, run.py, README.md, every runs/ document",
+  "edits": [
+    {
+      "where": "real-host-pages record (was :3880, now :3885-3886)",
+      "change": "the key \"connectionsOpenedByProbe\": 0 is replaced by \"proxyRequestsSentByProbe\": 0 and \"connectOnlyLivenessCheckBeforePages\": true; \"fullCaptureWitness\": false and \"overBoundWitness\" are unchanged",
+      "why": "the saved-start check at :3847 calls loopbackAccepts(port), one connect-only TCP liveness check to the live listener, closed before the pages without sending anything"
+    },
+    {
+      "where": "the comment above that record (was :3876-3878)",
+      "change": "says the probe sends no proxy request, that its one listener connection is the connect-only loopbackAccepts check closed before the pages, and that an active-connection total of 1 there would be that connect, not a collection witness"
+    },
+    {
+      "where": "ownerHeld doc comment (was :2306-2307)",
+      "change": "'every exchange the caller sends afterwards meets a held owner' becomes 'callers spawned afterwards start while the owner is held'. The comment now says the flag marks the spawn only, the overlap is read from the outputs (lane-fill flags, result labels), and a hold that ended before its case marks the run inconclusive (existing behaviour: out.inconclusive at :2942 and :4007; summary exit 3 at :4280)."
+    },
+    {
+      "where": "cancel case (b) comment (was :2882-2883)",
+      "change": "'one 120 ms hold spans the send' becomes a hold started before the read is spawned and a cancel after a 20 ms wait; ownerHeldAfterCancel marks only that the hold stood at the cancel, not that the send happened inside it; the overlap is read from the result label, and an early end marks the run inconclusive"
+    }
+  ],
+  "unchanged": "instrumentation, behaviour, budgets, modes, timing, hold durations, checks and every other record key",
+  "label_audit_note": "the two new keys are within run.py's LABEL pattern (letters only; 24 and 35 characters, under 120); the new value is a Bool, as the hold flags already are",
+  "follow_ups_for_parent_docs_not_edited_here": [
+    "runs/c8547b7-actor-focus/verification-report.md:26 and author-manifest.json:53 still cite connectionsOpenedByProbe=0 as historical text",
+    "README.md:3 (strict-pool exclusion wording and the 'awaits the full-list fairness correction' line) and README.md:199/:314 (old main-thread-sleep method) per review item 4"
+  ],
+  "runs": "none by this lane: no build, compile or verify; the parent recompiles and reruns only the affected pressure mode against the same production objects"
+}

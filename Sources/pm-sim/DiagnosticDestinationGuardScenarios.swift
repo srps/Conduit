@@ -10,7 +10,7 @@ import ProxyControlBridge
 /// and the runtime keeps serving and stops cleanly. The writers, guard and orchestrator
 /// are the production types. The only fixture is a loopback listener on an ephemeral port,
 /// and everything lives under a scratch directory.
-@MainActor
+@RuntimeActor
 enum DiagnosticDestinationGuardScenarios {
     private struct Failure: Error { let message: String }
 

@@ -6,8 +6,8 @@ import XCTest
 /// #100: a direct route whose origin does not resolve is the destination's
 /// problem, not the upstream pool's. Only upstream failures raise
 /// `error_rate.alarm` (and its re-probe); every failure still counts.
-@MainActor
 final class ErrorRateAlarmTests: XCTestCase {
+    @RuntimeActor
     private func makeRunningOrchestrator() -> ProxyOrchestrator {
         var config = ProxyConfig()
         config.proxy.host = "127.0.0.1"
@@ -23,11 +23,13 @@ final class ErrorRateAlarmTests: XCTestCase {
         return orchestrator
     }
 
+    @RuntimeActor
     private func alarms(_ orchestrator: ProxyOrchestrator) -> Int {
         orchestrator.eventLog.events.filter { $0.event == "error_rate.alarm" }.count
     }
 
-    func testADirectNXDOMAINStormDoesNotRaiseTheAlarm() {
+    @RuntimeActor
+    func testADirectNXDOMAINStormDoesNotRaiseTheAlarm() async {
         let orchestrator = makeRunningOrchestrator()
         for _ in 0..<300 {
             orchestrator.recordRequestCompletion(.failed(.origin))
@@ -37,7 +39,8 @@ final class ErrorRateAlarmTests: XCTestCase {
         XCTAssertEqual(orchestrator.snapshot.runtimeStatus.metrics.requestsHandled, 300)
     }
 
-    func testClientAndLocalFailuresDoNotRaiseTheAlarm() {
+    @RuntimeActor
+    func testClientAndLocalFailuresDoNotRaiseTheAlarm() async {
         let orchestrator = makeRunningOrchestrator()
         for _ in 0..<50 {
             orchestrator.recordRequestCompletion(.failed(.client))
@@ -47,7 +50,8 @@ final class ErrorRateAlarmTests: XCTestCase {
         XCTAssertEqual(orchestrator.snapshot.runtimeStatus.metrics.failedRequests, 100)
     }
 
-    func testUpstreamFailuresStillRaiseTheAlarm() {
+    @RuntimeActor
+    func testUpstreamFailuresStillRaiseTheAlarm() async {
         let orchestrator = makeRunningOrchestrator()
         for _ in 0..<300 {
             orchestrator.recordRequestCompletion(.failed(.origin))

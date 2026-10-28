@@ -9,6 +9,9 @@ package final class TunnelResolverManager: TunnelResolverApplying, @unchecked Se
     /// The directory `cleanupStale` enumerates. Required, so a host or simulator names the directory it owns and never
     /// reads the machine's `/etc/resolver` by default. Production passes `/etc/resolver`.
     private let resolverDirectory: String
+    /// The host's platform queue. Each of the three operations runs there whole, so its helper round trips hold that queue, in order
+    /// with the host's other platform work, and never a concurrency-pool thread.
+    private let work: PlatformWork
 
     /// Port carried in every `/etc/resolver/*` file this manager writes.
     /// Kernel-side constant — the listener that consumes the resolver files
@@ -18,10 +21,11 @@ package final class TunnelResolverManager: TunnelResolverApplying, @unchecked Se
     /// compiling; newer code reads `TunnelResolverPort.port` directly.
     package static let resolverPort = TunnelResolverPort.port
 
-    package init(privilegeClient: PrivilegeClient, logger: any LogSink, resolverDirectory: String) {
+    package init(privilegeClient: PrivilegeClient, logger: any LogSink, resolverDirectory: String, work: PlatformWork) {
         self.privilegeClient = privilegeClient
         self.logger = logger
         self.resolverDirectory = resolverDirectory
+        self.work = work
     }
 
     package func apply(hostname: String, listenIP: String) throws {
@@ -37,7 +41,19 @@ package final class TunnelResolverManager: TunnelResolverApplying, @unchecked Se
         logger.log(.info, "Tunnel DNS: removed /etc/resolver/\(hostname).", category: .tunnel)
     }
 
-    package func applyAll(hostnames: [String], listenIP: String) -> (succeeded: [String], failed: [String]) {
+    package func applyAll(hostnames: [String], listenIP: String) async -> (succeeded: [String], failed: [String]) {
+        await work.run { [self] in applyAllNow(hostnames: hostnames, listenIP: listenIP) }
+    }
+
+    package func removeAll(hostnames: [String]) async {
+        await work.run { [self] in removeAllNow(hostnames: hostnames) }
+    }
+
+    package func cleanupStale(activeHostnames: Set<String>) async {
+        await work.run { [self] in cleanupStaleNow(activeHostnames: activeHostnames) }
+    }
+
+    private func applyAllNow(hostnames: [String], listenIP: String) -> (succeeded: [String], failed: [String]) {
         var succeeded: [String] = []
         var failed: [String] = []
         for hostname in hostnames {
@@ -52,7 +68,7 @@ package final class TunnelResolverManager: TunnelResolverApplying, @unchecked Se
         return (succeeded, failed)
     }
 
-    package func removeAll(hostnames: [String]) {
+    private func removeAllNow(hostnames: [String]) {
         for hostname in hostnames {
             do {
                 try remove(hostname: hostname)
@@ -62,7 +78,7 @@ package final class TunnelResolverManager: TunnelResolverApplying, @unchecked Se
         }
     }
 
-    package func cleanupStale(activeHostnames: Set<String>) {
+    private func cleanupStaleNow(activeHostnames: Set<String>) {
         let resolverDir = resolverDirectory
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: resolverDir) else { return }
 

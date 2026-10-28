@@ -12,6 +12,10 @@ import ProxyKernel
 /// running the work inline, and holding it would hang the test instead of
 /// failing it. It is recorded instead (`reachedOnMainThread`), and anyone
 /// waiting for the hold is let go so the test's assertions can run.
+///
+/// Nor is one on a thread of the Swift concurrency pool (`isCooperativePool`): holding it takes a pool thread from every task and
+/// actor, which hangs the test, and with a one-thread pool deadlocks it. It is taken, recorded (`reachedOnCooperativePool`, and for the
+/// hold's whole life `takenOnCooperativePool`) and let through. `HeldCallTests` checks the label rule on the actual contexts.
 final class HeldCall: @unchecked Sendable {
     /// What a matching call made on another queue than the armed one does. The main thread is never such a queue: a call there is
     /// always taken and let through.
@@ -25,17 +29,37 @@ final class HeldCall: @unchecked Sendable {
         case recorded
     }
 
-    private let lock = NSLock()
+    /// The lock, and the condition a held call and `blockUntilReached` wait on.
+    private let condition = NSCondition()
     private var matcher: (@Sendable (_ name: String, _ values: [String]) -> Bool)?
     private var queueSuffix: String?
     private var otherQueues = OtherQueues.ignored
     private var reached = false
     private var onMainThread = false
+    private var onCooperativePool = false
+    /// Sticky across arms: some arm of this hold took a call on the pool.
+    private var everOnCooperativePool = false
     private var onArmedQueue = false
     private var label: String?
     private var waiters: [CheckedContinuation<Void, Never>] = []
-    private let reachedSignal = DispatchSemaphore(value: 0)
-    private let gate = DispatchSemaphore(value: 0)
+    /// Held calls, as tickets: each one waits in `pass` until `released` reaches its ticket, so each `release()` lets the oldest held
+    /// call go, whichever arm took it. A call taken without being held issues none, so it never lets another arm's call go.
+    private var issued: UInt64 = 0
+    private var released: UInt64 = 0
+    /// `release()` came for this arm before its call, with nothing held: the call is let through when it comes. A release with nothing
+    /// armed or held leaves nothing behind, so it can never let a later arm's call through.
+    private var releasedEarly = false
+
+    /// Whether a thread whose current dispatch queue has this label belongs to the Swift concurrency pool, which runs tasks and the
+    /// default executor of every actor but the main one.
+    static func isCooperativePool(_ label: String) -> Bool {
+        label.hasSuffix(".cooperative")
+    }
+
+    /// The label of the calling thread's current dispatch queue.
+    static func currentQueueLabel() -> String {
+        String(cString: __dispatch_queue_get_label(nil))
+    }
 
     /// Holds the next call `matcher` accepts. `name` is the launch path for a
     /// subprocess and the operation's raw value for a privileged write.
@@ -44,58 +68,86 @@ final class HeldCall: @unchecked Sendable {
     ///   label ends with this is held. One made on the main thread (the
     ///   inline case this exists to catch) is taken and let through.
     /// - Parameter otherQueues: what a matching call on any other queue does.
+    ///
+    /// Arming while an earlier arm's call is still held hands the hold on: that call stays held, and the next `release()` lets it go,
+    /// so a test can arm for the call the held one leads to before releasing it.
     func arm(
         onQueueLabeled queueSuffix: String? = nil,
         otherQueues: OtherQueues = .ignored,
         _ matcher: @escaping @Sendable (_ name: String, _ values: [String]) -> Bool
     ) {
-        lock.withLock {
+        condition.withLock {
             self.matcher = matcher
             self.queueSuffix = queueSuffix
             self.otherQueues = otherQueues
             reached = false
             onMainThread = false
+            onCooperativePool = false
             onArmedQueue = false
             label = nil
+            releasedEarly = false
         }
     }
 
     /// Whether the held call arrived on the main thread, where it was let
     /// through instead of held.
-    var reachedOnMainThread: Bool { lock.withLock { onMainThread } }
+    var reachedOnMainThread: Bool { condition.withLock { onMainThread } }
 
-    /// Whether the call was held on the queue it was armed for: off the main thread, and on the named queue when one was named.
-    var reachedOnArmedQueue: Bool { lock.withLock { onArmedQueue } }
+    /// Whether the taken call arrived on a thread of the concurrency pool, where it was let through instead of held.
+    var reachedOnCooperativePool: Bool { condition.withLock { onCooperativePool } }
+
+    /// Whether any arm of this hold took a call on the concurrency pool. A harness asserts it false at teardown, so a test whose call
+    /// was let through on the pool cannot pass as if it had been held.
+    var takenOnCooperativePool: Bool { condition.withLock { everOnCooperativePool } }
+
+    /// Whether the call was taken on the queue it was armed for: off the main thread and the concurrency pool, and on the named queue
+    /// when one was named.
+    var reachedOnArmedQueue: Bool { condition.withLock { onArmedQueue } }
 
     /// The label of the dispatch queue the taken call was made on, nil until one is taken.
-    var reachedQueueLabel: String? { lock.withLock { label } }
+    var reachedQueueLabel: String? { condition.withLock { label } }
+
+    /// Whether a call is held now, waiting for `release()`.
+    var isHolding: Bool { condition.withLock { released < issued } }
 
     /// Called by the fakes on every machine call.
     func pass(_ name: String, _ values: [String]) {
         let isMain = Thread.isMainThread
-        let queueLabel = String(cString: __dispatch_queue_get_label(nil))
-        let taken: (waiters: [CheckedContinuation<Void, Never>], holds: Bool)? = lock.withLock {
+        let queueLabel = Self.currentQueueLabel()
+        let cooperative = !isMain && Self.isCooperativePool(queueLabel)
+        let taken: (waiters: [CheckedContinuation<Void, Never>], ticket: UInt64?)? = condition.withLock {
             guard let matcher, matcher(name, values) else { return nil }
-            let armedQueue = !isMain && (queueSuffix.map { queueLabel.hasSuffix($0) } ?? true)
-            if !isMain, !armedQueue, otherQueues == .ignored { return nil }
+            let armedQueue = !isMain && !cooperative && (queueSuffix.map { queueLabel.hasSuffix($0) } ?? true)
+            // An arm that names no queue would have held a pool call, so that call is taken and let through instead of ignored.
+            if !isMain, !armedQueue, case .ignored = otherQueues, !cooperative || queueSuffix != nil { return nil }
             self.matcher = nil
             reached = true
             onMainThread = isMain
+            onCooperativePool = cooperative
+            everOnCooperativePool = everOnCooperativePool || cooperative
             onArmedQueue = armedQueue
             label = queueLabel
+            var ticket: UInt64?
+            if armedQueue, !releasedEarly {
+                issued += 1
+                ticket = issued
+            }
+            condition.broadcast()
             defer { waiters = [] }
-            return (waiters, armedQueue)
+            return (waiters, ticket)
         }
         guard let taken else { return }
         for waiter in taken.waiters { waiter.resume() }
-        reachedSignal.signal()
-        if taken.holds { gate.wait() }
+        guard let ticket = taken.ticket else { return }
+        condition.withLock {
+            while released < ticket { condition.wait() }
+        }
     }
 
     /// Waits, off the main actor's turn, until the armed call has arrived.
     func waitUntilReached() async {
         await withCheckedContinuation { continuation in
-            let already = lock.withLock { () -> Bool in
+            let already = condition.withLock { () -> Bool in
                 if reached { return true }
                 waiters.append(continuation)
                 return false
@@ -109,22 +161,92 @@ final class HeldCall: @unchecked Sendable {
     func waitUntilReached(within limit: Duration) async -> Bool {
         let deadline = ContinuousClock.now.advanced(by: limit)
         while ContinuousClock.now < deadline {
-            if lock.withLock({ reached }) { return true }
+            if condition.withLock({ reached }) { return true }
             try? await Task.sleep(for: .milliseconds(1))
         }
-        return lock.withLock { reached }
+        return condition.withLock { reached }
     }
 
     /// Blocks the calling thread until the armed call has arrived. For tests
     /// that drive a manager from threads of their own, never from the main
-    /// actor while the held work needs it.
+    /// actor while the held work needs it. It waits on this arm's call alone: a call taken under an earlier arm does not count.
     func blockUntilReached() {
-        reachedSignal.wait()
+        condition.withLock {
+            while !reached { condition.wait() }
+        }
     }
 
-    /// Lets the held call go on.
+    /// Lets the oldest held call go on. With nothing held, it lets this arm's call through when it comes; with nothing armed or held,
+    /// it does nothing, so it is safe on every exit path.
     func release() {
-        gate.signal()
+        condition.withLock {
+            if released < issued {
+                released += 1
+                condition.broadcast()
+            } else if matcher != nil {
+                releasedEarly = true
+            }
+        }
+    }
+
+    /// Ends the hold for good, for a harness's teardown: disarms, and lets every held call go. A test that failed mid-hold can leave
+    /// more than one held after a hand-over, and `release()` frees only the oldest, so a stop waiting on the next would hang.
+    func releaseAll() {
+        condition.withLock {
+            matcher = nil
+            releasedEarly = false
+            released = issued
+            condition.broadcast()
+        }
+    }
+}
+
+/// Parks the main thread, so a test can show work going on while the main actor cannot run. The park is bounded: it ends at
+/// `release()` or at its limit, whichever comes first, so a test that fails never hangs XCTest. Call it from off the main actor: the
+/// main thread must be free to take the park.
+final class MainThreadPark: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var parked = false
+    private var began = false
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Whether the main thread is parked now.
+    var isParked: Bool { condition.withLock { parked } }
+
+    /// Parks the main thread until `release()` or `limit`, and returns once it is parked.
+    func park(limit: Duration) async {
+        let seconds = Double(limit.components.seconds) + Double(limit.components.attoseconds) / 1e18
+        let deadline = Date(timeIntervalSinceNow: seconds)
+        DispatchQueue.main.async { [self] in
+            let waiting = condition.withLock { () -> [CheckedContinuation<Void, Never>] in
+                parked = true
+                began = true
+                defer { waiters = [] }
+                return waiters
+            }
+            for waiter in waiting { waiter.resume() }
+            condition.withLock {
+                while !released, condition.wait(until: deadline) {}
+                parked = false
+            }
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let already = condition.withLock { () -> Bool in
+                if began { return true }
+                waiters.append(continuation)
+                return false
+            }
+            if already { continuation.resume() }
+        }
+    }
+
+    /// Ends the park. Idempotent, so a test may also call it on every exit.
+    func release() {
+        condition.withLock {
+            released = true
+            condition.broadcast()
+        }
     }
 }
 

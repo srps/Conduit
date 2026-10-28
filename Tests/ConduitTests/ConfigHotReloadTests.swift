@@ -6,13 +6,13 @@ import XCTest
 
 final class ConfigHotReloadTests: XCTestCase {
 
-    @MainActor
+    @RuntimeActor
     /// Every upstream the orchestrator probed, in order. The probe answers
     /// unreachable at once instead of connecting out and waiting the real
     /// probe's timeout.
     private let probed = NIOLockedValueBox<[String]>([])
 
-    @MainActor
+    @RuntimeActor
     private func makeRunningOrchestrator() async throws -> ProxyOrchestrator {
         var config = GenericDefaults.shared.makeConfig()
         config.proxy.port = 0
@@ -27,7 +27,7 @@ final class ConfigHotReloadTests: XCTestCase {
 
     // MARK: - No-op when nothing changed
 
-    @MainActor
+    @RuntimeActor
     func testApplyConfigChangeNoOpWhenIdentical() async throws {
         let orchestrator = try await makeRunningOrchestrator()
         defer { Task { await orchestrator.stopProxy() } }
@@ -39,7 +39,7 @@ final class ConfigHotReloadTests: XCTestCase {
 
     // MARK: - Routing changes don't restart proxy
 
-    @MainActor
+    @RuntimeActor
     func testRoutingChangeDoesNotRestartProxy() async throws {
         let orchestrator = try await makeRunningOrchestrator()
         defer { Task { await orchestrator.stopProxy() } }
@@ -54,7 +54,7 @@ final class ConfigHotReloadTests: XCTestCase {
                        "Routing change should not change the bound port (no restart)")
     }
 
-    @MainActor
+    @RuntimeActor
     func testPACRouteLimitChangeDoesNotRefreshPACRouting() async throws {
         let orchestrator = try await makeRunningOrchestrator()
         defer { Task { await orchestrator.stopProxy() } }
@@ -73,7 +73,7 @@ final class ConfigHotReloadTests: XCTestCase {
 
     // MARK: - Logging change is immediate
 
-    @MainActor
+    @RuntimeActor
     func testLoggingChangeAppliesWithoutRestart() async throws {
         let orchestrator = try await makeRunningOrchestrator()
         defer { Task { await orchestrator.stopProxy() } }
@@ -88,7 +88,7 @@ final class ConfigHotReloadTests: XCTestCase {
 
     // MARK: - Health interval change restarts health loop
 
-    @MainActor
+    @RuntimeActor
     func testHealthChangeRestartsHealthLoop() async throws {
         let orchestrator = try await makeRunningOrchestrator()
         defer { Task { await orchestrator.stopProxy() } }
@@ -103,7 +103,7 @@ final class ConfigHotReloadTests: XCTestCase {
 
     // MARK: - Proxy port change triggers restart
 
-    @MainActor
+    @RuntimeActor
     func testProxyPortChangeRestartsProxy() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.proxy.port = 0
@@ -124,7 +124,7 @@ final class ConfigHotReloadTests: XCTestCase {
 
     // MARK: - Proxy limits change without restart
 
-    @MainActor
+    @RuntimeActor
     func testProxyLimitsChangeWithoutRestart() async throws {
         let orchestrator = try await makeRunningOrchestrator()
         defer { Task { await orchestrator.stopProxy() } }
@@ -141,7 +141,7 @@ final class ConfigHotReloadTests: XCTestCase {
 
     // MARK: - Upstreams change triggers refresh
 
-    @MainActor
+    @RuntimeActor
     func testUpstreamsChangeRefreshesConnectivity() async throws {
         let orchestrator = try await makeRunningOrchestrator()
         defer { Task { await orchestrator.stopProxy() } }
@@ -179,7 +179,7 @@ final class ConfigHotReloadTests: XCTestCase {
 
     // MARK: - Tunnel reconciliation via config change
 
-    @MainActor
+    @RuntimeActor
     func testTunnelChangeUsesReconciliation() async throws {
         // Tunnels must be running for `applyConfigChange` to route into `reconcileTunnels`;
         // without that precondition the test would pass even if the reconcile branch were
@@ -222,7 +222,7 @@ final class ConfigHotReloadTests: XCTestCase {
 
     // MARK: - DNS change with DNS not running is no-op
 
-    @MainActor
+    @RuntimeActor
     func testDNSChangeWhenNotRunningIsNoOp() async throws {
         let orchestrator = try await makeRunningOrchestrator()
         defer { Task { await orchestrator.stopProxy() } }
@@ -241,7 +241,7 @@ final class ConfigHotReloadTests: XCTestCase {
     /// point, 127.0.0.1, whatever the proxy's listen host. It used to bind
     /// the listen host, so `::1` left system DNS asking an address nothing
     /// served. A listen-host edit therefore leaves it alone.
-    @MainActor
+    @RuntimeActor
     func testTheDNSForwarderListensOnIPv4LoopbackWhateverTheListenHost() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.proxy.host = "::1"
@@ -280,13 +280,13 @@ final class ConfigHotReloadTests: XCTestCase {
     /// `ntlmv2` would leave the chip reading "Kerberos" until the first
     /// new-config handshake — a stale-state lie the snapshot is supposed
     /// to prevent. Mirrors the rationale on `stopProxy`'s VPN-flap reset.
-    @MainActor
+    @RuntimeActor
     func testApplyConfigChangeAuthChangedClearsRuntimeAuthOutcome() async throws {
         let orchestrator = try await makeRunningOrchestrator()
         defer { Task { await orchestrator.stopProxy() } }
 
         // Pre-populate the snapshot the way a real CONNECT handshake would.
-        // `reportAuthOutcome` is `nonisolated` and hops to MainActor for the
+        // `reportAuthOutcome` is `nonisolated` and hops to the owner for the
         // mutation, so we yield once to let the Task land before reading.
         orchestrator.reportAuthOutcome(.kerberos, host: "proxy.example.com", reason: nil)
         try await Task.sleep(for: .milliseconds(50))
@@ -310,7 +310,7 @@ final class ConfigHotReloadTests: XCTestCase {
     /// edit (e.g. username/domain change), not just a mode flip — both
     /// branches of the `diff.authChanged` test must invalidate the cached
     /// outcome.
-    @MainActor
+    @RuntimeActor
     func testApplyConfigChangeAuthCredentialEditAlsoClearsRuntimeAuthOutcome() async throws {
         let orchestrator = try await makeRunningOrchestrator()
         defer { Task { await orchestrator.stopProxy() } }
@@ -335,7 +335,7 @@ final class ConfigHotReloadTests: XCTestCase {
     /// stop→start cycle briefly shows the prior outcome (e.g. "Kerberos →
     /// NTLM") until a fresh handshake lands. Mirrors
     /// `VPNTransitionTableTests.testStopProxyResetsFlapTelemetryCounters`.
-    @MainActor
+    @RuntimeActor
     func testStopProxyResetsRuntimeAuthOutcome() async throws {
         let orchestrator = try await makeRunningOrchestrator()
 

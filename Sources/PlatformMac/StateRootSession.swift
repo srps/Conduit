@@ -56,6 +56,13 @@ package final class StateRootSession: Sendable {
         lease.release()
     }
 
+    /// `destinationGuard`, holding this session. A diagnostic writer under this root keeps the root's authority for as long as it keeps
+    /// its guard, so its queued and started writes keep the lease until they end (decision 0017), not only until its owner lets go. Both
+    /// admissions are the wrapped guard's, unchanged. The session owns no writer or guard, so the hold makes no cycle.
+    package func retainingAuthority(_ destinationGuard: any RecordFileDestinationGuarding) -> any RecordFileDestinationGuarding {
+        AuthorityRetainingDestinationGuard(session: self, wrapped: destinationGuard)
+    }
+
     /// The resolved file of one configuration component. The map is exhaustive, so a component added to `ConfigurationComponent` does not
     /// compile until it names its file.
     package func configurationFile(for component: ConfigurationComponent) -> StateRootFile {
@@ -78,6 +85,20 @@ package final class StateRootSession: Sendable {
         VerifiedConfigurationFileReplacement.replace(
             staged, at: configurationFile(for: component), under: lease, access: access, expecting: baseline
         )
+    }
+}
+
+/// A destination guard that holds its root's session and only delegates (`StateRootSession.retainingAuthority`).
+private struct AuthorityRetainingDestinationGuard: RecordFileDestinationGuarding {
+    let session: StateRootSession
+    let wrapped: any RecordFileDestinationGuarding
+
+    func admit(destination: URL) throws {
+        try wrapped.admit(destination: destination)
+    }
+
+    func admit(openedDescriptor descriptor: Int32, destination: URL) throws {
+        try wrapped.admit(openedDescriptor: descriptor, destination: destination)
     }
 }
 

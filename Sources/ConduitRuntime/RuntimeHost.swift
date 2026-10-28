@@ -27,7 +27,7 @@ package struct RuntimeOpenRefusal: Error, Sendable {
 /// `FakeMachine`. It may link `PlatformMac` (Keychain, CFNetwork PAC,
 /// SCDynamicStore, helper XPC, networksetup wrappers) but imports no AppKit or
 /// SwiftUI.
-@MainActor
+@RuntimeActor
 package final class RuntimeHost {
     /// The root's writer authority (decision 0017). The host holds a reference, so the
     /// lease stays open while the host runs, whatever its caller drops. Stop does
@@ -46,9 +46,9 @@ package final class RuntimeHost {
     var collections = RuntimeHostCollections()
     /// Told when the host's safe state may have changed, so the control service composed over it captures a new snapshot. Set only by
     /// that composition; nil when no service is composed.
-    var onControlStateChange: (@MainActor () -> Void)?
+    var onControlStateChange: (@RuntimeActor () -> Void)?
     /// Told once, when the quit's physical work has ended, so the composed control service ends its streams. Set only by that composition.
-    var onControlShutdown: (@MainActor () -> Void)?
+    var onControlShutdown: (@RuntimeActor () -> Void)?
     /// The control operations this host admitted at the service's fence and has not launched yet. The service bounds them: its ordinary
     /// capacity, and at most one queued Stop per module, whose replacement is dropped here in the same fence turn.
     var controlAdmissions: [ControlOperationID: RuntimeControlAdmission] = [:]
@@ -195,7 +195,7 @@ package final class RuntimeHost {
     /// injects `FakeNetworkPathObserver`, so no test reads the machine's network.
     let networkPathObserver: any NetworkPathObserving
     /// The hops from the observers and the orchestrator's callbacks onto the
-    /// main actor. Internal so the tests can `drain()` them instead of
+    /// owner. Internal so the tests can `drain()` them instead of
     /// sleeping.
     let deliveries = ObserverDeliveries()
     private let proxySettingsNotifications = CoalescedObserverDelivery()
@@ -301,7 +301,8 @@ package final class RuntimeHost {
     private let startedAt: Date
     /// Ends the process after a terminal stop. The entry point passes
     /// `exit(0)`; the host itself never exits, so a test can observe the call.
-    let terminalExit: @MainActor () -> Void
+    /// It assumes no actor: an entry point that needs one hops there itself.
+    let terminalExit: @Sendable () -> Void
 
     /// Opens the host over its one configuration owner (decisions 0031 and 0032). The startup observation goes through the store before
     /// the orchestrator and the reconciler take their baselines, so every baseline comes from that observation. A caller that runs a
@@ -315,7 +316,7 @@ package final class RuntimeHost {
         logger: any LogSink,
         startupAllowsMissing: Bool,
         startedAt: Date,
-        terminalExit: @escaping @MainActor () -> Void,
+        terminalExit: @escaping @Sendable () -> Void,
         effects: RuntimeHostEffects,
         networkLocationLimits: NetworkLocationLimits = .init(),
         environmentDriftInterval: Duration = .seconds(300),
@@ -376,7 +377,7 @@ package final class RuntimeHost {
         incarnation: ControlHostIncarnation,
         workflow: RuntimeConfigurationWorkflow,
         startedAt: Date,
-        terminalExit: @escaping @MainActor () -> Void,
+        terminalExit: @escaping @Sendable () -> Void,
         effects: RuntimeHostEffects,
         networkLocationLimits: NetworkLocationLimits = .init(),
         environmentDriftInterval: Duration = .seconds(300),
@@ -420,13 +421,14 @@ package final class RuntimeHost {
         // replay records appended before it, so the sink is bound here, before the factory can emit. An event from the
         // adapter's construction or from its first command then reaches the log and `events.ndjson` exactly once. The
         // log is the orchestrator's log below, shared with the diagnostic writers.
+        // Each writer's guard holds the session, so a write still queued after the host is gone keeps the root's lease until it ends.
         let diagnosticsEventLog = RuntimeEventLog()
         let eventWriter = RuntimeEventFileWriter(
             fileURL: environment.eventsFile,
             logger: logger,
-            destinationGuard: diagnosticDestinationGuard(
+            destinationGuard: stateSession.retainingAuthority(diagnosticDestinationGuard(
                 for: .runtimeEvents, in: environment, writerLeaseFile: stateSession.writerLeaseFile
-            ),
+            )),
             eventLog: diagnosticsEventLog
         )
         self.eventWriter = eventWriter
@@ -434,9 +436,9 @@ package final class RuntimeHost {
         self.snapshotWriter = makeSnapshotArtifactWriter(
             fileURL: environment.snapshotFile,
             logger: logger,
-            destinationGuard: diagnosticDestinationGuard(
+            destinationGuard: stateSession.retainingAuthority(diagnosticDestinationGuard(
                 for: .snapshot, in: environment, writerLeaseFile: stateSession.writerLeaseFile
-            ),
+            )),
             eventLog: diagnosticsEventLog
         )
         let privilege = effects.privilege({ diagnosticsEventLog.append($0) })
@@ -453,23 +455,23 @@ package final class RuntimeHost {
             { flapBox.withLockedValue { $0.minVisibleSeconds } }
         )
 
+        // The relay's and the tunnel resolver's helper commands go through the same queue as the surface work, off the owner (#47). The
+        // DNS module's slot orders the relay's, and the tunnel lifecycle the resolver's, so their place in the queue only delays them.
+        let platformWork = PlatformWork(label: "io.github.srps.Conduit.daemon.platform-work")
+        self.platformWork = platformWork
         let tunnelResolverManager = TunnelResolverManager(
             privilegeClient: auditedPrivilegeClient,
             logger: logger,
-            resolverDirectory: effects.resolverDirectory
+            resolverDirectory: effects.resolverDirectory,
+            work: platformWork
         )
         // The connection audit writer reports a refused destination on the same log as the other diagnostic writers (#222).
         let auditSink = Self.makeAuditSink(
             for: loadedConfiguration.config,
-            environment: environment,
-            writerLeaseFile: stateSession.writerLeaseFile,
+            stateSession: stateSession,
             logger: logger,
             eventLog: diagnosticsEventLog
         )
-        // The relay's helper commands go through the same queue as the surface work, off the owner (#47). The DNS module's slot orders
-        // them, so their place in the queue only delays them.
-        let platformWork = PlatformWork(label: "io.github.srps.Conduit.daemon.platform-work")
-        self.platformWork = platformWork
         let relayClient = auditedPrivilegeClient
         let orchestrator = ProxyOrchestrator(
             config: loadedConfiguration.config,
@@ -513,7 +515,7 @@ package final class RuntimeHost {
         )
         orchestrator.setAuthenticatorProvider(authenticatorProvider)
 
-        // The hop to the main actor is kept: deliveries share one ordering with the other observers. The state is read
+        // The hop to the owner is kept: deliveries share one ordering with the other observers. The state is read
         // when the delivery runs, not taken from the value emitted earlier. A delivery queued before a later state
         // (the final stop, for one) must not submit an older snapshot after it. The canonical snapshot is the only
         // source, so no second revision counter is needed.
@@ -552,7 +554,7 @@ package final class RuntimeHost {
         // at its dead forwarder, and launch is when the journal's record of
         // what was there before is most likely still the truth. Without this
         // the host leaves them until its next start or stop, which may be
-        // never. Three calls in a fixed order, off the main actor.
+        // never. Three calls in a fixed order, off the owner.
         //
         // This host is never built from a failed load: its entry points run
         // `recoverWithoutConfiguration` instead, which skips only the
@@ -567,7 +569,9 @@ package final class RuntimeHost {
             resolversManaged: loadedConfiguration.platformConfig.manageDNSResolvers
         )
         let eventLog = orchestrator.eventLog
-        launchRecovery = LaunchRecovery { [logger] in
+        // On the host's one platform queue, as all its other blocking work. Each surface path joins recovery first or cannot run before
+        // a path that did (`awaitLaunchRecovery`).
+        launchRecovery = LaunchRecovery(on: platformWork) { [logger] in
             LaunchRecovery.recoverPlatformSurfaces(
                 systemDNS: dnsRecovery,
                 systemProxy: proxyRecovery,
@@ -585,19 +589,19 @@ package final class RuntimeHost {
     /// The connection audit sink the orchestrator records each closed connection to, the composition's only one: off (the default) is the
     /// no-op sink; on, a bounded file at `auditLogPath`, or the root's `audit.ndjson` when no path is set, with `auditLogMaxBytes`. The
     /// guard protects the same resources as the other writers, the writer lease included, so a configured path that aliases one is refused
-    /// with one fixed event and the runtime keeps serving.
+    /// with one fixed event and the runtime keeps serving. The guard holds the session, as the other writers' do.
     ///
     /// Built once, from the configuration the host opened with. A reload does not re-resolve it.
     private static func makeAuditSink(
         for config: ProxyConfig,
-        environment: RuntimeEnvironment,
-        writerLeaseFile: URL,
+        stateSession: StateRootSession,
         logger: any LogSink,
         eventLog: RuntimeEventLog
     ) -> any ConnectionAuditSink {
         guard config.auditLogEnabled else {
             return DiscardingConnectionAuditSink()
         }
+        let environment = stateSession.environment
         let url: URL
         if let path = config.auditLogPath, !path.isEmpty {
             url = URL(fileURLWithPath: path)
@@ -609,9 +613,9 @@ package final class RuntimeHost {
             fileURL: url,
             maxBytes: config.auditLogMaxBytes,
             logger: logger,
-            destinationGuard: diagnosticDestinationGuard(
-                for: .connectionAudit, in: environment, writerLeaseFile: writerLeaseFile
-            ),
+            destinationGuard: stateSession.retainingAuthority(diagnosticDestinationGuard(
+                for: .connectionAudit, in: environment, writerLeaseFile: stateSession.writerLeaseFile
+            )),
             eventLog: eventLog
         )
     }
@@ -636,7 +640,7 @@ package final class RuntimeHost {
     /// Publishes readiness: `daemon.ready`, `daemon-ready.json` and a
     /// snapshot. Joins launch recovery first, so readiness never precedes it:
     /// a consumer that acts on `daemon.ready` must not find the machine still
-    /// pointed at a crashed run's dead listeners. An await, so the main actor
+    /// pointed at a crashed run's dead listeners. An await, so the owner
     /// stays free while recovery runs.
     package func markReady(mode: String) async {
         await awaitLaunchRecovery()
@@ -782,8 +786,8 @@ package final class RuntimeHost {
         join.armDeadline(deadline)
         // The join holds the root's session itself, so the root stays claimed until the warm-up and deliveries have
         // finished, whether or not the caller's deadline or the host's owner has gone. It holds the host weakly: the
-        // result is computed on the main actor from the host's state, and only if the host is still there.
-        Task { @MainActor [weak self] in
+        // result is computed on the owner from the host's state, and only if the host is still there.
+        Task { [weak self] in
             await warmup?.value
             await deliveries.drain()
             withExtendedLifetime(session) {}
@@ -866,7 +870,7 @@ package final class RuntimeHost {
         // Start or Stop, no fence, and no later adoption of another accepted view, by a reload or an apply, which moves `configGeneration`.
         // Weak: the reconciler keeps the last admission for its retry.
         let view = configGeneration
-        let stands: @MainActor () -> Bool = { [weak self, workflow] in
+        let stands: @RuntimeActor () -> Bool = { [weak self, workflow] in
             guard let self else { return false }
             return workflow.isLatest(captured) && !workflow.stopFenced && self.configGeneration == view
         }
@@ -982,12 +986,15 @@ package final class RuntimeHost {
         await orchestrator.testUpstream(named: name)
     }
 
-    /// The readiness and shutdown flush: audit, events, then the snapshot, inside one `DiagnosticFlushPhase`
-    /// (see `DiagnosticFlush`). Every writer is awaited. Then the logger's own drain, awaited too, so the owner never
-    /// blocks on it: the existing per-writer wait from now, cut to `loggerUntil`, the quit's absolute deadline when there
-    /// is one. A deadline already passed waits for nothing. Its outcome is the report's `logger`, apart from `allConfirmed`.
+    /// The readiness and shutdown flush. First the logger's own drain, awaited so the owner never blocks on it: the existing
+    /// per-writer wait from now, cut to `loggerUntil`, the quit's absolute deadline when there is one. A deadline already passed
+    /// waits for nothing. Its outcome is the report's `logger`, apart from `allConfirmed`. Then audit, events and the snapshot,
+    /// inside one `DiagnosticFlushPhase` (see `DiagnosticFlush`), every writer awaited. The drain's own unconfirmed fact is
+    /// recorded before the artifact flush starts, so a confirmed events flush covers it and nothing this flush records is left
+    /// for the events writer after it. Lines logged by the artifact flush itself are not drained; nothing claims them.
     @discardableResult
     package func flushEvents(loggerUntil cap: ContinuousClock.Instant? = nil) async -> DiagnosticFlushReport {
+        let loggerOutcome = await drainLogger(until: cap)
         reportWriterLoss()
         var report = await DiagnosticFlush.run(
             phase: DiagnosticFlushPhase(),
@@ -1000,12 +1007,12 @@ package final class RuntimeHost {
         if !report.allConfirmed {
             logger.log(.warning, "Observability flush not fully confirmed: audit=\(report.audit.rawValue) events=\(report.events.rawValue) snapshot=\(report.snapshot.rawValue).", category: .general)
         }
-        report.logger = await drainLogger(until: cap)
+        report.logger = loggerOutcome
         return report
     }
 
     /// One bounded logger drain. A drain that did not confirm the lines records `lifecycle.log_flush_unconfirmed`, event first and its
-    /// derived line second; neither is claimed persisted, and nothing waits after them.
+    /// derived line second. Only the artifact flush after it can confirm the event; the line is not claimed persisted.
     private func drainLogger(until cap: ContinuousClock.Instant?) async -> RecordDrainOutcome {
         let now = ContinuousClock.now
         let wait = now.advanced(by: DiagnosticFlushPhase.writerWait)
@@ -1264,7 +1271,7 @@ package final class RuntimeHost {
     private func scheduleSplitDNSHelperCheck() {
         guard splitDNSRepair.pending != nil, splitDNSHelperCheck == nil, let helper = helperStatusSource else { return }
         let base = splitDNSHelperCheckInterval
-        splitDNSHelperCheck = Task { @MainActor [weak self] in
+        splitDNSHelperCheck = Task { [weak self] in
             while let delay = self?.splitDNSHelperCheckDelay(base: base) {
                 // Cancelled: a retry took over, a new episode restarted the
                 // check, or quit. Whoever cancelled it has cleared the handle.
@@ -1334,7 +1341,7 @@ package final class RuntimeHost {
         deliveries.deliver { [weak self] in await self?.reconcileEnvironmentDriftIfRunning(trigger: trigger) }
     }
 
-    /// Off the main actor: three profile reads and six `launchctl getenv`,
+    /// Off the owner: three profile reads and six `launchctl getenv`,
     /// and a repair only when something drifted. Coalesced like the system
     /// proxy pass, and checked against the lifecycle under the manager's
     /// lock before it writes (`EnvironmentManager.repair`).
@@ -1380,7 +1387,7 @@ package final class RuntimeHost {
     /// after wake rather than once per missed interval.
     private func startEnvironmentDriftTimer() {
         let interval = environmentDriftInterval
-        environmentDriftTimer = Task { @MainActor [weak self] in
+        environmentDriftTimer = Task { [weak self] in
             while true {
                 do { try await Task.sleep(for: interval) }
                 catch { return }
@@ -1473,11 +1480,16 @@ package final class RuntimeHost {
         // Taken when the timer is armed, not when a probe completes: a probe still out when a Stop or a newer Start begins names the
         // run that asked for it, so its reading is never taken for the newer run's.
         let token = lanes.dns.observationToken
+        // One reading on its way to the owner at a time: a tick while the last one has not landed adds nothing. Sendable, so the
+        // handler assumes no actor on the global queue it fires on.
+        let hopPending = NIOLockedValueBox(false)
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + 30, repeating: 30)
-        timer.setEventHandler { [weak self, manager] in
+        timer.setEventHandler { @Sendable [weak self, manager] in
+            guard hopPending.withLockedValue({ pending in defer { pending = true }; return !pending }) else { return }
             let alive = manager.probeLiveness()
-            Task { @MainActor in
+            Task { @RuntimeActor [weak self] in
+                hopPending.withLockedValue { $0 = false }
                 self?.handleDNSHealthResult(alive: alive, forwarderPort: forwarderPort, armedBy: token)
             }
         }
@@ -1500,7 +1512,7 @@ package final class RuntimeHost {
             dnsRelayUnresponsive = false
             return
         }
-        // The restart and the probe after it run off the main actor, one at a time.
+        // The restart and the probe after it run off the owner, one at a time.
         guard !dnsRelayRestartInFlight else { return }
         dnsRelayRestartInFlight = true
 
@@ -1598,9 +1610,9 @@ extension RuntimeHost {
         let writer = RuntimeEventFileWriter(
             fileURL: environment.eventsFile,
             logger: logger,
-            destinationGuard: diagnosticDestinationGuard(
+            destinationGuard: stateSession.retainingAuthority(diagnosticDestinationGuard(
                 for: .runtimeEvents, in: environment, writerLeaseFile: stateSession.writerLeaseFile
-            ),
+            )),
             eventLog: emitted
         )
         let emit: @Sendable (RuntimeEvent) -> Void = { event in
@@ -1629,7 +1641,8 @@ extension RuntimeHost {
             portProbe: effects.loopbackPortProbe,
             locationRecovery: locationRecovery
         )
-        let recovery = LaunchRecovery {
+        // No host exists to lend its platform queue, so this one call has a worker of its own.
+        let recovery = LaunchRecovery(on: PlatformWork(label: "io.github.srps.Conduit.configless-recovery")) {
             LaunchRecovery.recoverPlatformSurfaces(
                 systemDNS: systemDNS,
                 systemProxy: systemProxy,
@@ -1764,7 +1777,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
         let reapplyEnvironment = environmentFollows && platform.manageEnvironmentVariables
             && !pass.platformActions.contains(.applyEnvironment)
         guard reapplySystemProxy || reapplyEnvironment else { return }
-        // Off the main actor, and a failure, partial environment applies
+        // Off the owner, and a failure, partial environment applies
         // included, is reported and retried.
         let systemProxy = systemConduit, environment = environmentManager, log = logger
         let mode = platform.systemProxyMode, pacURL = orchestrator.snapshot.bindings.localPACURL

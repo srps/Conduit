@@ -167,6 +167,10 @@ def main():
                 assert repaired["configGeneration"] == 1
                 assert repaired["profileName"] == config["profileName"]
                 assert repaired["directModeCause"] == original["directModeCause"]
+                # SIGINT and SIGTERM share one handler: a stop that traps instead of exiting would be hidden by the cleanup below.
+                os.kill(process.pid, signal.SIGTERM)
+                code = process.wait(timeout=10)
+                assert code == 0, f"SIGTERM stop exited {code}"
             finally:
                 process.terminate()
                 try:
@@ -174,7 +178,7 @@ def main():
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-        print("PASS: standalone DNS policy, rejected startup, first run, loopback binds, failed control/SIGHUP reload preservation, repaired reload")
+        print("PASS: standalone DNS policy, rejected startup, first run, loopback binds, failed control/SIGHUP reload preservation, repaired reload, SIGTERM stop")
 
 
 if __name__ == "__main__":

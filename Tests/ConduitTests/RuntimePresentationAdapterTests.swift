@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Combine
+import NIOConcurrencyHelpers
 import XCTest
 import ConduitShared
 @testable import Conduit
@@ -360,12 +361,38 @@ final class AppStatePageCollectorTests: XCTestCase {
 /// of 10,000 typical connection rows. The structural assertions always run and assert no timing or app memory figure. Under the existing
 /// `CONDUIT_RUNTIME_RESOURCE_PROBES=1` gate the test also logs observations only (`APPSTATE-COLLECTION` lines): per-pass wall time, a
 /// main-actor heartbeat's lateness, which includes the OS timer's and the scheduler's own delay and so is not an exact measure of main-actor
-/// unavailability, one synchronous `apply(rows:)`, and the process's peak RSS and malloc in use, which are Debug test-process samples, not
+/// unavailability, one synchronous `apply(rows:)`, and the process's peak RSS and malloc in use, which are test-process samples, not
 /// a RAM bound.
 @MainActor
 final class AppStateCollectionCaptureCostTests: XCTestCase {
     private static let rows = 10_000
     private static let passes = 4
+
+    /// The fake owner over `kernel` and the production service and transport over it, built on the owner. Each connection capture the
+    /// service asks the owner for is counted.
+    @RuntimeActor
+    private static func service(
+        snapshot: ControlRuntimeSnapshot, kernel: ProxyOrchestratorSnapshot, limits: RuntimeServiceLimits,
+        countingConnectionProjections projections: NIOLockedValueBox<Int>
+    ) -> (FakeCommandOwner, RuntimeServiceCore, RuntimeInMemoryTransport) {
+        let owner = FakeCommandOwner(incarnation: snapshot.stamp.incarnation, snapshot: snapshot)
+        owner.projectionOverride = { kind, budget in
+            if kind == .activeConnections { projections.withLockedValue { $0 += 1 } }
+            return RuntimeSnapshotControlProjection.projectRows(kind, from: kernel, within: budget)
+        }
+        let core = RuntimeServiceCore(
+            owner: owner, limits: limits, timing: .system, scheduling: TaskOwnerScheduling(),
+            makeOperationID: { ControlOperationID(rawValue: UUID()) }
+        )
+        return (owner, core, RuntimeInMemoryTransport(core: core, limits: limits, timing: .system, scheduling: TaskOwnerScheduling()))
+    }
+
+    /// A new revision of the owner's snapshot, reported to the service in the same owner turn.
+    @RuntimeActor
+    private static func advance(_ owner: FakeCommandOwner, _ core: RuntimeServiceCore, to snapshot: ControlRuntimeSnapshot) {
+        owner.snapshotValue = snapshot
+        core.ownerDidChange()
+    }
 
     func testATenThousandRowCaptureThroughTheAppObserverIsWholeAndHostCustodyStaysBounded() async throws {
         let probes = ProcessInfo.processInfo.environment["CONDUIT_RUNTIME_RESOURCE_PROBES"] == "1"
@@ -382,19 +409,12 @@ final class AppStateCollectionCaptureCostTests: XCTestCase {
         XCTAssertEqual(reference.rows.count, Self.rows)
         try sample("kernel-built")
 
-        let owner = FakeCommandOwner(
-            incarnation: incarnation, snapshot: try WireSnapshotFixture.snapshot(kernel, incarnation: incarnation)
+        // The host side is the owner's; the app's observer and adapter below stay on the main actor.
+        let connectionProjections = NIOLockedValueBox(0)
+        let (owner, core, transport) = await Self.service(
+            snapshot: try WireSnapshotFixture.snapshot(kernel, incarnation: incarnation), kernel: kernel, limits: profile.limits,
+            countingConnectionProjections: connectionProjections
         )
-        var connectionProjections = 0
-        owner.projectionOverride = { kind, budget in
-            if kind == .activeConnections { connectionProjections += 1 }
-            return RuntimeSnapshotControlProjection.projectRows(kind, from: kernel, within: budget)
-        }
-        let core = RuntimeServiceCore(
-            owner: owner, limits: profile.limits, timing: .system, scheduling: TaskOwnerScheduling(),
-            makeOperationID: { ControlOperationID(rawValue: UUID()) }
-        )
-        let transport = RuntimeInMemoryTransport(core: core, limits: profile.limits, timing: .system, scheduling: TaskOwnerScheduling())
         let client = try makeFramedRuntimeClient(
             transport: transport, limits: profile.clientFrameLimits, wireBudgetCap: profile.wireBudgetCap
         )
@@ -420,7 +440,7 @@ final class AppStateCollectionCaptureCostTests: XCTestCase {
         func passCompleted(_ pass: Int) async -> Bool {
             let deadline = ContinuousClock.now.advanced(by: .seconds(60))
             while ContinuousClock.now < deadline {
-                if connectionProjections == pass, adapter.rows(.activeConnections) == .current { return true }
+                if connectionProjections.withLockedValue({ $0 }) == pass, adapter.rows(.activeConnections) == .current { return true }
                 try? await Task.sleep(for: .milliseconds(1))
             }
             return false
@@ -437,8 +457,8 @@ final class AppStateCollectionCaptureCostTests: XCTestCase {
         XCTAssertEqual(adapter.activeConnections.first?.id, ConnectionDisplay(reference.rows[0]).id)
         XCTAssertEqual(adapter.activeConnections.last?.id, ConnectionDisplay(reference.rows[Self.rows - 1]).id)
         XCTAssertTrue(failures.isEmpty, "\(failures)")
-        XCTAssertEqual(connectionProjections, 1, "one host capture per revision; every page came from the retained rows")
-        let afterFirst = core.collectionRetention(.activeConnections)
+        XCTAssertEqual(connectionProjections.withLockedValue { $0 }, 1, "one host capture per revision; every page came from the retained rows")
+        let afterFirst = await core.collectionRetention(.activeConnections)
         XCTAssertEqual(afterFirst.rowSets, 1)
         XCTAssertEqual(afterFirst.retainedBytes, reference.encodedBytes)
         XCTAssertLessThanOrEqual(reference.encodedBytes, profile.limits.collectionByteCapacity)
@@ -447,16 +467,15 @@ final class AppStateCollectionCaptureCostTests: XCTestCase {
         for pass in 2...Self.passes {
             began = ContinuousClock.now
             // A new revision of the list is a new presentation, as the host stamps it.
-            owner.snapshotValue = try WireSnapshotFixture.snapshot(
+            await Self.advance(owner, core, to: try WireSnapshotFixture.snapshot(
                 kernel, collections: WireSnapshotFixture.revisions(pass), incarnation: incarnation, presentation: pass - 1
-            )
-            core.ownerDidChange()
+            ))
             let completed = await passCompleted(pass)
             passTimes.append(began.duration(to: .now))
             XCTAssertTrue(completed, "capture \(pass) completed")
         }
-        XCTAssertEqual(connectionProjections, Self.passes)
-        let retention = core.collectionRetention(.activeConnections)
+        XCTAssertEqual(connectionProjections.withLockedValue { $0 }, Self.passes)
+        let retention = await core.collectionRetention(.activeConnections)
         XCTAssertLessThanOrEqual(retention.rowSets, profile.limits.collectionRowRevisionsPerKind)
         XCTAssertLessThanOrEqual(retention.retainedBytes, 2 * reference.encodedBytes)
         XCTAssertLessThanOrEqual(retention.retainedBytes, profile.limits.collectionRetainedByteCapacity)
@@ -473,7 +492,7 @@ final class AppStateCollectionCaptureCostTests: XCTestCase {
             let applyElapsed = applyBegan.duration(to: .now)
             let pages = try RuntimeServiceProfileKernels.pack(reference.rows, limits: profile.clientFrameLimits).pages
             let worst = lateness.max() ?? .zero
-            print("APPSTATE-COLLECTION scope=debug-xctest rows=\(Self.rows) encodedBytes=\(reference.encodedBytes) pages=\(pages)"
+            print("APPSTATE-COLLECTION scope=xctest-process rows=\(Self.rows) encodedBytes=\(reference.encodedBytes) pages=\(pages)"
                   + " passes=\(passTimes.map { "\($0)" }.joined(separator: ","))")
             print("APPSTATE-COLLECTION heartbeat wakes=\(lateness.count) maxLateness=\(worst)"
                   + " over16ms=\(lateness.filter { $0 > .milliseconds(16) }.count) over100ms=\(lateness.filter { $0 > .milliseconds(100) }.count)"
@@ -487,7 +506,7 @@ final class AppStateCollectionCaptureCostTests: XCTestCase {
         XCTAssertTrue(adapter.activeConnections.isEmpty, "hiding the list drops its rows")
         for sample in samples {
             print("APPSTATE-COLLECTION resource stage=\(sample.stage) peakRSSBytes=\(sample.peakRSSBytes) mallocInUseBytes=\(sample.mallocInUseBytes)"
-                  + " note=debug-test-process-observation")
+                  + " note=test-process-observation")
         }
     }
 }

@@ -5,6 +5,7 @@ import ProxyKernel
 import ConduitShared
 
 enum NetworkLocationScenarios {
+    @RuntimeActor
     static func recovery() async throws -> ScenarioResult {
         let began = Date()
         let home = "11111111-1111-1111-1111-111111111111"
@@ -135,10 +136,9 @@ enum NetworkLocationScenarios {
         await notificationDeliveries.drain()
         let rewriteRepaired = try retryStore.snapshot().services[1].proxies["ProxyAutoConfigURLString"] == .text(localPAC)
         retryStore.refuseWrites(true)
-        let settingsBurstBounded = await MainActor.run {
-            for _ in 0..<10_000 { settingsObserver.emitSettingsChange() }
-            return notificationDeliveries.inFlightCount == 1
-        }
+        // In one owner turn, so no delivery can finish while the burst lands.
+        for _ in 0..<10_000 { settingsObserver.emitSettingsChange() }
+        let settingsBurstBounded = notificationDeliveries.inFlightCount == 1
         await notificationDeliveries.drain()
         let observedRepairFailed = events.events.contains { $0.detail?.hasPrefix("operation=observed_settings_reconcile") == true }
         retryStore.refuseWrites(false)

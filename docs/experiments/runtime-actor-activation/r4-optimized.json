@@ -1,0 +1,84 @@
+{
+  "source_sha256": "22f032013afd369662703280daa64bd4af999db6f2279f538ab90c5e2c97207c",
+  "final_source_sha256": "22f032013afd369662703280daa64bd4af999db6f2279f538ab90c5e2c97207c",
+  "stable": true,
+  "command": [
+    "xcrun",
+    "swift",
+    "test",
+    "--scratch-path",
+    "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-optimized/build",
+    "-c",
+    "release",
+    "-Xswiftc",
+    "-enable-testing",
+    "--filter",
+    "AppStateCollectionCaptureCostTests|RuntimeActorFairnessTests"
+  ],
+  "scope": "optimized XCTest with testability; fake owner plus production projection/core/framing for admission; no physical Stop or shipping app RAM claim; separate build leaves shipping Release objects untouched",
+  "trials": [
+    {
+      "trial": 1,
+      "exit": 0,
+      "seconds": 249.62800433300436,
+      "observations": [
+        "APPSTATE-COLLECTION scope=xctest-process rows=10000 encodedBytes=3006968 pages=47 passes=0.769866541 seconds,0.798389209 seconds,0.788615042 seconds,0.849246875 seconds",
+        "APPSTATE-COLLECTION heartbeat wakes=1643 maxLateness=0.003392041 seconds over16ms=0 over100ms=0 note=includes-os-timer-and-scheduler-delay",
+        "APPSTATE-COLLECTION apply rows=10000 elapsed=0.000621166 seconds",
+        "APPSTATE-COLLECTION host-retention rowSets=2 retainedBytes=6013936",
+        "APPSTATE-COLLECTION resource stage=before-composition peakRSSBytes=28884992 mallocInUseBytes=1204688 note=test-process-observation",
+        "APPSTATE-COLLECTION resource stage=kernel-built peakRSSBytes=39714816 mallocInUseBytes=7179584 note=test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-pass-1 peakRSSBytes=49332224 mallocInUseBytes=12303888 note=test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-pass-4 peakRSSBytes=58687488 mallocInUseBytes=15306544 note=test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-hide-and-stop peakRSSBytes=58900480 mallocInUseBytes=10463200 note=test-process-observation",
+        "RUNTIME-ACTOR-FAIRNESS capture rows=10000 projection=0.484712416 seconds statusAfterIssue=0.488330667 seconds stopAfterIssue=0.488399875 seconds statusAfterProjection=0.003624917 seconds"
+      ],
+      "summary": [
+        "\t Executed 5 tests, with 0 failures (0 unexpected) in 4.671 (4.672) seconds",
+        "\t Executed 5 tests, with 0 failures (0 unexpected) in 4.671 (4.679) seconds"
+      ]
+    },
+    {
+      "trial": 2,
+      "exit": 0,
+      "seconds": 7.65025008295197,
+      "observations": [
+        "APPSTATE-COLLECTION scope=xctest-process rows=10000 encodedBytes=3006968 pages=47 passes=0.790604875 seconds,0.785073792 seconds,0.80070625 seconds,0.801370417 seconds",
+        "APPSTATE-COLLECTION heartbeat wakes=1611 maxLateness=0.003967292 seconds over16ms=0 over100ms=0 note=includes-os-timer-and-scheduler-delay",
+        "APPSTATE-COLLECTION apply rows=10000 elapsed=0.000549167 seconds",
+        "APPSTATE-COLLECTION host-retention rowSets=2 retainedBytes=6013936",
+        "APPSTATE-COLLECTION resource stage=before-composition peakRSSBytes=28917760 mallocInUseBytes=1202128 note=test-process-observation",
+        "APPSTATE-COLLECTION resource stage=kernel-built peakRSSBytes=39862272 mallocInUseBytes=7177024 note=test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-pass-1 peakRSSBytes=50282496 mallocInUseBytes=12301152 note=test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-pass-4 peakRSSBytes=59047936 mallocInUseBytes=15307616 note=test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-hide-and-stop peakRSSBytes=59047936 mallocInUseBytes=10466240 note=test-process-observation",
+        "RUNTIME-ACTOR-FAIRNESS capture rows=10000 projection=0.480678917 seconds statusAfterIssue=0.484463292 seconds stopAfterIssue=0.484464 seconds statusAfterProjection=0.003793583 seconds"
+      ],
+      "summary": [
+        "\t Executed 5 tests, with 0 failures (0 unexpected) in 4.555 (4.557) seconds",
+        "\t Executed 5 tests, with 0 failures (0 unexpected) in 4.555 (4.563) seconds"
+      ]
+    },
+    {
+      "trial": 3,
+      "exit": 0,
+      "seconds": 7.396607958013192,
+      "observations": [
+        "APPSTATE-COLLECTION scope=xctest-process rows=10000 encodedBytes=3006968 pages=47 passes=0.862305375 seconds,0.769832875 seconds,0.784053083 seconds,0.81742325 seconds",
+        "APPSTATE-COLLECTION heartbeat wakes=1652 maxLateness=0.007000125 seconds over16ms=0 over100ms=0 note=includes-os-timer-and-scheduler-delay",
+        "APPSTATE-COLLECTION apply rows=10000 elapsed=0.000952917 seconds",
+        "APPSTATE-COLLECTION host-retention rowSets=2 retainedBytes=6013936",
+        "APPSTATE-COLLECTION resource stage=before-composition peakRSSBytes=28819456 mallocInUseBytes=1205984 note=test-process-observation",
+        "APPSTATE-COLLECTION resource stage=kernel-built peakRSSBytes=39813120 mallocInUseBytes=7180880 note=test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-pass-1 peakRSSBytes=47775744 mallocInUseBytes=12305056 note=test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-pass-4 peakRSSBytes=53280768 mallocInUseBytes=15308528 note=test-process-observation",
+        "APPSTATE-COLLECTION resource stage=after-hide-and-stop peakRSSBytes=55443456 mallocInUseBytes=10471808 note=test-process-observation",
+        "RUNTIME-ACTOR-FAIRNESS capture rows=10000 projection=0.630476958 seconds statusAfterIssue=0.634265542 seconds stopAfterIssue=0.634278 seconds statusAfterProjection=0.00379675 seconds"
+      ],
+      "summary": [
+        "\t Executed 5 tests, with 0 failures (0 unexpected) in 4.848 (4.849) seconds",
+        "\t Executed 5 tests, with 0 failures (0 unexpected) in 4.848 (4.855) seconds"
+      ]
+    }
+  ]
+}

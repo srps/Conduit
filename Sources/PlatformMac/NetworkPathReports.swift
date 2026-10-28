@@ -12,7 +12,7 @@ import ProxyKernel
 /// interfaces, gateways or IP-family support, and the reconcile is what
 /// re-pins 127.0.0.1. When nothing drifted it only reads the services' DNS
 /// and logs nothing.
-@MainActor
+@RuntimeActor
 package enum NetworkPathReports {
     /// Proxy reconciliation is requested before a material change can suspend
     /// in `act`; DNS reconciliation follows it. Both run for every report.
@@ -20,9 +20,9 @@ package enum NetworkPathReports {
     package static func receive(
         _ path: NetworkPathState,
         orchestrator: ProxyOrchestrator,
-        act: @MainActor (NetworkPathChange) async -> Void,
-        reconcileSystemDNS: @MainActor () async -> Void,
-        reconcileSystemProxy: @MainActor () async -> Void = {}
+        act: @RuntimeActor (NetworkPathChange) async -> Void,
+        reconcileSystemDNS: @RuntimeActor () async -> Void,
+        reconcileSystemProxy: @RuntimeActor () async -> Void = {}
     ) async {
         // Repair a failed application or a VPN rewrite before a PAC refetch
         // can suspend the transition. Unchanged reports also retry drift.

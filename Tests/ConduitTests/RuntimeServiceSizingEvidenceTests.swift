@@ -8,9 +8,8 @@ import ProxyControlBridge
 /// Sizing evidence for a later owner choice. It prints the encoded sizes of a snapshot and of a baseline frame, measured with the
 /// codec, for a few samples. It states no threshold and chooses no profile. Each sample is an encoded size of one projected snapshot,
 /// and the samples are not the maximum: the projection's own text bounds are not exercised here.
-@MainActor
 final class RuntimeServiceSizingEvidenceTests: XCTestCase {
-    func testMeasuredSnapshotAndBaselineFramesArePrintedForEachSample() throws {
+    @RuntimeActor func testMeasuredSnapshotAndBaselineFramesArePrintedForEachSample() async throws {
         let limits = try RuntimeServiceFixtures.limits()
         let frameLimits = try ControlFrameLimits(maxFrameBytes: 1 << 20)
         let samples: [(label: String, profile: String)] = [
@@ -44,7 +43,7 @@ final class RuntimeServiceSizingEvidenceTests: XCTestCase {
 
     /// A kernel snapshot whose every free-text field holds `text`, and whose counters are the largest value the wire accepts. The Bridge
     /// sanitizes text and does not cap it, so the length is the caller's, and the sample states it.
-    private func populatedKernel(_ text: String) -> ProxyOrchestratorSnapshot {
+    @RuntimeActor private func populatedKernel(_ text: String) -> ProxyOrchestratorSnapshot {
         var kernel = ProxyOrchestratorSnapshot(tunnelDNSOverrideStatus: .notNeeded)
         kernel.runtimeStatus.activeUpstream = text
         kernel.runtimeStatus.lastHealthSummary = text
@@ -64,7 +63,7 @@ final class RuntimeServiceSizingEvidenceTests: XCTestCase {
 
     /// One text field at the approved display bound (1,024 bytes) and at two sizes beside it, plain and quote/NUL. Only the profile name
     /// changes, so the payload delta is the cost of that field. No cap is chosen here: the numbers feed the owner's text decision.
-    func testATextFieldAtItsBoundsIsMeasuredPlainAndEscaped() throws {
+    @RuntimeActor func testATextFieldAtItsBoundsIsMeasuredPlainAndEscaped() async throws {
         let stamp = ControlRuntimeStamp(
             incarnation: RuntimeServiceFixtures.incarnation(1),
             presentationRevision: try XCTUnwrap(ControlPresentationRevision(rawValue: 9)),
@@ -94,7 +93,7 @@ final class RuntimeServiceSizingEvidenceTests: XCTestCase {
     /// collection rows, the tunnel DNS reason and the bindings are absent. Both samples go through the codec.
     /// The stamp's per-module revisions are additive. Without them the stamp encodes byte for byte as before the field existed, so an
     /// earlier snapshot or baseline keeps its size; with them at the maximum, the field adds exactly the bytes measured here.
-    func testTheStampModuleRevisionsAreAdditiveAndTheLegacyBytesAreUnchanged() throws {
+    @RuntimeActor func testTheStampModuleRevisionsAreAdditiveAndTheLegacyBytesAreUnchanged() async throws {
         let encoder = ControlRuntimeCodec.makeEncoder()
         let maxLifecycle = try XCTUnwrap(ControlLifecycleRevision(rawValue: Int.max))
         var stamp = ControlRuntimeStamp(
@@ -116,7 +115,7 @@ final class RuntimeServiceSizingEvidenceTests: XCTestCase {
         print("RUNTIME-SIZING stamp legacyBytes=\(legacy.utf8.count) widestModulesBytes=\(widest.count) addedBytes=\(added)")
     }
 
-    func testEightScalarTextFieldsAreMeasuredEscapedAndPlainThroughTheBridge() throws {
+    @RuntimeActor func testEightScalarTextFieldsAreMeasuredEscapedAndPlainThroughTheBridge() async throws {
         let escaped = String(repeating: "\"\\\u{0}é😀", count: 57)
         let plain = String(repeating: "abcdefghi", count: 57)
         XCTAssertEqual(escaped.utf8.count, 513)

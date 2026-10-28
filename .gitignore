@@ -9,3 +9,4 @@ audit/
 .vscode/
 .claude/
 .jj/
+__pycache__/

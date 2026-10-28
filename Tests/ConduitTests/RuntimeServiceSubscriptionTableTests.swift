@@ -2,9 +2,9 @@
 import XCTest
 @testable import ConduitRuntime
 import ConduitShared
+import ProxyKernel
 
 /// The subscription table and the snapshot slot as values, without the core. Each test states one rule of the table or of the slot.
-@MainActor
 final class RuntimeServiceSubscriptionTableTests: XCTestCase {
     private let cursor = RuntimeSubscriberCursor(
         nextEvent: 1,
@@ -14,12 +14,12 @@ final class RuntimeServiceSubscriptionTableTests: XCTestCase {
         lastWasSnapshot: false
     )
 
-    private func waiter(_ counter: WakeCounter) -> RuntimeParkedWaiter {
+    @RuntimeActor private func waiter(_ counter: WakeCounter) -> RuntimeParkedWaiter {
         RuntimeParkedWaiter(token: RuntimeWaiterToken(), wake: { counter.bump() })
     }
 
     /// Opens take identities in order, the limit refuses without changing the table, and a removed slot frees its place.
-    func testTheTableOpensToItsLimitAndRefusesWithoutChangingIt() {
+    @RuntimeActor func testTheTableOpensToItsLimitAndRefusesWithoutChangingIt() async {
         var table = RuntimeSubscriptionTable(limit: 2)
         XCTAssertEqual(table.open(cursor), .opened(1))
         XCTAssertEqual(table.open(cursor), .opened(2))
@@ -30,7 +30,7 @@ final class RuntimeServiceSubscriptionTableTests: XCTestCase {
     }
 
     /// A removal happens exactly once: the record and its wait leave together, and a second removal finds nothing.
-    func testARemovalReturnsTheHeldWaitOnceAndTheSecondFindsNothing() {
+    @RuntimeActor func testARemovalReturnsTheHeldWaitOnceAndTheSecondFindsNothing() async {
         var table = RuntimeSubscriptionTable(limit: 1)
         guard case .opened(let id) = table.open(cursor) else { return XCTFail("the table must open") }
         let counter = WakeCounter()
@@ -43,7 +43,7 @@ final class RuntimeServiceSubscriptionTableTests: XCTestCase {
     }
 
     /// One parked wait per subscriber, and only the token that parked it may release it.
-    func testOneWaitPerSubscriberAndOnlyItsOwnTokenReleasesIt() {
+    @RuntimeActor func testOneWaitPerSubscriberAndOnlyItsOwnTokenReleasesIt() async {
         var table = RuntimeSubscriptionTable(limit: 1)
         guard case .opened(let id) = table.open(cursor) else { return XCTFail("the table must open") }
         let parked = waiter(WakeCounter())
@@ -56,7 +56,7 @@ final class RuntimeServiceSubscriptionTableTests: XCTestCase {
     }
 
     /// Taking the waits clears them and keeps every subscriber subscribed, so each wake runs after the table is complete.
-    func testTakingTheWaitsKeepsEverySubscriberSubscribed() {
+    @RuntimeActor func testTakingTheWaitsKeepsEverySubscriberSubscribed() async {
         var table = RuntimeSubscriptionTable(limit: 2)
         guard case .opened(let first) = table.open(cursor), case .opened(let second) = table.open(cursor) else {
             return XCTFail("the table must open")
@@ -69,7 +69,7 @@ final class RuntimeServiceSubscriptionTableTests: XCTestCase {
     }
 
     /// A commit for a subscriber that has left changes nothing, so a late winning gate cannot revive it.
-    func testACommitForAnAbsentSubscriberChangesNothing() {
+    @RuntimeActor func testACommitForAnAbsentSubscriberChangesNothing() async {
         var table = RuntimeSubscriptionTable(limit: 1)
         guard case .opened(let id) = table.open(cursor) else { return XCTFail("the table must open") }
         _ = table.remove(id)
@@ -82,12 +82,12 @@ final class RuntimeServiceSubscriptionTableTests: XCTestCase {
 
     // MARK: - Snapshot slot
 
-    private func snapshot(_ revision: Int, profile: String = "Corp", incarnation: Int = 1) throws -> ControlRuntimeSnapshot {
+    @RuntimeActor private func snapshot(_ revision: Int, profile: String = "Corp", incarnation: Int = 1) throws -> ControlRuntimeSnapshot {
         try observationSnapshot(presentation: revision, profile: profile, incarnation: incarnation)
     }
 
     /// Each refusal leaves the held snapshot and its generation as they were, and names the broken invariant in its order.
-    func testEveryRefusalLeavesTheHeldSnapshotAndItsGenerationAsTheyWere() throws {
+    @RuntimeActor func testEveryRefusalLeavesTheHeldSnapshotAndItsGenerationAsTheyWere() async throws {
         var slot = RuntimeSnapshotSlot(incarnation: RuntimeServiceFixtures.incarnation(1), byteCapacity: 100)
         XCTAssertEqual(slot.offer(try snapshot(10), encodedBytes: 50), .replaced)
         XCTAssertEqual(slot.generation, 1)
@@ -103,7 +103,7 @@ final class RuntimeServiceSubscriptionTableTests: XCTestCase {
     }
 
     /// Each replacement advances the generation by one, and the owner's stamp is kept as the owner sent it.
-    func testEachReplacementAdvancesOnceAndKeepsTheOwnersStampVerbatim() throws {
+    @RuntimeActor func testEachReplacementAdvancesOnceAndKeepsTheOwnersStampVerbatim() async throws {
         var slot = RuntimeSnapshotSlot(incarnation: RuntimeServiceFixtures.incarnation(1), byteCapacity: 100)
         let next = try snapshot(12)
         XCTAssertEqual(slot.offer(try snapshot(10), encodedBytes: 1), .replaced)
@@ -114,7 +114,7 @@ final class RuntimeServiceSubscriptionTableTests: XCTestCase {
     }
 
     /// An exhausted generation is sticky: no further snapshot is retained, and the slot reports the exhaustion once it is reached.
-    func testAnExhaustedGenerationIsStickyAndRetainsNothingMore() throws {
+    @RuntimeActor func testAnExhaustedGenerationIsStickyAndRetainsNothingMore() async throws {
         var slot = RuntimeSnapshotSlot(incarnation: RuntimeServiceFixtures.incarnation(1), byteCapacity: 100, generationSeed: Int.max - 1)
         XCTAssertEqual(slot.offer(try snapshot(10), encodedBytes: 1), .replaced)
         XCTAssertEqual(slot.generation, Int.max)

@@ -18,8 +18,9 @@ import RuntimeEvents
 @MainActor
 final class AppStateHarness {
     let stateDirectory: URL
-    /// The scratch root's writer authority, taken before the first seed write and held until `tearDown`.
-    let stateSession: StateRootSession
+    /// The scratch root's writer authority, taken before the first seed write. The harness's own reference goes in `dropOwnReferences`;
+    /// the app and its host keep theirs until they end.
+    private var retainedSession: StateRootSession?
     let environment: RuntimeEnvironment
     let machine: FakeMachine
     let vpn = FakeVPNStatusObserver()
@@ -65,9 +66,16 @@ final class AppStateHarness {
         try ProxyConfigPersistence.save(config, in: fixture)
         try PlatformConfigPersistence.save(platformConfig, in: fixture)
         try AppPreferencesPersistence.save(AppPreferences(), in: fixture)
-        stateSession = try acquireScratchStateRoot(fixture)
-        environment = stateSession.environment
+        let session = try acquireScratchStateRoot(fixture)
+        retainedSession = session
+        environment = session.environment
         machine = FakeMachine(resolverDirectory: stateDirectory.appendingPathComponent("resolver", isDirectory: true))
+    }
+
+    /// The harness's session, until `dropOwnReferences`.
+    var stateSession: StateRootSession {
+        guard let retainedSession else { preconditionFailure("the harness dropped its session") }
+        return retainedSession
     }
 
     var homeDirectory: URL { stateDirectory.appendingPathComponent("home", isDirectory: true) }
@@ -167,19 +175,78 @@ final class AppStateHarness {
         XCTAssertTrue(condition(), "timed out waiting until \(what)", file: file, line: line)
     }
 
-    /// Quits the way AppKit's terminate-later does, then removes the scratch state.
+    /// How long teardown waits for the root's lease to come free once the harness and its app have let go. A Quit's caller is let go at
+    /// its deadline while the host's work runs on, through at most one diagnostic flush phase and the logger's own wait. A bound on the
+    /// proof, not a policy: a lease still held after it fails the test and keeps the root.
+    static let leaseCloseBound: Duration = DiagnosticFlushPhase.defaultBudget + DiagnosticFlushPhase.writerWait + .seconds(2)
+
+    private let rootProbe = PlatformWork(label: "io.github.srps.Conduit.test.root-probe")
+    private var tornDown = false
+
+    /// Quits the way AppKit's terminate-later does and lets go of the root. The scratch state is removed only once a fresh acquisition
+    /// of the root proves the lease closed, so the host's own work, which holds its session until it ends, is never raced; otherwise the
+    /// test fails and the root is kept.
     func tearDown() async {
-        hold.release()
+        guard !tornDown else { return }
+        tornDown = true
+        hold.releaseAll()
+        XCTAssertFalse(hold.takenOnCooperativePool, "a held call was let through on the concurrency pool instead of held")
         // A held file log would block the close below.
         appLogHold.release()
         if let appState {
             await appState.opening?.value
+            // An unsettled Quit let its caller go at the deadline; the proof below waits for the host's work instead.
             if appState.beginQuit() { _ = await appState.finishQuit() }
             appState.logStore.logFileURL = nil
         }
-        appState = nil
-        releaseScratchStateRoot(stateSession)
+        dropOwnReferences()
+        guard await rootReacquires(within: Self.leaseCloseBound) else {
+            XCTFail("the scratch root's lease did not come free within \(Self.leaseCloseBound); the root is kept at \(stateDirectory.path)")
+            return
+        }
         removeScratch([stateDirectory])
+    }
+
+    /// Lets go of the harness's own app and session, so only what still holds them (a test's own references, the host's work) keeps the
+    /// root's lease.
+    func dropOwnReferences() {
+        appState = nil
+        retainedSession = nil
+    }
+
+    /// Whether a fresh acquisition of the root succeeds within `limit`. Busy is expected while some owner still holds the lease, and is
+    /// tried again; any other refusal is reported and ends the wait.
+    func rootReacquires(within limit: Duration) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: limit)
+        while true {
+            switch await probeRoot() {
+            case .success(let release):
+                XCTAssertEqual(release, .released, "the proof's own session closed")
+                return release == .released
+            case .failure(.busy) where ContinuousClock.now < deadline:
+                try? await Task.sleep(for: .milliseconds(5))
+            case .failure(.busy):
+                return false
+            case .failure(let failure):
+                XCTFail("the scratch root was refused: \(failure)")
+                return false
+            }
+        }
+    }
+
+    /// One acquisition of the root through the production bootstrap and the real lease, off the main actor, creating nothing. A session
+    /// it takes is released before it returns, with the release's outcome, so the probe never keeps the root itself.
+    func probeRoot() async -> Result<StateWriterRelease, StateRootAcquisitionFailure> {
+        let environment = RuntimeEnvironment.isolated(stateDirectory: stateDirectory)
+        return await rootProbe.run {
+            StateRootBootstrap.acquire(
+                environment,
+                createRootIfMissing: false,
+                fileSystem: OSStateRootFileSystem(),
+                leasing: OSStateWriterLeasing(),
+                onReleaseFailure: { failure in XCTFail("the root probe's lease could not be closed: errno \(failure.errno)") }
+            ).map { $0.releaseForTesting() }
+        }
     }
 }
 
@@ -533,8 +600,8 @@ final class AppStateHarnessTests: XCTestCase {
             guard case .settled(.completed)? = await state.finishQuit()?.quit else { return XCTFail("the quit completed") }
         }
         XCTAssertEqual(try harness.savedConfig.profileName, "Frozen at quit", "the quit saved the draft it froze")
-        await harness.tearDown()
-        self.harness = nil
+        // The observer and editor this test keeps hold the host through their clients, so the root is proved free only at teardown.
+        harness.dropOwnReferences()
         await harness.settle("nothing keeps the app after its quit") { released == nil }
 
         // Every callback the observer holds, as a read still out after the quit would call it.
@@ -550,6 +617,65 @@ final class AppStateHarnessTests: XCTestCase {
         await editor.settle()
         XCTAssertTrue(editor.isIdle)
         XCTAssertNil(editor.ledger.active, "nothing was submitted after the quit")
+    }
+
+    /// A Quit's deadline is not the end of its work. The Quit's teardown is held on the platform worker, so its caller is let go at the
+    /// deadline and the app is released, with the harness's own references gone too. The host's held work still holds the root: a fresh
+    /// acquisition is busy. Released, that work ends, the host lets go, and the root is acquired again.
+    func testTheRootStaysLeasedWhileTheHostsQuitWorkIsHeldAndComesFreeOnceItEnds() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
+        harness.timing.quitTotal = .seconds(1)
+        weak var released: AppState?
+        do {
+            let state = await harness.ready()
+            released = state
+            state.toggleProxy()
+            await harness.settle("the Start's surfaces applied") { harness.machine.launchdEnvironment["HTTP_PROXY"] != nil }
+            harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+                name == "/bin/launchctl" && arguments.first == "unsetenv"
+            }
+            XCTAssertTrue(state.beginQuit())
+            await harness.hold.waitUntilReached()
+            XCTAssertTrue(harness.hold.reachedOnArmedQueue, "the Quit's teardown is held on the platform worker")
+            guard case .unsettled? = await state.finishQuit()?.quit else {
+                return XCTFail("the Quit's caller was let go at its deadline")
+            }
+        }
+        harness.dropOwnReferences()
+        await harness.settle("nothing keeps the app after its quit") { released == nil }
+        XCTAssertTrue(harness.hold.isHolding, "the host's teardown is still held")
+        let whileHeld = await harness.probeRoot()
+        XCTAssertEqual(whileHeld, .failure(.busy), "the host's held work keeps the root")
+        harness.hold.release()
+        let reacquired = await harness.rootReacquires(within: AppStateHarness.leaseCloseBound)
+        XCTAssertTrue(reacquired, "the root comes free once the held work ends")
+    }
+
+    /// A diagnostic write still queued under the root keeps the root's authority after its app, its host and the harness have let go
+    /// (decision 0017). The app's file log is held at its open, the Quit completes around it, and every own reference is dropped, so
+    /// only the held write's writer is left: a fresh acquisition of the root is busy. Released, the write lands and the root comes free.
+    func testAHeldDiagnosticWriteKeepsTheRootLeasedAfterEveryOwnerLetGo() async throws {
+        let harness = try makeHarness()
+        harness.timing.quitTotal = .seconds(4)
+        weak var released: AppState?
+        do {
+            let state = await harness.ready()
+            released = state
+            holdTheAppLogOpen(state, harness, witness: "held authority witness")
+            XCTAssertTrue(state.beginQuit())
+            guard case .settled(.completed)? = await state.finishQuit()?.quit else {
+                return XCTFail("the Quit completed around the held write")
+            }
+        }
+        harness.dropOwnReferences()
+        await harness.settle("nothing keeps the app after its quit") { released == nil }
+        let whileHeld = await harness.probeRoot()
+        XCTAssertEqual(whileHeld, .failure(.busy), "the held write's writer keeps the root")
+        harness.appLogHold.release()
+        let reacquired = await harness.rootReacquires(within: AppStateHarness.leaseCloseBound)
+        XCTAssertTrue(reacquired, "the root comes free once the held write ends")
+        let log = try String(contentsOf: harness.environment.logFile, encoding: .utf8)
+        XCTAssertTrue(log.contains("held authority witness"), "the held write landed before the root came free")
     }
 
     // MARK: Saves
@@ -1023,13 +1149,13 @@ final class AppStateHarnessTests: XCTestCase {
         guard case .settled(.completed)? = result?.quit else { return XCTFail("the Quit completed: \(String(describing: result?.quit))") }
 
         let hostLine = "Lifecycle: lifecycle.log_flush_unconfirmed source=host outcome=timed_out"
-        XCTAssertTrue(state.logStore.entries.contains { $0.message == hostLine }, "the host's derived line")
+        // The host logs from its owner, so its line reaches the app's history through the store's off-main hand-off.
+        await harness.settle("the host's derived line") { state.logStore.entries.contains { $0.message == hostLine } }
         XCTAssertEqual(logFlushOutcomes(state, source: .app), [.busy], "the app's tail did not wait a second time")
         let appLine = "Lifecycle: lifecycle.log_flush_unconfirmed source=app outcome=busy"
         XCTAssertEqual(state.logStore.entries.filter { $0.message == appLine }.count, 1, "the app's event has its one derived line")
-        await harness.settle("the host's event reached its own file") {
-            harness.hostEventsText.contains(#""detail":"source=host outcome=timed_out""#)
-        }
+        // The host drains its logger before its artifact flush, so a completed Quit's confirmed events flush already covered the fact.
+        XCTAssertTrue(harness.hostEventsText.contains(#""detail":"source=host outcome=timed_out""#), "the host's event is in its own file")
 
         harness.appLogHold.release()
         XCTAssertTrue(state.logStore.flushFileLog(timeout: 5), "the held writes drained once released")
@@ -1054,8 +1180,10 @@ final class AppStateHarnessTests: XCTestCase {
         // The host's own 2 s logger wait, or any fresh tail wait, would end later than this.
         XCTAssertLessThan(started.duration(to: .now), .milliseconds(1_900), "the Quit and its tail ended with the one deadline")
         XCTAssertEqual(logFlushOutcomes(state, source: .app), [.skippedBudget])
-        XCTAssertTrue(state.logStore.entries.contains { $0.message == "Lifecycle: lifecycle.log_flush_unconfirmed source=host outcome=timed_out" },
-                      "the host's drain was cut to the quit's deadline")
+        // The host logs from its owner, so its line reaches the app's history through the store's off-main hand-off.
+        await harness.settle("the host's drain was cut to the quit's deadline") {
+            state.logStore.entries.contains { $0.message == "Lifecycle: lifecycle.log_flush_unconfirmed source=host outcome=timed_out" }
+        }
     }
 
     // MARK: Updates

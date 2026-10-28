@@ -14,7 +14,7 @@ package enum RuntimeConfigApplication: Equatable {
 
 /// The side of a runtime host (`AppState`, `RuntimeHost`) a reconcile pass talks to. A protocol rather than a set of closures so the tests
 /// can stand in a recording host, and so the reconciler can hold it weakly: it is owned by the host it calls back.
-@MainActor
+@RuntimeActor
 package protocol RuntimeReconcilerHost: AnyObject {
     /// Pushes a config edit into the running subsystems. Suspends, which is the whole reason passes are serialised. The result is the
     /// runtime input the call leaves held; the pass records it, and never reads the orchestrator afterwards.
@@ -27,7 +27,7 @@ package protocol RuntimeReconcilerHost: AnyObject {
     func awaitLifecycleIdle() async
     /// Re-applies the surfaces whose *contents* the config edit changed — resolver files, the system proxy, the environment block — using
     /// nothing but what the pass carries. Called only when the config changed; a flag-only save skips it. Async so a host can run the
-    /// `networksetup` and `launchctl` writes off the main actor.
+    /// `networksetup` and `launchctl` writes off the owner.
     func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) async
     /// A platform decision, called before its side effect so the event stream carries the decision whether or not the side effect lands.
     func recordPlatformDecision(_ action: PlatformIntegrationReconciler.Action)
@@ -55,7 +55,7 @@ package protocol RuntimeReconcilerHost: AnyObject {
 /// Each platform flag advances only when its action lands, while config-driven surface work remains owed until re-applied.
 /// A flag action supersedes a content re-apply for the same surface, avoiding duplicate writes and admin prompts.
 /// Admission is checked between effects. Stop waits only for an effect already running, since queued passes may await its lane.
-@MainActor
+@RuntimeActor
 package final class RuntimeReconciler {
     package struct RuntimeState: Equatable {
         package var proxyIsUp: Bool
@@ -118,7 +118,7 @@ package final class RuntimeReconciler {
         let config: ProxyConfig
         let platformConfig: PlatformIntegrationConfig
         /// The caller's admission, checked synchronously before each step that acts. Nil admits every step.
-        let isCurrent: (@MainActor () -> Bool)?
+        let isCurrent: (@RuntimeActor () -> Bool)?
     }
 
     /// The config-driven surfaces a pushed input changed and no admitted pass has re-applied yet. One record: a later push widens `old` to
@@ -138,7 +138,7 @@ package final class RuntimeReconciler {
     private var activeEffect: Task<Void, Never>?
     /// The admission the last request was recorded under. `retryRequest` runs under this one and no other, so a retry never outlives the
     /// authority the request had.
-    private var requestedAdmission: (@MainActor () -> Bool)?
+    private var requestedAdmission: (@RuntimeActor () -> Bool)?
     private var surfacesOwed: OwedSurfaces?
 
     /// Waits for the effect already running, if one is. It does not wait for queued passes, which may be waiting on the lane the caller
@@ -221,7 +221,7 @@ package final class RuntimeReconciler {
     package func reconcile(
         config new: ProxyConfig,
         platformConfig newPlatform: PlatformIntegrationConfig,
-        isCurrent: (@MainActor () -> Bool)? = nil
+        isCurrent: (@RuntimeActor () -> Bool)? = nil
     ) {
         guard isCurrent?() ?? true else { return }
         requestedConfig = new
@@ -239,7 +239,7 @@ package final class RuntimeReconciler {
         guard worker != nil || surfacesOwed != nil || lags(config: new, platformConfig: newPlatform) else { return }
         pending = PassRequest(config: new, platformConfig: newPlatform, isCurrent: isCurrent)
         guard worker == nil else { return }
-        worker = Task { @MainActor in await self.work() }
+        worker = Task { await self.work() }
     }
 
     /// Takes the pending request and runs it, then whatever arrived meanwhile, until none is left. The worker is released in the same turn
@@ -319,8 +319,8 @@ package final class RuntimeReconciler {
 
     /// Runs one effect and holds its handle while it runs, so quiescence can wait on it. The handle is the only effect state there is: one
     /// effect runs at a time, because only the worker starts one.
-    private func runEffect(_ body: @escaping @MainActor () async -> Void) async {
-        let effect = Task { @MainActor in await body() }
+    private func runEffect(_ body: @escaping @RuntimeActor () async -> Void) async {
+        let effect = Task { await body() }
         activeEffect = effect
         await effect.value
         activeEffect = nil
@@ -328,7 +328,7 @@ package final class RuntimeReconciler {
 
     /// A flag action as the one effect running. Unlike `runEffect`, `body` begins in this turn, so the host queues the action's platform
     /// work in the turn the pass checked its admission; the handle only marks when the action ends, which is what quiescence waits for.
-    private func runFlagEffect(_ body: @MainActor () async -> Void) async {
+    private func runFlagEffect(_ body: @RuntimeActor () async -> Void) async {
         // Finish-only: nothing is ever yielded, and the buffer holds none.
         let (ended, end) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(0))
         activeEffect = Task { for await _ in ended {} }

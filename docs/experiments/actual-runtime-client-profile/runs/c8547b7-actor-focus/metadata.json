@@ -1,0 +1,180 @@
+{
+  "sourceCommit": "c8547b7c098e5abcb0d620067b801cadf27247cf",
+  "provenanceBefore": {
+    "head": "c8547b7c098e5abcb0d620067b801cadf27247cf",
+    "productSourcesDirty": false,
+    "productSourceFingerprint": "22573d2a041a595feb6dc5ba47ff435ba0502d3d2f1bd71051e1f8170307ce6e",
+    "untrackedProductFiles": 0,
+    "experimentFiles": {
+      "Probe.swift": "af37b3ce54a5af8c8afaced6a9ca750be26740d21fae22125afb85f3c2bd7113",
+      "README.md": "ea12df0ab5217a3068aff0e7e2100b4b23d4353de3ed42e59d5503b5730d5850",
+      "run.py": "2ae0f902e3bb66d9875d8549e169cbf3e195f9099016926850b8906a2879e070"
+    }
+  },
+  "provenanceAfter": {
+    "head": "c8547b7c098e5abcb0d620067b801cadf27247cf",
+    "productSourcesDirty": false,
+    "productSourceFingerprint": "22573d2a041a595feb6dc5ba47ff435ba0502d3d2f1bd71051e1f8170307ce6e",
+    "untrackedProductFiles": 0,
+    "experimentFiles": {
+      "Probe.swift": "af37b3ce54a5af8c8afaced6a9ca750be26740d21fae22125afb85f3c2bd7113",
+      "README.md": "ea12df0ab5217a3068aff0e7e2100b4b23d4353de3ed42e59d5503b5730d5850",
+      "run.py": "2ae0f902e3bb66d9875d8549e169cbf3e195f9099016926850b8906a2879e070"
+    }
+  },
+  "sourceUnchangedDuringRun": true,
+  "objectsUnchangedDuringRun": true,
+  "probe_sha256": "af37b3ce54a5af8c8afaced6a9ca750be26740d21fae22125afb85f3c2bd7113",
+  "runner_sha256": "2ae0f902e3bb66d9875d8549e169cbf3e195f9099016926850b8906a2879e070",
+  "swiftc": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)\nTarget: arm64-apple-macosx26.0",
+  "objects": {
+    "CNIOOpenBSD.o": {
+      "sha256": "a76c52360886ee6b13b54b8645a062abe2e05d58022cfa04b660f3b16b36ed9a",
+      "mtime": 1793187422.826298
+    },
+    "RuntimeEvents.o": {
+      "sha256": "dcac577248d4de0d05d3e90177dabff916d5f78c52c6d267eabe5f662167795c",
+      "mtime": 1793177185.4322972
+    },
+    "CNIOLinux.o": {
+      "sha256": "d25fb202a2d09fee2f88d86accb6c654638b484303ebfcc1ca12426eb682d55b",
+      "mtime": 1793187423.0853305
+    },
+    "InternalCollectionsUtilities.o": {
+      "sha256": "054d30700153d1d76c452310605fdebe9c67b1cf3032c4eebfffedd10616946a",
+      "mtime": 1793177184.319728
+    },
+    "CNIOFreeBSD.o": {
+      "sha256": "c33ba43f29ed138ceb5c50a82249f12ee6a4fc1b82d8cd089e43fb14f342049a",
+      "mtime": 1793187422.8325655
+    },
+    "_AtomicsShims.o": {
+      "sha256": "4712a7f99a5c4034b1dab16538d1a5877d029da6b7231b35a84d3ede7eb96a04",
+      "mtime": 1792866988.244233
+    },
+    "CNIOAtomics.o": {
+      "sha256": "f5bcaadcaaa49f9a0e79ddb43d9c017f0bb5b68d2e452a47d5ab10e5fe59b725",
+      "mtime": 1793187423.6507592
+    },
+    "CNIOLLHTTP.o": {
+      "sha256": "eee2ba6eb6f6bac26a1ad6f98f896b69eb4fcc3be1dcb81946d095f533f724f8",
+      "mtime": 1793187423.3706465
+    },
+    "_NIODataStructures.o": {
+      "sha256": "d20415b99dd71dabc44d4ce3b0777aa5a0f3978cb776905a38ab75ffb8c9f561",
+      "mtime": 1793177184.31618
+    },
+    "CNIOWindows.o": {
+      "sha256": "63f3e7d513bc29cbf870c6c9703ccb049b718b2e992161fdc27489940990cea7",
+      "mtime": 1792866986.9841125
+    },
+    "Atomics.o": {
+      "sha256": "552a474cc08dc0f42c8ba91e57ae5527214be708aad63f6014d1ebc0048c49a2",
+      "mtime": 1793177185.432123
+    },
+    "NIOConcurrencyHelpers.o": {
+      "sha256": "2576476005bee1b6e294bd6fd44436483a7cf6d00695a81c6c4f81663b9521b2",
+      "mtime": 1793177184.5268233
+    },
+    "ProxyKernel.o": {
+      "sha256": "f2630dfd3066892097a178791596948cd9e6410d06ed12ee3bcd4db4764d73df",
+      "mtime": 1793183721.0099187
+    },
+    "CNIOPosix.o": {
+      "sha256": "1740dc37a6c297c0646a1389ac61e910e66ea8f97beb15bfcfcf89bf4ed10552",
+      "mtime": 1793187422.86491
+    },
+    "NIOCore.o": {
+      "sha256": "448b746a8be80a1828fab5ff3e604dfdabda8a73278f4a4cd17a2a9983fb5461",
+      "mtime": 1793177193.749462
+    },
+    "DequeModule.o": {
+      "sha256": "79c270ec18648a256c63d29f60cd311e5f0f72f26b427a5628ff75e0a8416687",
+      "mtime": 1793177186.3912988
+    },
+    "CNIODarwin.o": {
+      "sha256": "a48db75b4dba4cab5a5f7a9ed998af1d42b3e5f2c35a55f314746af5e8cc283f",
+      "mtime": 1793187423.0979466
+    },
+    "NIOEmbedded.o": {
+      "sha256": "14d335cb973f2fee2be9f92e51ef7e533b7005a70bcfe65a4440627ce1647928",
+      "mtime": 1793177196.033854
+    },
+    "NIO.o": {
+      "sha256": "2db37a344b62878317281f269807daa5d50453a66bcc315204d2e4f7504d5972",
+      "mtime": 1793177204.2600846
+    },
+    "ConduitShared.o": {
+      "sha256": "8fb82c987f484cd691366d8fc657d93afba53a264cce14bbe87709711a997c9f",
+      "mtime": 1793177197.000345
+    },
+    "NIOPosix.o": {
+      "sha256": "cbaf1b9318df2fa9cc4f2e9613aa4746b1f70db252728ed5dd4b8eae80fd7bba",
+      "mtime": 1793177203.9951713
+    },
+    "ContainersPreview.o": {
+      "sha256": "00dbc7fb33d13ebfa85da3741c12b74792bb43a71ad720d4d68d9df6b4dd782f",
+      "mtime": 1793177184.757736
+    },
+    "CNIOWASI.o": {
+      "sha256": "63f3e7d513bc29cbf870c6c9703ccb049b718b2e992161fdc27489940990cea7",
+      "mtime": 1793187422.8161356
+    },
+    "NIOHTTP1.o": {
+      "sha256": "3a9f143fb83919c4f99d0ce281acc48d51b224f2818b25c0ab1e3ac8f6fecbc5",
+      "mtime": 1793177208.276479
+    },
+    "_NIOBase64.o": {
+      "sha256": "f2929d70eb43270d2e9dd814151acdcd1213f1ec78217fdaca2fb625d1ef3ee3",
+      "mtime": 1793177184.2187283
+    },
+    "ProxyControlBridge.o": {
+      "sha256": "5af149c106480f717e5967b4252170799f8f1515e3f5b5e7f325932789a010dc",
+      "mtime": 1793177231.8822863
+    },
+    "ConduitRuntime.o": {
+      "sha256": "a7bfcdcd258917f81985178fe544e99a6338e6d2a71a61b1b09433adec959da9",
+      "mtime": 1793186024.5924034
+    },
+    "PlatformMac.o": {
+      "sha256": "dc89ed3e339a082edc7f16d6524a2278a3e4327eed75e2c5f39789dc584d1c6b",
+      "mtime": 1793186016.1654863
+    },
+    "ProxyAuth.o": {
+      "sha256": "3cf681ef21c9cfbce7fa97d9a07f4f07a59ac39bc447aa168fb5232c9778e5a0",
+      "mtime": 1793177232.745725
+    },
+    "ProxyPAC.o": {
+      "sha256": "11d0424b2f8a90886ab1bac158016d11e3c6eafd8773818ab8f7705cd464b09b",
+      "mtime": 1793177231.882043
+    }
+  },
+  "modeTimeoutSeconds": 300,
+  "maxOutputBytes": 4194304,
+  "checks": [
+    {
+      "kind": "small",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 1.192,
+      "log": "small.ndjson",
+      "outputBytes": 13307,
+      "outputTruncated": false,
+      "records": 48,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "client-quit-widest",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 3.257,
+      "log": "client-quit-widest.ndjson",
+      "outputBytes": 11354,
+      "outputTruncated": false,
+      "records": 44,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    }
+  ]
+}

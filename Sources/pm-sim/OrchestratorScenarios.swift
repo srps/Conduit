@@ -9,7 +9,7 @@ enum OrchestratorScenarios {
 
     // MARK: - Health check through the real LocalProxyServer + ConnectionPool.exchange path
 
-    @MainActor
+    @RuntimeActor
     static func healthCheck(verbose: Bool) async throws -> ScenarioResult {
         let name = "healthCheck(HEAD via upstream)"
         let harness = SimHarness(verbose: verbose)
@@ -58,7 +58,7 @@ enum OrchestratorScenarios {
     /// Startup prewarm dials every upstream at once; none of those dials is
     /// a selection, so the active upstream stays the first by priority however
     /// the dials land (#164).
-    @MainActor
+    @RuntimeActor
     static func prewarmKeepsSelection(verbose: Bool) async throws -> ScenarioResult {
         let name = "prewarm-selection"
         let group = MultiThreadedEventLoopGroup.singleton
@@ -130,7 +130,7 @@ enum OrchestratorScenarios {
         return condition()
     }
 
-    @MainActor
+    @RuntimeActor
     static func upstreamFailover(verbose: Bool) async throws -> ScenarioResult {
         let name = "upstreamFailover"
         let group = MultiThreadedEventLoopGroup.singleton
@@ -239,7 +239,7 @@ enum OrchestratorScenarios {
     /// `.upstreamsUnreachable` does not route client traffic directly even
     /// when `directModeProvider` says direct, so the loud line the product
     /// emits under that cause is the upstream failure.
-    @MainActor
+    @RuntimeActor
     static func directModeSilence(verbose: Bool) async throws -> ScenarioResult {
         let name = "directModeSilence(VPN-off vs upstreams-unreachable)"
         let group = MultiThreadedEventLoopGroup.singleton
@@ -322,7 +322,7 @@ enum OrchestratorScenarios {
     /// cause and config, sends one CONNECT to `target`, waits for the request
     /// to be reported failed, and returns what the failure left behind: the
     /// `.proxy` log lines at `.warning` or above and the `*_failed` events.
-    @MainActor
+    @RuntimeActor
     private static func runFailureProbe(
         cause: DirectModeCause,
         logger: RecordingLogSink,
@@ -394,7 +394,7 @@ enum OrchestratorScenarios {
 
     // MARK: - Keepalive readback: verify OS accepted the options on a dedicated client socket.
 
-    @MainActor
+    @RuntimeActor
     static func keepaliveReadback(verbose: Bool) async throws -> ScenarioResult {
         let name = "keepaliveReadback"
         let group = MultiThreadedEventLoopGroup.singleton

@@ -810,20 +810,28 @@ final class RuntimeEditorSessionChainTests: XCTestCase {
 
     private func deadline() -> RuntimeDeadline { .after(.seconds(30), from: .now) }
 
+    /// The harness's host composed in one owner turn: its framed client, and the transport a held private editor wraps. The transport
+    /// keeps the service alive.
+    @RuntimeActor
+    private static func compose(_ harness: InteractiveHostHarness) async throws -> (control: any RuntimeClient, transport: RuntimeInMemoryTransport) {
+        let host = try await harness.makeHost()
+        let composition = RuntimeControlComposition(
+            host: host, limits: try RuntimeServiceFixtures.hostLimits(subscribers: 2), timing: .system, scheduling: TaskOwnerScheduling()
+        )
+        let control = try makeFramedRuntimeClient(
+            transport: composition.transport, limits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
+        )
+        return (control, composition.transport)
+    }
+
     /// The refused draft is sent again exactly once and verified when nothing was edited since; an edit made after it was refused is
     /// never sent by that explanation, and stays a dirty draft its own next save writes.
     func testAnOwnStopsWriteChainedBeforeTheMismatchReceiptSendsTheRefusedDraftOnceAndNoLaterEdit() async throws {
         for editsAfter in [false, true] {
-            let harness = try makeInteractiveHarness(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: true)
+            let harness = try await makeInteractiveHarness(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: true)
             self.harness = harness
-            let host = try await harness.makeHost()
-            let composition = RuntimeControlComposition(
-                host: host, limits: try RuntimeServiceFixtures.hostLimits(subscribers: 2), timing: .system, scheduling: TaskOwnerScheduling()
-            )
-            let control = try makeFramedRuntimeClient(
-                transport: composition.transport, limits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
-            )
-            let held = HeldPrivateTransport(inner: composition.transport)
+            let (control, transport) = try await Self.compose(harness)
+            let held = HeldPrivateTransport(inner: transport)
             defer { held.release() }
             let editorClient = PrivateEditorClient(transport: held)
             let incarnation = try await control.readSnapshot(deadline: deadline()).stamp.incarnation
@@ -911,16 +919,10 @@ final class RuntimeEditorSessionChainTests: XCTestCase {
     /// The save frozen before the app went is still sent and settled as frozen. A later trigger then reads no draft and makes none up,
     /// asks for no module intent, sends nothing, and closes the session, so no write starts after it.
     func testASaveFrozenBeforeTheOwnerWentSettlesAndALaterTriggerSendsNothingAndClosesTheSession() async throws {
-        let harness = try makeInteractiveHarness(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: false)
+        let harness = try await makeInteractiveHarness(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: false)
         self.harness = harness
-        let host = try await harness.makeHost()
-        let composition = RuntimeControlComposition(
-            host: host, limits: try RuntimeServiceFixtures.hostLimits(subscribers: 2), timing: .system, scheduling: TaskOwnerScheduling()
-        )
-        let control = try makeFramedRuntimeClient(
-            transport: composition.transport, limits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
-        )
-        let held = HeldPrivateTransport(inner: composition.transport)
+        let (control, transport) = try await Self.compose(harness)
+        let held = HeldPrivateTransport(inner: transport)
         defer { held.release() }
         let editorClient = PrivateEditorClient(transport: held)
         let incarnation = try await control.readSnapshot(deadline: deadline()).stamp.incarnation

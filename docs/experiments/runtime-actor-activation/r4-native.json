@@ -1,0 +1,21 @@
+{
+  "recorded_at_utc": "2026-10-28T11:27:37.345735+00:00",
+  "source_snapshot": "runtime-actor-stageb-review-r4",
+  "bundle": "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Conduit Dev.app",
+  "binary_sha256": "3d2433a776649f4094dd05d4f57aad9cbe8ff112c0d8ff5c7d3f70561cfd9c1b",
+  "scratch_root": "/private/tmp/cdt-r4-ui",
+  "actions": [
+    "AX Start from stopped: running loopback60127",
+    "AX Restart: running new loopback60183",
+    "AX Stop: stopped",
+    "AX Start: running loopback60549",
+    "Before edit diskLocalPort0; focused field typed18082, pending Apply visible; disk remained0",
+    "No Return, Apply, navigation or focus change; CmdQ while running; CUA App quit result5134ms inclusive tool overhead; diskLocalPort18082",
+    "Relaunch same bundle/root AX confirmed Listen Port18082 and stopped runtime",
+    "DNS Start running loopback53512, DNS Stop stopped",
+    "Proxy Start running127.0.0.1:18082 while DNS remainedstopped (Stop fence preserved)",
+    "Second active-proxy Quit completed; CUA App quit5092ms inclusive tooloverhead"
+  ],
+  "scope": "FakeMachine/native UI and framed host clients; installed app/helper untouched; no precise worst-case deadline or held-helper native claim",
+  "result": "PASS native fake-machine Start/Restart/Stop/DNS Stop fence/focused final edit/active Quit/relaunch"
+}

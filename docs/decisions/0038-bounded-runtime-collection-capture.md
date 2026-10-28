@@ -105,3 +105,7 @@ behavior or release readiness.
 ## Open questions
 
 Other composition capacities and deadlines remain separate from this selected pair.
+
+### Control-fairness correction — 2026-10-28
+
+The [activation checkpoint](../verification-runtime-actor-activation-2026-10-28.md) measures a long synchronous projection and records the reviewed off-owner correction. [One shared capture flight](../../Sources/ConduitRuntime/RuntimeCaptureFlight.swift) across kinds reuses the existing one-capture staging term in [RuntimeServiceLimits](../../Sources/ConduitRuntime/RuntimeServiceLimits.swift), without reserving budget early or changing eviction. Eight MiB remains retained encoded rows, with up to one four-MiB capture in progress; these accounts exclude object memory. Source, causal checks and final-source resource acceptance pass in the linked checkpoint. A small-kind capture can keep an unselected larger collection alive, so neither the row cap nor these encoded accounts bound the whole frozen value or app RAM.

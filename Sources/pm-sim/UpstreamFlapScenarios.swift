@@ -32,7 +32,7 @@ import ProxyKernel
 /// separate keeps the assertion blocks short.
 enum UpstreamFlapScenarios {
 
-    @MainActor
+    @RuntimeActor
     static func upstreamFlap(verbose: Bool) async throws -> ScenarioResult {
         let name = "upstreamFlap"
         let start = Date()

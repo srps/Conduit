@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Decision: accepted (owner, 2026-10-25, #186: selected “Incremental development; one final AppState switch (Recommended)”)
-- Implementation: partial
+- Implementation: implemented
 - Validation: pending
 - Supersedes: 0001, 0013
 - Superseded by: none
@@ -263,3 +263,14 @@ Subsystem actors or broad module splits still require measured contention or
 dependency evidence. Revisit activation sequencing only if a demonstrated
 compatibility need outweighs temporary capabilities, with a concrete ownership
 and deletion plan for owner review.
+
+
+The [isolation preparation checkpoint](../verification-runtime-actor-preparation-2026-10-28.md) makes callback/effect contracts Sendable, preserves bounded generation-checked timer hops and moves launch recovery onto the existing physical worker. Review also fixes observer restart (#260). The control cluster still runs on MainActor; this is a prerequisite rather than completion of the selected whole RuntimeActor move. A2 focused normal/scoped-strict checks and all 41 repository checks pass (3,741 tests, four existing skips, 103 simulator scenarios). Independent review accepts Source and records three test-quality improvements carried into the actor slice. Whole-actor and native/real-machine acceptance remain pending.
+
+### Whole control-owner activation checkpoint — 2026-10-28
+
+The [activation checkpoint](../verification-runtime-actor-activation-2026-10-28.md) records the whole cluster on [RuntimeActor](../../Sources/ProxyKernel/Abstractions/RuntimeActor.swift), including [RuntimeHost](../../Sources/ConduitRuntime/RuntimeHost.swift), the workflow/store, lifecycle/reconciler and framed service. AppState holds clients and presentation remains MainActor. Parked-main and held-effect tests pass, as do all 41 checks on the frozen candidate. Independent source review accepts the final authority correction. Native isolated Dev lifecycle, focused final-edit Quit and relaunch checks pass. At this intermediate checkpoint implementation was partial and validation pending; the next section records completion of implementation while release validation remains pending. Earlier MainActor checkpoints above remain historical evidence.
+
+### Completed implementation and separate release gates — 2026-10-28
+
+The [final activation checkpoint](../verification-runtime-actor-activation-2026-10-28.md) records the shared [RuntimeHost](../../Sources/ConduitRuntime/RuntimeHost.swift), [RuntimeActor](../../Sources/ProxyKernel/Abstractions/RuntimeActor.swift) and [off-owner capture flight](../../Sources/ConduitRuntime/RuntimeCaptureFlight.swift). AppState's replaced paths are deleted. Source review, all 41 local checks, scoped strict tests, unsuppressed TSan, optimized control-fairness and complete production-profile measurements pass. Final-source isolated native paged-client/active-tunnel Quit checks pass. Implementation is complete; the test-maintenance workflow also passes (3,768 tests with four existing skips and 103 scenarios); final hosted compiler compatibility, release integration and applicable real-machine acceptance remain distinct, with validation pending. Earlier partial/MainActor checkpoints are historical.

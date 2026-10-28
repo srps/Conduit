@@ -11,7 +11,6 @@ import XCTest
 
 /// #155: a connectivity probe that straddles a newer VPN transition, or that
 /// a later-started probe overtook, must not change routing.
-@MainActor
 final class ConnectivityProbeSupersessionTests: XCTestCase {
     /// Answers every request 200, so a health check through it passes. With
     /// `failures`, that many first requests, on any connection, get 503.
@@ -81,7 +80,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         }
     }
 
-    private func makeOrchestrator(_ script: ProbeScript) -> ProxyOrchestrator {
+    @RuntimeActor private func makeOrchestrator(_ script: ProbeScript) -> ProxyOrchestrator {
         var config = ProxyConfig()
         config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
         config.healthCheckIntervalSeconds = 3600
@@ -90,19 +89,19 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
                                  connectivityProbe: { await script.probe($0) })
     }
 
-    private func waitUntilParked(_ script: ProbeScript, _ index: Int) async throws {
+    @RuntimeActor private func waitUntilParked(_ script: ProbeScript, _ index: Int) async throws {
         for _ in 0..<2_000 where !script.isParked(index) { try await Task.sleep(for: .milliseconds(1)) }
         XCTAssertTrue(script.isParked(index), "probe \(index) never ran")
     }
 
-    private func details(_ orchestrator: ProxyOrchestrator, _ name: String) -> [String] {
+    @RuntimeActor private func details(_ orchestrator: ProxyOrchestrator, _ name: String) -> [String] {
         orchestrator.eventLog.events.filter { $0.event == name }.map { $0.detail ?? "" }
     }
 
     /// Disconnect probe sees unreachable upstreams; the reconnect commits
     /// while it is held. The stale verdict must not turn routing DIRECT on
     /// a working VPN, sweep, or report the disconnect's outcome.
-    func testAStaleDisconnectProbeLeavesTheReconnectsRouting() async throws {
+    @RuntimeActor func testAStaleDisconnectProbeLeavesTheReconnectsRouting() async throws {
         for reconnectHeld in [false, true] {
             let script = ProbeScript()
             let orchestrator = makeOrchestrator(script)
@@ -112,11 +111,11 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
             await orchestrator.handleVPNStateChange(.connected)
 
             let disconnectProbe = script.next(reachable: false, hold: true)
-            let disconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
+            let disconnect = Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
             try await waitUntilParked(script, disconnectProbe)
 
             let reconnectProbe = script.next(reachable: true, hold: reconnectHeld)
-            let reconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.connected) }
+            let reconnect = Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.connected) }
             if reconnectHeld {
                 // Older result lands first, then the newer one.
                 try await waitUntilParked(script, reconnectProbe)
@@ -147,7 +146,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
     /// Reconnect probe sees reachable upstreams; a newer disconnect commits
     /// while it is held. The stale verdict must not lift direct mode while
     /// the VPN is down.
-    func testAStaleReconnectProbeLeavesTheDisconnectsRouting() async throws {
+    @RuntimeActor func testAStaleReconnectProbeLeavesTheDisconnectsRouting() async throws {
         for disconnectHeld in [false, true] {
             let script = ProbeScript()
             let orchestrator = makeOrchestrator(script)
@@ -160,11 +159,11 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
             XCTAssertEqual(orchestrator.snapshot.directModeCause, .vpnDisconnected)
 
             let reconnectProbe = script.next(reachable: true, hold: true)
-            let reconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.connected) }
+            let reconnect = Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.connected) }
             try await waitUntilParked(script, reconnectProbe)
 
             let disconnectProbe = script.next(reachable: false, hold: disconnectHeld)
-            let disconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost)) }
+            let disconnect = Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost)) }
             if disconnectHeld {
                 try await waitUntilParked(script, disconnectProbe)
                 script.release(reconnectProbe)
@@ -222,10 +221,15 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         }
     }
 
+    /// Whether the VPN reads up on the orchestrator's owner, from a probe that runs off it.
+    @RuntimeActor private static func vpnIsUp(_ orchestrator: ProxyOrchestrator?) -> Bool {
+        orchestrator.map { $0.snapshot.vpnState == .connected } ?? true
+    }
+
     /// The reconnect's probe commits, but a newer disconnect runs while its
     /// PAC refresh is pending: the reconnect must not report `vpn.connected`
     /// over the disconnected state.
-    func testAReconnectSupersededDuringItsPACRefreshReportsNoOutcome() async throws {
+    @RuntimeActor func testAReconnectSupersededDuringItsPACRefreshReportsNoOutcome() async throws {
         // Upstreams answer exactly while the VPN is up. The verdict follows
         // the state, not call order: a health check against the fixture's
         // dead port may start a recovery ladder whose probe would otherwise
@@ -243,7 +247,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
             pacEvaluator: pac, connectivityProbe: { upstreams in
                 probes.withLockedValue { $0 += 1 }
                 let orchestrator = box.withLockedValue { $0 }
-                let up = await MainActor.run { orchestrator.map { $0.snapshot.vpnState == .connected } ?? true }
+                let up = await Self.vpnIsUp(orchestrator)
                 return UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: up) })
             })
         box.withLockedValue { $0 = orchestrator }
@@ -252,14 +256,14 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
 
         pac.holdNextFetch()
-        let reconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.connected) }
+        let reconnect = Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.connected) }
         for _ in 0..<2_000 where !pac.isParked { try await Task.sleep(for: .milliseconds(1)) }
         XCTAssertTrue(pac.isParked)
         XCTAssertEqual(orchestrator.snapshot.directModeCause, .none, "the reconnect's probe committed")
         let connectedBefore = details(orchestrator, "vpn.connected").count
 
         let probesBefore = probes.withLockedValue { $0 }
-        let disconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost)) }
+        let disconnect = Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost)) }
         for _ in 0..<2_000 where probes.withLockedValue({ $0 }) <= probesBefore { try await Task.sleep(for: .milliseconds(1)) }
         pac.release()
         await reconnect.value
@@ -275,7 +279,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
     /// Overlapping probes under one VPN state: a wake probe starts after the
     /// disconnect's and commits first. The older result yields to it, and
     /// the disconnect handler routes on the newer evidence.
-    func testAnOlderProbeYieldsToANewerOneUnderTheSameTransition() async throws {
+    @RuntimeActor func testAnOlderProbeYieldsToANewerOneUnderTheSameTransition() async throws {
         let script = ProbeScript()
         let orchestrator = makeOrchestrator(script)
         _ = script.next(reachable: true)
@@ -284,7 +288,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         await orchestrator.handleVPNStateChange(.connected)
 
         let disconnectProbe = script.next(reachable: false, hold: true)
-        let disconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
+        let disconnect = Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
         try await waitUntilParked(script, disconnectProbe)
         _ = script.next(reachable: true)            // wake: on-prem, upstream answers
         await orchestrator.handleSystemWake()
@@ -303,11 +307,11 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
 
     /// A VPN report during startup supersedes the start probe; the listener
     /// is not up, so nothing else probes. Startup probes again.
-    func testStartupProbesAgainWhenAVPNReportSupersedesIt() async throws {
+    @RuntimeActor func testStartupProbesAgainWhenAVPNReportSupersedesIt() async throws {
         let script = ProbeScript()
         let orchestrator = makeOrchestrator(script)
         let first = script.next(reachable: false, hold: true)
-        let start = Task { @MainActor in try await orchestrator.startProxy() }
+        let start = Task { @RuntimeActor in try await orchestrator.startProxy() }
         try await waitUntilParked(script, first)
         await orchestrator.handleVPNStateChange(.connected)
         _ = script.next(reachable: true)
@@ -337,7 +341,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
     /// listener binds, finds the listener not yet running and reacts to
     /// nothing. Startup must decide again before it reports running, not
     /// publish the off-VPN DIRECT verdict.
-    func testAVPNReportAfterTheStartProbeIsDecidedAgainBeforeRunning() async throws {
+    @RuntimeActor func testAVPNReportAfterTheStartProbeIsDecidedAgainBeforeRunning() async throws {
         let script = ProbeScript()
         _ = script.next(reachable: false)
         let box = NIOLockedValueBox<ProxyOrchestrator?>(nil)
@@ -345,7 +349,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
             guard let orchestrator = box.withLockedValue({ $0 }) else { return }
             box.withLockedValue { $0 = nil }
             _ = script.next(reachable: true)
-            Task { @MainActor in await orchestrator.handleVPNStateChange(.connected) }
+            Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.connected) }
         }
         var config = ProxyConfig()
         config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
@@ -370,12 +374,12 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
     /// is bounded, and startup still reports running with the probe-less
     /// cause for the state it ends on. The PAC fetched across the last flap
     /// is dropped and fetched again once running (#155).
-    func testStartupUnderAFlappingVPNStopsReDecidingAndRuns() async throws {
+    @RuntimeActor func testStartupUnderAFlappingVPNStopsReDecidingAndRuns() async throws {
         let box = NIOLockedValueBox<ProxyOrchestrator?>(nil)
         let flips = NIOLockedValueBox(0)
         // Flips the VPN while startup is still deciding: once when the
         // listener is up, then during every PAC fetch that follows.
-        @MainActor @Sendable func flip() async {
+        @RuntimeActor @Sendable func flip() async {
             guard let orchestrator = box.withLockedValue({ $0 }), orchestrator.snapshot.runtimeStatus.state == .starting else { return }
             let n = flips.withLockedValue { $0 += 1; return $0 }
             await orchestrator.handleVPNStateChange(n.isMultiple(of: 2) ? .connected : .disconnected(reason: .networkLost))
@@ -398,7 +402,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
             }.bind(host: "127.0.0.1", port: 0).get()
         config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1",
                                           port: try XCTUnwrap(upstream.localAddress?.port), priority: 0)]
-        let orchestrator = ProxyOrchestrator(config: config, logger: ListeningHook { Task { @MainActor in await flip() } },
+        let orchestrator = ProxyOrchestrator(config: config, logger: ListeningHook { Task { @RuntimeActor in await flip() } },
             authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
             pacEvaluator: pac, connectivityProbe: { upstreams in
                 UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) })
@@ -421,7 +425,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
 
     /// A local upstream that answers every health check, so no recovery ladder runs and takes a scripted verdict. With `failures`, it
     /// first fails that many checks.
-    private func healthyUpstream(failing failures: NIOLockedValueBox<Int>? = nil) async throws -> Channel {
+    @RuntimeActor private func healthyUpstream(failing failures: NIOLockedValueBox<Int>? = nil) async throws -> Channel {
         try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .childChannelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
@@ -432,7 +436,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
     }
 
     /// Waits, bounded, until `detail` is reported as a dropped probe. The continuation that awaited that probe returns in the same turn.
-    private func waitForSupersession(_ orchestrator: ProxyOrchestrator, _ detail: String) async throws {
+    @RuntimeActor private func waitForSupersession(_ orchestrator: ProxyOrchestrator, _ detail: String) async throws {
         for _ in 0..<5_000 where !details(orchestrator, "connectivity.probe_superseded").contains(detail) {
             try await Task.sleep(for: .milliseconds(1))
         }
@@ -441,7 +445,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
     /// The ladder against a dead upstream exhausts, then probes connectivity before it decides the state. A stop admitted while that probe
     /// is out owns the state and the monitors: the probe is dropped, and the stopped runtime is neither reported running nor given back
     /// the health loop whose next ladder would cold-start the listener.
-    func testAnExhaustedLaddersProbeThatOutlivesAStopLeavesTheListenerStopped() async throws {
+    @RuntimeActor func testAnExhaustedLaddersProbeThatOutlivesAStopLeavesTheListenerStopped() async throws {
         let script = ProbeScript()
         let orchestrator = makeOrchestrator(script)
         _ = script.next(reachable: true)                            // start
@@ -465,7 +469,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
 
     /// The direct-mode retry probes while the timer that started it is still running. A stop admitted during that probe owns the state: the
     /// result is dropped, so routing, the state and the monitors stay as the stop left them.
-    func testAReprobeThatOutlivesAStopLeavesTheListenerStopped() async throws {
+    @RuntimeActor func testAReprobeThatOutlivesAStopLeavesTheListenerStopped() async throws {
         let upstream = try await healthyUpstream()
         let box = NIOLockedValueBox<ProxyOrchestrator?>(nil)
         let probes = NIOLockedValueBox(0)
@@ -500,7 +504,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
 
     /// The error-rate alarm re-probes the upstreams. A stop is admitted and finishes while that probe is out, and only then does the
     /// probe find them unreachable. The result is dropped, so the stopped runtime's routing, state and monitors stay as the stop left them.
-    func testAnErrorRateRetryThatOutlivesAStopLeavesTheListenerStopped() async throws {
+    @RuntimeActor func testAnErrorRateRetryThatOutlivesAStopLeavesTheListenerStopped() async throws {
         let upstream = try await healthyUpstream()
         let box = NIOLockedValueBox<ProxyOrchestrator?>(nil)
         let probes = NIOLockedValueBox(0)
@@ -534,7 +538,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
 
     /// A confirmed disconnect probes before it decides routing. A stop admitted during the probe owns the state and the monitors; the
     /// transition still commits its routing and its sweeps, but it does not report the stopped runtime running.
-    func testADisconnectProbeThatOutlivesAStopLeavesTheListenerStopped() async throws {
+    @RuntimeActor func testADisconnectProbeThatOutlivesAStopLeavesTheListenerStopped() async throws {
         let upstream = try await healthyUpstream()
         let script = ProbeScript()
         var config = ProxyConfig()
@@ -549,7 +553,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         await orchestrator.handleVPNStateChange(.connected)
 
         let disconnectProbe = script.next(reachable: false, hold: true)
-        let disconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
+        let disconnect = Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
         try await waitUntilParked(script, disconnectProbe)
         await orchestrator.stopProxy()
         script.release(disconnectProbe)
@@ -596,7 +600,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         }
     }
 
-    private func observe(_ orchestrator: ProxyOrchestrator) -> Observed {
+    @RuntimeActor private func observe(_ orchestrator: ProxyOrchestrator) -> Observed {
         let observed = Observed()
         let log = orchestrator.eventLog
         orchestrator.onEvent = { event in
@@ -618,7 +622,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
 
     /// Runs `body`, then `cleanup` whether or not `body` threw, so a failed unwrap or a cancelled wait does not leave a listener or a
     /// fixture open for the rest of the run. The body's failure is the one reported.
-    private func withCleanup(_ body: () async throws -> Void, cleanup: () async throws -> Void) async throws {
+    @RuntimeActor private func withCleanup(_ body: () async throws -> Void, cleanup: () async throws -> Void) async throws {
         do {
             try await body()
         } catch {
@@ -634,7 +638,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
 
     /// The first health check gets a 503 and starts the ladder; its first step's check passes. The kernel records one typed recovery,
     /// with the detail derived from it, before the state it decides is published and before the app's callback runs.
-    func testALadderThatRecoversRecordsOneTypedOutcomeBeforeItsStateAndCallback() async throws {
+    @RuntimeActor func testALadderThatRecoversRecordsOneTypedOutcomeBeforeItsStateAndCallback() async throws {
         let failures = NIOLockedValueBox(1)
         let upstream = try await healthyUpstream(failing: failures)
         var started: ProxyOrchestrator?
@@ -674,7 +678,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
     /// state commits first, so the ladder answers with its unreachable result, and the seam puts routing back on the upstream. It pins the
     /// branch's mechanics only: one typed failure carrying the kernel's own authentication verdict and no summary text, recorded before
     /// the state is published and before the callback runs.
-    func testTheLegacyFailedBranchRecordsOneTypedOutcomeBeforeItsStateAndCallback() async throws {
+    @RuntimeActor func testTheLegacyFailedBranchRecordsOneTypedOutcomeBeforeItsStateAndCallback() async throws {
         for summary in ["Upstream unreachable", "Proxy authentication rejected (HTTP 407)"] {
             let authenticationLikely = summary.contains("rejected")
             let script = ProbeScript()
@@ -716,7 +720,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
 
     /// An exhausted ladder whose probe finds an upstream answering, hands the state to direct mode, or is superseded by a VPN
     /// transition decides the state without an outcome to report: no typed record and no callback, as before.
-    func testAnExhaustedLadderThatEndsWithoutAnOutcomeRecordsNone() async throws {
+    @RuntimeActor func testAnExhaustedLadderThatEndsWithoutAnOutcomeRecordsNone() async throws {
         enum Ending: CaseIterable { case upstreamReachable, directMode, superseded }
         for ending in Ending.allCases {
             let script = ProbeScript()
@@ -762,7 +766,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
     /// Hosts stamp reports on the monitor's callback. An older report that
     /// lands after a newer one is dropped whole: the newer state runs its own
     /// path sweeps, which close whatever the older one stranded.
-    func testAnOlderVPNReportIsDropped() async throws {
+    @RuntimeActor func testAnOlderVPNReportIsDropped() async throws {
         let script = ProbeScript()
         let orchestrator = makeOrchestrator(script)
         try await orchestrator.startProxy()
@@ -778,7 +782,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         await orchestrator.stopProxy()
     }
 
-    func testTheSequencerStampsInCallOrderAndEachConsumerKeepsItsOwnPosition() {
+    @RuntimeActor func testTheSequencerStampsInCallOrderAndEachConsumerKeepsItsOwnPosition() async {
         let sequencer = VPNObservationSequencer()
         let first = sequencer.next(), second = sequencer.next()
         XCTAssertLessThan(first, second)

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import PlatformMac
+import ProxyKernel
 import XCTest
 
 /// `LifecycleLane` against an independent bounded model (#186; the model table in
@@ -47,7 +48,6 @@ import XCTest
 /// no cancellation, so the parked task outlives the failed history. Bounded
 /// failure therefore does not clean up every corruption, and a leaked continuation
 /// is reported rather than drained.
-@MainActor
 final class LifecycleLaneModelTests: XCTestCase {
     private let maxDepth = 6
     private let maxHeld = 3
@@ -72,7 +72,7 @@ final class LifecycleLaneModelTests: XCTestCase {
         case budgetExhausted(states: Int)
     }
 
-    func testLaneConformsToTheModelWithinItsBounds() async {
+    @RuntimeActor func testLaneConformsToTheModelWithinItsBounds() async {
         switch await explore(fault: nil) {
         case .conforms(let states, let histories, let coverage, let newAtBound):
             let closure = newAtBound == 0
@@ -98,7 +98,7 @@ final class LifecycleLaneModelTests: XCTestCase {
 
     /// Longer histories than the breadth-first depth, from fixed seeds, with the
     /// same alphabet and checks. A failure names its seed.
-    func testSeededLongerHistoriesConformToTheModel() async {
+    @RuntimeActor func testSeededLongerHistoriesConformToTheModel() async {
         var coverage = Coverage()
         for seed in UInt64(1)...200 {
             var generator = SplitMix64(seed: seed)
@@ -123,7 +123,7 @@ final class LifecycleLaneModelTests: XCTestCase {
     /// Each injected fault, and the shortest explicit history that shows it: the
     /// printed witness is the commands alone, with cleanup not counted. A fault the
     /// model misses, or one only a longer history shows, fails here.
-    func testEachInjectedAdapterFaultDivergesAtItsShortestHistory() async {
+    @RuntimeActor func testEachInjectedAdapterFaultDivergesAtItsShortestHistory() async {
         // `dropEnd` needs a begin and the end that is lost: the lane keeps the operation
         // open once the model has gone idle. Cleanup ends operations on the real lane, so
         // one begin alone never shows it.
@@ -152,7 +152,7 @@ final class LifecycleLaneModelTests: XCTestCase {
     /// open, and cleanup ends them on the real lane around every injected fault, so each one
     /// conforms with nothing left unresumed. Without the bypass, `dropEnd` would fail here at
     /// one begin.
-    func testCleanupEndsWhatAHistoryLeavesOpenAroundEveryInjectedFault() async {
+    @RuntimeActor func testCleanupEndsWhatAHistoryLeavesOpenAroundEveryInjectedFault() async {
         var coverage = Coverage()
         let histories: [[LifecycleCommand]] = [
             [.begin(.start, coalescing: true)],
@@ -172,7 +172,7 @@ final class LifecycleLaneModelTests: XCTestCase {
     /// A divergence with a join still pending ends the operation the lane holds,
     /// awaits the join and reports the divergence. Without the release this
     /// test would hang on the join.
-    func testADivergenceReleasesEveryTaskItOwns() async {
+    @RuntimeActor func testADivergenceReleasesEveryTaskItOwns() async {
         var coverage = Coverage()
         let history: [LifecycleCommand] = [
             .begin(.start, coalescing: true), .begin(.start, coalescing: true), .end(index: 0),
@@ -188,7 +188,7 @@ final class LifecycleLaneModelTests: XCTestCase {
 
     // MARK: - Exploration
 
-    private func explore(fault: LifecycleFault?) async -> Exploration {
+    @RuntimeActor private func explore(fault: LifecycleFault?) async -> Exploration {
         var coverage = Coverage()
         var visited: Set<LifecycleModel.Key> = [LifecycleModel().key]
         var frontier: [[LifecycleCommand]] = [[]]
@@ -215,13 +215,13 @@ final class LifecycleLaneModelTests: XCTestCase {
         return .conforms(states: visited.count, histories: replays, coverage: coverage, newAtBound: frontier.count)
     }
 
-    private func enabledCommands(after history: [LifecycleCommand]) -> [LifecycleCommand] {
+    @RuntimeActor private func enabledCommands(after history: [LifecycleCommand]) -> [LifecycleCommand] {
         var model = LifecycleModel()
         for command in history { _ = model.apply(command) }
         return enabledCommands(model)
     }
 
-    private func enabledCommands(_ model: LifecycleModel) -> [LifecycleCommand] {
+    @RuntimeActor private func enabledCommands(_ model: LifecycleModel) -> [LifecycleCommand] {
         var commands: [LifecycleCommand] = []
         for kind in [LifecycleLane.Kind.start, .stop] {
             for coalescing in [true, false] where model.held.count < maxHeld || model.coalesces(kind, coalescing: coalescing) {
@@ -244,7 +244,7 @@ final class LifecycleLaneModelTests: XCTestCase {
     /// Runs `history` on a fresh lane and attempts release on both passing and
     /// diverging paths. Passing and injected-fault histories join their owned tasks;
     /// a corrupt production continuation is reported as unresumed rather than awaited forever.
-    private func replayHistory(
+    @RuntimeActor private func replayHistory(
         _ history: [LifecycleCommand],
         fault: LifecycleFault?,
         _ coverage: inout Coverage
@@ -302,7 +302,7 @@ final class LifecycleLaneModelTests: XCTestCase {
     }
 
     /// Compares every observable the model predicts. Returns the first disagreement.
-    private func compare(_ model: LifecycleModel, _ driver: LifecycleDriver) -> String? {
+    @RuntimeActor private func compare(_ model: LifecycleModel, _ driver: LifecycleDriver) -> String? {
         let lane = driver.lane
         if lane.current != model.latest {
             return "the latest generation is \(lane.current), the model says \(model.latest)"
@@ -339,7 +339,7 @@ final class LifecycleLaneModelTests: XCTestCase {
     /// Cleanup is not part of the explored alphabet: its ends go to the production lane
     /// directly, around the injected adapter faults, so a fault shows only where the
     /// history's own commands reach it, and the printed witness is the history alone.
-    private func teardown(_ model: inout LifecycleModel, _ driver: LifecycleDriver) async -> String? {
+    @RuntimeActor private func teardown(_ model: inout LifecycleModel, _ driver: LifecycleDriver) async -> String? {
         while !driver.held.isEmpty {
             _ = model.apply(.end(index: 0))
             driver.endUnfaulted(index: 0)
@@ -487,7 +487,7 @@ private enum LifecycleFault: CaseIterable, Hashable {
 /// Runs commands on one production lane. Joins and idle waits run as tasks on the
 /// main actor; `settle` lets them run, and `release` ends what is open and awaits
 /// what it owns.
-@MainActor
+@RuntimeActor
 private final class LifecycleDriver {
     let lane = LifecycleLane(name: "model")
     private let fault: LifecycleFault?

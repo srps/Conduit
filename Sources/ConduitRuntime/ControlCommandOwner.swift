@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import ConduitShared
 import Foundation
+import ProxyKernel
 
 /// The owner's synchronous answer to one command. The owner records its own fence here, and it starts no
 /// effect. Every newly received Stop reaches the owner, including one that would coalesce, because the owner
@@ -19,10 +20,10 @@ enum ControlOwnerFenceResult: Sendable, Equatable {
 /// that the owner has no work left for the operation. Both are idempotent, and the first settlement is the one that
 /// counts. `quiesced` may arrive without `settled`, and the service then closes the operation as an internal failure.
 /// A report may only be used after its effect was launched, and it changes nothing once the operation has closed.
-@MainActor
+@RuntimeActor
 struct ControlEffectReport {
-    let settled: @MainActor (ControlOperationOutcome) -> Void
-    let quiesced: @MainActor () -> Void
+    let settled: @RuntimeActor (ControlOperationOutcome) -> Void
+    let quiesced: @RuntimeActor () -> Void
 }
 
 /// A closed fault the service reports to the owner, which is the canonical producer of diagnostics. Each case names the site
@@ -62,7 +63,7 @@ enum ControlServiceFault: Sendable, Equatable {
 /// The one owner of intent and lifecycle, seen from the service. `RuntimeHost` conforms (`RuntimeHostControlOwner.swift`): its fence is
 /// the host's own synchronous admission, which precedes launch recovery and any I/O. A fake owner in tests proves the service's contract,
 /// not the host's fence.
-@MainActor
+@RuntimeActor
 protocol ControlCommandOwner: AnyObject {
     var incarnation: ControlHostIncarnation { get }
 
@@ -70,10 +71,11 @@ protocol ControlCommandOwner: AnyObject {
     /// project its state; the owner reports why itself, and the service answers that read as an internal failure, never a stale value.
     func snapshot() -> ControlRuntimeSnapshot?
 
-    /// The projected rows of one collection, in the same owner turn as the snapshot that names its revision. The owner projects them
-    /// through the shared bounded projection, which stops at the first row past a bound, so an over-budget capture is never built in
-    /// full. The service refuses an over-budget answer as a whole capture, never truncated. An internal failure is a closed fault.
-    func projectedRows(for kind: ControlCollectionKind, within budget: ControlRowBudget) -> ControlProjection
+    /// The projection of one collection, frozen in the same owner turn as the snapshot that names its revision and total: the job holds
+    /// that turn's value and no owner state, so it runs off the owner. It projects through the shared bounded projection, which stops at
+    /// the first row past a bound, so an over-budget capture is never built in full. The service refuses an over-budget answer as a whole
+    /// capture, never truncated. An internal failure is a closed fault. The service asks only after the exact total passed the row bound.
+    func rowSource(for kind: ControlCollectionKind) -> RuntimeRowSource
 
     /// Synchronous admission and fence. `candidate` is the pending stop of the same module, when one exists. `request` is the client's
     /// request ID, which the admitted work names in every store context it reaches (decision 0018).

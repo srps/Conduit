@@ -1,0 +1,32 @@
+{
+  "head": "f3abd5f710ed683a2f73859e0429d6e5c807e9f9",
+  "source_sha256": "dd9d1b25522ca6a67450978b2b602cd7628a75c3b9ed1800a6c34f8be107bea7",
+  "final_source_sha256": "dd9d1b25522ca6a67450978b2b602cd7628a75c3b9ed1800a6c34f8be107bea7",
+  "stable": true,
+  "checks": [
+    {
+      "name": "release-build",
+      "command": [
+        "xcrun",
+        "swift",
+        "build",
+        "-c",
+        "release"
+      ],
+      "exit": 0,
+      "seconds": 94.929
+    },
+    {
+      "name": "actual-profile-31-trials",
+      "command": [
+        "python3",
+        "docs/experiments/actual-runtime-client-profile/run.py",
+        "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r5-production-profile/probe",
+        "--repo",
+        "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit"
+      ],
+      "exit": 0,
+      "seconds": 92.18
+    }
+  ]
+}

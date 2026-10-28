@@ -794,26 +794,26 @@ final class RuntimeModuleIntentTests: XCTestCase {
         expectedOwnerGeneration: PrivateConfigExpectedGeneration(rawValue: 1)!
     )
 
-    private func enabledRuntime() throws -> Data {
+    nonisolated private func enabledRuntime() throws -> Data {
         var config = GenericDefaults.shared.makeConfig()
         config.dnsForwarderEnabled = true
         return try ProxyConfigPersistence.stagedFileData(for: config)
     }
 
-    private func platformBytes() throws -> Data {
+    nonisolated private func platformBytes() throws -> Data {
         try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig())
     }
 
     private struct LoadNotAdopted: Error {}
 
-    private func load(_ fixture: ConfigurationStoreTests.Fixture) async throws {
+    @RuntimeActor private func load(_ fixture: ConfigurationStoreTests.Fixture) async throws {
         guard case .admitted(let report) = await fixture.store.load(context: Self.context), case .adopted = report.outcome else {
             XCTFail("the fixture's load was not adopted")
             throw LoadNotAdopted()
         }
     }
 
-    private func disable(_ fixture: ConfigurationStoreTests.Fixture, current: Bool = true) async -> ConfigurationWriteOutcome? {
+    @RuntimeActor private func disable(_ fixture: ConfigurationStoreTests.Fixture, current: Bool = true) async -> ConfigurationWriteOutcome? {
         guard case .admitted(let result) = await fixture.store.commitDNSLifecycle(
             enabled: false,
             expecting: fixture.store.baselineToken(for: .runtime),
@@ -823,13 +823,13 @@ final class RuntimeModuleIntentTests: XCTestCase {
         return result.runtime
     }
 
-    private func writes(_ fixture: ConfigurationStoreTests.Fixture, at path: String) -> Int {
+    @RuntimeActor private func writes(_ fixture: ConfigurationStoreTests.Fixture, at path: String) -> Int {
         fixture.access.observations.filter { if case .write(let written, _) = $0 { written == path } else { false } }.count
     }
 
     /// The disable writes the runtime file alone. An external platform edit neither holds it nor is written over, and the commit gives no
     /// verified pair, so the ordinary coupled apply stays held on the changed platform file.
-    func testTheDNSDisableWritesOnlyTheRuntimeFileAndAuthorizesNoApply() async throws {
+    @RuntimeActor func testTheDNSDisableWritesOnlyTheRuntimeFileAndAuthorizesNoApply() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try enabledRuntime(), platform: try platformBytes())
         defer { fixture.close() }
         try await load(fixture)
@@ -855,7 +855,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
     }
 
     /// The disable respects the runtime file's own external edit: it conflicts, writes nothing and keeps the edit.
-    func testTheDNSDisableConflictsWithAnExternalRuntimeEdit() async throws {
+    @RuntimeActor func testTheDNSDisableConflictsWithAnExternalRuntimeEdit() async throws {
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try enabledRuntime(), platform: try platformBytes())
         defer { fixture.close() }
         try await load(fixture)
@@ -877,7 +877,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
     }
 
     /// The decoded `dnsForwarderEnabled` of the runtime file on disk, through the store's own load and the production decoder.
-    private func savedDNSEnabled(_ fixture: ConfigurationStoreTests.Fixture) async throws -> Bool? {
+    @RuntimeActor private func savedDNSEnabled(_ fixture: ConfigurationStoreTests.Fixture) async throws -> Bool? {
         try await load(fixture)
         return fixture.store.values?.runtime.dnsForwarderEnabled
     }
@@ -885,7 +885,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
     /// The runtime-only write keeps the legacy guard for both sidecars a runtime file can carry values for (decision 0026): an absent
     /// sidecar holds it, a present unchanged one lets it write, and one deleted or changed since its baseline holds it. No row writes a
     /// sidecar. A persisted row's file decodes to the disable.
-    func testTheDNSDisableKeepsTheLegacyGuardForBothSidecars() async throws {
+    @RuntimeActor func testTheDNSDisableKeepsTheLegacyGuardForBothSidecars() async throws {
         let sidecars: [(ConfigurationComponent, String, Any, () throws -> Data)] = [
             (.platform, "manageSystemProxy", true, platformBytes),
             (.preferences, "showMenuBarIcon", false, { try AppPreferencesPersistence.stagedData(for: AppPreferences()) }),
@@ -933,7 +933,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
     }
 
     /// An already-disabled file verifies without a write, and a revoked claim writes nothing.
-    func testAnUnchangedDisableVerifiesAndARevokedClaimWritesNothing() async throws {
+    @RuntimeActor func testAnUnchangedDisableVerifiesAndARevokedClaimWritesNothing() async throws {
         let disabled = try ConfigurationStoreTests.Fixture(
             runtime: try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig()), platform: try platformBytes()
         )

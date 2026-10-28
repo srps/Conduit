@@ -1,0 +1,152 @@
+[
+  {
+    "run": "runtime-diagnostic-targeted-9uYlww",
+    "kind": "expected old-adapter restart failure",
+    "files": {
+      "tests.log": {
+        "bytes": 13408,
+        "sha256": "0285691df3c2631d176267acff7d37ddcd47189218af4527cf6a9a057a0ebb19"
+      }
+    }
+  },
+  {
+    "run": "runtime-actor-prep-focused-XURVaD",
+    "kind": "guard-removal control and rejected rearm fixture",
+    "files": {
+      "tests.log": {
+        "bytes": 323391,
+        "sha256": "f5e4b0657701756185f4a0d60d2cf660fcfa497b8ca8d4aecfdac64dd840c07f"
+      },
+      "exit-code": {
+        "bytes": 2,
+        "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+      },
+      "build.log": {
+        "bytes": 1163,
+        "sha256": "1f6b741bf8c5831d67e4008a7a34d88f8edaae5d44e3b281053f8f7e650aa175"
+      }
+    }
+  },
+  {
+    "run": "runtime-actor-prep-focused-mtaLd9",
+    "kind": "tests passed; catalogue failed",
+    "files": {
+      "catalogue.log": {
+        "bytes": 137,
+        "sha256": "27c72cb46b6b2f8402ff327d21159c017f6efe5b50b75b5c47e0a0571f96db5d"
+      },
+      "imports.log": {
+        "bytes": 114,
+        "sha256": "c1a3944c6f3612028283155ac6c6a9bb22eb16afeb251460dedc53fb3ed599a6"
+      },
+      "writer-sim.log": {
+        "bytes": 2256,
+        "sha256": "d1e012c07c42b84b31a920f5303024c32152f61608f07cfa0d9aff245b240031"
+      },
+      "tests.log": {
+        "bytes": 323222,
+        "sha256": "172ea2b457f973c6f430c3adddd6b5d2996321a3212a1d7fabfe990e53235a63"
+      },
+      "sim.log": {
+        "bytes": 25196,
+        "sha256": "e48f44eea5410ff169aea53cc581bad5c9f7ec275d63c3abd262fa97a139d57a"
+      },
+      "exit-code": {
+        "bytes": 2,
+        "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+      },
+      "relay-sim.log": {
+        "bytes": 2328,
+        "sha256": "c1a4cdeef41437c030ceea1061c3ad5c8b583ebbd42187868840521174cf9fb3"
+      },
+      "build.log": {
+        "bytes": 507,
+        "sha256": "35f3ad1e8d5f68ddbdc4a1fb5dfe1685c9bb5cc1203181d3c22fc998e712fdc1"
+      }
+    }
+  },
+  {
+    "run": "runtime-actor-prep-focused-ZFzM5n",
+    "kind": "normal focused pass",
+    "files": {
+      "catalogue.log": {
+        "bytes": 89,
+        "sha256": "4c7d746de50ffba152e91a800474fc60a47918ad460b8cb2c01e546600b125f4"
+      },
+      "decisions.log": {
+        "bytes": 68,
+        "sha256": "135368b2ee14567717c22b2cdd6b9689b4d1437fb7f1fe7cb510b8048958c044"
+      },
+      "imports.log": {
+        "bytes": 114,
+        "sha256": "c1a3944c6f3612028283155ac6c6a9bb22eb16afeb251460dedc53fb3ed599a6"
+      },
+      "writer-sim.log": {
+        "bytes": 2257,
+        "sha256": "ccaf71283af848984c555c9291b2c29d55f989304cb9f431bdf7f0a5720c5935"
+      },
+      "tests.log": {
+        "bytes": 316591,
+        "sha256": "2c0066c70bc7f017d381f77b11091957360fb5125ce5d7b1df394bf1c055d9d4"
+      },
+      "sim.log": {
+        "bytes": 25196,
+        "sha256": "d6f17057d63ce4ccaadfb5a7e46470c7fe33362e81cd6eb1a1972e52c8d1c7ab"
+      },
+      "exit-code": {
+        "bytes": 2,
+        "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+      },
+      "relay-sim.log": {
+        "bytes": 2328,
+        "sha256": "2a9971b2210cf2d71d5658af635cb38dbe678954effa4c4ee4b4398ac82b6161"
+      },
+      "build.log": {
+        "bytes": 287,
+        "sha256": "f23a4ce2fb447ae32755efbca714cf4c45886e337c7518b3341a40bfdd73231a"
+      }
+    }
+  },
+  {
+    "run": "runtime-actor-prep-focused-Q5sH02",
+    "kind": "scoped strict pass",
+    "files": {
+      "catalogue.log": {
+        "bytes": 89,
+        "sha256": "4c7d746de50ffba152e91a800474fc60a47918ad460b8cb2c01e546600b125f4"
+      },
+      "decisions.log": {
+        "bytes": 68,
+        "sha256": "135368b2ee14567717c22b2cdd6b9689b4d1437fb7f1fe7cb510b8048958c044"
+      },
+      "imports.log": {
+        "bytes": 114,
+        "sha256": "c1a3944c6f3612028283155ac6c6a9bb22eb16afeb251460dedc53fb3ed599a6"
+      },
+      "writer-sim.log": {
+        "bytes": 76,
+        "sha256": "528af5933e5a8483bd9e245abda0ed19a9ba0c13f55f3025a56e00878e13a6a1"
+      },
+      "tests.log": {
+        "bytes": 14311,
+        "sha256": "321de669bdc1931286d398463411b15660ef5c627eed0f51669fc163402bc4f9"
+      },
+      "sim.log": {
+        "bytes": 25196,
+        "sha256": "18b7ade779a51ca293e71d426d47e848e9311c25296cb0aefe7e18d03bc2f72c"
+      },
+      "exit-code": {
+        "bytes": 2,
+        "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+      },
+      "relay-sim.log": {
+        "bytes": 2327,
+        "sha256": "905da2cf9e323743de77abeff5a84e2435f53da59d537cf6a4092869ae82c3f6"
+      },
+      "build.log": {
+        "bytes": 175,
+        "sha256": "bf37928a5bfc405ca3ab26d4c97f6fad8c4f49f7116a9ec04a2e4974fc272ea3"
+      }
+    }
+  }
+]

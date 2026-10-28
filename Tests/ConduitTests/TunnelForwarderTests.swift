@@ -340,7 +340,10 @@ final class TunnelForwarderTests: XCTestCase {
     func testReconcileRemovingProxiedTunnelTearsDownDNSOverride() async throws {
         let logger = RecordingLogSink(minLevel: .debug)
         let recording = RecordingPrivilegeClient()
-        let resolverManager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory())
+        let resolverManager = TunnelResolverManager(
+            privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory(),
+            work: PlatformWork(label: "io.github.srps.Conduit.tests.tunnel-forwarder")
+        )
 
         let pool = ConnectionPool(
             group: group,
@@ -393,7 +396,10 @@ final class TunnelForwarderTests: XCTestCase {
     func testReconcileAddingProxiedTunnelPreservesUnchangedProxiedOverride() async throws {
         let logger = RecordingLogSink(minLevel: .debug)
         let recording = RecordingPrivilegeClient()
-        let resolverManager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory())
+        let resolverManager = TunnelResolverManager(
+            privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory(),
+            work: PlatformWork(label: "io.github.srps.Conduit.tests.tunnel-forwarder")
+        )
 
         let pool = ConnectionPool(
             group: group,

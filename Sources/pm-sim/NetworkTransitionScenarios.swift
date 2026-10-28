@@ -42,7 +42,7 @@ enum NetworkTransitionScenarios {
     ///  * no extra `dns.transports_reset` events fired between the scripted
     ///    hops (catches the regression where the DoH recycle gets wired into
     ///    a tier-C-shaped path that fires on every `NWPathMonitor` event)
-    @MainActor
+    @RuntimeActor
     static func networkTransition(verbose: Bool) async throws -> ScenarioResult {
         let name = "networkTransition"
         let start = Date()
@@ -170,7 +170,7 @@ enum NetworkTransitionScenarios {
     ///  * a Wi-Fi roam (same interface, new gateway) causes exactly 1 reset,
     ///    and its event names the field and carries the 20 it absorbed
     ///  * a system wake still resets, whatever the path did
-    @MainActor
+    @RuntimeActor
     static func networkPathChurn(verbose: Bool) async throws -> ScenarioResult {
         let name = "networkPathChurn"
         let start = Date()
@@ -280,7 +280,7 @@ enum NetworkTransitionScenarios {
         )
     }
 
-    @MainActor
+    @RuntimeActor
     private static func makeBareOrchestrator(verbose: Bool) -> ProxyOrchestrator {
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
         var config = ProxyConfig()

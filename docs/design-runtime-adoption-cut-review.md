@@ -14,8 +14,7 @@ or released. The app composes one shared host and uses framed ordinary/private
 clients; its replaced lifecycle, reconciler and direct file-writer paths are removed.
 Ordinary frames use the selected 64 KiB cap (0030), collections use the selected
 4 MiB capture / 8 MiB host-retained profile (0038), and total app Quit uses ten
-seconds (0039). Fresh measurements and native acceptance remain due for this
-composition. Claude Code and Codex source-review findings are recorded below;
+seconds (0039). The [whole-owner checkpoint](verification-runtime-actor-activation-2026-10-28.md) records subsequent RuntimeActor and native Dev checks; resource fairness is accepted; the test-maintenance workflow passes; hosted and applicable real-machine acceptance remain due. Claude Code and Codex source-review findings are recorded below;
 Claude used the owner's claude.ai subscription.
 
 ## Selected activation sequence

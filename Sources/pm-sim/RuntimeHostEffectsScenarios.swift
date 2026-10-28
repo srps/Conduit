@@ -22,8 +22,9 @@ import RuntimeEvents
 /// app or helper is reached.
 ///
 /// It checks a failed start on a held port, a restart on the same host, and a stop, against the fakes; then the configuration workflow;
-/// then a stop admitted before a held start binds, and the next start; then the connection audit of one served loopback request; and, last,
-/// a reload's flag action held on the platform queue while a Stop is admitted.
+/// then a stop admitted before a held start binds, and the next start; then the connection audit of one served loopback request and of
+/// a burst of connections under mixed-priority owner load; and, last,
+/// a reload's flag action held on the platform queue while a Stop is admitted, with the main thread parked throughout.
 /// Every path after
 /// the root is taken ends in one release step: the root's reference is dropped, a fresh acquisition proves the lease
 /// closed, and the scratch directory is removed only when that proof and the close-failure count both agree. A shutdown
@@ -32,10 +33,10 @@ enum RuntimeHostEffectsScenario {
     /// The one host a shutdown could not confirm. Held for the rest of the process, so its writers keep the root they
     /// hold. A single slot: a second unconfirmed shutdown never needs a second one, and a run started while it is
     /// occupied fails before it allocates anything.
-    @MainActor
+    @RuntimeActor
     private static var unconfirmedHost: RuntimeHost?
 
-    @MainActor
+    @RuntimeActor
     static func run() async throws -> ScenarioResult {
         let began = Date()
         guard unconfirmedHost == nil else {
@@ -182,7 +183,8 @@ enum RuntimeHostEffectsScenario {
     /// gets its own wake fake; only the wake exercise keeps and fires its own.
     private static func effects(
         _ fakes: Fakes, home: URL, pac: (any PacEvaluator)? = nil, wake: FakeSystemWakeObserver = FakeSystemWakeObserver(),
-        hold: HeldSetenv? = nil, vpn: FakeVPNStatusObserver = FakeVPNStatusObserver()
+        hold: HeldSetenv? = nil, vpn: FakeVPNStatusObserver = FakeVPNStatusObserver(),
+        path: FakeNetworkPathObserver = FakeNetworkPathObserver()
     ) -> RuntimeHostEffects {
         let machine = fakes.machine
         return RuntimeHostEffects(
@@ -198,7 +200,7 @@ enum RuntimeHostEffectsScenario {
                 return try machine.run(launchPath, arguments)
             },
             dnsResponds: fakes.dns.responds(onPort:),
-            networkPath: FakeNetworkPathObserver(),
+            networkPath: path,
             networkLocation: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil },
             vpnStatusMonitor: { _, _ in vpn },
@@ -212,7 +214,7 @@ enum RuntimeHostEffectsScenario {
     /// The configuration workflow through the actual host, over the run's fakes and the scratch root. Reloads go through the store, so the
     /// checks read what the host did: an invalid runtime file refuses and is left unchanged, a valid edit applies and advances the
     /// generation, and a start-blocking edit is kept for editing while the applied view stays.
-    @MainActor
+    @RuntimeActor
     private static func exerciseWorkflow(
         session: StateRootSession,
         environment: RuntimeEnvironment,
@@ -295,6 +297,9 @@ enum RuntimeHostEffectsScenario {
         check("a passed cap skips the logger drain without waiting",
               capped.logger == .skippedBudget && capStarted.duration(to: .now) < DiagnosticFlushPhase.writerWait)
         logger.release()
+        // The flush drains the logger first, so it is not given the time the artifacts took to retire the timed-out wait's notify.
+        let retired = await logger.joinDrained()
+        check("released, the held write leaves the logger's queue", retired)
         let report = await host.flushEvents()
         check("released, the logger drains", report.logger == .drained)
         check("the workflow host's observability flush is confirmed", report.allConfirmed)
@@ -329,7 +334,7 @@ enum RuntimeHostEffectsScenario {
     /// is held on its PAC fetch, which the kernel awaits before it binds. Released after the stop, the overtaken start binds and applies
     /// nothing, and the next start comes up instead of finding a stale `running` and doing nothing. An edit the Stop fence held at reload
     /// is the next start's committed input, and that start adopts it as the host view.
-    @MainActor
+    @RuntimeActor
     private static func exerciseStopBeforeBind(
         session: StateRootSession,
         environment: RuntimeEnvironment,
@@ -372,7 +377,7 @@ enum RuntimeHostEffectsScenario {
         // Owned here, so the error path joins it after the release.
         var heldStart: Task<Void, Error>?
         do {
-            let start = Task { @MainActor in try await host.startRuntime() }
+            let start = Task { @RuntimeActor in try await host.startRuntime() }
             heldStart = start
             let deadline = ContinuousClock.now.advanced(by: .seconds(5))
             while !fetch.isHeld, ContinuousClock.now < deadline {
@@ -440,7 +445,7 @@ enum RuntimeHostEffectsScenario {
     /// capture and commit; the reload's observation replaces the pair, so the Start's remaining effects hold and are not rebound to the edit.
     /// Its teardown clears the modules it owned, and the reload's pass, admitted under it, applies nothing. The next explicit Start then
     /// captures the edit.
-    @MainActor
+    @RuntimeActor
     private static func exerciseReloadAfterCapture(
         session: StateRootSession,
         environment: RuntimeEnvironment,
@@ -481,7 +486,7 @@ enum RuntimeHostEffectsScenario {
         var quiesced = false
         var heldStart: Task<Void, Error>?
         do {
-            let start = Task { @MainActor in try await host.startRuntime() }
+            let start = Task { @RuntimeActor in try await host.startRuntime() }
             heldStart = start
             let deadline = ContinuousClock.now.advanced(by: .seconds(5))
             while !fetch.isHeld, ContinuousClock.now < deadline {
@@ -493,7 +498,7 @@ enum RuntimeHostEffectsScenario {
             edited.profileName = "Edited after the capture"
             try ProxyConfigPersistence.save(edited, in: environment)
             // The reload's pass waits for the held Start's lane, so the reload runs beside it; its adoption is seen in the host view.
-            let reload = Task { @MainActor in await host.reloadConfiguration() }
+            let reload = Task { @RuntimeActor in await host.reloadConfiguration() }
             while host.status().profileName != edited.profileName, ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(1))
             }
@@ -545,7 +550,7 @@ enum RuntimeHostEffectsScenario {
     /// tunnel without rewriting the pair; a preflight refresh reads the fake helper and a credentials notice completes, through the same
     /// client; an explicit reload through it refuses a malformed file whole and adopts an external edit, writing neither (decision 0032);
     /// and the process quit latches, tears every module down and returns with every lane idle.
-    @MainActor
+    @RuntimeActor
     private static func exerciseModuleLifecycle(
         session: StateRootSession,
         environment: RuntimeEnvironment,
@@ -621,7 +626,7 @@ enum RuntimeHostEffectsScenario {
             )
             // A witness stream read beside every step below until it ends, so it sees the host's own events as they are published.
             let witnessStream = try await clients.control.subscribe(.live, deadline: RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now))
-            witness = Task { @MainActor in await readUntilEnd(witnessStream) }
+            witness = Task { @RuntimeActor in await readUntilEnd(witnessStream) }
             let viaClient = try await stopProxyThroughClient(clients.control)
             check("the client's snapshot shows the restarted proxy", viaClient.proxyShown)
             check("a proxy Stop through the framed client completes", viaClient.completed)
@@ -655,6 +660,15 @@ enum RuntimeHostEffectsScenario {
                 receipt.runtime.write == .unchanged && receipt.prior?.runtime == receipt.runtime.baseline
                     && receipt.committedDNSForwarderEnabled == true
             } ?? false)
+            // A first page through the framed client: its current revision has no rows yet, so the host's one shared capture flight
+            // projects it off the owner, and the page is answered from that capture.
+            let bindings = try await firstPage(clients.control, .tunnelBindings)
+            var bindingsCursor: (incarnation: ControlHostIncarnation, revision: ControlCollectionRevision)?
+            check("a first tunnel-bindings page is captured by the shared flight and served current and whole", {
+                guard case .tunnelBindings(let page) = bindings.reply, page.status == .current else { return false }
+                bindingsCursor = (page.incarnation, page.revision)
+                return page.totalCount == bindings.total && page.rows.count == 1 && page.nextCursor == nil
+            }())
             // The app's preflight and its credentials notice, through the same client: the fake helper answers installed.
             let preflight = try await settleThroughClient(clients.control, .refreshPreflight(helperReplaced: true))
             check("a preflight refresh through the framed client reads the installed helper", {
@@ -701,6 +715,24 @@ enum RuntimeHostEffectsScenario {
                 afterQuit = refused
             }
             check("no Start runs after the quit", afterQuit == .terminated)
+            // After the quit's end no capture starts: a collection never captured is refused as not captured, with the exact total its
+            // current reference names, and the tunnel rows captured earlier still serve their own revision.
+            let health = try await firstPage(clients.control, .upstreamHealth)
+            check("after the quit a collection never captured is refused as not captured with its exact total",
+                  health.reply == .unavailable(.upstreamHealth, .notCaptured, knownTotal: health.total))
+            if let bindingsCursor {
+                let retained = try await clients.control.readPage(
+                    ControlPageRequest(
+                        expectedIncarnation: bindingsCursor.incarnation, collection: .tunnelBindings,
+                        cursor: ControlPageCursor(revision: bindingsCursor.revision, offset: try ControlCount(0))
+                    ),
+                    deadline: RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
+                )
+                check("after the quit the retained tunnel rows still serve their own revision", {
+                    guard case .tunnelBindings(let page) = retained else { return false }
+                    return page.revision == bindingsCursor.revision && page.rows.count == 1
+                }())
+            }
             let seen = await witness?.value ?? StreamWitness()
             witness = nil
             check("the host's own typed events reach the actual stream", seen.dnsStartedEvent)
@@ -744,7 +776,7 @@ enum RuntimeHostEffectsScenario {
     }
 
     /// Reads one stream until it ends, bounded in frames and in each wait, so a stream that never ends fails a check instead of hanging.
-    @MainActor
+    @RuntimeActor
     private static func readUntilEnd(_ stream: RuntimeSubscription) async -> StreamWitness {
         var witness = StreamWitness()
         defer { stream.cancel() }
@@ -777,7 +809,7 @@ enum RuntimeHostEffectsScenario {
 
     /// A proxy Stop through the host's in-memory control client. Its stream ends when this returns; the stream's cancel queues the one hop
     /// that releases its subscriber.
-    @MainActor
+    @RuntimeActor
     private static func stopProxyThroughClient(_ client: any RuntimeClient) async throws -> (proxyShown: Bool, completed: Bool) {
         let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
         let snapshot = try await client.readSnapshot(deadline: deadline)
@@ -801,7 +833,7 @@ enum RuntimeHostEffectsScenario {
     /// One saved Start of `module` through the host's framed client (decision 0037): it names the module revision the client's own snapshot
     /// stamp reads and carries no configuration value, and its settlement is the receipt the client reads. The same request is then sent
     /// again at that revision, which the Start moved, and the host must refuse it whole. `after` is the client's next snapshot.
-    @MainActor
+    @RuntimeActor
     private static func savedStartThroughClient(
         _ client: any RuntimeClient,
         _ module: ControlModule
@@ -837,7 +869,7 @@ enum RuntimeHostEffectsScenario {
     }
 
     /// One command through the host's framed client, and its settlement, nil when it was not admitted or never settled within the bound.
-    @MainActor
+    @RuntimeActor
     private static func settleThroughClient(_ client: any RuntimeClient, _ command: ControlRuntimeCommand) async throws -> ControlOperationOutcome? {
         let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
         let incarnation = try await client.readSnapshot(deadline: deadline).stamp.incarnation
@@ -864,7 +896,7 @@ enum RuntimeHostEffectsScenario {
 
     /// A preferences save through the editor client, then the process quit through the framed client with its reserved preferences flush,
     /// all over the one composition. Each answer is the client's own; files are read only after their operation settled.
-    @MainActor
+    @RuntimeActor
     private static func quitThroughClient(_ clients: RuntimeInMemoryClients) async throws -> (preferencesSaved: Bool, completed: Bool, flushed: Bool) {
         let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
         let incarnation = try await clients.control.readSnapshot(deadline: deadline).stamp.incarnation
@@ -928,6 +960,24 @@ enum RuntimeHostEffectsScenario {
         return (saved, completed, flushed)
     }
 
+    /// The first page of `kind` through the framed client, beside the exact total the snapshot read just before it names for that kind.
+    @RuntimeActor
+    private static func firstPage(_ control: any RuntimeClient, _ kind: ControlCollectionKind) async throws
+        -> (reply: ControlPageReply, total: ControlCount) {
+        let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
+        let snapshot = try await control.readSnapshot(deadline: deadline)
+        let reference: ControlCollectionReference = switch kind {
+        case .activeConnections: snapshot.collections.activeConnections
+        case .upstreamHealth: snapshot.collections.upstreamHealth
+        case .tunnelBindings: snapshot.collections.tunnelBindings
+        case .tunnelDNSHosts: snapshot.collections.tunnelDNSHosts
+        }
+        let reply = try await control.readPage(
+            ControlPageRequest(expectedIncarnation: snapshot.stamp.incarnation, collection: kind), deadline: deadline
+        )
+        return (reply, reference.totalCount)
+    }
+
     /// This scenario's own control-service profile. Every value is explicit and scenario-only, sized for one client and a handful of
     /// operations; none is a shipping default. The event ring and the ingress carry the host's own events, so they are sized for a
     /// Start's or a quit's burst, and one more subscriber holds the witness stream beside each step's own.
@@ -950,7 +1000,7 @@ enum RuntimeHostEffectsScenario {
     /// An external edit that only respells the PAC URL (#246), reloaded into a running actual host. Precomposed `é` and `e` with a
     /// combining accent differ in UTF-8 only; the user's bytes are the intent (decisions 0023, 0027), so the reload must fetch the PAC
     /// from the new bytes rather than keep the script from the old ones. The check is the URL bytes the PAC fake was asked for.
-    @MainActor
+    @RuntimeActor
     private static func exerciseRespelledPACReload(
         session: StateRootSession,
         environment: RuntimeEnvironment,
@@ -1026,7 +1076,7 @@ enum RuntimeHostEffectsScenario {
     /// A Start beside a missing platform sidecar, after an outside editor added a legacy platform value to the owned runtime file, through
     /// the actual host over the run's fakes. The platform's first write checks the runtime bytes the host opened with, so it holds and
     /// creates no sidecar over the edited value. The runtime write is held behind it, and the next Start finds both files latched.
-    @MainActor
+    @RuntimeActor
     private static func exerciseSourceChanged(
         session: StateRootSession,
         environment: RuntimeEnvironment,
@@ -1125,7 +1175,7 @@ enum RuntimeHostEffectsScenario {
     /// observes wake from open; a wake while stopped runs only the kernel's wake path; a wake while the forwarder runs re-pins the interface
     /// a simulated VPN client rewrote; a module Stop keeps observing; the quit ends observation in its admission, and a wake already in
     /// flight then does nothing. The kernel's wake path is read back from the owned events file after a confirmed flush.
-    @MainActor
+    @RuntimeActor
     private static func exerciseWake(
         session: StateRootSession,
         environment: RuntimeEnvironment,
@@ -1226,8 +1276,8 @@ enum RuntimeHostEffectsScenario {
     /// The connection audit through the actual host, as the app composes it (#222). Audit is on at the root's default path. One loopback
     /// request, its query carrying a value no row may hold, goes through the host's listener; the default no-proxy list routes it DIRECT
     /// to an origin this exercise owns, so no upstream or Kerberos token is involved. After the stop and a confirmed flush, the owned
-    /// `audit.ndjson` holds that request's one row, its query redacted.
-    @MainActor
+    /// `audit.ndjson` holds that request's one row, its query redacted, and one row for each connection of the mixed-priority burst.
+    @RuntimeActor
     private static func exerciseConnectionAudit(
         session: StateRootSession,
         environment: RuntimeEnvironment,
@@ -1246,6 +1296,7 @@ enum RuntimeHostEffectsScenario {
         config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
         config.logging.auditLogEnabled = true
         let auditFile = environment.configDirectory.appendingPathComponent("audit.ndjson")
+        let path = FakeNetworkPathObserver()
         let host: RuntimeHost
         do {
             try ProxyConfigPersistence.save(config, in: environment)
@@ -1258,7 +1309,7 @@ enum RuntimeHostEffectsScenario {
                 startupAllowsMissing: false,
                 startedAt: Date(timeIntervalSince1970: 1_700_000_000),
                 terminalExit: {},
-                effects: effects(fakes, home: home)
+                effects: effects(fakes, home: home, path: path)
             )
         } catch {
             notes.append("audit host did not open: \(error.localizedDescription)")
@@ -1284,7 +1335,7 @@ enum RuntimeHostEffectsScenario {
                     + "Host: 127.0.0.1:\(originPort)\r\nConnection: close\r\n\r\n"
             )
             check("the host serves the loopback request", response.hasPrefix("HTTP/1.1 200"))
-            // The orchestrator hands the row to its sink in the main-actor step that closes the connection, queued after the request's
+            // The orchestrator hands the row to its sink in the owner step that closes the connection, queued after the request's
             // completion; both counts mean the row was handed over.
             var closed = false
             let deadline = ContinuousClock.now.advanced(by: .seconds(5))
@@ -1294,6 +1345,59 @@ enum RuntimeHostEffectsScenario {
                 if !closed { try await Task.sleep(for: .milliseconds(1)) }
             }
             check("the served request's connection closes", closed)
+
+            // A burst of connections from clients at every task priority, with owner jobs at every priority queued beside the
+            // connection callbacks' hops. A close whose hop ran before its open's would leave a connection counted open and its row
+            // unwritten, so the counts and the rows below witness the order.
+            let burst = 16
+            let priorities: [TaskPriority] = [.background, .utility, .medium, .userInitiated, .high]
+            let load = (0..<128).map { index in
+                Task(priority: priorities[index % priorities.count]) { @RuntimeActor in _ = host.status() }
+            }
+            let requests = (0..<burst).map { index in
+                Task.detached(priority: priorities[index % priorities.count]) { () -> Bool in
+                    let response = try? await RawHTTPAuditClient.request(
+                        group: MultiThreadedEventLoopGroup.singleton, host: "127.0.0.1", port: proxyPort,
+                        request: "GET http://127.0.0.1:\(originPort)/v1/item/\(index) HTTP/1.1\r\n"
+                            + "Host: 127.0.0.1:\(originPort)\r\nConnection: close\r\n\r\n"
+                    )
+                    return response?.hasPrefix("HTTP/1.1 200") == true
+                }
+            }
+            var servedBurst = 0
+            for request in requests {
+                if await request.value { servedBurst += 1 }
+            }
+            for job in load { await job.value }
+            check("every request of the mixed-priority burst is served", servedBurst == burst)
+            var burstClosed = false
+            let burstDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !burstClosed, ContinuousClock.now < burstDeadline {
+                let metrics = host.status().metrics
+                burstClosed = metrics.requestsHandled >= 1 + burst && metrics.openConnections == 0
+                if !burstClosed { try await Task.sleep(for: .milliseconds(1)) }
+            }
+            check("the mixed-priority burst leaves no connection open", burstClosed)
+
+            // The path observer follows the modules (#260): a Stop that leaves none up stops it, the next Start observes again, and a
+            // report delivered after that restart reaches the host's path handling. The real adapter's restart is `NetworkMonitorTests`.
+            check("the path observer runs while the proxy runs", path.isObserving)
+            await host.stopRuntime()
+            check("a Stop that leaves every module down stops the path observer", !path.isObserving)
+            try await host.startRuntime()
+            check("a Start after that Stop observes the path again", path.isObserving)
+            path.emit(NetworkPathState(
+                status: .satisfied, interfaces: [.init(name: "en0", type: "wifi")], gateways: ["192.0.2.1"],
+                supportsIPv4: true, supportsIPv6: false, supportsDNS: true
+            ))
+            var pathHandled = false
+            let pathDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !pathHandled, ContinuousClock.now < pathDeadline {
+                _ = await host.flushEvents()
+                pathHandled = try recordedEvents(in: environment.eventsFile).contains { $0.event == "network.path_changed" }
+                if !pathHandled { try await Task.sleep(for: .milliseconds(10)) }
+            }
+            check("a path report after the restart reaches the host's path handling", pathHandled)
 
             await host.stopRuntime()
             let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
@@ -1306,11 +1410,15 @@ enum RuntimeHostEffectsScenario {
             let decoder = ConnectionAuditRecord.canonicalDecoder
             let rows = try text.split(separator: "\n").map { try decoder.decode(ConnectionAuditRecord.self, from: Data($0.utf8)) }
             notes.append("audit rows: \(rows.count)")
-            check("the owned audit file holds the served request's one row", rows.count == 1)
+            let served = rows.filter { $0.target.hasPrefix("http://127.0.0.1:\(originPort)/v1/resource") }
+            check("the owned audit file holds the served request's one row", served.count == 1)
             check("the row keeps the target's authority and path and redacts its query",
-                  rows.first?.target == "http://127.0.0.1:\(originPort)/v1/resource?<redacted>")
-            check("the row records the DIRECT route", rows.first?.chosenUpstream == "DIRECT")
+                  served.first?.target == "http://127.0.0.1:\(originPort)/v1/resource?<redacted>")
+            check("the row records the DIRECT route", served.first?.chosenUpstream == "DIRECT")
             check("no row carries the query value", !text.contains(secret))
+            let burstRows = rows.filter { $0.target.hasPrefix("http://127.0.0.1:\(originPort)/v1/item/") }
+            check("each connection of the mixed-priority burst has its one row",
+                  burstRows.count == burst && Set(burstRows.map(\.id)).count == burst && rows.count == 1 + burst)
         } catch {
             check("the audit exercise completed without error", false)
             // The error path joins the host's work before anything is released: stop, settle, then flush, then judge.
@@ -1331,7 +1439,7 @@ enum RuntimeHostEffectsScenario {
     /// teardown waits for the action already running. A VPN drop taken meanwhile queues its entry-file removal behind the parked work
     /// rather than running it on the owner. Released, the Stop's clears land after the apply, so no variable is left, no entry file
     /// outlives the tunnel, and the reload reports its pass not current.
-    @MainActor
+    @RuntimeActor
     private static func exerciseHeldFlagAction(
         session: StateRootSession,
         environment: RuntimeEnvironment,
@@ -1386,7 +1494,13 @@ enum RuntimeHostEffectsScenario {
                 limits: try controlProfile(), clientFrameLimits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
             )
             held.arm()
+            // The owner is not the main thread: the whole held exchange is answered with the main thread parked.
+            let park = MainThreadPark()
+            defer { park.release() }
+            await park.park(seconds: 60)
             let seen = try await reloadAndStopWhileHeld(clients.control, host: host, held: held, vpn: vpn, machine: machine)
+            check("the main thread stayed parked while the held exchange was answered", park.isParked)
+            park.release()
             notes.append("environment writes by the held apply: \(held.writes); hold timed out: \(held.timedOut)")
             check("the flag action's write reaches the platform queue, not the main thread", seen.reached && !held.reachedOnMainThread)
             check("the framed snapshot answers while the flag action is held", seen.snapshotAnswered)
@@ -1425,6 +1539,43 @@ enum RuntimeHostEffectsScenario {
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
     }
 
+    /// Parks the main thread in one bounded main-queue block, until `release()` or the limit. Called off the main thread.
+    private final class MainThreadPark: @unchecked Sendable {
+        private let condition = NSCondition()
+        private var parked = false
+        private var released = false
+        private var began: CheckedContinuation<Void, Never>?
+
+        var isParked: Bool { condition.withLock { parked } }
+
+        /// Returns once the main thread is parked.
+        func park(seconds: TimeInterval) async {
+            let deadline = Date(timeIntervalSinceNow: seconds)
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                condition.withLock { began = continuation }
+                DispatchQueue.main.async { [self] in
+                    let resume = condition.withLock { () -> CheckedContinuation<Void, Never>? in
+                        parked = true
+                        defer { began = nil }
+                        return began
+                    }
+                    resume?.resume()
+                    condition.withLock {
+                        while !released, condition.wait(until: deadline) {}
+                        parked = false
+                    }
+                }
+            }
+        }
+
+        func release() {
+            condition.withLock {
+                released = true
+                condition.broadcast()
+            }
+        }
+    }
+
     /// What the client saw around the held flag action.
     private struct HeldFlagWitness {
         var reached = false
@@ -1439,7 +1590,7 @@ enum RuntimeHostEffectsScenario {
 
     /// A reload through the framed client whose flag action `held` parks, then a VPN drop and a proxy Stop while it is parked, then the
     /// release and both settlements. Every wait is bounded, and the hold is released on every path.
-    @MainActor
+    @RuntimeActor
     private static func reloadAndStopWhileHeld(
         _ client: any RuntimeClient, host: RuntimeHost, held: HeldSetenv, vpn: FakeVPNStatusObserver, machine: FakeMachine
     ) async throws -> HeldFlagWitness {
@@ -1464,8 +1615,9 @@ enum RuntimeHostEffectsScenario {
         }
         witness.reached = held.isHeld
         guard witness.reached else { return witness }
-        // The drop's delivery is queued on the main actor before the snapshot's round trip, so it has run by the time the snapshot
-        // answers: an inline removal would be on the machine by then.
+        // The drop's delivery and the snapshot's owner hop are both queued from this task, at its priority, the drop's first. An inline
+        // removal would be on the machine by the time the snapshot answers. That the drop's turn ran before the Stop's is not assumed
+        // here: `dropLandedBeforeStopRestore` checks the order the platform queue took after the release.
         let removalsBefore = machine.privilege.commands(matching: .removeDNS).count
         let commandsBefore = machine.privilege.commands.count
         vpn.emit(.disconnected(reason: .userInitiated))
@@ -1553,6 +1705,15 @@ enum RuntimeHostEffectsScenario {
 
         func release() { released.signal() }
 
+        /// Whether the released writer's queue physically emptied, bounded and off the caller. A timed-out drain's notify stays
+        /// registered until then, so a drain issued before it may honestly be `busy`; once the queue is empty a fresh drain is not.
+        func joinDrained() async -> Bool {
+            guard let writer = file.withLockedValue({ $0 }) else { return true }
+            return await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async { continuation.resume(returning: writer.flush(timeout: 10)) }
+            }
+        }
+
         func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
             let line = Data((LogEntry(level: level, category: category, message: message).formatted() + "\n").utf8)
             file.withLockedValue { $0?.write(line) }
@@ -1596,7 +1757,7 @@ enum RuntimeHostEffectsScenario {
 
     /// Starts, fails and restarts, then stops and flushes one `RuntimeHost`. On success the host is dropped on return.
     /// Every path ends with a stop and a flush, so the host's own work is joined before the caller releases the root.
-    @MainActor
+    @RuntimeActor
     private static func exercise(
         session: StateRootSession,
         environment: RuntimeEnvironment,
@@ -1611,7 +1772,7 @@ enum RuntimeHostEffectsScenario {
         let probe = fakes.probe
         let pac = fakes.pac
         let gss = fakes.gss
-        var terminalExits = 0
+        let terminalExits = NIOLockedValueBox(0)
 
         let host: RuntimeHost
         do {
@@ -1620,7 +1781,7 @@ enum RuntimeHostEffectsScenario {
                 logger: DiscardingLogSink(),
                 startupAllowsMissing: true,
                 startedAt: Date(timeIntervalSince1970: 1_700_000_000),
-                terminalExit: { terminalExits += 1 },
+                terminalExit: { terminalExits.withLockedValue { $0 += 1 } },
                 effects: effects(fakes, home: home)
             )
         } catch {
@@ -1689,7 +1850,7 @@ enum RuntimeHostEffectsScenario {
             check("each Start's settlements share its group, and the restart's is newer",
                   Set(written.prefix(3).map(\.group)).count == 1 && Set(written.dropFirst(3).map(\.group)).count == 1
                     && (written.first?.group ?? .max) < (written.last?.group ?? .min))
-            check("a non-terminal stop does not call the terminal exit", terminalExits == 0)
+            check("a non-terminal stop does not call the terminal exit", terminalExits.withLockedValue { $0 } == 0)
 
             // The fake refuses a command the scenario did not plan, and the refusal is a failure, not a success.
             let refusal = try machine.run("/usr/bin/security", ["find-generic-password"])
@@ -1717,7 +1878,7 @@ enum RuntimeHostEffectsScenario {
     /// Drops this run's reference to the root, then proves the lease closed with a fresh acquisition. The scratch
     /// directory is removed only when that proof and the close-failure count both agree. An unknown close keeps the root
     /// and the directory, and the first close errno is reported when there was a failure.
-    @MainActor
+    @RuntimeActor
     private static func releaseRoot(
         _ session: inout StateRootSession?,
         environment: RuntimeEnvironment,
@@ -1749,7 +1910,7 @@ enum RuntimeHostEffectsScenario {
 
     /// Whether a fresh acquisition of the root succeeds. The probe's session is dropped on return, so a success here
     /// proves the lease closed. A busy or refused root reports `false`.
-    @MainActor
+    @RuntimeActor
     private static func leaseReacquires(
         _ environment: RuntimeEnvironment,
         releaseFailures: ReleaseFailureCounter

@@ -1,0 +1,63 @@
+{
+  "stage": "RuntimeActor Stage A r2 (review corrections + #260 NetworkMonitor restart); owner isolation still MainActor, no RuntimeActor, no retag",
+  "root": "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit",
+  "branch": "codex/runtime-actor-isolation",
+  "base_head_seen": "e62683181a0f0092d136abfed8f9596db98d0088 (parent integrates Git)",
+  "source_frozen": true,
+  "issue": "https://github.com/srps/Conduit/issues/260",
+  "files_changed_in_r2": {
+    "sources": [
+      "Sources/PlatformMac/NetworkMonitor.swift (#260 fix)",
+      "Sources/PlatformMac/LaunchRecovery.swift (comment only)",
+      "Sources/ConduitRuntime/RuntimeHost.swift (comment only)",
+      "Sources/pm-sim/RuntimeHostEffectsScenarios.swift (effects path parameter + path-observer restart row)"
+    ],
+    "tests_added": [
+      "Tests/ConduitTests/NetworkMonitorTests.swift"
+    ],
+    "tests_modified": [
+      "Tests/ConduitTests/HeldCall.swift",
+      "Tests/ConduitTests/HeldCallTests.swift",
+      "Tests/ConduitTests/SnapshotCoalescingTests.swift",
+      "Tests/ConduitTests/RuntimeHostInteractiveTests.swift (teardown assertion only)",
+      "Tests/ConduitTests/AppStateHarnessTests.swift (teardown assertion only)",
+      "Tests/ConduitTests/DaemonRuntimeHostTests.swift (teardown assertion only)"
+    ],
+    "stage_a_r1_files_unchanged_since_r1": "all other Stage A files in runtime-actor-stagea-manifest.json; ProxyOrchestrator.swift guard was removed for the control run and restored byte-for-byte before the green runs"
+  },
+  "changes": {
+    "network_monitor": "One NSLock over one State {onChange, generation, active (fresh NWPathMonitor + TrailingDebouncer)}; existing serial queue. start(): check/bump generation/build/store active atomically under the lock, idempotent while active; monitor.start(queue:) outside the lock. stop(): take active, bump generation only if one was active, idempotent; debouncer.cancel and monitor.cancel outside the lock. Debouncer delivery captures [weak self]; deinit cancels the active monitor/debouncer. deliver(armedAs:) checks generation and reads onChange in one locked step, calls it outside. No API, factory, protocol, hook or setting.",
+    "held_call": "recordedExcept removed. Sticky takenOnCooperativePool asserted false in InteractiveHostHarness, AppStateHarness and DaemonHarness teardowns. Held calls are release tickets (issued/released): each release lets the oldest held call go; with nothing held it pre-releases the current arm; with nothing armed or held it is a no-op; a call taken without being held issues no ticket, so it never lets another arm's call go. Re-arming while held hands the hold on (see deviation).",
+    "coalesce_witness": "testACoalescedFlushWhoseHopWaitsForTheOwnerEmitsOnceAfterIt (non-discriminating) replaced by testAStaleCoalesceHopAfterAnImmediateEmitAndRearmFlushesNothingEarly: one GCD main block arms timer 1, queues the immediate-emit+re-arm block, then holds main 400 ms so timer 1's hop queues behind it; probe block queued after. Positive log witness [emit, held, emit, rearmed, probe] then exactly one more emit. Uses only existing seams and main-queue FIFO; parks main because main is the owner today (Stage B needs an owner-ordering witness instead).",
+    "pm_sim": "runtime-host-effects connection-audit exercise: path observer runs while the proxy runs; a Stop leaving every module down stops it; the next Start observes again; a FakeNetworkPathObserver report after the restart produces network.path_changed in events.ndjson. Host seam only; the real adapter is NetworkMonitorTests."
+  },
+  "deviation_from_approved_plan": "Approved plan was XCTFail on re-arm while held (testRearmingWhileACallIsHeldFails with XCTExpectFailure). The control run XURVaD showed an existing legitimate pattern: DaemonRuntimeHostTests.testAVPNFlapAndAStopDuringAStartsHeldEntryFileTailEndInOrderAndStopped (lines 3737-3740) arms the next call while the first is held and then releases, because arming after release races the serial platform queue. Replaced with the ticket semantics above and testARearmWhileACallIsHeldHandsTheHoldOn, which witnesses both reviewer defects fixed (an unheld take no longer wakes the held call; a release after re-arm frees the held call and does not pre-release the new arm). Parent/reviewer to confirm.",
+  "tests_added_or_changed_r2": [
+    "NetworkMonitorTests.testARestartedMonitorReportsAgain",
+    "NetworkMonitorTests.testAStartWhileActiveAndAStopWhileStoppedChangeNothing",
+    "SnapshotCoalescingTests.testAStaleCoalesceHopAfterAnImmediateEmitAndRearmFlushesNothingEarly (replaces testACoalescedFlushWhoseHopWaitsForTheOwnerEmitsOnceAfterIt)",
+    "HeldCallTests.testARecordedArmRecordsTheWrongExecutorAndHoldsItsQueue (was testAStrictArm...)",
+    "HeldCallTests.testARearmWhileACallIsHeldHandsTheHoldOn",
+    "HeldCallTests.testACallOnThePoolIsRecordedAndLetThroughNeverHeld (adds sticky-flag check)",
+    "HeldCallTests.testThePoolIsToldApartFromTheQueuesTheHostsUse (exact global-label equalities dropped)",
+    "pm-sim runtime-host-effects: 4 new path-observer restart checks"
+  ],
+  "verification_r2": [
+    {"run": "runtime-diagnostic-targeted-9uYlww", "mode": "targeted held-logger (wrapper has no network-monitor mode; held-logger includes NetworkMonitorTests, held logger and the 3 reprobe cases)", "source": "OLD NetworkMonitor + new NetworkMonitorTests", "result": "EXPECTED BASELINE FAILURE, exit 1: 6 tests, 2 failures — both NetworkMonitorTests fail at the restart assertion (lines 35 and 55) after the first start reported. Held-logger and 3 reprobe cases passed."},
+    {"run": "runtime-actor-prep-focused-XURVaD", "mode": "default normal focused (wrapper has no stale-coalesce mode), coalesce generation guard temporarily removed", "result": "CONTROL, exit-code 1: 643 tests, 3 failures. (a) Intended positive failure: testAStaleCoalesceHop... lines 224 and 231, log [emit, held, emit, rearmed, emit, probe] — stale hop flushed before the probe. (b) Unintended: HeldCall re-arm XCTFail in DaemonRuntimeHostTests.testAVPNFlapAndAStop... (legitimate hand-over pattern; led to the deviation). NetworkMonitorTests passed with the fix. Guard restored afterwards."},
+    {"run": "runtime-actor-prep-focused-mtaLd9", "mode": "normal focused", "result": "INVALID ATTEMPT (my pm-sim string): all 643 selected tests passed, pm-sim no [fail], imports pass; check-event-catalogue failed: pm-sim referred to prefix `network.path_` (not catalogued). Fixed to exact catalogued `network.path_changed`."},
+    {"run": "runtime-actor-prep-focused-ZFzM5n", "mode": "normal focused", "result": "GREEN, exit-code 0: 643 tests, 0 failures (includes NetworkMonitorTests, VPNReprobeRecoveryTests, ConnectivityProbeSupersessionTests, RuntimeHostAuditTests, LaunchRecoveryTests, HeldCallTests 7). pm-sim runtime-host-effects, relay-reassert-after-stop, bounded-writers no [fail]; imports, catalogue, decisions, diff-check pass."},
+    {"run": "runtime-actor-prep-focused-Q5sH02", "mode": "scoped strict (LIBDISPATCH_COOPERATIVE_POOL_STRICT=1)", "result": "GREEN, exit-code 0: 39 tests, 0 failures — ConnectionTracking 8, ConnectivityProbeSupersession reprobe case, HeldCall 7, LaunchRecovery 4, NetworkMonitor 2, RuntimeHostAudit 8, held-logger case, SnapshotCoalescing 6, VPNReprobeRecovery 2. pm-sim runtime-host-effects and relay no [fail]; bounded-writers skipped by design; checks pass."}
+  ],
+  "earlier_attempts_preserved": "r1: CQbYfY invalid compile; q9FKCV invalid wrapper mid-edit (exit 2, tests had passed); k8yvGr aborted unsuitably broad strict fixture attempt (DiagnosticDrainPhase/RecordDrainWaiter deliberately blocking fixtures).",
+  "markers": "runtime-diagnostic-targeted-mode is empty (default). runtime-actor-strict-pool EXISTS (created by Claude for Q5sH02; Claude cannot delete it) — parent must unlink before any normal wrapper run.",
+  "limits": [
+    "NetworkMonitor generation guard (a late report from a stopped monitor/debouncer after restart) is inspected, not witnessed: the real NWPathMonitor cannot be forced to deliver late. A report already claimed before stop can still reach the callback it read; the host's own token fence handles that.",
+    "NetworkMonitorTests observe the real machine path read-only; they rely on NWPathMonitor's documented initial report after start (bounded 5 s wait).",
+    "Stale-coalesce witness: nothing observes timer 1 firing inside the 400 ms hold; the guard-removal control (XURVaD) shows the test discriminates. It parks main as the owner and must be re-expressed for Stage B.",
+    "Relay (30 s) and DNS-health (30 s) timers still have no firing witness; direct-mode reprobe firing is covered by the 3 reprobe tests (normal and strict).",
+    "Mixed-priority connection witness runs on the MainActor owner; meaningful ordering evidence comes after Stage B.",
+    "Harness teardown pool assertion covers the three harness holds only; locally created holds (PlatformOperationLockTests, RelayLifecycleTests, HeldStateFileRead, ReadThenHoldSecretStore) are not covered.",
+    "No RuntimeActor, parked-owner framed witness, held-effect table, fairness counts, TSan, Release capture, native/real-machine/VPN/helper evidence."
+  ]
+}

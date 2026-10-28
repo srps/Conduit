@@ -1,0 +1,24 @@
+{
+  "reason": "Independent reviewer requires one regression-test guard/reordering; stop full workflow before mutating frozen test file. No product source defect.",
+  "time": "2026-10-28T13:44:39.041332+00:00",
+  "root_pid": 26766,
+  "owned_process_tree": [
+    {
+      "pid": 26766,
+      "ppid": 11271,
+      "comm": "python3"
+    },
+    {
+      "pid": 36666,
+      "ppid": 26766,
+      "comm": "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift-test"
+    },
+    {
+      "pid": 36819,
+      "ppid": 36666,
+      "comm": "/Applications/Xcode.app/Contents/Developer/usr/bin/xctest"
+    }
+  ],
+  "signal": "SIGTERM exact owned process tree only",
+  "serving_app_touched": false
+}

@@ -7,7 +7,7 @@ import XCTest
 
 final class ProxyOrchestratorLocalPACTests: XCTestCase {
 
-    @MainActor
+    @RuntimeActor
     func testLocalPACStartsWithActualBoundProxyPort() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = [.init(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
@@ -28,7 +28,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     func testRoutingReloadUpdatesServedPACScript() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = [.init(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
@@ -58,7 +58,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     func testVPNRoutingChangesKeepServedBrowserPACStable() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = [.init(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
@@ -81,7 +81,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     func testRoutingReloadDisablesLocalPACServer() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -103,7 +103,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     func testStrictModeReloadUpdatesServedPACScript() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = [.init(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
@@ -133,7 +133,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     func testUpstreamAvailabilityHotReloadUpdatesServedPACWithoutRestart() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -189,7 +189,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
     /// A stop admitted while a reload's PAC listener restart is out supersedes the restart at its next epoch check. That is reported as
     /// a supersession, not as a failed PAC update, and the stop leaves no PAC listener behind. The test observes `local_pac.restarting`,
     /// which the restart emits just before its first suspension, and admits the stop then; the stop takes its epoch before it suspends.
-    @MainActor
+    @RuntimeActor
     func testAStopDuringAReloadPACRestartIsReportedAsSupersededNotFailed() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -204,7 +204,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
             // A different fixed port forces the restart branch. The restart is superseded before it binds, so the port is never taken.
             moved.localPACPort = boundPort == 65535 ? boundPort - 1 : boundPort + 1
             let before = orchestrator.eventLog.events.count
-            let reload = Task { @MainActor in await orchestrator.applyConfigChange(moved) }
+            let reload = Task { @RuntimeActor in await orchestrator.applyConfigChange(moved) }
             for _ in 0..<5_000 where !orchestrator.eventLog.events.contains(where: { $0.event == "local_pac.restarting" }) {
                 await Task.yield()
             }
@@ -225,7 +225,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
     /// snapshot still reads running. A strict-mode edit reaches the PAC branch with no suspension, so the decision is made inside that
     /// window: both run on the main actor, and the stop cannot end until this test yields. The refresh is deferred to the next start
     /// instead of taking the stop's epoch, waiting behind its teardown and binding the PAC listener after it.
-    @MainActor
+    @RuntimeActor
     func testAReloadDuringAStopDoesNotRebindThePACListenerAfterIt() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -267,7 +267,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
     }
 
     /// The same window for a listener edit: a restart admitted during the stop would supersede it and start the proxy again.
-    @MainActor
+    @RuntimeActor
     func testAListenerReloadDuringAStopDoesNotStartTheProxyAgain() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -295,7 +295,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
 
     /// The same window for a health interval edit: the stop already ended the health loop, so the reload restarts nothing and the next
     /// start runs the loop with the new interval.
-    @MainActor
+    @RuntimeActor
     func testAHealthReloadDuringAStopDoesNotRestartTheHealthLoop() async throws {
         var config = ProxyConfig.testFixture()
         // One loopback upstream, which the fixture's probe reports unreachable: on the VPN that is `upstreamsUnreachable`, a cause that
@@ -327,7 +327,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
     /// The restart's own stop is in flight when a user stop is admitted. The restart then must not start over that newer stop; it is
     /// reported as superseded, and the edit is left in the config for the next start. The restart reaches its stop with no suspension,
     /// so the test admits its stop as soon as it sees one in flight.
-    @MainActor
+    @RuntimeActor
     func testAStopDuringAListenerRestartsOwnTeardownIsNotOvertakenByTheRestart() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -341,7 +341,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
             var moved = orchestrator.config
             moved.socksPort = moved.socksPort == 65535 ? 65534 : moved.socksPort + 1
             let before = orchestrator.eventLog.events.count
-            let reload = Task { @MainActor in await orchestrator.applyConfigChange(moved) }
+            let reload = Task { @RuntimeActor in await orchestrator.applyConfigChange(moved) }
             for _ in 0..<5_000 where !orchestrator.isStopInFlight {
                 await Task.yield()
             }
@@ -363,7 +363,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
 
     /// An upstream reload probes under its own lifecycle. A stop is admitted and finishes while that probe is out, so the result is
     /// dropped: the stopped runtime's routing and upstream status stay as the stop left them, and the edit waits for the next start.
-    @MainActor
+    @RuntimeActor
     func testAnUpstreamReloadProbeThatOutlivesAStopCommitsNoRouting() async throws {
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -401,9 +401,9 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
 
     /// Admits a stop and returns once it has taken its epoch and suspended in its teardown, before it publishes `stopped`. The caller
     /// must not suspend before acting on that window.
-    @MainActor
+    @RuntimeActor
     private static func stopHeldInFlight(_ orchestrator: ProxyOrchestrator) async -> Task<Void, Never> {
-        let stop = Task { @MainActor in await orchestrator.stopProxy() }
+        let stop = Task { @RuntimeActor in await orchestrator.stopProxy() }
         for _ in 0..<5_000 where !orchestrator.isStopInFlight {
             await Task.yield()
         }
@@ -436,7 +436,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
         return String(decoding: data, as: UTF8.self)
     }
 
-    @MainActor
+    @RuntimeActor
     private func withStartedOrchestrator(
         _ config: ProxyConfig,
         body: (ProxyOrchestrator) async throws -> Void

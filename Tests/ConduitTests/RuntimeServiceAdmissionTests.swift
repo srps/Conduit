@@ -2,14 +2,14 @@
 import XCTest
 @testable import ConduitRuntime
 import ConduitShared
+import ProxyKernel
 
 /// The admission path, driven through the production service against a fake owner and a manual hop queue. Every
 /// decision is the service's: recovery, conflict, incarnation, bounds, supersession and aging. Every fence is the owner's.
-@MainActor
 final class RuntimeServiceAdmissionTests: XCTestCase {
     private let lifecycle = ControlLifecycleRevision(rawValue: 5) ?? ControlLifecycleRevision(rawValue: 0)!
 
-    func testRecoveredRequestRecoversItsAdmissionWithoutAFreshFence() throws {
+    @RuntimeActor func testRecoveredRequestRecoversItsAdmissionWithoutAFreshFence() async throws {
         let harness = try RuntimeServiceHarness()
 
         let first = harness.core.submit(try RuntimeServiceFixtures.request(1, .stop(.dns)))
@@ -18,7 +18,7 @@ final class RuntimeServiceAdmissionTests: XCTestCase {
         XCTAssertEqual(harness.owner.fenceLog.count, 1, "a recovered request is never fenced again")
     }
 
-    func testSamePayloadConflictIsRefusedAndTheEarlierAdmissionIsNotReused() throws {
+    @RuntimeActor func testSamePayloadConflictIsRefusedAndTheEarlierAdmissionIsNotReused() async throws {
         let harness = try RuntimeServiceHarness()
 
         _ = harness.core.submit(try RuntimeServiceFixtures.request(1, .stop(.dns)))
@@ -26,7 +26,7 @@ final class RuntimeServiceAdmissionTests: XCTestCase {
         XCTAssertEqual(harness.owner.fenceLog.count, 1)
     }
 
-    func testAnotherIncarnationIsRefusedAndNothingIsRecorded() throws {
+    @RuntimeActor func testAnotherIncarnationIsRefusedAndNothingIsRecorded() async throws {
         let harness = try RuntimeServiceHarness()
 
         let other = RuntimeServiceFixtures.incarnation(7)
@@ -38,7 +38,7 @@ final class RuntimeServiceAdmissionTests: XCTestCase {
         XCTAssertTrue(harness.owner.fenceLog.isEmpty, "a refused incarnation never reaches the owner")
     }
 
-    func testEveryStopReachesTheOwnerIncludingACoalescingOne() throws {
+    @RuntimeActor func testEveryStopReachesTheOwnerIncludingACoalescingOne() async throws {
         let harness = try RuntimeServiceHarness()
 
         guard case .accepted(let first) = harness.core.submit(try RuntimeServiceFixtures.request(1, .stop(.dns))) else {
@@ -48,7 +48,7 @@ final class RuntimeServiceAdmissionTests: XCTestCase {
         XCTAssertEqual(harness.owner.fenceLog.map { $0.candidate }, [nil, first], "the owner decides the join, with the candidate")
     }
 
-    func testAFreshStopSupersedesACandidateTheOwnerReplaces() throws {
+    @RuntimeActor func testAFreshStopSupersedesACandidateTheOwnerReplaces() async throws {
         let harness = try RuntimeServiceHarness()
         harness.owner.answer = { _, _ in .admitted }
 
@@ -61,7 +61,7 @@ final class RuntimeServiceAdmissionTests: XCTestCase {
         XCTAssertEqual(harness.core.pendingOperationCount, 1, "the stop slot moves to the newer operation")
     }
 
-    func testAStopFloodStaysInsideItsPartitionAndAnotherModuleStillAdmits() throws {
+    @RuntimeActor func testAStopFloodStaysInsideItsPartitionAndAnotherModuleStillAdmits() async throws {
         let harness = try RuntimeServiceHarness(aliases: 8)
 
         for id in 1...40 {
@@ -73,7 +73,7 @@ final class RuntimeServiceAdmissionTests: XCTestCase {
         }
     }
 
-    func testOrdinaryQueueFullIsNotRecordedSoARetryIsAdmittedLater() throws {
+    @RuntimeActor func testOrdinaryQueueFullIsNotRecordedSoARetryIsAdmittedLater() async throws {
         let harness = try RuntimeServiceHarness(ordinaryPending: 1)
 
         guard case .accepted(let first) = harness.core.submit(try RuntimeServiceFixtures.request(1, .restart(.proxy, ifLifecycleRevision: lifecycle))) else {
@@ -96,7 +96,7 @@ final class RuntimeServiceAdmissionTests: XCTestCase {
     /// A rejected stop is recorded as its rejection, and a retry of the same payload recovers that rejection without a fresh
     /// fence. A rejection takes no stop slot, so a later stop for the module is fenced on its own. This covers both modules,
     /// and the bounded model's join and reject alphabet covers `.dns` only.
-    func testARejectedStopIsRecordedAndRecoversItsRejectionWithoutAFreshFence() throws {
+    @RuntimeActor func testARejectedStopIsRecordedAndRecoversItsRejectionWithoutAFreshFence() async throws {
         for module in [ControlModule.dns, .proxy] {
             let harness = try RuntimeServiceHarness()
             harness.owner.answer = { _, _ in .rejected(.hostStopping) }
@@ -116,7 +116,7 @@ final class RuntimeServiceAdmissionTests: XCTestCase {
         }
     }
 
-    func testSynchronousCompletionFindsTheFinalRecord() throws {
+    @RuntimeActor func testSynchronousCompletionFindsTheFinalRecord() async throws {
         let harness = try RuntimeServiceHarness()
         harness.owner.completesSynchronously = true
 
@@ -129,7 +129,7 @@ final class RuntimeServiceAdmissionTests: XCTestCase {
         XCTAssertEqual(harness.core.liveOperationCount, 0, "a synchronously quiesced operation holds nothing")
     }
 
-    func testPendingNeverAgesAndAFinishedRecordExpiresFromItsSettlement() throws {
+    @RuntimeActor func testPendingNeverAgesAndAFinishedRecordExpiresFromItsSettlement() async throws {
         let harness = try RuntimeServiceHarness()
 
         guard case .accepted(let operation) = harness.core.submit(try RuntimeServiceFixtures.request(1, .restart(.proxy, ifLifecycleRevision: lifecycle))) else {

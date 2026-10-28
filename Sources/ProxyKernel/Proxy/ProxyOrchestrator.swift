@@ -252,7 +252,7 @@ private final class AuthProviderHolder: @unchecked Sendable {
     }
 }
 
-@MainActor
+@RuntimeActor
 package final class ProxyOrchestrator {
     package var onSnapshotChange: ((ProxyOrchestratorSnapshot) -> Void)? {
         // Fire the initial snapshot synchronously when the consumer wires
@@ -354,6 +354,9 @@ package final class ProxyOrchestrator {
     /// `emitSnapshotImmediate()` can cancel a pending flush. The timer
     /// captures `[weak self]`, so one that fires after a teardown is safe.
     private var snapshotCoalesceTimer: DispatchSourceTimer?
+    /// Advanced by every arm and cancel of `snapshotCoalesceTimer`. The timer fires on a global queue and hops to the owner, so a hop
+    /// can arrive after its timer was cancelled or replaced; it flushes only under the generation it was armed with.
+    private var snapshotCoalesceGeneration: UInt64 = 0
 
     /// State-transition emit. Bypasses the throttle, cancels any pending
     /// coalesced flush, and fires `onSnapshotChange` synchronously.
@@ -363,6 +366,7 @@ package final class ProxyOrchestrator {
             snapshotCoalescePending = false
             snapshotCoalesceTimer?.cancel()
             snapshotCoalesceTimer = nil
+            snapshotCoalesceGeneration &+= 1
         }
         onSnapshotChange?(snapshot)
     }
@@ -373,11 +377,14 @@ package final class ProxyOrchestrator {
     private func emitSnapshotCoalesced() {
         snapshotCoalescePending = true
         guard snapshotCoalesceTimer == nil else { return }
-        let timer = DispatchSource.makeTimerSource(queue: .main)
+        snapshotCoalesceGeneration &+= 1
+        let generation = snapshotCoalesceGeneration
+        // One-shot, so it hops once. Sendable, so it assumes no actor on the queue it fires on.
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
         timer.schedule(deadline: .now() + Self.snapshotCoalesceInterval)
-        timer.setEventHandler { [weak self] in
-            MainActor.assumeIsolated {
-                self?.flushPendingSnapshot()
+        timer.setEventHandler { @Sendable [weak self] in
+            Task { @RuntimeActor [weak self] in
+                self?.flushPendingSnapshot(armedAs: generation)
             }
         }
         timer.resume()
@@ -387,9 +394,12 @@ package final class ProxyOrchestrator {
     /// Timer handler. Drops the timer reference, then emits if a coalesced
     /// flush is still pending (a state-transition emit might have already
     /// flushed and cancelled in the gap between schedule and fire — in
-    /// which case `snapshotCoalescePending` is false and we no-op).
-    private func flushPendingSnapshot() {
+    /// which case `snapshotCoalescePending` is false and we no-op). A hop
+    /// from a timer that was cancelled or replaced since does nothing.
+    private func flushPendingSnapshot(armedAs generation: UInt64) {
+        guard generation == snapshotCoalesceGeneration else { return }
         snapshotCoalesceTimer = nil
+        snapshotCoalesceGeneration &+= 1
         guard snapshotCoalescePending else { return }
         snapshotCoalescePending = false
         onSnapshotChange?(snapshot)
@@ -464,7 +474,6 @@ package final class ProxyOrchestrator {
     /// snapshot — the lookup must succeed because the production
     /// callback runs BEFORE the connection is removed from the
     /// snapshot.
-    @MainActor
     package func recordConnectionCloseForAudit(id: UUID, info: ActiveConnectionInfo? = nil) {
         guard let info = info ?? snapshot.activeConnections.ordered.first(where: { $0.id == id }) else {
             return
@@ -576,15 +585,15 @@ package final class ProxyOrchestrator {
     }
 
     /// Reporter for runtime auth outcomes. Called from the NIO-spawned
-    /// auth `Task` (off the main actor) via the `outcomeHandler` closure
+    /// auth `Task` (off the owner) via the `outcomeHandler` closure
     /// threaded through `credentialBasedAuthenticatorProvider`. Emits the
     /// `.auth` event first (per AGENTS.md "events-first" invariant),
     /// derives the human-readable log line from the same decision, and
-    /// schedules a MainActor hop to mutate the snapshot so the UI chip
+    /// schedules an owner hop to mutate the snapshot so the UI chip
     /// reflects runtime reality rather than configured intent.
     ///
     /// `nonisolated` because the call site is an NIO Task; we do the hop
-    /// internally rather than forcing every caller to wrap in `Task { @MainActor in }`.
+    /// internally rather than forcing every caller to wrap in `Task { @RuntimeActor in }`.
     package nonisolated func reportAuthOutcome(
         _ outcome: RuntimeAuthOutcome,
         host: String,
@@ -608,21 +617,28 @@ package final class ProxyOrchestrator {
         // `.ntlmFallback` logs whenever its event was emitted: once per
         // host and reason per minute (#99). The snapshot follows every
         // outcome, reported or not, so the UI chip stays current.
-        Task { @MainActor [weak self] in
+        Task { @RuntimeActor [weak self] in
             guard let self else { return }
+            // The proxy listeners and the proxied tunnels both authenticate through the late-bound provider, so either one admitted
+            // running is a producer whose outcome is the chip's. A hop that lands once neither admits running publishes nothing, and logs no
+            // transition the chip will not show: the proxy's stop cleared the outcome, and the next run reports its own. Before either
+            // admitted anything, nothing has cleared it.
+            let publishes = self.proxyLifecycle.admitsRunning || self.tunnelLifecycle.admitsRunning
+                || (self.proxyLifecycle.epoch == 0 && self.tunnelLifecycle.epoch == 0)
             let prior = self.snapshot.lastAuthOutcome
             switch outcome {
             case .ntlmFallback:
                 if let fallbackLine {
                     self.logStore.log(.notice, fallbackLine, category: .auth)
                 }
-            case .kerberos where prior != .kerberos:
+            case .kerberos where publishes && prior != .kerberos:
                 self.logStore.log(.notice, "Using Kerberos for \(host).", category: .auth)
-            case .ntlmDirect where prior != .ntlmDirect:
+            case .ntlmDirect where publishes && prior != .ntlmDirect:
                 self.logStore.log(.notice, "Using NTLMv2 (configured) for \(host).", category: .auth)
             default:
                 break
             }
+            guard publishes else { return }
             self.mutateSnapshot { snap in
                 snap.lastAuthOutcome = outcome
                 snap.lastAuthOutcomeAt = Date()
@@ -981,12 +997,14 @@ package final class ProxyOrchestrator {
     /// tells `reassertTransparentRelay` there is something to reassert.
     private var tcpRelayActive = false
     /// Advanced by every relay start and stop. The reassert probe runs off
-    /// the main actor; its result is applied only if no start or stop ran
+    /// the owner; its result is applied only if no start or stop ran
     /// meanwhile, so a stop during the probe is never followed by a fresh
     /// start (#199).
     private var tcpRelayGeneration: UInt64 = 0
     /// See `startTransparentRelayTimer`.
     private var transparentRelayTimer: DispatchSourceTimer?
+    /// Advanced by every stop of `transparentRelayTimer`, a restart's included; a tick acts only under the generation it was armed with.
+    private var transparentRelayTimerGeneration: UInt64 = 0
     /// Whether a reassert is in flight, from its tick to its reissue's end. One at a time (`beginRelayReassert`).
     private var transparentRelayReassertInFlight = false
     private static let transparentRelayProbeInterval: TimeInterval = 30
@@ -1057,7 +1075,7 @@ package final class ProxyOrchestrator {
     /// them, and its recovery runs the re-sweeps.
     private var strandedSweepsOwed: String?
     /// Mirror of `snapshot.vpnState == .connected` for the DNS forwarder's
-    /// `@Sendable` DoH transport preference (NIO handlers cannot read MainActor
+    /// `@Sendable` DoH transport preference (NIO handlers cannot read the owner's
     /// snapshot). Updated in `handleVPNStateChange`.
     private let vpnConnectedForDNSBox = NIOLockedValueBox(false)
 
@@ -1072,6 +1090,8 @@ package final class ProxyOrchestrator {
     /// flaps simply don't reach this layer.
     private var flapStartedAt: Date?
     private var directModeReprobeTimer: DispatchSourceTimer?
+    /// Advanced by every stop of `directModeReprobeTimer`, a restart's included; a tick acts only under the generation it was armed with.
+    private var directModeReprobeGeneration: UInt64 = 0
     private var recentFailureTimestamps: [Date] = []
     private var errorRateReprobeScheduled = false
     /// Last alarm; none fires again within `errorRateCooldown`.
@@ -1119,19 +1139,21 @@ package final class ProxyOrchestrator {
     }()
 
     /// Internal so a test can hand in, before the first start, a forwarder whose `willBindTCP` holds a start inside its bind.
-    lazy var dnsForwarder = LocalDNSForwarder(
+    lazy var dnsForwarder: LocalDNSForwarder = LocalDNSForwarder(
         group: MultiThreadedEventLoopGroup.singleton,
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
         preferProxyPathForDoH: { [vpnConnectedForDNSBox] in
             vpnConnectedForDNSBox.withLockedValue { $0 }
         },
-        onMetrics: { [weak self] queries, dohFallbacks, cacheHits in
-            Task { @MainActor in
-                guard let s = self else { return }
-                s.snapshot.dnsQueryCount = queries
-                s.snapshot.dnsDoHFallbackCount = dohFallbacks
-                s.snapshot.dnsCacheHitCount = cacheHits
+        // A signal only: the hop reads the running core's counters when it runs. A stop clears them, and a later start's core counts
+        // from zero, so a hop that lands after either publishes that operation's counts, never the ones it was queued with.
+        onMetrics: { [weak self] in
+            Task { @RuntimeActor in
+                guard let s = self, s.dnsLifecycle.admitsRunning, let counts = s.dnsForwarder.metricCounts else { return }
+                s.snapshot.dnsQueryCount = counts.queries
+                s.snapshot.dnsDoHFallbackCount = counts.dohFallbacks
+                s.snapshot.dnsCacheHitCount = counts.cacheHits
                 s.emitSnapshotCoalesced()
             }
         },
@@ -1148,7 +1170,7 @@ package final class ProxyOrchestrator {
         directConnectDetector: directConnectDetector,
         pacRoutingEngine: pacRoutingEngine,
         onConnectionOpened: { [weak self] info in
-            Task { @MainActor in
+            Task { @RuntimeActor in
                 guard let s = self else { return }
                 s.snapshot.activeConnections.insert(info)
                 s.snapshot.runtimeStatus.metrics.openConnections = s.snapshot.activeConnections.count
@@ -1156,7 +1178,7 @@ package final class ProxyOrchestrator {
             }
         },
         onConnectionClosed: { [weak self] id in
-            Task { @MainActor in
+            Task { @RuntimeActor in
                 guard let s = self else { return }
                 // Emit audit record BEFORE removal so the lookup against
                 // `snapshot.activeConnections` finds the closing connection's
@@ -1170,7 +1192,7 @@ package final class ProxyOrchestrator {
             }
         },
         onConnectionActivity: { [weak self] activity in
-            Task { @MainActor in
+            Task { @RuntimeActor in
                 guard let s = self else { return }
                 s.snapshot.activeConnections.update(id: activity.connectionID) { info in
                     info.applyActivity(activity)
@@ -1178,7 +1200,7 @@ package final class ProxyOrchestrator {
             }
         },
         onRequestCompleted: { [weak self] outcome, _ in
-            Task { @MainActor in
+            Task { @RuntimeActor in
                 self?.recordRequestCompletion(outcome)
             }
         },
@@ -1326,10 +1348,12 @@ package final class ProxyOrchestrator {
         // `ProxyConfig.pacRoutingEnabled = false`.
         self.pacEvaluator = pacEvaluator
         self.snapshot = ProxyOrchestratorSnapshot()
-        self.tunnelForwarder.sessionTracker.onChange = { [weak self] count in
-            Task { @MainActor in
+        // The hop reads the tracker when it runs, not the count it was queued with: a stop resets the tracker in its teardown, so a hop
+        // landing after the stop publishes zero, not a session count from before it.
+        self.tunnelForwarder.sessionTracker.onChange = { [weak self] _ in
+            Task { @RuntimeActor in
                 guard let s = self else { return }
-                s.snapshot.tunnelSessionCount = count
+                s.snapshot.tunnelSessionCount = s.tunnelLifecycle.admitsRunning ? s.tunnelForwarder.sessionTracker.totalActiveSessions : 0
                 s.emitSnapshotCoalesced()
             }
         }
@@ -1362,7 +1386,7 @@ package final class ProxyOrchestrator {
 
     /// Runs `body` as the proxy listeners' physical effect for `epoch`; see `PhysicalLifecycle.run`.
     @discardableResult
-    private func runPhysicalEffect(epoch: Int, _ body: @escaping @MainActor () async throws -> Void) async throws -> Bool {
+    private func runPhysicalEffect(epoch: Int, _ body: @escaping @RuntimeActor () async throws -> Void) async throws -> Bool {
         try await proxyLifecycle.run(epoch: epoch, body)
     }
 
@@ -1373,7 +1397,7 @@ package final class ProxyOrchestrator {
         _ lifecycle: PhysicalLifecycle,
         epoch: Int,
         category: LogCategory,
-        _ body: @escaping @MainActor () async -> Void
+        _ body: @escaping @RuntimeActor () async -> Void
     ) async -> Bool {
         do {
             return try await lifecycle.run(epoch: epoch, body)
@@ -1903,7 +1927,7 @@ package final class ProxyOrchestrator {
             interval: 30,
             tunnels: { probeTargets },
             onResult: { [weak self] results in
-                Task { @MainActor in
+                Task { @RuntimeActor in
                     guard let s = self, s.tunnelLifecycle.isCurrent(epoch) else { return }
 
                     // Collect the per-binding health deltas first, then commit them atomically
@@ -2463,7 +2487,7 @@ package final class ProxyOrchestrator {
     ) {
         strandedSweeps?.cancel()
         let delays = (immediately ? [Duration.zero] : []) + (resweeps ?? strandedResweepDelays)
-        strandedSweeps = Task { @MainActor [weak self] in
+        strandedSweeps = Task { [weak self] in
             var waited = Duration.zero
             for (pass, delay) in delays.enumerated() {
                 if delay > waited {
@@ -2487,9 +2511,13 @@ package final class ProxyOrchestrator {
 
     private func sweepStrandedSockets(transition: String, pass: Int, addressesOnly: Bool) async {
         let sockets = self.sockets
-        // Off the main actor: it checks every tracked socket's path.
-        let found = await Task.detached { sockets.findStranded(addressesOnly: addressesOnly) }.value
-        // Back on the main actor: a flap or newer report that arrived during
+        // Off the owner and the concurrency pool, as the relay probe is: it checks every tracked socket's path with blocking calls.
+        let found = await withCheckedContinuation { (continuation: CheckedContinuation<OutboundSocketRegistry.Stranded, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: sockets.findStranded(addressesOnly: addressesOnly))
+            }
+        }
+        // Back on the owner: a flap or newer report that arrived during
         // the check cancelled this sweep, and its verdicts no longer hold.
         guard !Task.isCancelled else { return }
         let swept = sockets.close(found)
@@ -2661,7 +2689,7 @@ package final class ProxyOrchestrator {
         // failed-recovery path is what turned one failure into a ladder
         // every 1.5 s (see `RecoveryGate`).
         guard !healthChecker.isRunning else { return }
-        // Each check applies its own result on the main actor, judged by the
+        // Each check applies its own result on the owner, judged by the
         // loop run and the routing generation it started under. One that
         // outlived its run (a stop, or a restart for new health settings)
         // belongs to a loop that no longer exists (#181); one that straddled
@@ -2671,9 +2699,9 @@ package final class ProxyOrchestrator {
             guard let self else {
                 return .unhealthy(.unreachable(detail: "ProxyOrchestrator deallocated"), responseTimeMS: 0)
             }
-            let generation = await MainActor.run { self.routingGeneration }
+            let generation = await self.routingGeneration
             let result = await self.localProxyServer.performHealthCheck()
-            await MainActor.run { self.applyHealthCheckResult(result, startedUnder: generation, run: run) }
+            await self.applyHealthCheckResult(result, startedUnder: generation, run: run)
             return result
         } onResult: { _ in }
     }
@@ -2770,7 +2798,7 @@ package final class ProxyOrchestrator {
         let lifecycle = lifecycleEpoch
         let stamp = localProxyServer.listenerStamp
         mutateSnapshot { $0.runtimeStatus.state = .recovering }
-        Task { @MainActor in
+        Task {
             let recovered = await self.autoRecovery.recover(trigger: result.failure, since: stamp) {
                 self.routingGeneration == generation && self.lifecycleEpoch == lifecycle
             }
@@ -2997,46 +3025,59 @@ package final class ProxyOrchestrator {
         eventLog.append(scheduled)
         logStore.log(snapshot.directModeCause.isExpected ? .info : .notice,
                      "Connectivity retry scheduled: \(scheduled.detail ?? "")", category: .network)
-        let timer = DispatchSource.makeTimerSource(queue: .main)
+        let generation = directModeReprobeGeneration
+        // The tick hops to the owner and acts there under the generation it was armed with. One hop at a time: a tick while the last
+        // one has not run yet adds nothing, so a stalled owner gathers no hops.
+        let hopPending = NIOLockedValueBox(false)
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         timer.schedule(deadline: .now() + interval, repeating: interval)
-        timer.setEventHandler { [weak self] in
-            guard let self,
-                  self.snapshot.directModeCause.usesDirectReprobeTimer,
-                  self.snapshot.runtimeStatus.state != .stopped else {
-                self?.stopDirectModeReprobeTimer()
-                return
-            }
-            let lifecycle = self.lifecycleEpoch
-            Task { @MainActor in
-                let started = RuntimeEvent(kind: .health, event: "connectivity.reprobe_started",
-                    detail: "cause=\(self.snapshot.directModeCause.rawValue)")
-                self.eventLog.append(started)
-                self.logStore.log(.debug, "Connectivity retry started: \(started.detail ?? "")", category: .network)
-                // nil: a VPN report, or a stop or start, during the probe owns routing or the runtime now.
-                guard let summary = await self.refreshConnectivityMode(lifecycle: lifecycle) else { return }
-                let completed = RuntimeEvent(kind: .health, event: "connectivity.reprobe_completed",
-                    detail: "reachable=\(summary.hasReachableUpstream) cause=\(self.snapshot.directModeCause.rawValue)")
-                self.eventLog.append(completed)
-                self.logStore.log(summary.hasReachableUpstream ? .notice : .debug,
-                                  "Connectivity retry completed: \(completed.detail ?? "")", category: .network)
-                if !self.snapshot.directModeCause.isDirect, summary.hasReachableUpstream {
-                    self.logStore.log(.notice, "Upstreams reachable again — exiting direct mode.", category: .network)
-                    self.stopDirectModeReprobeTimer()
-                    self.mutateSnapshot {
-                        $0.runtimeStatus.activeUpstream = summary.bestReachableUpstream?.endpoint ?? $0.runtimeStatus.activeUpstream
-                        $0.runtimeStatus.state = .running
-                    }
-                    self.startHealthLoop()
-                }
+        timer.setEventHandler { @Sendable [weak self] in
+            guard hopPending.withLockedValue({ pending in defer { pending = true }; return !pending }) else { return }
+            Task { @RuntimeActor [weak self] in
+                hopPending.withLockedValue { $0 = false }
+                self?.directModeReprobeTick(armedAs: generation)
             }
         }
         directModeReprobeTimer = timer
         timer.resume()
     }
 
+    /// One tick of the reprobe timer armed under `generation`; a tick from a timer stopped or replaced since does nothing.
+    private func directModeReprobeTick(armedAs generation: UInt64) {
+        guard generation == directModeReprobeGeneration else { return }
+        guard snapshot.directModeCause.usesDirectReprobeTimer, snapshot.runtimeStatus.state != .stopped else {
+            stopDirectModeReprobeTimer()
+            return
+        }
+        let lifecycle = lifecycleEpoch
+        Task {
+            let started = RuntimeEvent(kind: .health, event: "connectivity.reprobe_started",
+                detail: "cause=\(self.snapshot.directModeCause.rawValue)")
+            self.eventLog.append(started)
+            self.logStore.log(.debug, "Connectivity retry started: \(started.detail ?? "")", category: .network)
+            // nil: a VPN report, or a stop or start, during the probe owns routing or the runtime now.
+            guard let summary = await self.refreshConnectivityMode(lifecycle: lifecycle) else { return }
+            let completed = RuntimeEvent(kind: .health, event: "connectivity.reprobe_completed",
+                detail: "reachable=\(summary.hasReachableUpstream) cause=\(self.snapshot.directModeCause.rawValue)")
+            self.eventLog.append(completed)
+            self.logStore.log(summary.hasReachableUpstream ? .notice : .debug,
+                              "Connectivity retry completed: \(completed.detail ?? "")", category: .network)
+            if !self.snapshot.directModeCause.isDirect, summary.hasReachableUpstream {
+                self.logStore.log(.notice, "Upstreams reachable again — exiting direct mode.", category: .network)
+                self.stopDirectModeReprobeTimer()
+                self.mutateSnapshot {
+                    $0.runtimeStatus.activeUpstream = summary.bestReachableUpstream?.endpoint ?? $0.runtimeStatus.activeUpstream
+                    $0.runtimeStatus.state = .running
+                }
+                self.startHealthLoop()
+            }
+        }
+    }
+
     private func stopDirectModeReprobeTimer() {
         directModeReprobeTimer?.cancel()
         directModeReprobeTimer = nil
+        directModeReprobeGeneration &+= 1
     }
 
     private static let errorRateWindow: TimeInterval = 5
@@ -3094,7 +3135,7 @@ package final class ProxyOrchestrator {
         logStore.log(.warning, "High error rate (\(failureCount) failures in \(Int(Self.errorRateWindow))s) — triggering upstream re-probe.", category: .network)
 
         let lifecycle = lifecycleEpoch
-        Task { @MainActor in
+        Task {
             defer { self.errorRateReprobeScheduled = false }
             // nil: a VPN report, or a stop or start, during the probe owns routing or the runtime now.
             guard let summary = await self.refreshConnectivityMode(lifecycle: lifecycle) else { return }
@@ -3140,7 +3181,7 @@ package final class ProxyOrchestrator {
     /// recovering out of it) stamps `signal` first (#97): a handler reads
     /// the cause, then the signal, so a new cause it can see always comes
     /// with the stamp. The read and the write are separate because the
-    /// orchestrator is the only writer and calls this on the main actor.
+    /// orchestrator is the only writer and calls this on its owner.
     package static func publishDirectMode(
         _ cause: DirectModeCause,
         to box: NIOLockedValueBox<(isDirect: Bool, cause: DirectModeCause)>,
@@ -3303,7 +3344,7 @@ package final class ProxyOrchestrator {
     }
 
     /// Every 30 s while a transparent proxy is published: probe the
-    /// intercept address off the main thread and re-issue the relay start
+    /// intercept address off the owner and re-issue the relay start
     /// if nothing accepts there. The helper relaunch after a crash is an
     /// amnesiac (see `TCPAcceptProbe`), and the start is idempotent in the
     /// helper (`TCPRelayPlan`), so a probe against a relay that is fine costs
@@ -3314,24 +3355,37 @@ package final class ProxyOrchestrator {
     /// with resolver files alone, and that configuration had no probe at all.
     private func startTransparentRelayTimer() {
         stopTransparentRelayTimer()
-        let timer = DispatchSource.makeTimerSource(queue: .main)
+        let generation = transparentRelayTimerGeneration
+        // As the reprobe timer: one hop at a time to the owner, acting under the generation it was armed with.
+        let hopPending = NIOLockedValueBox(false)
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         timer.schedule(
             deadline: .now() + Self.transparentRelayProbeInterval,
             repeating: Self.transparentRelayProbeInterval
         )
-        timer.setEventHandler { [weak self] in
-            guard let self, self.tcpRelayActive,
-                  let host = self.snapshot.bindings.transparentProxyHost,
-                  let port = self.snapshot.bindings.transparentProxyPort else { return }
-            self.beginTransparentRelayReassert(host: host, targetPort: port)
+        timer.setEventHandler { @Sendable [weak self] in
+            guard hopPending.withLockedValue({ pending in defer { pending = true }; return !pending }) else { return }
+            Task { @RuntimeActor [weak self] in
+                hopPending.withLockedValue { $0 = false }
+                self?.transparentRelayTick(armedAs: generation)
+            }
         }
         transparentRelayTimer = timer
         timer.resume()
     }
 
+    /// One tick of the relay timer armed under `generation`; a tick from a timer stopped or replaced since does nothing.
+    private func transparentRelayTick(armedAs generation: UInt64) {
+        guard generation == transparentRelayTimerGeneration, tcpRelayActive,
+              let host = snapshot.bindings.transparentProxyHost,
+              let port = snapshot.bindings.transparentProxyPort else { return }
+        beginTransparentRelayReassert(host: host, targetPort: port)
+    }
+
     private func stopTransparentRelayTimer() {
         transparentRelayTimer?.cancel()
         transparentRelayTimer = nil
+        transparentRelayTimerGeneration &+= 1
     }
 
     /// What a reassert captured in the turn it began. Its verdict applies only if nothing it captured has moved by the time it acts.
@@ -3369,14 +3423,14 @@ package final class ProxyOrchestrator {
     @discardableResult
     package func beginTransparentRelayReassert(host: String, targetPort: Int) -> Task<Void, Never>? {
         guard let fence = beginRelayReassert() else { return nil }
-        return Task { @MainActor [weak self] in
+        return Task { [weak self] in
             await self?.probeAndReissueTransparentRelay(host: host, targetPort: targetPort, under: fence)
             self?.endRelayReassert()
         }
     }
 
-    /// The probe's connect can sit out its timeout, so it runs off the main
-    /// actor, and a relay start or stop can land before it returns. The
+    /// The probe's connect can sit out its timeout, so it runs off the
+    /// owner, and a relay start or stop can land before it returns. The
     /// fence captured here decides whether its verdict still applies.
     package func reassertTransparentRelayOffMain(host: String, targetPort: Int) async {
         guard let fence = beginRelayReassert() else { return }

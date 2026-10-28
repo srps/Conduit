@@ -11,7 +11,6 @@ import RuntimeEvents
 /// (`RuntimeControlComposition`, which the production `makeInMemoryControlClient` builds and pm-sim drives) over a `FakeMachine` and a
 /// scratch root. The actual-host tests ingest nothing: each event is one the host recorded on its own diagnostics log. The shutdown-wakeup
 /// unit runs over the service core alone and ingests its own events. Every wait is bounded, so a missing feed or end fails, never hangs.
-@MainActor
 final class RuntimeHostControlStreamTests: XCTestCase {
     private var harness: InteractiveHostHarness?
 
@@ -21,7 +20,7 @@ final class RuntimeHostControlStreamTests: XCTestCase {
         try await super.tearDown()
     }
 
-    private func deadline() -> RuntimeDeadline {
+    @RuntimeActor private func deadline() -> RuntimeDeadline {
         .after(.seconds(30), from: ContinuousClock.now)
     }
 
@@ -33,7 +32,7 @@ final class RuntimeHostControlStreamTests: XCTestCase {
     }
 
     /// One host and its composition, with the framed and editor clients the production factory hands out over the same transport.
-    private func compose(subscribers: Int = 2) async throws -> Composed {
+    @RuntimeActor private func compose(subscribers: Int = 2) async throws -> Composed {
         let harness = try makeInteractiveHarness(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: false)
         self.harness = harness
         let host = try await harness.makeHost()
@@ -49,7 +48,7 @@ final class RuntimeHostControlStreamTests: XCTestCase {
 
     /// Frames from a stream until `stop` holds, or until the stream ends or one wait passes `quiet` with no frame; each read is one plain
     /// `next`, back to back. Bounded in frames and in each wait; the result is the error that ended reading, nil when `stop` held.
-    private func read(
+    @RuntimeActor private func read(
         _ stream: RuntimeSubscription,
         of composed: Composed,
         into frames: inout [ControlRuntimeFrame],
@@ -67,7 +66,7 @@ final class RuntimeHostControlStreamTests: XCTestCase {
         return stop(frames) ? nil : .unexpectedReply
     }
 
-    private func typed(_ frames: [ControlRuntimeFrame]) -> [ControlTypedRuntimeEvent] {
+    @RuntimeActor private func typed(_ frames: [ControlRuntimeFrame]) -> [ControlTypedRuntimeEvent] {
         frames.flatMap { frame -> [ControlTypedRuntimeEvent] in
             guard case .events(let batch) = frame else { return [] }
             return batch.events.compactMap { record in
@@ -77,7 +76,7 @@ final class RuntimeHostControlStreamTests: XCTestCase {
         }
     }
 
-    private func finished(_ frames: [ControlRuntimeFrame]) -> [ControlOperationFinished] {
+    @RuntimeActor private func finished(_ frames: [ControlRuntimeFrame]) -> [ControlOperationFinished] {
         frames.compactMap { frame in
             guard case .operationFinished(let finished) = frame else { return nil }
             return finished
@@ -95,7 +94,7 @@ final class RuntimeHostControlStreamTests: XCTestCase {
     }
 
     /// The events the host's file writer recorded, read back after a flush.
-    private func written(_ host: RuntimeHost) async throws -> [RuntimeEvent] {
+    @RuntimeActor private func written(_ host: RuntimeHost) async throws -> [RuntimeEvent] {
         await host.flushEvents()
         let text = try String(contentsOf: try XCTUnwrap(harness).environment.eventsFile, encoding: .utf8)
         let decoder = CanonicalJSON.decoder()
@@ -104,7 +103,7 @@ final class RuntimeHostControlStreamTests: XCTestCase {
 
     /// A saved Start through the actual client and a reload of an external edit: each typed record the host emits through its owner and
     /// its workflow reaches the live stream, the Start's own settlement too, and the file writer still records each event exactly once.
-    func testTheHostsTypedEventsReachTheActualStreamAndTheWriterRecordsEachOnce() async throws {
+    @RuntimeActor func testTheHostsTypedEventsReachTheActualStreamAndTheWriterRecordsEachOnce() async throws {
         let composed = try await compose()
         let host = composed.host
         let stream = try await composed.control.subscribe(.live, deadline: deadline())
@@ -143,7 +142,7 @@ final class RuntimeHostControlStreamTests: XCTestCase {
 
     /// An event too large for the stream's bound is an explicit loss: the live subscriber that reaches it ends with a resync, never a
     /// silent gap. The file writer still records it once.
-    func testAnOversizedHostEventEndsTheStreamWithAResyncAndIsStillWrittenOnce() async throws {
+    @RuntimeActor func testAnOversizedHostEventEndsTheStreamWithAResyncAndIsStillWrittenOnce() async throws {
         let composed = try await compose()
         let host = composed.host
         let stream = try await composed.control.subscribe(.live, deadline: deadline())
@@ -166,14 +165,14 @@ final class RuntimeHostControlStreamTests: XCTestCase {
     /// The bounded client Quit through the actual composition. A stream already waiting is woken by the end. It receives the Quit's own
     /// settlement first and then `hostShutdown`, and the settlement is still answered by lookup. A subscription opened after the
     /// physical end receives its baseline and the same end.
-    func testTheQuitSettlesOnTheStreamBeforeHostShutdownAndALaterOpenGetsTheSameEnd() async throws {
+    @RuntimeActor func testTheQuitSettlesOnTheStreamBeforeHostShutdownAndALaterOpenGetsTheSameEnd() async throws {
         let composed = try await compose(subscribers: 3)
         let host = composed.host
         let stream = try await composed.control.subscribe(.live, deadline: deadline())
         defer { stream.cancel() }
         guard case .baseline = try await stream.next(deadline()) else { return XCTFail("a stream opens with its baseline") }
         // One pull parked before the Quit, so what the Quit publishes, or its end, must wake a wait that is already parked.
-        let parkedPull = Task { @MainActor in try await stream.next(.after(.seconds(10), from: ContinuousClock.now)) }
+        let parkedPull = Task { @RuntimeActor in try await stream.next(.after(.seconds(10), from: ContinuousClock.now)) }
         var parked = composed.composition.service.parkedWaiterCount == 1
         for _ in 0..<2_000 where !parked {
             try await Task.sleep(for: .milliseconds(1))
@@ -221,7 +220,7 @@ final class RuntimeHostControlStreamTests: XCTestCase {
     /// The shutdown alone wakes a parked wait: no operation is pending and no snapshot changes, so nothing else could. An event published
     /// before the shutdown is read first; the end follows, and an event recorded after the shutdown is not queued. Over the service with
     /// its fake owner and manual hops, so every step is explicit.
-    func testTheShutdownAloneWakesAParkedWaitAfterWhatWasPublished() throws {
+    @RuntimeActor func testTheShutdownAloneWakesAParkedWaitAfterWhatWasPublished() async throws {
         let harness = try RuntimeServiceHarness()
         guard case .opened(let subscriber, _) = harness.core.openSubscription(.live) else { return XCTFail("the subscription opens") }
         harness.core.ingest(ControlRuntimeEvent(timestamp: Date(timeIntervalSince1970: 0), kind: "config", event: "test.before"))
@@ -245,7 +244,7 @@ final class RuntimeHostControlStreamTests: XCTestCase {
 
     /// A factory that refuses its client after composing (a zero wire budget cap) undoes every connection: no state or shutdown callback
     /// is left, the file writer records alone, once, and a later composition over the same host works.
-    func testAFailedFactoryDetachesEveryConnectionAndALaterCompositionWorks() async throws {
+    @RuntimeActor func testAFailedFactoryDetachesEveryConnectionAndALaterCompositionWorks() async throws {
         let harness = try makeInteractiveHarness(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: false)
         self.harness = harness
         let host = try await harness.makeHost()
@@ -272,7 +271,7 @@ final class RuntimeHostControlStreamTests: XCTestCase {
 
     /// A composition built after the quit's physical end has no later end to hear, so it starts shut down: its stream's baseline is
     /// followed at once by `hostShutdown`.
-    func testACompositionBuiltAfterTheQuitEndedStartsShutDown() async throws {
+    @RuntimeActor func testACompositionBuiltAfterTheQuitEndedStartsShutDown() async throws {
         let harness = try makeInteractiveHarness(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: false)
         self.harness = harness
         let host = try await harness.makeHost()
@@ -297,7 +296,7 @@ final class RuntimeHostControlStreamTests: XCTestCase {
 
     /// The host holds its composition only weakly: the state, event and shutdown connections let the service go with the composition,
     /// and the file writer goes on recording every event once. None of them holds the host.
-    func testADroppedCompositionIsReleasedAndTheWriterStillRecordsEachEventOnce() async throws {
+    @RuntimeActor func testADroppedCompositionIsReleasedAndTheWriterStillRecordsEachEventOnce() async throws {
         let harness = try makeInteractiveHarness(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: false)
         self.harness = harness
         let host = try await harness.makeHost()

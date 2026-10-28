@@ -1,0 +1,6 @@
+	 Executed 14 tests, with 0 failures (0 unexpected) in 1.131 (1.133) seconds
+/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/RuntimeManualSchedulerTests.swift:99: error: -[ConduitTests.RuntimeManualSchedulerTests testACancelledDriverEndsItsWaitingCallAsCancelled] : failed - a cancelled page is not answered
+	 Executed 2 tests, with 1 failure (0 unexpected) in 2.152 (2.152) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 0.010 (0.011) seconds
+	 Executed 29 tests, with 1 failure (0 unexpected) in 3.292 (3.295) seconds
+	 Executed 29 tests, with 1 failure (0 unexpected) in 3.292 (3.302) seconds

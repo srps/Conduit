@@ -25,7 +25,7 @@ struct SystemWakeDeliveries: Sendable {
 /// wake adds no event of its own and schedules no retry; each repair it asks for keeps its own guard.
 extension RuntimeHost {
     /// Called once, from `init`. The callback runs on the source's thread and only hands each repair to its coalescer, which hops onto the
-    /// main actor through `deliveries`, in order with the other observers.
+    /// owner through `deliveries`, in order with the other observers.
     func startWakeObserver() {
         systemWakeObserver.start(onWake: { [weak self, deliveries, wakeDeliveries] in
             wakeDeliveries.systemProxy.deliver(using: deliveries) { await self?.repairAfterWake(.systemProxy) }

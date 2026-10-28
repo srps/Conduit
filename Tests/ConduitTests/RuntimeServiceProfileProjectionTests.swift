@@ -38,22 +38,21 @@ enum RuntimeServiceProfileResource {
 /// Phase B: the actual projection, row encoding, capture bounds and page framing, measured at the candidate's collection bounds. Every bound
 /// comes from `RuntimeServiceProfileCandidate.limits()`, the one candidate builder. Times and resource samples are probe observations written to
 /// the log. No test asserts a deadline or a memory figure.
-@MainActor
 final class RuntimeServiceProfileProjectionTests: XCTestCase {
     /// Log-only gate: whether the retained-kernel probe extends from eleven to 101 captures. It is an observation, not a memory assertion.
     private let flatGrowthObservationBytes = 1_048_576
 
-    private func candidate() throws -> RuntimeServiceLimits {
+    @RuntimeActor private func candidate() throws -> RuntimeServiceLimits {
         try RuntimeServiceProfileCandidate.limits()
     }
 
-    private func frame(_ limits: RuntimeServiceLimits) throws -> ControlFrameLimits {
+    @RuntimeActor private func frame(_ limits: RuntimeServiceLimits) throws -> ControlFrameLimits {
         try RuntimeServiceProfileCandidate.frameLimits(limits.maxReplyBytes)
     }
 
     /// Typical connections at 1, 64, 256, 1,000 and the candidate's row bound. The projection's total is checked against the sum of the rows'
     /// own encodings, and every row is packed into a reply-sized page. The projection elapsed time is printed as an observation only.
-    func testTypicalConnectionsAtTheDefaultScaleAreMeasuredThroughTheActualProjection() throws {
+    @RuntimeActor func testTypicalConnectionsAtTheDefaultScaleAreMeasuredThroughTheActualProjection() async throws {
         let limits = try candidate()
         let frame = try frame(limits)
         for count in [1, 64, 256, 1_000, limits.collectionRowCapacity] {
@@ -80,7 +79,7 @@ final class RuntimeServiceProfileProjectionTests: XCTestCase {
     }
 
     /// One connection over the row bound is refused whole by its count, before any row is mapped. No partial rows are returned.
-    func testOneMoreConnectionThanTheRowBoundIsRefusedWholeBeforeAnyRowIsMapped() throws {
+    @RuntimeActor func testOneMoreConnectionThanTheRowBoundIsRefusedWholeBeforeAnyRowIsMapped() async throws {
         let limits = try candidate()
         let answer = RuntimeServiceProfileKernels.projection(
             RuntimeServiceProfileKernels.typical(connections: limits.collectionRowCapacity + 1),
@@ -95,7 +94,7 @@ final class RuntimeServiceProfileProjectionTests: XCTestCase {
     /// Doubling, then bisection, on the byte bound for a kernel builder. Rows are monotone in count: each row's size depends only on its index,
     /// and the byte check refuses exactly when the sum of all rows exceeds the cap. Returns the largest count that fits, the smallest that is
     /// refused, and the number of projections run. Either value is 0 when that side was never reached.
-    private func fitBoundary(
+    @RuntimeActor private func fitBoundary(
         _ limits: RuntimeServiceLimits,
         _ build: (Int) -> ProxyOrchestratorSnapshot
     ) throws -> (fits: Int, refused: Int, probes: Int) {
@@ -143,7 +142,7 @@ final class RuntimeServiceProfileProjectionTests: XCTestCase {
 
     /// The boundary of one kernel shape, through the actual kernel, Bridge projection, byte-bounded capture and page packer. The fitting capture
     /// and the refused count are both checked whole, and the rows are packed. Returns the largest fitting count and its rows.
-    private func measureBoundary(
+    @RuntimeActor private func measureBoundary(
         _ label: String,
         _ limits: RuntimeServiceLimits,
         _ build: (Int) -> ProxyOrchestratorSnapshot
@@ -184,7 +183,7 @@ final class RuntimeServiceProfileProjectionTests: XCTestCase {
     }
 
     /// MIXED ESCAPE, not a maximum: one different escape-heavy body per field, rotated. The earlier fixture, kept and labelled.
-    func testMixedEscapeTextFitCountIsMeasuredAndLabelledNotAMaximum() throws {
+    @RuntimeActor func testMixedEscapeTextFitCountIsMeasuredAndLabelledNotAMaximum() async throws {
         let limits = try candidate()
         let measured = try measureBoundary("mixed-escape (not a maximum)", limits) {
             RuntimeServiceProfileKernels.mixedEscape(connections: $0)
@@ -195,7 +194,7 @@ final class RuntimeServiceProfileProjectionTests: XCTestCase {
     /// The strongest string-field candidate measured here, not a universal maximum: every displayed text field is an all-NUL run of 1,025 bytes,
     /// over its 512-byte cap, with `Int.max` counts. The fit count is derived, not assumed. Every row encodes to the same size, so the largest
     /// count that fits is exactly the byte cap divided by that size. The escape shape is checked in the encoded row.
-    func testAllNULStrongestStringFitCountIsDerivedThroughKernelBridgeAndCapture() throws {
+    @RuntimeActor func testAllNULStrongestStringFitCountIsDerivedThroughKernelBridgeAndCapture() async throws {
         let limits = try candidate()
         let measured = try measureBoundary("all-nul strongest-string", limits) {
             RuntimeServiceProfileKernels.allNUL(connections: $0)
@@ -218,7 +217,7 @@ final class RuntimeServiceProfileProjectionTests: XCTestCase {
     }
 
     /// One projection and page pass over a kernel the caller already holds. The kernel is not rebuilt, so the sample isolates the projection.
-    private func projectAndPack(_ kernel: ProxyOrchestratorSnapshot, _ limits: RuntimeServiceLimits) throws -> Int {
+    @RuntimeActor private func projectAndPack(_ kernel: ProxyOrchestratorSnapshot, _ limits: RuntimeServiceLimits) throws -> Int {
         let captured = try RuntimeServiceProfileKernels.connectionRows(
             kernel,
             maxRows: limits.collectionRowCapacity,
@@ -235,7 +234,7 @@ final class RuntimeServiceProfileProjectionTests: XCTestCase {
         )
     }
 
-    private func printSample(_ sample: RuntimeServiceProfileResourceSample, pages: Int, scope: String) {
+    @RuntimeActor private func printSample(_ sample: RuntimeServiceProfileResourceSample, pages: Int, scope: String) {
         print(
             "RUNTIME-SERVICE-PROFILE resource scope=\(scope) stage=\(sample.stage) peakRSSBytes=\(sample.peakRSSBytes)"
                 + " mallocInUseBytes=\(sample.mallocInUseBytes) pagesPerCapture=\(pages)"
@@ -246,7 +245,7 @@ final class RuntimeServiceProfileProjectionTests: XCTestCase {
     /// The retained-kernel probe. The 1,000-connection kernel is built once and held immutable, and each iteration runs only the projection and
     /// packing over it. Eleven iterations are sampled. The run extends to 101 only if the first eleven stay under the log-only gate above. The
     /// samples are written to the log, and no assertion depends on them.
-    func testProjectionOnARetainedKernelIsSampledWithoutACallerPool() throws {
+    @RuntimeActor func testProjectionOnARetainedKernelIsSampledWithoutACallerPool() async throws {
         try requireResourceProbesOptIn()
         let limits = try candidate()
         let retained = RuntimeServiceProfileKernels.typical(connections: 1_000)
@@ -278,7 +277,7 @@ final class RuntimeServiceProfileProjectionTests: XCTestCase {
 
     /// The comparison probe: the same 1,000-connection kernel is built and released on each iteration, and nothing is projected. Its growth
     /// separates construction from projection. Eleven iterations only, and the samples are written to the log.
-    func testFreshKernelConstructionAloneIsSampledForComparison() throws {
+    @RuntimeActor func testFreshKernelConstructionAloneIsSampledForComparison() async throws {
         try requireResourceProbesOptIn()
         var samples = [try RuntimeServiceProfileResource.sample("construction-before-first")]
         for iteration in 1...11 {

@@ -1,0 +1,14 @@
+{
+  "head": "081b0d83326d4b6f9c81027e36abcbb99a1ba78a",
+  "review_base": "081b0d83326d4b6f9c81027e36abcbb99a1ba78a",
+  "snapshot_sha256": "31de7659ed3053dfb6b241662ec0cfe2e692fbcdb9bf01e350b08de2cbb25cfe",
+  "files": 798,
+  "author_manifest": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-manifest.json",
+  "new_files_in_patch": [
+    "Sources/ProxyKernel/Abstractions/RuntimeActor.swift",
+    "Tests/ConduitTests/RuntimeActorFairnessTests.swift",
+    "Tests/ConduitTests/RuntimeActorPlacementTests.swift"
+  ],
+  "patch_sha256": "6f25b03e924dcd3a4c2533e60f97ef0b6a6798e0c582afc48dbc4df58ccaaf44",
+  "stable": true
+}

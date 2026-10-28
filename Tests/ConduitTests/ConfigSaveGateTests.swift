@@ -116,6 +116,17 @@ final class ConfigSaveGateTests: XCTestCase {
         let refusal = try XCTUnwrap(state.eventLog.events.first { $0.event == "config.save_rejected" })
         XCTAssertEqual(refusal.detail, "file=preferences reason=resource_limit field=browserTestURL limit=\(DomainResourceLimits.urlText)")
         XCTAssertFalse(state.eventLog.events.contains { ($0.detail ?? "").contains("value-witness") })
+
+        // At Quit the same ceiling keeps the value out of the final saves: it is discarded, not declared, so the Quit settles without
+        // waiting out its deadline for a save that could never be sent.
+        XCTAssertTrue(state.beginQuit())
+        let finished = await state.finishQuit()
+        let result = try XCTUnwrap(finished)
+        guard case .settled(.completed) = result.quit else { return XCTFail("the Quit settled: \(result.quit)") }
+        XCTAssertEqual(result.preferences, .notDeclared)
+        let discard = try XCTUnwrap(state.eventLog.events.first { $0.event == "config.edit_discarded" })
+        XCTAssertEqual(discard.detail, "trigger=quit reason=resource_limit field=browserTestURL limit=\(DomainResourceLimits.urlText)")
+        XCTAssertEqual(try Data(contentsOf: harness.environment.preferencesFile), before)
     }
 
     /// A write the destination refuses keeps the edit unsaved and the file's authority, so no reload is asked for; once the destination is
@@ -124,26 +135,29 @@ final class ConfigSaveGateTests: XCTestCase {
     /// file unwritten too.
     func testAFailedWriteKeepsTheEditUnsavedUntilACommitAfterTheRepairWritesIt() async throws {
         for role in [StateRootRole.config, .platformConfig] {
-            let refusing = RefusingWrites(of: role)
-            let state = try await ready(stateFiles: refusing)
-            let refused = role == .config ? harness.environment.configFile : harness.environment.platformConfigFile
-            let before = try Data(contentsOf: refused)
-            state.config.noProxyHosts.append("retry.example")
-            state.platformConfig.manageEnvironmentVariables = true
-            state.commitPendingEdit(trigger: .submit)
-            await state.awaitPendingSave()
-            XCTAssertEqual(try Data(contentsOf: refused), before, "\(role)")
-            XCTAssertTrue(state.hasUnsavedEdit, "\(role): the write failed, so the edit is not saved")
-            XCTAssertTrue(state.lastErrorMessage?.hasPrefix("Settings were not saved") == true, "\(role)")
-            XCTAssertFalse(state.configurationNeedsReload, "\(role): a write proven not to have happened keeps the file's authority")
+            // Scoped, so the app is gone before the teardown proves the root free.
+            do {
+                let refusing = RefusingWrites(of: role)
+                let state = try await ready(stateFiles: refusing)
+                let refused = role == .config ? harness.environment.configFile : harness.environment.platformConfigFile
+                let before = try Data(contentsOf: refused)
+                state.config.noProxyHosts.append("retry.example")
+                state.platformConfig.manageEnvironmentVariables = true
+                state.commitPendingEdit(trigger: .submit)
+                await state.awaitPendingSave()
+                XCTAssertEqual(try Data(contentsOf: refused), before, "\(role)")
+                XCTAssertTrue(state.hasUnsavedEdit, "\(role): the write failed, so the edit is not saved")
+                XCTAssertTrue(state.lastErrorMessage?.hasPrefix("Settings were not saved") == true, "\(role)")
+                XCTAssertFalse(state.configurationNeedsReload, "\(role): a write proven not to have happened keeps the file's authority")
 
-            refusing.refusing = false
-            state.commitPendingEdit(trigger: .sectionClose)
-            await state.awaitPendingSave()
-            XCTAssertFalse(state.hasUnsavedEdit, "\(role)")
-            XCTAssertTrue(try ProxyConfigPersistence.load(from: harness.environment.configFile).noProxyHosts.contains("retry.example"))
-            XCTAssertTrue(try PlatformConfigPersistence.load(in: harness.environment).manageEnvironmentVariables)
-            XCTAssertNil(state.lastErrorMessage, "\(role): the verified retry cleared the failure's banner")
+                refusing.refusing = false
+                state.commitPendingEdit(trigger: .sectionClose)
+                await state.awaitPendingSave()
+                XCTAssertFalse(state.hasUnsavedEdit, "\(role)")
+                XCTAssertTrue(try ProxyConfigPersistence.load(from: harness.environment.configFile).noProxyHosts.contains("retry.example"))
+                XCTAssertTrue(try PlatformConfigPersistence.load(in: harness.environment).manageEnvironmentVariables)
+                XCTAssertNil(state.lastErrorMessage, "\(role): the verified retry cleared the failure's banner")
+            }
             await harness.tearDown()
             harness = nil
         }

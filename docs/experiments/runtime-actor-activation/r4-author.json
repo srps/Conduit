@@ -1,0 +1,41 @@
+{
+  "stage": "RuntimeActor Stage B correction lane (R4): diagnostic writers hold the state root's authority, over the R3 frozen Source",
+  "root": "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit",
+  "source_frozen_by_author": true,
+  "authority": "runtime-actor-stageb-r3-authority-review.md; decision 0017 (queued and started writes keep authority until quiescence or process exit). No new owner decision.",
+  "hashes": "not computed in this lane: Bash was limited to the fixed verifier. The parent should hash at freeze. RuntimePresentationAdapterTests.swift (the parent's resource-label cleanup) and the Profile experiment files were not touched.",
+  "r3_note": "The R3 full41 pass is historical evidence for the R3 tree only; it is not claimed for this changed tree.",
+  "files_changed": {
+    "Sources/PlatformMac/StateRootSession.swift": "new package StateRootSession.retainingAuthority(_:) -> any RecordFileDestinationGuarding. It returns a private immutable AuthorityRetainingDestinationGuard that holds the session and the wrapped guard and delegates both admit methods unchanged. The concrete type is not exposed, and there is no raw lease accessor, queue, registry, budget or protected-path list. The session owns no writer or guard, so there is no cycle.",
+    "Sources/ConduitRuntime/RuntimeHost.swift": "events and snapshot writer guards wrapped with stateSession.retainingAuthority; makeAuditSink takes stateSession (instead of the writerLeaseFile URL) and wraps the audit guard; the configless recovery events writer guard is wrapped. The guards' protected resources are unchanged.",
+    "Sources/Conduit/App/AppState.swift": "app-log guard: composition.appLogGuard.wrap(stateSession.retainingAuthority(diagnosticDestinationGuard(.appLog, ...))), so a composition wrapper such as the harness's HoldingAppLogGuard sits outside the session-holding authoritative guard. The export guard is wrapped the same way.",
+    "Sources/Conduit/App/AppComposition.swift": "AppLogGuardEffect doc: the authoritative guard holds the root's session, and a wrapper must keep it",
+    "Tests/ConduitTests/AppStateHarnessTests.swift": "new testAHeldDiagnosticWriteKeepsTheRootLeasedAfterEveryOwnerLetGo"
+  },
+  "untouched_by_design": "pm-proxy (takes no lease; its guards stay path-only), pm-sim's diagnosticDestinationGuard scenarios, InteractiveHostHarness and DaemonHarness",
+  "regression_test": {
+    "name": "AppStateHarnessTests.testAHeldDiagnosticWriteKeepsTheRootLeasedAfterEveryOwnerLetGo",
+    "shape": "Built from the existing app composition and fixtures. holdTheAppLogOpen holds a fresh file-log writer at its open through appLogHold/HoldingAppLogGuard. The Quit then settles .completed around it. The harness drops the app and its own session, and the test waits until the AppState is released. A production bootstrap probe (createRootIfMissing false) must then be .failure(.busy). After appLogHold.release(), rootReacquires(within: leaseCloseBound) must succeed, and the held witness line must be in the log file. No production test hook.",
+    "baseline_on_R3_source": [
+      {"run": "runtime-actor-stageb-QMc8CJ", "mode": "focused", "result": "exit 1; 788 tests, 2 skipped, 1 failure, the new test only: XCTAssertEqual failed: (\"success(PlatformMac.StateWriterRelease.released)\") is not equal to (\"failure(PlatformMac.StateRootAcquisitionFailure.busy)\") - the held write's writer keeps the root"},
+      {"run": "runtime-actor-stageb-sj6DfB", "mode": "authority (target above)", "result": "exit 1; 2 failures in the one test: the same early acquisition, and 'the held write landed before the root came free' (the root came free before the held line reached the file)"}
+    ],
+    "fixed": {"run": "runtime-actor-stageb-xPQhDv", "mode": "authority (target above)", "result": "exit 0; passed (2.174 s)"},
+    "why_not_vacuous": "On the R3 tree the same sequence acquired the root, so after the drops neither the host, the app, the harness nor a test local held the session. The only change between the two runs is that the writer's guard holds the session, and the held writer is kept alive only by its own queued drain."
+  },
+  "runs": [
+    {"run": "runtime-actor-stageb-QWC5bB", "mode": "test-build", "result": "exit 0; no warnings in changed files"},
+    {"run": "runtime-actor-stageb-vRW6Xq", "mode": "correction", "result": "exit 0; 42 tests, 0 failures; security-boundaries PASS; status-stream PASS; imports and catalogue pass"},
+    {"run": "runtime-actor-stageb-to99Sv", "mode": "focused", "result": "exit 0; 788 tests, 2 skipped (existing opt-in resource probes), 0 failures; pm-sim runtime-host-effects PASS (incl. its natural-drop releaseRoot lease proof) and relay PASS; catalogue (230) and decisions pass"},
+    {"run": "runtime-actor-stageb-hXsiSK", "mode": "strict", "result": "exit 0; 47 tests, 0 failures; both pm-sim PASS; fairness capture inconclusive under the one-thread pool, as before"},
+    {"run": "runtime-actor-stageb-Yxabtx", "mode": "release-build", "result": "exit 0, no warnings"}
+  ],
+  "preserved": "logger drain first, then one DiagnosticFlush under the original cap; no budget, capacity, setting, queue or second drain. All R3 fixes are unchanged.",
+  "limits": [
+    "A writer stuck on hung I/O now keeps the root's lease until the write ends or the process exits, as 0017 requires. In tests this fails loudly through leaseCloseBound or the probe.",
+    "Production behaviour is unchanged in effect: the app and the daemon still pin the session for the process, and a lease can only close in-process on test and pm-sim natural-drop paths.",
+    "The regression test witnesses the general mechanism (a pending diagnostic write keeps the lease) through the app log. It does not reproduce the reviewer's exact post-flush snapshot-timer sequence, which the same wrapper covers through the snapshot writer's guard.",
+    "InteractiveHostHarness and DaemonHarness still close their lease with releaseForTesting after a confirmed settle and flush. That fixture force-close is not a lease proof and was not changed.",
+    "Not run here: full41, TSan, optimized fairness/consumer, Profile/full31, probes and native checks. The mode file was left at release-build; the authority target file names the test above."
+  ]
+}

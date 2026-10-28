@@ -13,7 +13,6 @@ import XCTest
 ///
 /// The exploration is bounded to the four cases below: {Stop, Start} admitted during {the pre-claim read, the replacement}. A claim
 /// revoked before a replacement starts writes nothing, and a replacement that started finishes its read-back and reports it.
-@MainActor
 final class ConfigurationWorkflowPhaseTests: XCTestCase {
     /// The physical step a test parks. `read` is any configuration read, including the pre-read a replacement makes before its claim is
     /// checked. `replace` is the write itself, which is reached only after its claim check passed.
@@ -82,13 +81,13 @@ final class ConfigurationWorkflowPhaseTests: XCTestCase {
         }
     }
 
-    private func scratchSession() throws -> (StateRootSession, URL) {
+    @RuntimeActor private func scratchSession() throws -> (StateRootSession, URL) {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-workflow-phase-\(UUID().uuidString)", isDirectory: true)
         return (try acquireScratchStateRoot(.isolated(stateDirectory: directory)), directory)
     }
 
-    private func workflow(_ session: StateRootSession, files: ParkingFiles, work: PlatformWork) -> RuntimeConfigurationWorkflow {
+    @RuntimeActor private func workflow(_ session: StateRootSession, files: ParkingFiles, work: PlatformWork) -> RuntimeConfigurationWorkflow {
         let store = ConfigurationStore(session: session, access: files, work: work)
         return RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
     }
@@ -96,7 +95,7 @@ final class ConfigurationWorkflowPhaseTests: XCTestCase {
     /// Stop admitted while the commit is still queued behind a blocked physical job, so before its claim is checked. A queued commit has
     /// no I/O yet, so the revocation is observed at the claim, not at a file read. The claim is revoked before the write, so nothing is
     /// written, the runtime write is held behind the platform write, and the Start stops without applying anything.
-    func testAStopAdmittedBeforeTheClaimRevokesTheWriteAndNothingApplies() async throws {
+    @RuntimeActor func testAStopAdmittedBeforeTheClaimRevokesTheWriteAndNothingApplies() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)
@@ -143,7 +142,7 @@ final class ConfigurationWorkflowPhaseTests: XCTestCase {
 
     /// Stop admitted while the platform replacement is in flight. The replacement finishes its read-back and reports it persisted. The
     /// runtime write's claim is then revoked, so the runtime file is not written, and nothing applies.
-    func testAStopAdmittedDuringAStartedReplacementCompletesIt() async throws {
+    @RuntimeActor func testAStopAdmittedDuringAStartedReplacementCompletesIt() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)
@@ -172,7 +171,7 @@ final class ConfigurationWorkflowPhaseTests: XCTestCase {
     }
 
     /// Start admitted during a reload's read. The reload's observation is durable, but it names no applied input.
-    func testAReloadStaleAtItsReadAppliesNothing() async throws {
+    @RuntimeActor func testAReloadStaleAtItsReadAppliesNothing() async throws {
         let (session, directory) = try scratchSession()
         defer {
             releaseScratchStateRoot(session)

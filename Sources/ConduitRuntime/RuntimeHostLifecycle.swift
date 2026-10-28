@@ -59,7 +59,7 @@ struct RuntimeAdmittedStart: Sendable {
 
 /// The facts one Start produced for its request's receipt: its commit result and the DNS bit it staged, empty until a commit ran, and each
 /// member's result as its lane effect recorded it (the same value its `lifecycle.module_settled` carries), empty until it took lanes.
-@MainActor
+@RuntimeActor
 final class RuntimeCommitFacts: Sendable {
     var commit: RuntimePlatformCommitResult?
     var dnsStaged: Bool?
@@ -86,7 +86,7 @@ struct RuntimeAdmittedStop: Sendable {
 }
 
 /// The runtime file's facts from the disable save one session DNS Stop attempted, nil until it ran one.
-@MainActor
+@RuntimeActor
 final class RuntimeStopFacts: Sendable {
     var dnsWrite: RuntimeConfigurationWorkflow.DNSStopWrite?
 
@@ -99,7 +99,7 @@ final class RuntimeStopFacts: Sendable {
 /// the module it touches, so a newer operation on one module stops this one's work on that module only. For a Start, `prepared` is the
 /// authorizing prepared Start: the workflow group in it is the control authority, and an identical Start that joins takes it over with
 /// `adopt` while the effect has not settled its members.
-@MainActor
+@RuntimeActor
 final class RuntimeLifecycleEffect {
     /// What an operation asks beyond its scope. Two operations coalesce only when this, their scope and their operation are equal, and a
     /// Start only when it also captured the same verified pair.
@@ -431,7 +431,7 @@ extension RuntimeHost {
     }
 
     /// The members' physical start, in the order it always ran: the proxy listener and its surfaces (`applyProxySurfaces`), then the DNS
-    /// module (`startDNSModule`), then tunnels, each step on `platformWork` off the main actor (#47). Every suspension is followed by
+    /// module (`startDNSModule`), then tunnels, each step on `platformWork` off the owner (#47). Every suspension is followed by
     /// `continueStart`, and every manager step checks its module's token under the manager's lock (`LifecycleLane`). The members settle
     /// together once all completed; then a requested companion runs on its own DNS lane with its own closed result.
     private func runStartEffect(_ start: RuntimeLifecycleEffect) async throws -> RuntimeModuleStartOutcome {
@@ -974,7 +974,7 @@ extension RuntimeHost {
     /// it, as `stopRuntime(exitAfterStop: true)` does. A second call joins the first.
     ///
     /// It joins launch recovery first. Every caller reaches it asynchronously (the app's terminate-later Quit, the daemon's `SIGTERM`
-    /// through a `Task`), so the join leaves the main actor free, and the stop's clears never overlap recovery's.
+    /// through a `Task`), so the join leaves the owner free, and the stop's clears never overlap recovery's.
     ///
     /// `reservingFlushUntil` is the quit's one total deadline (`RuntimeQuitFlush`): it opens the reserved flush window for `flushing` until
     /// then, and the quit waits for the flushes it admits, or for the deadline, before it joins store work and confirms the flush of
@@ -1002,7 +1002,7 @@ extension RuntimeHost {
         let flush = deadline.map { RuntimeQuitFlush(until: $0, admitting: parts, workflow: workflow) }
         quitFlush = flush
         stoppedEffectsJoin?.finish(.superseded)
-        let quit = Task { @MainActor [self] in
+        let quit = Task { [self] in
             defer { pendingAdmissions -= 1 }
             await awaitLaunchRecovery()
             guard case .run(let stop) = beginLanes(Self.allModules, kind: .stop, operation: .runtimeStop,

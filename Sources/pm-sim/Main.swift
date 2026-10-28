@@ -169,7 +169,7 @@ enum PMSim {
         for name in names {
             // A hung scenario or cleanup must fail CI, not wait forever. The
             // longest intentional silence is 30 s; allow 120 s for the entire
-            // scenario including teardown, independently of the main actor.
+            // scenario including teardown, independently of the runtime actor.
             let watchdog = DispatchSource.makeTimerSource(queue: .global())
             let deadlineSeconds = args.contains("--self-test-outcomes") && name == "fixture-timeout" ? 0.05 : 120.0
             watchdog.schedule(deadline: .now() + deadlineSeconds)
@@ -179,7 +179,7 @@ enum PMSim {
                 exit(1)
             }
             watchdog.resume()
-            var results = await Task { @MainActor in
+            var results = await Task { @RuntimeActor in
                 let cleanup = ScenarioCleanup()
                 let results: [ScenarioResult]
                 do {
@@ -314,9 +314,9 @@ enum PMSim {
         "runtime-host-effects",
     ]
 
-    @MainActor private static var setupCleanupCompleted = false
+    @RuntimeActor private static var setupCleanupCompleted = false
 
-    @MainActor
+    @RuntimeActor
     static func runScenario(_ name: String, verbose: Bool) async throws -> [ScenarioResult] {
         switch name {
         case "baseline":
