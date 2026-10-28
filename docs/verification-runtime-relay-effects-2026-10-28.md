@@ -111,6 +111,13 @@ records. Relevant source remained `6b1efad999442ec0b7491c51e990c9c8532fc351c3329
 [Independent re-review](experiments/runtime-relay-effects/r3-source-review.md)
 accepts the final source and causal test setup, with proof limits retained.
 
+[Final independent executed review](experiments/runtime-relay-effects/r3-final-acceptance.md)
+accepts phase 1c and confirms both earlier failure witnesses passed in the full
+run. [Commit provenance](experiments/runtime-relay-effects/commit-provenance.json)
+links the tested scope to `0aa744a`; [snapshot comparison](experiments/runtime-relay-effects/snapshot-source-link.json)
+checks every included relevant review file byte-for-byte against that commit,
+with the omitted build resources recorded separately.
+
 ## Limits carried forward
 
 Relay commands can wait behind earlier platform work, as selected; the queue's

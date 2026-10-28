@@ -1,0 +1,77 @@
+{
+  "review_snapshot_sha256": "509150e4064dfef6bf9f5e4d51540bd776cad4f4352dcb75dc709ffd08ba375d",
+  "commit": "0aa744adca47590dc4a9a11ac1e8362b442409c7",
+  "compared_files": 741,
+  "all_included_relevant_files_match": true,
+  "omitted_build_inputs": [
+    {
+      "path": "Resources/AppIcon.icns",
+      "sha256": "25ce34419daf544ee4b45d561caef8a53a6b6bc12332f46733961fe6ad209e83"
+    },
+    {
+      "path": "Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
+      "sha256": "afe24cf0f326e03b6ead3579038e0c7a7036a70f544c0605af0ac260955aec78"
+    },
+    {
+      "path": "Resources/Assets.xcassets/AppIcon.appiconset/Contents.json",
+      "sha256": "d082f0cae2add6661ba00c01faed14443d6c0b823dafcfa7ef9fd78d83f7474a"
+    },
+    {
+      "path": "Resources/Assets.xcassets/Contents.json",
+      "sha256": "0fd49ba3c3585c709678e0046a821c3c60685ec7063720d30d3a3448be3a208b"
+    },
+    {
+      "path": "Resources/ConduitUpdater.entitlements",
+      "sha256": "315f401ef9f002541db53059e66db4f3389ed62af18ccfc03cb1d2850ece345e"
+    },
+    {
+      "path": "Resources/ThirdPartyLicenses/sparkle/LICENSE",
+      "sha256": "389a4e4e9a32f059775b13a06e25a591445ba229d2838d26dd3e7c0c45127cfe"
+    },
+    {
+      "path": "Resources/ThirdPartyLicenses/sparkle/Vendor/ed25519-sparkle/license.txt",
+      "sha256": "f68d76b9c1c2271422e55134ea94cf71f2ac3fc3ed6a7ec6b83a1a0538753214"
+    },
+    {
+      "path": "Resources/ThirdPartyLicenses/swift-atomics/LICENSE.txt",
+      "sha256": "770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55"
+    },
+    {
+      "path": "Resources/ThirdPartyLicenses/swift-collections/LICENSE.txt",
+      "sha256": "770af8291f708538d8ff885a0bbc4e045cd700531741c4f99528d435c14d7f55"
+    },
+    {
+      "path": "Resources/ThirdPartyLicenses/swift-nio/LICENSE.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "Resources/ThirdPartyLicenses/swift-nio/NOTICE.txt",
+      "sha256": "d25ed2452b3476c342082d11e4e8bf5459174d2836124f842b499850bcebc50e"
+    },
+    {
+      "path": "Resources/ThirdPartyLicenses/swift-nio/Sources/CNIOLLHTTP/LICENSE",
+      "sha256": "ebca854e0134cd256d673627c20499f42577eb74bacf08b9f25b626a73c91277"
+    },
+    {
+      "path": "Resources/ThirdPartyLicenses/swift-system/LICENSE.txt",
+      "sha256": "2245a990b635558be210fb3eb4f8a6f7a49aebc0fefbf5859146a65ddc7ddcf3"
+    },
+    {
+      "path": "Resources/release-signing.pem",
+      "sha256": "2b7219623bde2728479b358627913d5e6b1838983ce610e7bf6091d397857669"
+    },
+    {
+      "path": "Resources/sparkle-public-ed-key",
+      "sha256": "94345d40f1cd9cfe21d9cc42c91a90305065ce47aa5b489027f079cdb809ed20"
+    },
+    {
+      "path": "VERSION",
+      "sha256": "9a5e04d55ade7d167d2c3717946fb945d2036ac644486074f77df2bf1942b9db"
+    },
+    {
+      "path": "bundle-app.sh",
+      "sha256": "a70db2aeff3f69e28a1eb3366b137980489a6fecc3a988d903d5a323124d08b9"
+    }
+  ],
+  "workflow_source_sha256": "6b1efad999442ec0b7491c51e990c9c8532fc351c332995e6ac941766e371d0a"
+}
