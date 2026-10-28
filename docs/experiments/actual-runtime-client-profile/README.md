@@ -1,8 +1,8 @@
 # Actual runtime client profile probe
 
-The current app composition is measured at clean source `2e8d9fe` using
+The current app composition is measured at clean source `673e53a` using
 `RuntimeServiceProfile.inProcessApp()` and the selected ten-second Quit total.
-[The activation run](runs/2e8d9fe-appstate/README.md) passes all 31 fresh trials and
+[The lifetime-corrected run](runs/673e53a-lifetime/README.md) passes all 31 fresh trials and
 481 checks on stable source and linked objects. These are fake/scratch/loopback
 observations, separate from native/real-machine acceptance and app RAM bounds.
 

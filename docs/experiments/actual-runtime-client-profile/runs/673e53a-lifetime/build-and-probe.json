@@ -1,0 +1,32 @@
+{
+  "head": "673e53ab58ddd131f951a65eb2985a193725de33",
+  "source_sha256": "01691fd16ac6d74d348bccb41c82f2dea51b882c70e4bcef81c811a088cdf402",
+  "final_source_sha256": "01691fd16ac6d74d348bccb41c82f2dea51b882c70e4bcef81c811a088cdf402",
+  "stable": true,
+  "checks": [
+    {
+      "name": "release-build",
+      "command": [
+        "xcrun",
+        "swift",
+        "build",
+        "-c",
+        "release"
+      ],
+      "exit": 0,
+      "seconds": 99.019
+    },
+    {
+      "name": "actual-profile-31-trials",
+      "command": [
+        "python3",
+        "docs/experiments/actual-runtime-client-profile/run.py",
+        "/private/tmp/conduit-runtime-stage1-20261024/appstate-lifetime-production-profile/probe",
+        "--repo",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit"
+      ],
+      "exit": 0,
+      "seconds": 91.687
+    }
+  ]
+}

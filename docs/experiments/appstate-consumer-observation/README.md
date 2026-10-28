@@ -24,3 +24,5 @@ The collector enforces 4 MiB / 10,000 rows and the host's retained row ledger en
 8 MiB across lists. The app display array is count-bounded; its objects/strings and
 brief old/new/collector overlap are not included in that host accounting. These
 observations establish no app memory ceiling or installed-build footprint.
+
+The lifetime-corrected code `673e53a` has a separate [three-trial record](lifetime-fix-results.json), after its new all41 workflow and Release/profile run. All three pass on stable relevant-source fingerprint `01691fd16ac6d74d348bccb41c82f2dea51b882c70e4bcef81c811a088cdf402`. The earlier observations above remain labeled `2e8d9fe`; they are not silently reused for the correction.
