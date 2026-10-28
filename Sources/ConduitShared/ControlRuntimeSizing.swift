@@ -236,7 +236,7 @@ extension ControlLifecycleEvent {
         case .versionChanged(let from, let to):
             try budget.text(from)
             try budget.text(to)
-        case .superseded, .coalesced, .terminationDrainExpired, .moduleSettled:
+        case .superseded, .coalesced, .terminationDrainExpired, .moduleSettled, .logFlushUnconfirmed:
             break
         }
     }

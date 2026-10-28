@@ -1,0 +1,31 @@
+{
+  "observed": "after test-first467rOz",
+  "files": [
+    {
+      "file": "Sources/ConduitRuntime/RuntimeHost.swift",
+      "sha256": "9825c8a3aebb928f6b51612781d02ab83de6b2197c8eadc5e3b7a89f5e396937",
+      "matches_r1": true
+    },
+    {
+      "file": "Sources/ConduitRuntime/RuntimeHostLifecycle.swift",
+      "sha256": "8c3a6adba83212089c939121aedcecf9eabbbade37529ac9654554a430e9c719",
+      "matches_r1": true
+    },
+    {
+      "file": "Sources/PlatformMac/SplitDNSVPNGate.swift",
+      "sha256": "5007d82f154008a40b23fa92924bec9b0a7a501070b8ef453003f4014a3178eb",
+      "matches_r1": true
+    },
+    {
+      "file": "Sources/PlatformMac/SplitDNSEntryFileRepair.swift",
+      "sha256": "079bfc4750bd320af7110b9f2d5acef88f85f0e3025bcbe57d06899ba76dc961",
+      "matches_r1": true
+    },
+    {
+      "file": "Sources/PlatformMac/DNSManager.swift",
+      "sha256": "dd9768b194a796732f706238b518a7878c3a6f41e89dac1aee757359ba376d37",
+      "matches_r1": true
+    }
+  ],
+  "all_match_r1": true
+}

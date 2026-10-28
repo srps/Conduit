@@ -1,0 +1,10 @@
+{
+  "head": "6c9159ad163bc305b2b26958615fb1f43c4abdfd",
+  "review_base": "6c9159a",
+  "snapshot_sha256": "513e279de8cdb89dd750a0ae24510b2063d3f6f4970ee3251d836360630358bd",
+  "files": 790,
+  "author_manifest": "/private/tmp/conduit-runtime-stage1-20261024/runtime-diagnostic-manifest.json",
+  "new_files_in_patch": [],
+  "patch_sha256": "79408819d4efcd9e9d8b37e3d358f9a5effb7d8e4074f6a5d8cb17dfd7d97f8a",
+  "stable": true
+}

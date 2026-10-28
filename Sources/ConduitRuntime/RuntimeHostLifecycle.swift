@@ -471,8 +471,8 @@ extension RuntimeHost {
             // A stop issued while the listeners came up has already queued its clears; applying now would put the surfaces back after them.
             try continueStart(start)
             // The runtime input is the one the push just reported held. The platform flags are this start's verified intent.
+            // Marks the proxy's surfaces up itself, in the turn it decides its entry-file correction.
             try await applyProxySurfaces(start, config: heldRuntimeConfig, platform: platformConfig)
-            runtimeStarted = true
         }
         let config = heldRuntimeConfig
         let platform = platformConfig
@@ -822,8 +822,8 @@ extension RuntimeHost {
         // a crash between the flip and the reload, a config file edited by
         // hand (#13). The ownership reads happen inside the block, after
         // whatever was queued ahead of it has landed.
-        let stopGeneration = splitDNSRepair.generation
-        let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Outcome? in
+        let stopPlace = splitDNSRepair.queue()
+        let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Observation? in
             systemProxy.serialized {
                 guard terminal || !token.isSuperseded else { return }
                 guard platform.manageSystemProxy || systemProxy.hasManagedState() else { return }
@@ -842,7 +842,8 @@ extension RuntimeHost {
                     logger.log(.warning, "Could not clear environment variables: \(error.localizedDescription)", category: .system)
                 }
             }
-            return resolvers.serialized { () -> SplitDNSEntryFileRepair.Outcome? in
+            // The outcome and its residue, read under the same lock against the input the clear used.
+            return resolvers.serialized { () -> SplitDNSEntryFileRepair.Observation? in
                 guard terminal || !token.isSuperseded else { return nil }
                 if platform.manageDNSResolvers {
                     do {
@@ -851,11 +852,13 @@ extension RuntimeHost {
                         logger.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
                         // Only an entry file left on disk is the repair's; an
                         // intercept file the clear could not remove is not.
-                        if resolvers.entryFilesPresent(config: config) || resolvers.unconfiguredRecordedFilesPresent(config: config) {
-                            return .failed(.remove, error)
+                        let residue = resolvers.unconfiguredRecordedFilesPresent(config: config)
+                        if resolvers.entryFilesPresent(config: config) || residue {
+                            return SplitDNSEntryFileRepair.Observation(outcome: .failed(.remove, error), residue: residue)
                         }
+                        return SplitDNSEntryFileRepair.Observation(outcome: .succeeded(.remove), residue: residue)
                     }
-                    return .succeeded(.remove)
+                    return SplitDNSEntryFileRepair.Observation.after(.succeeded(.remove), config: config, dnsManager: resolvers)
                 } else if resolvers.hasManagedState() {
                     // Switch off: only what the journal names as ours, never a file
                     // for a configured domain we did not write.
@@ -868,7 +871,7 @@ extension RuntimeHost {
                 return nil
             }
         }
-        recordSplitDNS(entryFiles, source: .stop, startedAt: stopGeneration)
+        await recordSplitDNS(entryFiles, source: .stop, startedAt: stopPlace)
         return terminal || holdsLane(effect, .proxy)
     }
 
@@ -1011,7 +1014,8 @@ extension RuntimeHost {
             await waitUntilIdle(Self.allModules)
             await flush?.closed()
             await workflow.waitUntilIdle()
-            await flushEvents()
+            // The logger's drain is cut to the quit's own deadline, so the quit gives it no fresh budget.
+            await flushEvents(loggerUntil: deadline)
             flush?.quitDidEnd()
             // The physical work is done: the composed control service ends its streams after what it already published.
             quitEnded = true

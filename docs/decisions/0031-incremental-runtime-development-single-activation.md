@@ -3,7 +3,7 @@
 - Date: 2026-10-25
 - Decision: accepted (owner, 2026-10-25, #186: selected “Incremental development; one final AppState switch (Recommended)”)
 - Implementation: partial
-- Validation: none
+- Validation: pending
 - Supersedes: 0001, 0013
 - Superseded by: none
 
@@ -123,6 +123,9 @@ installed over the serving daily-driver app for verification.
 
 ## Implementation evidence
 
+The milestones below record their state at each checkpoint; the later AppState
+activation entry records current adoption.
+
 Partial: [`StateRootSession`](../../Sources/PlatformMac/StateRootSession.swift)
 now owns the exhaustive component-to-file mapping and delegates replacement to
 the existing primitive with its private lease.
@@ -197,16 +200,66 @@ the failure and corrected workflow evidence. This implementation is under
 verification and unreleased. The complete RuntimeActor move remains unimplemented, so this
 record's overall implementation status remains partial.
 
+### Blocking-effect prerequisite implementation (2026-10-28)
+
+[`RuntimeReconciler`](../../Sources/PlatformMac/RuntimeReconciler.swift) now awaits
+flag effects through the existing single quiescence handle;
+[`RuntimeHost`](../../Sources/ConduitRuntime/RuntimeHost.swift) enqueues their
+physical work on its existing PlatformWork. Per-action landed facts remain
+truthful without stale whole-baseline or desired-intent promotion. The
+[prerequisite checkpoint](../verification-runtime-actor-prerequisites-2026-10-28.md)
+records focused actual-client/host tests and remaining inline/blocking work. This
+is current-isolation preparation, not the whole RuntimeActor move or its
+acceptance. The single owner/store/workflow and selected Stop/Quit policy remain
+unchanged.
+
+The [split-DNS prerequisite](../verification-runtime-dns-effects-2026-10-28.md)
+queues gate/file, retry, residue and intercept-refresh work through the same
+PlatformWork, with queue-order freshness and Start-tail Stop protection. Focused
+checks, all 41 workflow checks and independent corrected-source review pass.
+Two review findings have test-first regressions, with invalid fixture/check
+attempts preserved separately. It preserves
+files-before-orchestrator ordering and records its latency tradeoff and revisit
+condition. This is still preparation under MainActor, not completed isolation.
+
+The [relay prerequisite](../verification-runtime-relay-effects-2026-10-28.md)
+replaces the kernel's direct helper with an async command on the host's existing
+PlatformWork, orders reassert through the DNS physical slot and bounds it to one
+in flight. It deletes unused termination/queue-drain paths while retaining audit
+assertions on the consumed diagnostic path. Focused and all 41 workflow checks
+pass after causal test-fixture corrections; independent review accepts Source.
+Diagnostic/logger work and the whole RuntimeActor move remain open.
+
+
+The [diagnostic prerequisite](../verification-runtime-diagnostics-2026-10-28.md)
+adds the asynchronous [LogSink drain](../../Sources/ProxyKernel/Abstractions/LogSink.swift),
+bounded [file writer](../../Sources/ProxyKernel/Support/RotatingLogFile.swift) and
+[AppLogStore history handoff](../../Sources/Conduit/App/AppLogStore.swift), with the
+[host](../../Sources/ConduitRuntime/RuntimeHost.swift) and
+[app Quit tail](../../Sources/Conduit/App/AppState.swift) using bounded waits.
+Misses use a typed lifecycle event with separate wire mapping. Independent review
+found and corrected a write/close admission race; focused tests, control
+witnesses and all 41 corrected workflow checks pass. Fresh Release host/writer
+and optimized consumer/logger measurements pass; new-head hosted checks remain
+pending. The full-list baseline still shows a long current-owner turn, so whole
+RuntimeActor and full-capture control fairness remain required.
+No registry, queue or runtime/store path is added. Native activation and
+applicable machine checks are now due, so validation is pending; unit tests,
+models and hosted CI are not recorded as owner/real-machine validation.
+
 ## Open questions
 
-Complete the workflow freshness/private-editor observation API, preserving
-client-observed prior component preconditions separately from runtime views and
-intent fences. [0034](0034-private-editor-reply-frame-cap.md) selects the private
-reply ceiling; actual-adapter custody and responsiveness still need verification.
-Select the remaining coherent profile from measurements before
-the affected adoption. [0032](0032-explicit-reload-and-reconcile.md) selects
-read-only reload-and-reconcile of eligible inputs; that policy is resolved. Revisit the
-activation sequence if a demonstrated delivery/compatibility need outweighs the
-cost of temporary capabilities; return the concrete ownership/deletion plan for
-owner review before changing this sequence. Subsystem actors or broad module
-splits still require measured contention or dependency evidence.
+The workflow freshness/private-editor observation API, private reply ceiling
+(0034), collection limits (0038), production profile and total Quit budget (0039)
+are selected and consumed by the AppState candidate. Local full-workflow,
+actual-adapter resource checks and exact-head hosted CI have passed. Native
+edit/Quit acceptance remains pending. [0032](0032-explicit-reload-and-reconcile.md)
+settles reload-and-reconcile policy; no configuration-store policy choice remains
+open here.
+
+Complete the remaining blocking-effect prerequisites and whole RuntimeActor move,
+then verify owner fairness and applicable real-machine/release acceptance.
+Subsystem actors or broad module splits still require measured contention or
+dependency evidence. Revisit activation sequencing only if a demonstrated
+compatibility need outweighs temporary capabilities, with a concrete ownership
+and deletion plan for owner review.

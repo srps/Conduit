@@ -39,6 +39,23 @@ final class DiagnosticDrainPhaseTests: XCTestCase {
         XCTAssertLessThanOrEqual(cut ?? ContinuousClock.now, ContinuousClock.now.advanced(by: .seconds(1)))
     }
 
+    /// The logger's drain is reported beside the artifacts and never changes their confirmation: unset, it is `unavailable`, not a
+    /// claimed drain, and no outcome of it makes a confirmed phase unconfirmed or the reverse.
+    func testTheLoggerOutcomeStaysApartFromTheArtifactConfirmation() {
+        var confirmed = DiagnosticFlushReport(audit: .drained, events: .drained, eventsRetry: nil, snapshot: .current,
+                                              snapshotEvent: .notNeeded, auditStatistics: RecordWriterStatistics(),
+                                              eventsStatistics: RecordWriterStatistics())
+        XCTAssertEqual(confirmed.logger, .unavailable)
+        var unconfirmed = confirmed
+        unconfirmed.events = .timedOut
+        for outcome in [RecordDrainOutcome.drained, .timedOut, .busy, .skippedBudget, .cancelled, .unavailable] {
+            confirmed.logger = outcome
+            unconfirmed.logger = outcome
+            XCTAssertTrue(confirmed.allConfirmed, "\(outcome)")
+            XCTAssertFalse(unconfirmed.allConfirmed, "\(outcome)")
+        }
+    }
+
     func testExhaustedPhaseSkipsEveryWriterAndSaysSo() async {
         let events = RuntimeEventLog(capacity: 16)
         let logger = RecordingLogSink()

@@ -9,7 +9,8 @@
 // small, realistic-valid-64, realistic-valid-128, validator-widest, escape-maximum, padded-8mib, repeat, contention,
 // contention-encode, contention-store, held, cancel, client-quit-widest (the actual `RuntimeClientQuit.quit` routine), codec-bounds,
 // profile-sizing (no host: the candidate's constructor terms, rows and snapshot), pressure-candidate (one bounded pressure run at the
-// candidate profile); any mode with `-nosampler` runs without the memory sampler.
+// candidate profile), logger-held (optional, not in the runner's default list: the host's logger drain held at its file's open);
+// any mode with `-nosampler` runs without the memory sampler.
 //
 // Every host mode runs at ONE measured CANDIDATE profile (`CandidateProfile`), built through the actual `RuntimeServiceLimits`
 // initializer from codec measurements. It is an experiment profile, not a shipping default; only its collection caps are selected
@@ -27,6 +28,7 @@ import PlatformMac
 import ProxyAuth
 import ProxyControlBridge
 import ProxyKernel
+import RuntimeEvents
 
 // MARK: - Output
 
@@ -432,6 +434,150 @@ struct Fakes: @unchecked Sendable {
             resolverDirectory: fakes.machine.resolverDirectory.path,
             stateFiles: fakes.files
         )
+    }
+}
+
+/// The host logger's file destination in `logger-held`: every admission is judged by the authoritative app-log guard the app builds
+/// from the held root (`diagnosticDestinationGuard(for: .appLog, …, writerLeaseFile:)`), after an optional hold. Armed, the next
+/// destination admission waits until `release()`, bounded by `safetySeconds`; an expiry is recorded and fails the mode. The opened
+/// descriptor is judged by the authoritative guard alone. The hold adds a wait only; it never admits what the guard refuses.
+final class HeldLogDestination: RecordFileDestinationGuarding, @unchecked Sendable {
+    static let safetySeconds: TimeInterval = 60
+    private let authoritative: any RecordFileDestinationGuarding
+    private let condition = NSCondition()
+    private var armed = false
+    private var holding = false
+    private var reached = 0
+    private var expired = false
+
+    init(authoritative: any RecordFileDestinationGuarding) { self.authoritative = authoritative }
+
+    func arm() { condition.withLock { armed = true } }
+
+    func release() {
+        condition.withLock {
+            armed = false
+            condition.broadcast()
+        }
+    }
+
+    var isHolding: Bool { condition.withLock { holding } }
+    var reachedCount: Int { condition.withLock { reached } }
+    var safetyExpired: Bool { condition.withLock { expired } }
+
+    func admit(destination: URL) throws {
+        condition.withLock {
+            guard armed else { return }
+            reached += 1
+            holding = true
+            let limit = Date().addingTimeInterval(Self.safetySeconds)
+            while armed {
+                if !condition.wait(until: limit) {
+                    expired = true
+                    armed = false
+                }
+            }
+            holding = false
+        }
+        try authoritative.admit(destination: destination)
+    }
+
+    func admit(openedDescriptor descriptor: Int32, destination: URL) throws {
+        try authoritative.admit(openedDescriptor: descriptor, destination: destination)
+    }
+}
+
+/// The probe-local host logger in `logger-held`: one formatted line per call, admitted to the kernel's own app-log file writer
+/// (`rotatingLogFile`), as the app's store admits it. `freshWriter()` closes the current writer and starts another, whose open is the
+/// one the destination can hold. It counts the lines and bytes handed to the current writer, and records each host drain call.
+final class ProbeFileLogger: LogSink, @unchecked Sendable {
+    let destination: HeldLogDestination
+    private let url: URL
+    /// The gate's own event log, for a refusal of this destination; the probe checks it stays empty.
+    let gateEvents = RuntimeEventLog(capacity: 16)
+    private let gate: RecordFileDestinationGate
+    private let lock = NSLock()
+    private var writer: any RotatingByteWriter
+    private var handedLines = 0
+    private var handedBytes = 0
+    private var drainCalls = 0
+    private var drainInFlight = false
+    private var lastDrain: (outcome: RecordDrainOutcome, requestedMS: Double, elapsedMS: Double)?
+    private var drainEntered: ContinuousClock.Instant?
+
+    init(url: URL, destination: HeldLogDestination) {
+        self.url = url
+        self.destination = destination
+        gate = RecordFileDestinationGate(sink: .appLog, eventLog: gateEvents, logger: DiscardingLogSink())
+        writer = rotatingLogFile(url: url, destinationGuard: destination, gate: gate, eventLog: gateEvents, logger: DiscardingLogSink())
+    }
+
+    /// The app's default buffered and stderr level.
+    var minLevel: LogLevel { .notice }
+
+    func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
+        let line = Data((LogEntry(level: level, category: category, message: message).formatted() + "\n").utf8)
+        lock.withLock {
+            handedLines += 1
+            handedBytes += line.count
+            writer.write(line)
+        }
+    }
+
+    var statistics: RecordWriterStatistics { lock.withLock { writer }.statistics }
+
+    @discardableResult func flush(timeout: TimeInterval) -> Bool { lock.withLock { writer }.flush(timeout: timeout) }
+
+    func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome {
+        let entered = ContinuousClock.now
+        let current = lock.withLock { () -> any RotatingByteWriter in
+            drainCalls += 1
+            drainInFlight = true
+            drainEntered = entered
+            return writer
+        }
+        let outcome = await current.drain(until: deadline)
+        let elapsed = elapsedMS(since: entered)
+        lock.withLock {
+            drainInFlight = false
+            lastDrain = (outcome, milliseconds(entered.duration(to: deadline)), elapsed)
+        }
+        return outcome
+    }
+
+    /// Closes the current writer with no lock held, and starts a fresh one. Returns the closed writer's counters and handed totals.
+    func freshWriter() -> (statistics: RecordWriterStatistics, lines: Int, bytes: Int) {
+        let closing = lock.withLock { writer }
+        closing.close()
+        let next = rotatingLogFile(url: url, destinationGuard: destination, gate: gate, eventLog: gateEvents, logger: DiscardingLogSink())
+        return lock.withLock {
+            let result = (closing.statistics, handedLines, handedBytes)
+            writer = next
+            handedLines = 0
+            handedBytes = 0
+            return result
+        }
+    }
+
+    func closeWriter() { lock.withLock { writer }.close() }
+
+    var handed: (lines: Int, bytes: Int) { lock.withLock { (handedLines, handedBytes) } }
+    /// The writer's counters and the handed totals read together. A line is handed and admitted under this lock, and the writer moves a
+    /// record from pending to written in one step, so handed = written + pending + dropped + failed holds in this one reading.
+    var consistentCounters: (statistics: RecordWriterStatistics, lines: Int, bytes: Int) {
+        lock.withLock { (writer.statistics, handedLines, handedBytes) }
+    }
+    var drains: (calls: Int, inFlight: Bool, entered: ContinuousClock.Instant?) { lock.withLock { (drainCalls, drainInFlight, drainEntered) } }
+    var lastDrainRecord: (outcome: RecordDrainOutcome, requestedMS: Double, elapsedMS: Double)? { lock.withLock { lastDrain } }
+
+    /// Exact writer counters and handed totals, for a stage record.
+    var counters: [String: Any] {
+        let statistics = self.statistics
+        let (lines, bytes) = handed
+        return ["writerPendingRecords": statistics.pendingRecords, "writerPendingBytes": statistics.pendingBytes,
+                "writerWrittenRecords": statistics.writtenRecords, "writerDroppedRecords": statistics.droppedRecords,
+                "writerFailedRecords": statistics.failedRecords, "writerFlushTimeouts": statistics.flushTimeouts,
+                "handedLines": lines, "handedBytes": bytes]
     }
 }
 
@@ -1456,6 +1602,9 @@ final class HostRun {
     weak var weakHost: RuntimeHost?
     var clients: RuntimeInMemoryClients?
     var incarnation: ControlHostIncarnation?
+    /// `logger-held` only: the probe-local file logger the host was opened with. Its hold is released, and its writer closed, on every
+    /// exit through `release()` (and before the error path's shutdown).
+    var fileLogger: ProbeFileLogger?
 
     init(out: Output, stages: StageRecorder, scratch: URL) throws {
         self.out = out
@@ -1480,10 +1629,11 @@ final class HostRun {
         }
     }
 
-    func open() async throws {
+    /// `logger` is the host's logger; every mode but `logger-held` keeps the default.
+    func open(logger: any LogSink = DiscardingLogSink()) async throws {
         guard let session else { throw ProbeError("noSession") }
         let opened = try await RuntimeHost.open(
-            stateSession: session, logger: DiscardingLogSink(), startupAllowsMissing: false,
+            stateSession: session, logger: logger, startupAllowsMissing: false,
             startedAt: Date(timeIntervalSince1970: 1_700_000_000), terminalExit: {}, effects: fakes.effects()
         )
         host = opened
@@ -1592,6 +1742,8 @@ final class HostRun {
     /// deallocation observed, the session dropped and the lease proven closed by a fresh acquisition; the scratch root is removed
     /// only when every proof agrees. Anything unconfirmed is pinned until process exit and reported.
     func release() async -> Bool {
+        // A held logger is released first, whatever happened, so no later flush or removal waits on it.
+        fileLogger?.destination.release()
         guard host != nil else {
             out.check(false, "release.hostPresent")
             return false
@@ -1666,6 +1818,11 @@ final class HostRun {
             if let alive = weakHost { Pinned.objects.append(alive) }
             out.emit(["record": "pinned", "reason": "host or lease not released; host kept until process exit; scratch kept"])
             return false
+        }
+        if let fileLogger {
+            // Its descriptor is closed before the root's directory goes; the hold must have ended by release, never by its safety bound.
+            fileLogger.closeWriter()
+            out.check(!fileLogger.destination.safetyExpired, "release.loggerHoldEndedByRelease")
         }
         do {
             try FileManager.default.removeItem(at: scratch)
@@ -2171,14 +2328,20 @@ extension HostRun {
         return try await openRunning(limits: limits, config: makeValidMaximumConfig(port: port, auditPrefix: scratch.path + "/audit"))
     }
 
-    /// Opens the actual host over `config`, composes the clients and Starts the proxy through a private update.
-    func openRunning(limits: RuntimeServiceLimits, config: ProxyConfig) async throws -> (config: ProxyConfig, port: Int) {
+    /// Opens the actual host over `config`, composes the clients and Starts the proxy through a private update. `logger`, when given,
+    /// builds the host's logger from the held session; otherwise the host logs to `DiscardingLogSink`.
+    func openRunning(limits: RuntimeServiceLimits, config: ProxyConfig,
+                     logger: ((StateRootSession) -> any LogSink)? = nil) async throws -> (config: ProxyConfig, port: Int) {
         let port = config.proxy.port
         try acquire()
         try ProxyConfigPersistence.save(config, in: environment)
         try PlatformConfigPersistence.save(makePlatform(), in: environment)
         try AppPreferencesPersistence.save(makeSmallPreferences(), in: environment)
-        try await open()
+        if let logger, let session {
+            try await open(logger: logger(session))
+        } else {
+            try await open()
+        }
         try compose(limits: limits)
         incarnation = try await readSnapshot().0.stamp.incarnation
         let observed = try await read().0
@@ -2519,6 +2682,113 @@ func runHeld(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
     out.check(outcomeLabel(stopDone.outcome) == "completed.stop" && after.proxyState != .running
               && !run.fakes.machine.service("Wi-Fi").webProxy.enabled, "helper.stopVerifiedAfterRelease")
     run.stages.stage("held-helper-done")
+    try await run.plainQuit()
+}
+
+/// logger-held: the host's own logger drain, held at its file's open. The host logs through the probe-local file logger, which writes the
+/// held root's own log file under the authoritative app-log guard. With the small fixture's real loopback listener running, the logger
+/// gets a fresh writer and the next line's open is held (positive witness). The host's flush is then started; once the logger records the
+/// host's drain call, status and one proxy Stop are measured while that drain is still in flight. The drain ends at the host's own bounded
+/// wait: that wait is deliberate and is reported apart, never as overhead. Released, every handed line is written with nothing dropped,
+/// the typed host fact reaches the owned events file, and the artifact confirmation is checked on its own.
+@MainActor
+func runLoggerHeld(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
+    let out = run.out
+    let environment = run.environment
+    let port = try reserveLoopbackPort()
+    var made: ProbeFileLogger?
+    _ = try await run.openRunning(limits: limits, config: makeSmallConfig(port: port)) { session in
+        let logger = ProbeFileLogger(url: environment.logFile, destination: HeldLogDestination(
+            authoritative: diagnosticDestinationGuard(for: .appLog, in: environment, writerLeaseFile: session.writerLeaseFile)
+        ))
+        made = logger
+        return logger
+    }
+    guard let logger = made else { throw ProbeError("noFileLogger") }
+    run.fileLogger = logger
+    let (running, _) = try await run.readSnapshot()
+    out.check(running.proxyState == .running && loopbackAccepts(port), "logger.listenerAccepts")
+    try await run.statusSamples(20, condition: "logger-idle")
+    run.stages.stage("logger-running", logger.counters)
+
+    // The hold: a fresh writer, whose open the next line reaches and waits in.
+    logger.destination.arm()
+    let first = logger.freshWriter()
+    out.emit(["record": "logger-first-writer", "writtenRecords": first.statistics.writtenRecords,
+              "droppedRecords": first.statistics.droppedRecords, "failedRecords": first.statistics.failedRecords,
+              "pendingRecords": first.statistics.pendingRecords, "handedLines": first.lines, "handedBytes": first.bytes])
+    out.check(first.statistics.writtenRecords == UInt64(first.lines) && first.statistics.pendingRecords == 0
+              && first.statistics.droppedRecords == 0 && first.statistics.failedRecords == 0, "logger.firstWriterWroteEveryLine")
+    logger.log(.notice, "probe logger hold witness")
+    let reached = try await waitUntil(seconds: 5) { logger.destination.isHolding }
+    out.check(reached && logger.destination.reachedCount == 1, "logger.holdReached")
+    run.stages.stage("logger-held-reached", logger.counters)
+
+    // The host's own flush: nothing in its artifacts is held; its logger drain is.
+    guard let host = run.host else { throw ProbeError("noHost") }
+    let flushStart = ContinuousClock.now
+    let flush = Task { @MainActor in await host.flushEvents() }
+    let entered = try await waitUntil(seconds: 10) { logger.drains.calls >= 1 }
+    out.check(entered, "logger.hostDrainEntered")
+    let artifactPhaseMS = logger.drains.entered.map { milliseconds(flushStart.duration(to: $0)) } ?? -1
+    try await run.statusSamples(20, condition: "logger-drain-held")
+    let stop = try await run.measuredStop(.proxy, condition: "logger-drain-held")
+    let listenerClosed = !loopbackAccepts(port)
+    let cleared = !run.fakes.machine.service("Wi-Fi").webProxy.enabled
+    let (afterStop, _) = try await run.readSnapshot()
+    let stillHeld = logger.drains.inFlight && logger.destination.isHolding
+    out.emit(["record": "logger-held-stop", "outcome": outcomeLabel(stop), "listenerClosed": listenerClosed, "systemProxyCleared": cleared,
+              "snapshotStopped": afterStop.proxyState != .running, "drainStillInFlightAfterMeasurements": stillHeld])
+    out.check(outcomeLabel(stop) == "completed.stop" && listenerClosed && cleared && afterStop.proxyState != .running,
+              "logger.stopPhysicallyCompleteWhileHeld")
+    out.check(stillHeld, "logger.measuredInsideTheHeldDrain")
+    run.stages.stage("logger-drain-held", logger.counters)
+
+    let report = await flush.value
+    let flushTotalMS = elapsedMS(since: flushStart)
+    let drain = logger.lastDrainRecord
+    out.emit(["record": "logger-held-drain", "drainOutcome": drain?.outcome.rawValue ?? "none", "requestedWaitMS": drain?.requestedMS ?? -1,
+              "drainElapsedMS": drain?.elapsedMS ?? -1, "drainWaitIsDeliberate": true, "artifactPhaseMS": artifactPhaseMS,
+              "flushTotalMS": flushTotalMS, "reportLogger": report.logger.rawValue, "artifactsAllConfirmed": report.allConfirmed])
+    out.check(report.logger == .timedOut && drain?.outcome == .timedOut, "logger.drainEndedAtItsBoundedWait")
+    out.check(report.allConfirmed, "logger.artifactConfirmationApart")
+    run.stages.stage("logger-drain-ended", logger.counters)
+
+    // Release: the held open proceeds and the writer drains what it admitted.
+    let releaseStart = ContinuousClock.now
+    logger.destination.release()
+    let flushed = logger.flush(timeout: 10)
+    let releaseToDrainedMS = elapsedMS(since: releaseStart)
+    let (statistics, lines, bytes) = logger.consistentCounters
+    var fileBytes = -1
+    do {
+        fileBytes = try FileManager.default.attributesOfItem(atPath: environment.logFile.path)[.size] as? Int ?? -1
+    } catch {
+        out.emit(["record": "error", "error": "probe.logFileUnreadable"])
+    }
+    let admittedBytes = first.bytes + bytes
+    out.emit(["record": "logger-release", "flushed": flushed, "releaseToDrainedMS": releaseToDrainedMS, "fileBytes": fileBytes,
+              "handedBytesBothWriters": admittedBytes, "pendingBytes": statistics.pendingBytes,
+              "gateRefusals": logger.gateEvents.events.count, "holdSafetyExpired": logger.destination.safetyExpired])
+    out.check(flushed && statistics.droppedRecords == 0 && statistics.failedRecords == 0
+              && statistics.writtenRecords + UInt64(statistics.pendingRecords) == UInt64(lines), "logger.everyHandedLineWrittenOrPending")
+    out.check(fileBytes <= admittedBytes && fileBytes >= admittedBytes - statistics.pendingBytes, "logger.fileHoldsTheWrittenBytes")
+    out.check(logger.gateEvents.events.isEmpty, "logger.authoritativeGuardAdmitted")
+    run.stages.stage("logger-released", logger.counters)
+
+    // The next host flush drains the logger, and persists the typed fact the held drain recorded.
+    let confirm = await host.flushEvents()
+    out.check(confirm.logger == .drained && confirm.allConfirmed, "logger.nextHostDrainDrained")
+    let decoder = CanonicalJSON.decoder()
+    let rows = try String(contentsOf: environment.eventsFile, encoding: .utf8).split(separator: "\n")
+    let expected = RuntimeEventPayload.lifecycle(.logFlushUnconfirmed(LifecycleLogFlushUnconfirmed(source: .host, outcome: .timedOut)))
+    var facts = 0
+    for row in rows {
+        if try decoder.decode(RuntimeEvent.self, from: Data(row.utf8)).typed == expected { facts += 1 }
+    }
+    out.emit(["record": "logger-typed-fact", "hostTimedOutFacts": facts, "eventRows": rows.count])
+    out.check(facts == 1, "logger.typedHostFactPersistedOnce")
+    run.stages.stage("logger-done", logger.counters)
     try await run.plainQuit()
 }
 
@@ -3816,7 +4086,7 @@ func runPressure(_ run: HostRun, build: CandidateBuild) async throws {
 }
 
 let latencyModes = ["contention", "contention-encode", "contention-store", "held", "cancel", "client-quit-widest", "codec-bounds",
-                    "profile-sizing", "pressure-candidate"]
+                    "profile-sizing", "pressure-candidate", "logger-held"]
 
 let flowModes = ["small", "realistic-valid-64", "realistic-valid-128", "validator-widest", "escape-maximum", "padded-8mib", "repeat"]
 
@@ -3920,6 +4190,8 @@ struct ProbeMain {
                     try await runClientQuit(run, limits: limits)
                 } else if mode == "pressure-candidate" {
                     try await runPressure(run, build: build)
+                } else if mode == "logger-held" {
+                    try await runLoggerHeld(run, limits: limits)
                 } else {
                     try await runFlow(run, limits: limits, fixture: try makeFixture(mode, scratch: scratch))
                 }
@@ -3927,6 +4199,8 @@ struct ProbeMain {
                 out.emit(["record": "error", "error": errorLabel(error)])
                 out.check(false, "mode.completed")
                 if run.host != nil {
+                    // A held logger is released first, so the shutdown's own flush does not wait on it.
+                    run.fileLogger?.destination.release()
                     // Join the host's work before anything is released: a quit, then the release proofs.
                     await run.host?.shutdown()
                 }

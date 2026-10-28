@@ -1,0 +1,6 @@
+{
+  "production_files_compared": 404,
+  "all_production_source_matches_relay_r1": true,
+  "r3_changes": "Test-only initial VPN failure setup barrier and precise helper documentation; same 6-attempt assertion, same later sleeps and assertions",
+  "review_snapshot_sha256": "509150e4064dfef6bf9f5e4d51540bd776cad4f4352dcb75dc709ffd08ba375d"
+}

@@ -2,6 +2,7 @@
 import Darwin
 import XCTest
 import ConduitShared
+@testable import Conduit
 @testable import ConduitRuntime
 @testable import PlatformMac
 @testable import ProxyKernel
@@ -84,6 +85,40 @@ fileprivate extension PrivateEditorClient {
     }
 }
 
+/// The host's logger in the held-drain test: it forwards every call to the app's log store, and records the host's synchronous flushes
+/// and the moment the host first enters an asynchronous drain, so the test acts only once the host's logger wait has actually begun.
+private final class DrainEntryWitness: LogSink, @unchecked Sendable {
+    private let base: any LogSink
+    private let lock = NSLock()
+    private var flushes = 0
+    private var drainEntered: ContinuousClock.Instant?
+    private var drainsReturned = 0
+
+    init(_ base: any LogSink) { self.base = base }
+
+    var minLevel: LogLevel { base.minLevel }
+    var statistics: RecordWriterStatistics { base.statistics }
+    var state: (flushes: Int, drainEntered: ContinuousClock.Instant?, drainsReturned: Int) {
+        lock.withLock { (flushes, drainEntered, drainsReturned) }
+    }
+
+    func flush(timeout: TimeInterval) -> Bool {
+        lock.withLock { flushes += 1 }
+        return base.flush(timeout: timeout)
+    }
+
+    func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome {
+        lock.withLock { if drainEntered == nil { drainEntered = .now } }
+        let outcome = await base.drain(until: deadline)
+        lock.withLock { drainsReturned += 1 }
+        return outcome
+    }
+
+    func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
+        base.logImpl(level, message, category: category)
+    }
+}
+
 /// The actual `RuntimeHost` as the control service's one command owner (decisions 0014, 0031, 0035 and 0036): host, then
 /// `RuntimeServiceCore`, then the in-memory transport, then the framed client, over a `FakeMachine` and a scratch root. Every bound is
 /// the explicit test fixture profile, never a shipping default. Waits end on observed boundaries: a held machine call, or the
@@ -111,10 +146,11 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
     /// `beforeOpen` shapes the scratch root's saved files or the harness's effects before the host opens over them.
     private func compose(
         dnsForwarderEnabled: Bool = true,
+        platform: PlatformIntegrationConfig? = nil,
         stateFiles: (any StateFileAccessing)? = nil,
         beforeOpen: (InteractiveHostHarness) throws -> Void = { _ in }
     ) async throws -> Composed {
-        let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: dnsForwarderEnabled)
+        let harness = try makeInteractiveHarness(platform: platform ?? proxyAndDNS, dnsForwarderEnabled: dnsForwarderEnabled)
         self.harness = harness
         if let stateFiles { harness.stateFiles = stateFiles }
         try beforeOpen(harness)
@@ -1615,6 +1651,180 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertTrue(composed.host.runtimeState().proxyIsUp)
     }
 
+    /// A mixed apply's flag action runs on the host's platform queue, never inline (#47). Held there, mid-apply, the framed snapshot and
+    /// the status answer and a proxy Stop is admitted; the Stop's teardown waits for the action already running. Released, the partial
+    /// environment apply lands at the value its save carried and its shortfall is still reported, the Stop's clears land after it, and the
+    /// rest of the apply holds: the system DNS clear never runs, no other group is recorded, and the request is left as the save made it.
+    func testAHeldFlagActionLeavesTheOwnerFreeAndAStopAdmittedMeanwhileClearsAfterIt() async throws {
+        let composed = try await compose(
+            dnsForwarderEnabled: false,
+            platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: false, manageSystemDNS: true)
+        )
+        try await composed.host.startRuntime()
+        let machine = composed.harness.machine
+        XCTAssertTrue(machine.launchdEnvironment.isEmpty, "the environment is not managed yet")
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let request = try update(composed, from: observed, modules: PrivateModuleSlots(
+            proxy: .applyWhileRunning(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision), dns: .saveOnly, tunnels: .saveOnly
+        ), editPlatform: {
+            $0.manageEnvironmentVariables = true
+            $0.manageSystemDNS = false
+        }) { $0.noProxyHosts.append("flag-held.example") }
+        machine.failingSetenv = ["HTTP_PROXY"]
+        func decisions(_ action: String) -> Int {
+            composed.host.orchestrator.eventLog.events.filter { $0.event == "config.platform_integration" && $0.detail == action }.count
+        }
+
+        let viewBefore = try await composed.client.readSnapshot(deadline: deadline()).stamp.configRevision.rawValue
+
+        composed.harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/bin/launchctl" && arguments.first == "setenv"
+        }
+        let operation = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+        await composed.harness.hold.waitUntilReached()
+        XCTAssertFalse(composed.harness.hold.reachedOnMainThread, "the flag action's manager call is off the main actor")
+        XCTAssertTrue(composed.host.heldRuntimeConfig.noProxyHosts.contains("flag-held.example"), "the push already ran")
+        XCTAssertEqual(decisions("applyEnvironment"), 1)
+
+        let snapshot = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertEqual(snapshot.proxyState, .running, "the framed snapshot answers while the action is held")
+        XCTAssertGreaterThan(snapshot.stamp.configRevision.rawValue, viewBefore,
+                             "the framed status already names the view the apply adopted before its held action")
+        let stop = try accepted(try await submit(composed, .stop(.proxy)))
+        let waiting = try await eventually { !composed.host.lanes.proxy.isIdle }
+        XCTAssertTrue(waiting, "the Stop took its lane while the action is held")
+        XCTAssertTrue(composed.host.runtimeState().proxyIsUp, "its teardown waits for the action already running")
+        XCTAssertTrue(machine.service("Wi-Fi").routesThroughAProxy)
+        composed.harness.hold.release()
+
+        let outcomes = try await finishedAll([operation, stop], on: stream)
+        XCTAssertEqual(outcomes[stop].flatMap { completed($0) }, .stop)
+        XCTAssertEqual(try receipt(try XCTUnwrap(outcomes[operation])).applied, false, "the Stop left the pair unreconciled")
+        XCTAssertTrue(machine.launchdEnvironment.isEmpty, "the Stop's clear landed after the held apply wrote the environment")
+        XCTAssertFalse(machine.service("Wi-Fi").routesThroughAProxy)
+        XCTAssertFalse(composed.host.runtimeState().proxyIsUp)
+        XCTAssertTrue(composed.host.orchestrator.eventLog.events.contains {
+            $0.event == "config.reapply_failed" && ($0.detail ?? "").hasPrefix("surface=environment cause=switch_on")
+        }, "the partial apply's shortfall is reported though a Stop overtook it")
+        XCTAssertTrue(composed.host.completedPlatformBaseline.manageEnvironmentVariables, "the partial apply landed at its save's value")
+        XCTAssertTrue(composed.host.completedPlatformBaseline.manageSystemDNS, "the skipped clear is not recorded")
+        XCTAssertEqual(decisions("clearSystemDNS"), 0, "no action runs after the Stop")
+        XCTAssertEqual(composed.host.reconciler.requestedPlatformConfig, composed.host.platformConfig, "the request is the save's")
+        XCTAssertTrue(composed.host.reconciler.requestLags)
+    }
+
+    /// A VPN transition's entry-file write runs on the host's platform queue, never inline, so a held resolver write leaves the owner free
+    /// (#47): the framed snapshot answers, the next transition is taken and queues its removal behind the write, and a proxy Stop is
+    /// admitted and takes its lane while its clears wait in the same queue. Released, the work lands in the order it was decided: the
+    /// tunnel's write, the drop's removal, then the Stop's clears, with each split-DNS outcome recorded and none superseded.
+    func testAHeldVPNEntryFileWriteLeavesTheOwnerFreeAndLandsBeforeTheNextTransitionAndAStop() async throws {
+        let composed = try await compose(
+            dnsForwarderEnabled: false, platform: PlatformIntegrationConfig(manageSystemProxy: true, manageDNSResolvers: true)
+        )
+        try await composed.host.startRuntime()
+        let machine = composed.harness.machine
+        let host = composed.host
+        composed.harness.vpn.emit(.disconnected(reason: .userInitiated))
+        await host.deliveries.drain()
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "no entry file with the tunnel down")
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let before = machine.privilege.commands.count
+
+        composed.harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.applyDNS.rawValue }
+        composed.harness.vpn.emit(.connected)
+        await composed.harness.hold.waitUntilReached()
+        XCTAssertFalse(composed.harness.hold.reachedOnMainThread, "the tunnel's entry write is off the main actor")
+
+        let snapshot = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertEqual(snapshot.proxyState, .running, "the framed snapshot answers while the resolver write is held")
+        composed.harness.vpn.emit(.disconnected(reason: .networkLost))
+        let taken = try await eventually { !host.splitDNSGate.entriesWanted }
+        XCTAssertTrue(taken, "the next transition is taken while the write is held")
+        let stop = try accepted(try await submit(composed, .stop(.proxy)))
+        let stopping = try await eventually { !host.lanes.proxy.isIdle }
+        XCTAssertTrue(stopping, "the Stop took its lane while the write is held")
+        XCTAssertFalse(machine.privilege.commands.dropFirst(before).contains { $0.command == .removeDNS },
+                       "neither the drop's removal nor the Stop's clear ran ahead of the held write")
+        XCTAssertTrue(machine.service("Wi-Fi").routesThroughAProxy, "the Stop's system proxy clear waits in the queue")
+        composed.harness.hold.release()
+
+        let stopped = try await finished(stop, on: stream)
+        XCTAssertEqual(completed(stopped), .stop)
+        await host.deliveries.drain()
+        let landed = machine.privilege.commands.dropFirst(before).map { $0.command }
+        let write = try XCTUnwrap(landed.firstIndex(of: .applyDNS))
+        let removal = try XCTUnwrap(landed.firstIndex(of: .removeDNS))
+        XCTAssertLessThan(write, removal, "the tunnel's write landed before the drop's removal")
+        // The only other helper writes here are the Stop's system proxy clear.
+        let clear = try XCTUnwrap(landed.firstIndex { $0 != .applyDNS && $0 != .removeDNS })
+        XCTAssertGreaterThan(clear, removal, "the Stop's clears landed after the drop's removal")
+        XCTAssertFalse(machine.service("Wi-Fi").routesThroughAProxy)
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "no entry file outlives the tunnel or the Stop")
+        let events = host.orchestrator.eventLog.events
+        XCTAssertFalse(events.contains { $0.event == "platform.split_dns_outcome_superseded" || $0.event == "platform.split_dns_failed" })
+        XCTAssertNil(host.splitDNSRepair.pending)
+    }
+
+    /// The DNS module's transparent-proxy relay start is a helper call, sent through the host's own platform queue and never run on the
+    /// owner (#47). Held there, exactly, the framed snapshot answers and a DNS Stop is admitted; the Stop's relay stop lands after every
+    /// start, so the relay ends stopped. A relay command run anywhere else is recorded, not held, and fails the placement check.
+    func testAHeldTransparentRelayStartIsOnThePlatformQueueAndAStopEndsTheRelayAfterIt() async throws {
+        let composed = try await compose(dnsForwarderEnabled: true) { harness in
+            var config = try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false)
+            config.transparentProxyEnabled = true
+            config.transparentProxyIP = "127.0.0.1"
+            config.transparentProxyPort = 0
+            config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.relay.test", interceptIP: "127.0.0.1")]
+            try ProxyConfigPersistence.save(config, in: harness.environment)
+        }
+        let machine = composed.harness.machine
+        let hold = composed.harness.hold
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await composed.client.readSnapshot(deadline: deadline())
+        let modules = try XCTUnwrap(observed.stamp.modules)
+
+        hold.arm(onQueueLabeled: "io.github.srps.Conduit.daemon.platform-work", otherQueues: .recorded) { name, _ in
+            name == PrivilegedOperation.startTCPRelay.rawValue
+        }
+        let start = try accepted(try await submit(composed, .start(.dns, ifModuleRevision: modules.dns)))
+        let reached = await hold.waitUntilReached(within: .seconds(10))
+        XCTAssertTrue(reached, "the DNS Start reached its relay start")
+        XCTAssertFalse(hold.reachedOnMainThread, "the relay start is not run on the owner")
+        XCTAssertTrue(hold.reachedOnArmedQueue,
+                      "the relay start is held on the host's platform queue, not \(hold.reachedQueueLabel ?? "nowhere")")
+
+        let snapshot = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertNotNil(snapshot.stamp.modules, "the framed snapshot answers while the relay start is held")
+        let stop = try accepted(try await submit(composed, .stop(.dns)))
+        XCTAssertFalse(machine.privilege.commands.contains { $0.command == .stopTCPRelay }, "no relay stop ran ahead of the held start")
+        hold.release()
+
+        // Both settle, in whichever order the stream carries them.
+        var outcomes: [ControlOperationID: ControlOperationOutcome] = [:]
+        for _ in 0..<128 where outcomes[start] == nil || outcomes[stop] == nil {
+            if case .operationFinished(let finished) = try await stream.next(deadline()) {
+                outcomes[finished.operationID] = finished.outcome
+            }
+        }
+        XCTAssertNotNil(outcomes[start], "the Start settled")
+        let stopped = try XCTUnwrap(outcomes[stop], "the Stop settled")
+        XCTAssertEqual(completed(stopped), .stop)
+        await composed.host.deliveries.drain()
+        let relay = machine.privilege.commands.map(\.command).filter { $0 == .startTCPRelay || $0 == .stopTCPRelay }
+        XCTAssertEqual(relay.first, .startTCPRelay)
+        XCTAssertEqual(relay.last, .stopTCPRelay, "the Stop's relay stop landed after every start: \(relay)")
+        XCTAssertEqual(relay.filter { $0 == .stopTCPRelay }.count, 1)
+        XCTAssertNotEqual(composed.host.orchestrator.snapshot.dnsRunState, .running)
+        XCTAssertNil(composed.host.orchestrator.snapshot.bindings.transparentProxyPort)
+    }
+
     /// An apply that moves the proxy onto an occupied port: the runtime takes the new input though its listener cannot bind. The receipt says
     /// the runtime took it, the accepted view follows it rather than lagging behind, and the snapshot shows the listener down.
     func testAnApplyOntoAnOccupiedPortReportsTheInputTakenAndTheListenerDown() async throws {
@@ -1846,6 +2056,66 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         composed.host.serviceFault(.snapshotOverBound)
         let reports = composed.host.orchestrator.eventLog.events.filter { $0.typed == .runtimeService(.fault(.snapshotOverBound)) }
         XCTAssertEqual(reports.count, 2)
+    }
+
+    // MARK: - Logger drain
+
+    /// The host's logger is the app's log store over a file whose open is held in its guard, seen through a forwarding witness that records
+    /// when the host enters its logger drain. Once it has, while that drain is still held, the owner answers a framed status read and
+    /// admits a Stop, both inside the drain's own 2 s wait. The drain ends at that bounded wait and records its typed fact; the Stop then
+    /// settles. A host that blocked on a synchronous logger flush instead would never enter the drain, and could answer nothing meanwhile.
+    func testAHeldLoggerDrainLeavesStatusReadsAndStopAdmissionAnswered() async throws {
+        let held = HeldDestinationGuard(holds: 0)
+        defer { held.release() }
+        var store: AppLogStore?
+        var witnessed: DrainEntryWitness?
+        let composed = try await compose(dnsForwarderEnabled: false) { harness in
+            let logStore = AppLogStore(destinationGuard: held, eventLog: RuntimeEventLog())
+            logStore.logFileURL = harness.environment.logFile
+            let witness = DrainEntryWitness(logStore)
+            harness.logger = witness
+            store = logStore
+            witnessed = witness
+        }
+        let logStore = try XCTUnwrap(store)
+        let witness = try XCTUnwrap(witnessed)
+        try await composed.host.startRuntime()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        guard case .baseline = try await stream.next(deadline()) else { return XCTFail("a stream opens with its baseline") }
+
+        // A fresh writer, whose open the next line waits in.
+        held.arm(1)
+        logStore.logFileURL = nil
+        logStore.logFileURL = composed.harness.environment.logFile
+        logStore.log(.notice, "held logger witness")
+        XCTAssertEqual(joinCleanup(held.entered), .success, "the logger's file is held")
+
+        let flush = Task { await composed.host.flushEvents() }
+        // Bounded: the host's artifacts have nothing held, so it reaches its logger drain at once unless it blocks before it.
+        var entered: ContinuousClock.Instant?
+        for _ in 0..<5_000 {
+            entered = witness.state.drainEntered
+            if entered != nil { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let drainStart = try XCTUnwrap(entered, "the host entered its logger drain (synchronous flushes: \(witness.state.flushes))")
+        let snapshot = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertEqual(snapshot.stamp.incarnation, composed.host.incarnation, "the status read was answered")
+        let stop = try accepted(try await submit(composed, .stop(.proxy)))
+        XCTAssertLessThan(drainStart.duration(to: .now), DiagnosticFlushPhase.writerWait, "both answered inside the held drain's wait")
+        XCTAssertEqual(witness.state.drainsReturned, 0, "the drain was still held when both were answered")
+        XCTAssertEqual(witness.state.flushes, 0, "the host never blocked on a synchronous logger flush")
+
+        let report = await flush.value
+        XCTAssertEqual(report.logger, .timedOut, "the drain was still held when its wait ended")
+        XCTAssertTrue(composed.harness.typedEvents().contains(.lifecycle(.logFlushUnconfirmed(
+            LifecycleLogFlushUnconfirmed(source: .host, outcome: .timedOut)
+        ))))
+        let stopped = try await finished(stop, on: stream)
+        XCTAssertEqual(completed(stopped), .stop)
+        held.release()
+        XCTAssertTrue(logStore.flushFileLog(timeout: 5), "released, the held lines drained")
     }
 
     // MARK: - Stop

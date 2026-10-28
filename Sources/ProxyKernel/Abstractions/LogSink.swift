@@ -10,8 +10,8 @@
 // and pm-sim scenarios that don't need to assert on log output).
 //
 // The SwiftUI app's `AppLogStore` (in `Sources/Conduit/App/`) conforms
-// via its existing nonisolated `bridge`-renamed-`logImpl` method which Tasks
-// back to MainActor for the ring buffer append.
+// via its nonisolated `logImpl`, which writes the file, stderr and the
+// unified log at once and hands only the ring buffer to MainActor.
 //
 // The protocol shape: the
 // filtering `@autoclosure` entry point is a protocol extension named
@@ -36,6 +36,9 @@ package protocol LogSink: Sendable {
     var minLevel: LogLevel { get }
     var statistics: RecordWriterStatistics { get }
     @discardableResult func flush(timeout: TimeInterval) -> Bool
+    /// Awaits the lines already handed to the sink without blocking the caller, until the absolute `deadline`. A sink
+    /// that cannot say answers `.unavailable`, the default; one with nothing pending answers `.drained`.
+    func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome
 
     /// Raw sink primitive. Conformers implement this to consume already-
     /// built log lines — they do **not** need to re-check `minLevel`
@@ -49,9 +52,9 @@ package protocol LogSink: Sendable {
     /// `log` extension itself, which is the only legitimate caller.
     ///
     /// Called from any thread / any actor. Implementations decide their
-    /// own threading: `ConsoleLogSink` uses a bounded queue; `AppLogStore` hops
-    /// to MainActor for its ring buffer; future `FileLogSink` may
-    /// dispatch to a background queue. Implementations MUST NOT assume
+    /// own threading: `ConsoleLogSink` uses a bounded queue; `AppLogStore`
+    /// writes its physical outputs on the calling thread's turn and hands
+    /// only its UI history to MainActor. Implementations MUST NOT assume
     /// the calling thread.
     func logImpl(_ level: LogLevel, _ message: String, category: LogCategory)
 }
@@ -59,6 +62,7 @@ package protocol LogSink: Sendable {
 extension LogSink {
     package var statistics: RecordWriterStatistics { .init() }
     @discardableResult package func flush(timeout: TimeInterval = 2) -> Bool { true }
+    package func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome { .unavailable }
 
     /// Filtered entry point. Every in-tree call site uses this method —
     /// the 127 occurrences of `logger.log(.level, "msg", category: .cat)`

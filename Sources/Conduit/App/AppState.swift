@@ -126,7 +126,9 @@ final class AppState: ObservableObject {
         let eventLog = RuntimeEventLog()
         self.eventLog = eventLog
         let logStore = AppLogStore(
-            destinationGuard: diagnosticDestinationGuard(for: .appLog, in: environment, writerLeaseFile: stateSession.writerLeaseFile),
+            destinationGuard: composition.appLogGuard.wrap(
+                diagnosticDestinationGuard(for: .appLog, in: environment, writerLeaseFile: stateSession.writerLeaseFile)
+            ),
             eventLog: eventLog
         )
         self.logStore = logStore
@@ -1317,9 +1319,23 @@ final class AppState: ObservableObject {
         let final = editor.flatMap { editor in incarnation.map { finalSaves(editor.ledger, incarnation: $0) } }
         let prior = editor?.ledger.active
         quitting = Task { @MainActor [weak self] in
-            await self?.quit(until: deadline, final: final, prior: prior)
+            let result = await self?.quit(until: deadline, final: final, prior: prior)
+            // Every return of the quit, under its one deadline.
+            await self?.drainQuitLog(until: deadline)
+            return result
         }
         return true
+    }
+
+    /// The quit's last step: the app's own final lines, drained under the Quit's one deadline, never a fresh one. A deadline already
+    /// passed waits for nothing. A drain that did not confirm them records `lifecycle.log_flush_unconfirmed`, event first and one derived
+    /// line after it; neither is claimed persisted, and nothing waits after them.
+    private func drainQuitLog(until deadline: ContinuousClock.Instant) async {
+        let outcome = ContinuousClock.now < deadline ? await logStore.drain(until: deadline) : .skippedBudget
+        guard let unconfirmed = LifecycleLogFlushOutcome(outcome) else { return }
+        let event = RuntimeEvent(payload: .lifecycle(.logFlushUnconfirmed(LifecycleLogFlushUnconfirmed(source: .app, outcome: unconfirmed))))
+        eventLog.append(event)
+        logStore.log(.warning, "Lifecycle: \(event.event) \(event.detail ?? "")", category: .system)
     }
 
     /// The quit's result, once it has run.

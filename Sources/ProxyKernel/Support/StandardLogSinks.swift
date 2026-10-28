@@ -39,9 +39,19 @@ package struct ConsoleLogSink: LogSink {
     @discardableResult
     package func flush(timeout: TimeInterval = 2) -> Bool { Self.writer.flush(timeout: timeout) }
 
+    package func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome {
+        await Self.writer.drain(until: deadline)
+    }
+
     package func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
         let entry = LogEntry(level: level, category: category, message: message)
-        Self.writer.append(Data((entry.formatted() + "\n").utf8))
+        write(line: Data((entry.formatted() + "\n").utf8))
+    }
+
+    /// Admits one already formatted, already sanitized line to the shared stderr writer, unfiltered. For a sink that
+    /// formats its line once for several outputs, so stderr gets the same bytes and the same bounds.
+    package func write(line: Data) {
+        Self.writer.append(line)
     }
 }
 
@@ -58,6 +68,9 @@ package struct DiscardingLogSink: LogSink {
     package init() {}
 
     package var minLevel: LogLevel { .error }
+
+    /// Nothing is ever pending.
+    package func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome { .drained }
 
     package func logImpl(_: LogLevel, _: String, category _: LogCategory) {
         // Intentionally empty.
@@ -94,6 +107,9 @@ package final class RecordingLogSink: LogSink, @unchecked Sendable {
     package var minLevel: LogLevel {
         minLevelBox.withLockedValue { $0 }
     }
+
+    /// Entries are captured synchronously, so nothing is ever pending.
+    package func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome { .drained }
 
     package func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
         let entry = LogEntry(level: level, category: category, message: message)

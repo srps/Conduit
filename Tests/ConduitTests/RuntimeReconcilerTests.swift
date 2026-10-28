@@ -32,6 +32,10 @@ final class RecordingHost: RuntimeReconcilerHost {
     var heldOverride: ProxyConfig?
     /// Makes every push report that it held nothing.
     var refuseApply = false
+    /// Holds the next flag action open until `resumeAction()`, as a host whose platform work is out.
+    var holdNextAction = false
+    private var heldAction: CheckedContinuation<Void, Never>?
+    var isHoldingAction: Bool { heldAction != nil }
     /// The surface re-applies, each with the diff it was given.
     private(set) var reapplied: [(old: ProxyConfig, new: ProxyConfig)] = []
 
@@ -80,6 +84,24 @@ final class RecordingHost: RuntimeReconcilerHost {
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
         previousConfig: ProxyConfig,
+        platform: PlatformIntegrationConfig,
+        previousPlatform: PlatformIntegrationConfig
+    ) async -> Bool {
+        calls.append(.perform(action, platform: platform))
+        if holdNextAction {
+            holdNextAction = false
+            await withCheckedContinuation { heldAction = $0 }
+        }
+        return !failing.contains(action)
+    }
+
+    func resumeAction() {
+        heldAction?.resume()
+        heldAction = nil
+    }
+
+    func performImmediate(
+        _ action: PlatformIntegrationReconciler.Action,
         platform: PlatformIntegrationConfig,
         previousPlatform: PlatformIntegrationConfig
     ) -> Bool {
@@ -375,6 +397,40 @@ final class RuntimeReconcilerTests: XCTestCase {
         XCTAssertEqual(host.performed, [.clearSystemProxy], "a standing admission runs the action the lapsed pass skipped")
         XCTAssertEqual(reconciler.lastReconciledPlatformConfig, proxyOff)
         XCTAssertFalse(reconciler.requestLags)
+    }
+
+    /// A flag action is the effect running while its work is out (#47), so quiescence waits for it. A Stop that lapses the admission while it
+    /// is held runs no further action. The held action landed, so it is recorded at the value its own save carried; the action it skipped and
+    /// the group no action named are not, and the request still names the skipped work.
+    func testQuiescenceWaitsForAHeldFlagActionAndALapsedAdmissionRecordsOnlyWhatLanded() async {
+        let admission = AdmissionBox()
+        var request = proxyOff
+        request.manageEnvironmentVariables = true
+        // DNS is down, so no action names this group; a pass that completes records it.
+        request.manageSystemDNS = true
+        host.holdNextAction = true
+        reconciler.reconcile(config: baseConfig, platformConfig: request, isCurrent: { admission.stands })
+        await settle("the first flag action is held") { self.host.isHoldingAction }
+        XCTAssertEqual(host.performed, [.clearSystemProxy])
+
+        let order = LockedLog<String>()
+        let quiescence = Task { @MainActor in
+            order.append("waiting")
+            await self.reconciler.quiesceEffects()
+            order.append("quiesced")
+        }
+        await settle("quiescence waits on the held action") { order.values == ["waiting"] }
+        admission.stands = false
+        order.append("released")
+        host.resumeAction()
+        await quiescence.value
+        await reconciler.drain()
+
+        XCTAssertEqual(order.values, ["waiting", "released", "quiesced"], "quiescence waited for the held action, not for nothing")
+        XCTAssertEqual(host.performed, [.clearSystemProxy], "the lapsed admission ran no further action")
+        XCTAssertEqual(reconciler.lastReconciledPlatformConfig, proxyOff, "only the landed clear is recorded, at its save's value")
+        XCTAssertEqual(reconciler.requestedPlatformConfig, request, "the completion leaves the save's request as it was")
+        XCTAssertTrue(reconciler.requestLags, "the request still names the skipped work")
     }
 
     /// A request whose admission lapsed before it was recorded changes nothing: no request, no login item, no pass.

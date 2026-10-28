@@ -1,0 +1,57 @@
+{
+  "task": "RuntimeActor prerequisite phase1c r3: relay production unchanged from r1; one test-only causal barrier for a back-off count that failed parent's full r2 swift-tests, plus one comment-only correction",
+  "worktree": "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit",
+  "preserved_evidence": [
+    "r1 manifest /private/tmp/conduit-runtime-stage1-20261024/runtime-actor-relay-manifest.json and snapshot runtime-actor-relay-review-r1 (unchanged)",
+    "r2 manifest /private/tmp/conduit-runtime-stage1-20261024/runtime-actor-relay-r2-manifest.json and snapshot runtime-actor-relay-review-r2 (unchanged). Its causal_boundary sentence overstated the Quit drain; parent corrects that record, and r3's comment fix below corrects the same overstatement in the test helper's doc."
+  ],
+  "status": "FOCUSED GREEN (6KO0zS) before the comment-only edit. Source frozen. Parent's full workflow and re-review still required.",
+  "production": "UNCHANGED from relay r1. No Source, script or docs file was edited in r2 or r3.",
+
+  "full_failure_r2": {
+    "run": "parent's corrected relay full r2 workflow, EXIT 1; all other 40 checks passed; swift-tests ran 3713 tests with 4 skipped and 1 failure",
+    "log": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-relay-r2-full-gates/swift-tests.log",
+    "assertion": "AppStateActivationParityTests.swift:417 testANewFailureGetsAFreshHelperCheckRatherThanAnEarlierBackOff: XCTAssertGreaterThanOrEqual(split_dns_failed count, 6, \"the back-off is at its limit\") failed, 5 < 6. The r2 file-read corrections passed.",
+    "facts_in_log": "swift-tests.log:795 attempt=1 source=vpn_transition (the drop's own refused removal, 04:11:48.251); :799-810 retries attempt=2..5, all trigger=helper_available; :811 the assertion. Five failures, exactly one short.",
+    "cause": "Test-side missing barrier. The test emits the VPN drop and goes straight into five iterations of (read the failure count from the file, refreshPreflight, settle until the count grows). A preflight retries only while a repair is pending: RuntimeHostPreflight.swift:92 calls observeHelperForSplitDNS, which guards on splitDNSRepair.shouldRetry, i.e. pending != nil (RuntimeHost.swift:1182). Since 1b the drop's removal is queued on PlatformWork and recorded in a later turn, while the preflight reads the helper on a global queue and can complete first. Iteration 1 refreshed before the drop's failure was recorded (no retry is correct production behavior then), and its settle was satisfied by the drop's own failure. Iterations 2-5 each got one retry: 1 + 4 = 5. The sibling tests already settle on the drop's refusal first (:384, :431). Not a production defect; the 1b offload widened the window."
+  },
+
+  "r3_changes": {
+    "barrier": {
+      "file": "Tests/ConduitTests/AppStateActivationParityTests.swift",
+      "change": "one line after harness.vpn.emit(.disconnected(reason: .networkLost)) and before the five refreshes: await harness.settle(\"the drop's removal was refused\") { !self.hostEvents(harness, \"platform.split_dns_failed\").isEmpty }",
+      "why_causal": "SplitDNSEntryFileRepair.record sets pending (:179) before it appends platform.split_dns_failed (:183), in one synchronous call, and the events writer is FIFO. So the drop's failure visible in the file means the repair is pending, and every later refresh has a repair to retry. The loop arithmetic then guarantees the count: the barrier makes before_1 >= 1, each iteration requires count > before_k, so before_{k+1} >= before_k + 1 and the count after five iterations is >= 6. An interleaved 1 s helper-check retry only adds failures.",
+      "unchanged": "the >= 6 assertion and its message; the loop; the existing 1.5 s sleep; every later step and assertion. No other cleanup."
+    },
+    "comment_only": {
+      "file": "Tests/ConduitTests/AppStateActivationParityTests.swift",
+      "change": "quitJoiningHostDiagnostics doc only. The r2 sentence claiming every event recorded before the Quit has left the writer's queue is replaced: the host settles the Quit only after its bounded diagnostic flush attempt has been joined; that attempt does not guarantee the events writer's queue emptied, records may remain queued or their writes fail, and the file assertions read after the helper detect any missing record. The following qualifications are unchanged. No helper logic or assertion changed.",
+      "verification": "made after the 6KO0zS run ended; no focused run solely for the comment, as directed"
+    },
+    "files_changed_r3": ["Tests/ConduitTests/AppStateActivationParityTests.swift (the barrier line and the helper doc comment only)"],
+    "hashes": "not computed: only the fixed wrapper is allowed; parent to fingerprint the frozen Source"
+  },
+
+  "verification": {
+    "wrapper": "bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-actor-prep.sh (filter includes AppStateActivationParityTests)",
+    "r3_run": {
+      "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-6KO0zS",
+      "scope": "the barrier in place; the doc-comment rewording came after this run",
+      "result": "exit 0; 'Focused actor-prerequisite verification passed; parent full workflow still required.'",
+      "tests": "327 tests, 0 failures; AppStateActivationParityTests 34/34, testANewFailureGetsAFreshHelperCheckRatherThanAnEarlierBackOff passed (13.040 s); every other suite in the filter passed (BoundedRecordWriterTests 9, ConfigReapplyRetryTests 10, DNSInterceptReadinessTests 8, DNSResolverReconciliationTests 4, DaemonRuntimeHostTests 95, RelayLifecycleTests 13, RuntimeHostControlOwnerTests 65, RuntimeHostInteractiveTests 29, RuntimePhysicalOrderingTests 15, RuntimeReconcilerTests 23, SplitDNSEntryFileRepairTests 15, SplitDNSVPNGateTests 7)",
+      "pm_sim": "runtime-host-effects PASS 148 [pass]; relay-reassert-after-stop PASS 10 [pass]",
+      "imports": "Kernel import/Process fence passed (109 Swift files, 1 object files; 5 RuntimeEvents files limited to Foundation)",
+      "catalogue": "PASS: 229 event names, and nothing more",
+      "decisions": "PASS",
+      "git_diff_check": "clean"
+    },
+    "earlier_attempts": "r1: GUd4bR (fixture compile error), mZz0zx (valid seam-baseline semantic failures), vtZUXa (focused green). r2: wQ7SU4 (focused green after the file-read correction). See the r1 and r2 manifests.",
+    "not_run_here": "parent full workflow, re-review"
+  },
+
+  "risks_and_remaining": [
+    "The barrier and the loop settles read events.ndjson; a lost or failed record would make a settle time out, which is a genuine finding.",
+    "Unchanged from r2: the snapshot-file read in testAnUpdatesCredentialReachesNoHostDiagnostic and the old :136 count remain unsynchronized artifact reads; the diagnostic slice plans the snapshot read's move behind the terminal attempt with a required read.",
+    "Relay r1 limitations unchanged."
+  ]
+}

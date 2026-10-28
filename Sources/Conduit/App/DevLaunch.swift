@@ -519,6 +519,7 @@ enum DevLaunch {
                 resolverDirectory: machine.resolverDirectory.path,
                 stateFiles: StateFileAccess.operatingSystem()
             ),
+            appLogGuard: .identity,
             helperLifecycle: helper,
             credentialStore: secrets,
             loginItemManager: loginItems.manager,

@@ -121,6 +121,7 @@ enum ProbeSupersessionScenarios {
         init(base: any LogSink, _ onListening: @escaping @Sendable () -> Void) { self.base = base; self.onListening = onListening }
         var minLevel: LogLevel { .debug }
         func flush(timeout: TimeInterval) -> Bool { base.flush(timeout: timeout) }
+        func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome { await base.drain(until: deadline) }
         func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
             base.log(level, message, category: category)
             if message.hasPrefix("Local proxy listening on"), !fired.withLockedValue({ let was = $0; $0 = true; return was }) {

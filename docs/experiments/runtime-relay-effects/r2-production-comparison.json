@@ -1,0 +1,7 @@
+{
+  "production_files_compared": 404,
+  "all_production_source_matches_relay_r1": true,
+  "r2_changed_test": "Tests/ConduitTests/AppStateActivationParityTests.swift",
+  "causal_scope_correction": "Completed Quit joins the bounded diagnostic flush attempt; it does not guarantee an empty queue or confirmed writes. Post-attempt file assertions still detect missing records.",
+  "review_snapshot_sha256": "f0bd283fb1b5a4256717977c5dbea230326be320bee7de061a3b0a45a38f4f56"
+}

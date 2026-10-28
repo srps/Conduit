@@ -401,6 +401,152 @@ final class RotatingLogFileProtectionTests: XCTestCase {
         XCTAssertNil(released)
     }
 
+    // MARK: - Bounded admission, drain and terminal close
+
+    private func heldWriter(_ log: URL, guardian: any RecordFileDestinationGuarding, limits: RecordWriterLimits = .init(),
+                            effects: RotatingLogFileEffects = .system) -> RotatingLogFile {
+        let events = RuntimeEventLog()
+        return RotatingLogFile(
+            url: log, maxBytes: 1 << 20, archives: 2, destinationGuard: guardian,
+            gate: RecordFileDestinationGate(sink: .appLog, eventLog: events, logger: DiscardingLogSink()),
+            eventLog: events, logger: DiscardingLogSink(), effects: effects, limits: limits
+        )
+    }
+
+    /// The queue's bound counts the write held in storage. Past it a write is dropped and counted exactly, and the waits report what the
+    /// queue is doing: timed out at the deadline, busy while that wait's notify is held, drained once the held write ends. Nothing
+    /// admitted is lost.
+    func testAHeldFileDropsExactlyPastItsBoundAndItsWaitsReportTheQueue() async throws {
+        let log = try tempDir().appendingPathComponent("proxy.log")
+        let held = HeldDestinationGuard(holds: 1)
+        var limits = RecordWriterLimits()
+        limits.maxPendingRecords = 4
+        let file = heldWriter(log, guardian: held, limits: limits)
+        file.write(Data("line 0\n".utf8))
+        XCTAssertEqual(joinCleanup(held.entered), .success, "the first write is held in storage")
+        for index in 1...5 { file.write(Data("line \(index)\n".utf8)) }
+        XCTAssertEqual(file.statistics.pendingRecords, 4, "the held write counts against the bound")
+        XCTAssertEqual(file.statistics.droppedRecords, 2, "exactly the writes past the bound")
+
+        let timedOut = await file.drain(until: deadline(in: 0.2))
+        XCTAssertEqual(timedOut, .timedOut)
+        let busy = await file.drain(until: deadline(in: 5))
+        XCTAssertEqual(busy, .busy, "the timed-out wait's notify is still held; no second reservation")
+        XCTAssertFalse(file.flush(timeout: 0.05), "the synchronous wait is honest too")
+
+        held.release()
+        XCTAssertTrue(file.flush(timeout: 5))
+        let drained = await file.drain(until: deadline(in: 5))
+        XCTAssertEqual(drained, .drained)
+        let statistics = file.statistics
+        XCTAssertEqual(statistics.writtenRecords, 4)
+        XCTAssertEqual(statistics.droppedRecords, 2)
+        XCTAssertEqual(statistics.failedRecords, 0)
+        XCTAssertEqual(statistics.flushTimeouts, 2, "the async and the synchronous timeouts")
+        XCTAssertEqual(try String(contentsOf: log, encoding: .utf8), "line 0\nline 1\nline 2\nline 3\n")
+        file.close()
+    }
+
+    /// A wait whose deadline has already passed is given nothing, not a fresh window.
+    func testAWaitPastItsDeadlineIsSkippedNotGivenAFreshWindow() async throws {
+        let log = try tempDir().appendingPathComponent("proxy.log")
+        let held = HeldDestinationGuard(holds: 1)
+        let file = heldWriter(log, guardian: held)
+        file.write(Data("held\n".utf8))
+        XCTAssertEqual(joinCleanup(held.entered), .success)
+        let skipped = await file.drain(until: ContinuousClock.now.advanced(by: .milliseconds(-1)))
+        XCTAssertEqual(skipped, .skippedBudget)
+        held.release()
+        XCTAssertTrue(file.flush(timeout: 5))
+        file.close()
+    }
+
+    /// The close starts while an admitted write is held. It latches at once, still writes what it admitted, and then closes. A write
+    /// after it is counted dropped, queues nothing, and opens nothing: a closed file never reopens.
+    func testACloseWritesWhatItAdmittedThenRefusesAndNeverReopens() throws {
+        let log = try tempDir().appendingPathComponent("proxy.log")
+        let held = HeldDestinationGuard(holds: 1)
+        let ledger = EffectLedger()
+        let file = heldWriter(log, guardian: held, effects: ledger.effects(close: { Darwin.close($0) }))
+        file.write(Data("admitted before close\n".utf8))
+        XCTAssertEqual(joinCleanup(held.entered), .success)
+        let closed = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            file.close()
+            closed.signal()
+        }
+        held.release()
+        XCTAssertEqual(joinCleanup(closed), .success)
+
+        file.write(Data("after close\n".utf8))
+        XCTAssertTrue(file.flush(timeout: 1), "nothing was queued after the close")
+        let statistics = file.statistics
+        XCTAssertEqual(statistics.writtenRecords, 1)
+        XCTAssertEqual(statistics.droppedRecords, 1)
+        XCTAssertEqual(statistics.pendingRecords, 0)
+        XCTAssertEqual(ledger.opens.withLockedValue { $0 }, 1, "the closed file was not opened again")
+        XCTAssertEqual(ledger.closed.withLockedValue { $0.count }, 1)
+        XCTAssertEqual(try String(contentsOf: log, encoding: .utf8), "admitted before close\n")
+    }
+
+    /// Writers on several threads keep writing, paced, while the main thread closes the writer, and each writes a few more after it. When close
+    /// returns, nothing it admitted is still pending: every record admitted before the latch was written by the close's own join of the
+    /// queue. After the writers end, every write is either written or dropped, none failed, nothing was written after the close, and the
+    /// file holds exactly the written lines. This is a concurrent custody invariant under stress: it does not force any one interleaving.
+    func testConcurrentWritesAndCloseAccountForEveryRecord() throws {
+        let log = try tempDir().appendingPathComponent("proxy.log")
+        let file = heldWriter(log, guardian: UncheckedRecordFileDestination())
+        let threads = 8
+        let closed = NIOLockedValueBox(false)
+        let attempts = NIOLockedValueBox(0)
+        let started = DispatchSemaphore(value: 0)
+        let finished = DispatchGroup()
+        for thread in 0..<threads {
+            finished.enter()
+            DispatchQueue.global().async {
+                started.signal()
+                var written = 0
+                var after = 0
+                // Paced, as log lines arrive, so the queue empties between writes and a later write schedules the next drain.
+                while after < 50 {
+                    file.write(Data("thread \(thread) line \(written)\n".utf8))
+                    written += 1
+                    if closed.withLockedValue({ $0 }) { after += 1 }
+                    usleep(50)
+                }
+                attempts.withLockedValue { $0 += written }
+                finished.leave()
+            }
+        }
+        for _ in 0..<threads { XCTAssertEqual(joinCleanup(started), .success) }
+        let deadline = Date().addingTimeInterval(10)
+        while file.statistics.writtenRecords < 200, Date() < deadline { usleep(100) }
+        // Close, if it is seen within a bounded wait, at a moment the queue holds admitted records and writes none: the moment a
+        // scheduled drain is not yet running. Otherwise close anyway, mid-burst.
+        let stallDeadline = Date().addingTimeInterval(0.2)
+        while Date() < stallDeadline {
+            let before = file.statistics
+            usleep(2_000)
+            let after = file.statistics
+            if before.pendingRecords > 0, after.writtenRecords == before.writtenRecords { break }
+        }
+        file.close()
+        let atClose = file.statistics
+        closed.withLockedValue { $0 = true }
+        XCTAssertEqual(atClose.pendingRecords, 0, "the close wrote everything it had admitted before it returned")
+        XCTAssertEqual(finished.wait(timeout: .now() + 10), .success)
+
+        let final = file.statistics
+        let total = UInt64(attempts.withLockedValue { $0 })
+        XCTAssertEqual(final.pendingRecords, 0)
+        XCTAssertEqual(final.failedRecords, 0, "no admitted record was failed by a drain after the close")
+        XCTAssertEqual(final.writtenRecords, atClose.writtenRecords, "nothing was written after the close")
+        XCTAssertEqual(final.writtenRecords + final.droppedRecords, total, "every write is accounted for")
+        XCTAssertGreaterThanOrEqual(final.droppedRecords, UInt64(threads * 50), "the writes after the close were dropped")
+        let lines = try String(contentsOf: log, encoding: .utf8).split(separator: "\n").count
+        XCTAssertEqual(UInt64(lines), final.writtenRecords, "the file holds exactly the written lines")
+    }
+
     // MARK: - Helpers
 
     private func failureDetails(_ events: RuntimeEventLog) -> [String?] {
@@ -519,6 +665,9 @@ private final class OrderingLogger: LogSink, @unchecked Sendable {
 
     var seenEventFirst: [Bool] { seen.withLockedValue { $0 } }
     var minLevel: LogLevel { .debug }
+
+    /// Each line is recorded synchronously, so nothing is pending.
+    func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome { .drained }
 
     func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
         let present = events.events.contains { $0.event == eventName }

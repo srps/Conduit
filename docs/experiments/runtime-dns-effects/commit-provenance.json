@@ -1,0 +1,14 @@
+{
+  "matches_full_workflow": true,
+  "commits": [
+    {
+      "commit": "53216126951c6f0fc603b8ee45e841ae96552eb6",
+      "source_sha256": "06d02d0acb7f57eee64cf1cc1e92cb14d6c2a5eb69789ffda037ad0f1d7ab143"
+    },
+    {
+      "commit": "98af3cdc0cdadc8420a245677072436a67017065",
+      "source_sha256": "06d02d0acb7f57eee64cf1cc1e92cb14d6c2a5eb69789ffda037ad0f1d7ab143"
+    }
+  ],
+  "merge_note": "Only documentation/evidence merged from AppState PR; relevant sources unchanged"
+}

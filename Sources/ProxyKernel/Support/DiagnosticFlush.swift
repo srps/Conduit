@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import RuntimeEvents
 
 /// One absolute monotonic deadline for an exit's diagnostic flushes, computed once when the phase starts.
 /// Each wait is capped at `writerWait` and cut to the time the phase has left, so no writer gets a fresh budget.
@@ -52,14 +53,17 @@ package struct DiagnosticFlushReport: Sendable, Equatable {
     /// earlier in the process keeps a later confirmation conservative.
     package var auditStatistics: RecordWriterStatistics
     package var eventsStatistics: RecordWriterStatistics
+    /// The logger's own drain after the artifacts, a fact about its queues only. It is separate from the artifacts and
+    /// never part of `allConfirmed`. `unavailable` until the owner that drains the logger sets it.
+    package var logger: RecordDrainOutcome = .unavailable
 
     /// The events queue confirmed its records: drained by this phase's wait, with no recorded drop or failure.
     package var eventsConfirmed: Bool {
         (events == .drained || eventsRetry == .drained) && DiagnosticFlush.lossless(eventsStatistics)
     }
 
-    /// Every writer confirmed: both queues drained with no recorded drop or failure, and the snapshot is current. Queue
-    /// drain alone is not a confirmation, since a failed batch empties the queue too.
+    /// Every artifact writer confirmed: both queues drained with no recorded drop or failure, and the snapshot is current.
+    /// Queue drain alone is not a confirmation, since a failed batch empties the queue too. The logger is not an artifact.
     package var allConfirmed: Bool {
         audit == .drained && DiagnosticFlush.lossless(auditStatistics) && eventsConfirmed && snapshot == .current
     }
@@ -123,5 +127,19 @@ package enum DiagnosticFlush {
         return DiagnosticFlushReport(audit: auditOutcome, events: eventsOutcome, eventsRetry: retry,
                                      snapshot: snapshotOutcome, snapshotEvent: snapshotEvent,
                                      auditStatistics: audit.statistics, eventsStatistics: events.statistics)
+    }
+}
+
+extension LifecycleLogFlushOutcome {
+    /// The typed outcome of a logger drain that did not confirm its lines; nil for `drained`, which records nothing.
+    package init?(_ outcome: RecordDrainOutcome) {
+        switch outcome {
+        case .drained: return nil
+        case .timedOut: self = .timedOut
+        case .busy: self = .busy
+        case .skippedBudget: self = .skippedBudget
+        case .cancelled: self = .cancelled
+        case .unavailable: self = .unavailable
+        }
     }
 }

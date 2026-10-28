@@ -31,12 +31,20 @@ package protocol RuntimeReconcilerHost: AnyObject {
     func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) async
     /// A platform decision, called before its side effect so the event stream carries the decision whether or not the side effect lands.
     func recordPlatformDecision(_ action: PlatformIntegrationReconciler.Action)
-    /// Runs one flag action through the manager the start and stop paths use. `previousPlatform` is the flags it moves from, so a host can
-    /// say whether a switch turned on or only the mode changed. Returns whether it landed.
+    /// Runs one flag action of a pass through the manager the start and stop paths use. `previousPlatform` is the flags it moves from, so a
+    /// host can say whether a switch turned on or only the mode changed. Returns whether it landed. Async so a host can queue the blocking
+    /// manager calls off this actor; it queues them in the turn it is called, which is the turn the pass checked its admission.
     func perform(
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
         previousConfig: ProxyConfig,
+        platform: PlatformIntegrationConfig,
+        previousPlatform: PlatformIntegrationConfig
+    ) async -> Bool
+    /// Runs an action that needs no runtime (`PlatformIntegrationReconciler.immediateActions`) before the save's pass is queued, so a quit
+    /// right after the save keeps it. Synchronous: the host answers it with no blocking effect. Returns whether it landed.
+    func performImmediate(
+        _ action: PlatformIntegrationReconciler.Action,
         platform: PlatformIntegrationConfig,
         previousPlatform: PlatformIntegrationConfig
     ) -> Bool
@@ -97,9 +105,9 @@ package final class RuntimeReconciler {
     package private(set) var requestedPlatformConfig: PlatformIntegrationConfig {
         didSet { platformRequest.set(requestedPlatformConfig) }
     }
-    /// `requestedPlatformConfig`, readable from the platform queue. A flag action runs on the main actor, not on that queue, so platform work
-    /// queued before a save can run after the save's clear: work that must not act on a switch a later save moved checks this under its
-    /// manager's lock (#194).
+    /// `requestedPlatformConfig`, readable from the platform queue. A save moves it at once, but its flag actions are queued only when its
+    /// pass runs, so platform work queued before a save can run after the save asked to clear: work that must not act on a switch a later
+    /// save moved checks this under its manager's lock (#194).
     package nonisolated let platformRequest: PlatformRequestFence
 
     package weak var host: (any RuntimeReconcilerHost)?
@@ -124,8 +132,9 @@ package final class RuntimeReconciler {
     private var worker: Task<Void, Never>?
     /// The newest request the worker has not taken yet.
     private var pending: PassRequest?
-    /// The effect now running, if any: the orchestrator push or the config-driven re-apply. Quiescence waits for this one handle and for
-    /// nothing queued, since a queued pass may itself wait for a lifecycle lane the caller holds.
+    /// The effect now running, if any: the orchestrator push, the config-driven re-apply, or one flag action with its host settlement.
+    /// Quiescence waits for this one handle and for nothing queued, since a queued pass may itself wait for a lifecycle lane the caller
+    /// holds.
     private var activeEffect: Task<Void, Never>?
     /// The admission the last request was recorded under. `retryRequest` runs under this one and no other, so a retry never outlives the
     /// authority the request had.
@@ -202,7 +211,7 @@ package final class RuntimeReconciler {
         guard !actions.isEmpty else { return }
         requestedPlatformConfig.launchAtLogin = newPlatform.launchAtLogin
         for action in actions {
-            run(action, config: lastReconciledConfig, previousConfig: lastReconciledConfig, from: oldPlatform, to: newPlatform)
+            runImmediate(action, from: oldPlatform, to: newPlatform)
         }
     }
 
@@ -222,7 +231,7 @@ package final class RuntimeReconciler {
         // See `PlatformIntegrationReconciler.immediateActions`.
         let immediatePlatform = lastReconciledPlatformConfig
         for action in PlatformIntegrationReconciler.immediateActions(old: immediatePlatform, new: newPlatform) {
-            run(action, config: new, previousConfig: lastReconciledConfig, from: immediatePlatform, to: newPlatform)
+            runImmediate(action, from: immediatePlatform, to: newPlatform)
         }
 
         // Nothing waits when no pass is running and the machine already holds the save: no runtime input is behind, no surface is owed,
@@ -296,8 +305,11 @@ package final class RuntimeReconciler {
         }
         for action in platformActions {
             guard admitted() else { return }
-            run(action, config: new, previousConfig: old, from: oldPlatform, to: newPlatform)
+            await runFlagEffect { await self.run(action, config: new, previousConfig: old, from: oldPlatform, to: newPlatform, host: host) }
         }
+        // An action suspends while its work is out. One that landed was recorded at the value this pass carried; a lapsed admission records
+        // nothing more.
+        guard admitted() else { return }
         // Complete: a flag group no action named this pass already holds the save's value, or the runtime is down and the start path owns
         // the surface from here. A named group was settled by its own action, and a failed one stays unreconciled for the next save.
         for group in FlagGroup.allCases where !platformActions.contains(where: { FlagGroup($0) == group }) {
@@ -314,20 +326,43 @@ package final class RuntimeReconciler {
         activeEffect = nil
     }
 
+    /// A flag action as the one effect running. Unlike `runEffect`, `body` begins in this turn, so the host queues the action's platform
+    /// work in the turn the pass checked its admission; the handle only marks when the action ends, which is what quiescence waits for.
+    private func runFlagEffect(_ body: @MainActor () async -> Void) async {
+        // Finish-only: nothing is ever yielded, and the buffer holds none.
+        let (ended, end) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(0))
+        activeEffect = Task { for await _ in ended {} }
+        await body()
+        end.finish()
+        activeEffect = nil
+    }
+
     /// Event first, side effect second: a flag flip is a config decision, and log lines are derived from events, not the other way round.
-    @discardableResult
+    /// A landed action is recorded at the value its pass carried, whatever was requested while it was out.
     private func run(
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
         previousConfig: ProxyConfig,
         from oldPlatform: PlatformIntegrationConfig,
-        to newPlatform: PlatformIntegrationConfig
-    ) -> Bool {
-        guard let host else { return false }
+        to newPlatform: PlatformIntegrationConfig,
+        host: any RuntimeReconcilerHost
+    ) async {
         host.recordPlatformDecision(action)
-        let landed = host.perform(action, config: config, previousConfig: previousConfig, platform: newPlatform, previousPlatform: oldPlatform)
+        let landed = await host.perform(
+            action, config: config, previousConfig: previousConfig, platform: newPlatform, previousPlatform: oldPlatform
+        )
         if landed { adopt(action, from: newPlatform) }
-        return landed
+    }
+
+    /// An immediate action, before any pass: the event, then the host's synchronous answer.
+    private func runImmediate(
+        _ action: PlatformIntegrationReconciler.Action,
+        from oldPlatform: PlatformIntegrationConfig,
+        to newPlatform: PlatformIntegrationConfig
+    ) {
+        guard let host else { return }
+        host.recordPlatformDecision(action)
+        if host.performImmediate(action, platform: newPlatform, previousPlatform: oldPlatform) { adopt(action, from: newPlatform) }
     }
 
     /// Records one flag action as reconciled, at the value it carried, once it landed. A failed action records nothing, so the next pass

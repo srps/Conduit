@@ -454,14 +454,15 @@ explanation, never a durable command log or authority for cleanup/recovery. This
 does not weaken authoritative platform-journal write-before-mutation requirements.
 No new durable telemetry spool/exporter is part of this program.
 
-Current-source inventory matters here: AppLogStore writes stderr on MainActor
-and creates a Task per off-main log; RotatingLogFile already performs append I/O
-on its serial queue, but that pending queue has no byte/item budget and flush/
-close synchronously drain it. Do not misdiagnose the file append as synchronous.
-As each sink crosses the new boundary, verify bounded pending work, slow-stderr/
-file behavior and a shutdown drain budget; surface rotation failures rather than
-silently discarding them. This is an affected-path obligation, not a new telemetry
-platform prerequisite for behavior-preserving extraction.
+The diagnostic prerequisite now keeps physical output independent of MainActor,
+with one bounded UI-history handoff and the existing bounded console writer.
+RotatingLogFile admits bounded bytes/items on its existing serial queue and
+supports deadline-based asynchronous drains. The host and app Quit tail share
+one total deadline; unconfirmed logger output has a typed lifecycle event and
+is separate from artifact confirmation. Close-on-toggle still synchronously
+finishes admitted writes, as before. This candidate remains under full-workflow
+and independent review; shipping resource and native acceptance are separate.
+No telemetry spool, replacement writer registry or second output path is added.
 
 ## Typed events, without an untyped producer escape hatch
 
@@ -478,12 +479,16 @@ package enum LifecycleEvent: Codable, Sendable, Equatable {
     case coalesced(LifecycleCoalesced)
     case terminationDrainExpired(LifecycleTerminationDrainExpired)
     case versionChanged(LifecycleVersionChanged)
+    case moduleSettled(LifecycleModuleSettled)
+    case logFlushUnconfirmed(LifecycleLogFlushUnconfirmed)
 }
 ```
 
 The implemented family is in [`LifecycleEvents.swift`](../Sources/RuntimeEvents/LifecycleEvents.swift),
 with its wire layout and bounds in [`events.md`](./events.md#typed-lifecycle-payloads). It types
-all four `lifecycle.*` names in the foundation. The other families stay legacy.
+all six current `lifecycle.*` names. Configuration/workflow and the other typed
+families are inventoried in the event catalogue; unmigrated producers retain
+the checked legacy envelope.
 
 Credentials, cookies, authorization headers and SecretBytes never enter Codable
 event values. Diagnostic text/targets use deliberately sanitized representations;

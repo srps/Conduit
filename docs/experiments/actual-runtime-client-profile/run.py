@@ -23,8 +23,11 @@ MODES = ['lifetime-open', 'lifetime-composed', 'lifetime-read', 'lifetime-save',
          'realistic-valid-64', 'realistic-valid-128', 'validator-widest', 'escape-maximum', 'padded-8mib', 'repeat',
          'contention', 'contention-encode', 'contention-store', 'contention-encode-nosampler', 'contention-store-nosampler',
          'held', 'cancel', 'client-quit-widest', 'codec-bounds', 'profile-sizing', 'pressure-candidate']
+# Explicit-only modes, never in the default run: name them with --modes.
+OPTIONAL_MODES = ['logger-held', 'logger-held-nosampler']
 # Fresh-process trials per mode; the live-A contention modes run several so a single outlier is visible as one.
-TRIALS = {'contention-encode': 3, 'contention-store': 3, 'contention-encode-nosampler': 3, 'contention-store-nosampler': 3}
+TRIALS = {'contention-encode': 3, 'contention-store': 3, 'contention-encode-nosampler': 3, 'contention-store-nosampler': 3,
+          'logger-held': 3, 'logger-held-nosampler': 3}
 MODE_TIMEOUT_SECONDS = 300
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 OBJECTS = [
@@ -41,7 +44,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('output', type=Path, help='a new directory for the compile log, NDJSON results and metadata')
 parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parents[3],
                     help='checkout whose Release products are linked')
-parser.add_argument('--modes', nargs='*', default=MODES, choices=MODES)
+parser.add_argument('--modes', nargs='*', default=MODES, choices=MODES + OPTIONAL_MODES)
 args = parser.parse_args()
 root = args.repo.resolve()
 source = Path(__file__).resolve().parent / 'Probe.swift'

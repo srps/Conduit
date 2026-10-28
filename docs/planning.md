@@ -83,16 +83,16 @@ The boundary carries typed commands, outcomes, presentation-complete snapshots
 and bounded cancellable subscriptions using the same versioned contract in
 memory and later over a socket. It must define command completion, cancellation
 after acceptance, deadline/unknown-outcome handling, initial-snapshot ordering,
-replay gaps and slow-subscriber behavior. The existing synchronous `DaemonClient`
-and thin `ControlDaemonStatus` do not yet meet that boundary. Proposed types must
-eliminate contradictory outcomes and duplicate derived state, keep private values
-out of ordinary control/status/events and use the explicitly encoded private
+replay gaps and slow-subscriber behavior. The implemented v2 framed client now
+serves the app candidate through the shared host; the synchronous v1 `DaemonClient` and `ControlDaemonStatus` remain legacy
+compatibility surfaces. The v2 values eliminate contradictory outcomes and
+duplicate derived state, keep private values out of ordinary control/status/events and use the explicitly encoded private
 configuration boundary (0018), preserving existing wire compatibility deliberately.
 
 Desired configuration, successfully persisted configuration and applied machine
 state are distinct. AppState keeps drafts and UI policy; the current persistence
-authority must remain explicit through extraction, and a daemon-side authority
-must be settled before production client adoption. #194's per-surface applied
+authority is the shared host/store under StateRootSession. Production daemon
+ownership and socket activation remain a later milestone. #194's per-surface applied
 state and #181's scheduler are separately scoped shared-implementation follow-ups,
 with models for supersession, partial failures and stop/restart ordering. A
 bounded applied-state slice may join 0.6; their full scopes do not gate extraction.

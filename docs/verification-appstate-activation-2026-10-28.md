@@ -124,6 +124,17 @@ Independent immutable fix review found no defect in its shape or tests. Fresh [R
 pass all 31 trials / 481 checks on clean corrected code `673e53a`, with stable
 source and objects. Three new fresh Debug consumer trials also pass, recorded
 separately from the prior run. The selected ten-second widest client Quit returns
-in 974.235 ms with fake effects. Hosted CI for the new exact head remains due;
+in 974.235 ms with fake effects. Hosted Swift and CodeQL passed on exact head
+`66a76e45337b65e38fe006de1d6cb7e06565b24e`; all annotations are runner notices;
 native acceptance remains blocked by the locked Mac. No merge or release is
 claimed, and the installed app/helper remains untouched.
+
+## Subsequent diagnostic merge gate
+
+A separate review of the consumed app path found that AppLogStore inherits the
+no-op LogSink.flush default, while its file-specific flush has no production
+caller after the cut. The candidate remains draft until a real bounded async
+logger drain and same-deadline app tail drain are implemented and verified,
+alongside native edit/Quit acceptance. Physical output must be independent of
+MainActor, with only bounded UI history handed back. This is part of the selected
+offloading/termination work, not a configuration-store policy change.

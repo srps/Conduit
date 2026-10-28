@@ -53,7 +53,7 @@ enum SettingsRetryScenarios {
             previousConfig: ProxyConfig,
             platform: PlatformIntegrationConfig,
             previousPlatform: PlatformIntegrationConfig
-        ) -> Bool {
+        ) async -> Bool {
             do {
                 switch action {
                 case .applySystemProxy:
@@ -73,6 +73,15 @@ enum SettingsRetryScenarios {
                                            detail: "action=\(action) reason=\(error.localizedDescription)"))
                 return false
             }
+        }
+
+        /// The login item is not this scenario's surface.
+        func performImmediate(
+            _ action: PlatformIntegrationReconciler.Action,
+            platform: PlatformIntegrationConfig,
+            previousPlatform: PlatformIntegrationConfig
+        ) -> Bool {
+            true
         }
 
         func count(_ event: String) -> Int {

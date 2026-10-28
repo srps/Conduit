@@ -86,29 +86,25 @@ package struct SplitDNSVPNGate: Sendable {
         return runtimeStarted ? .apply : .nothing
     }
 
-    /// Acts on the current policy decision: writes the entry files when the VPN
-    /// came up under a running proxy, removes them whenever the VPN is down and
-    /// they are still on disk. Returns what it did, `nil` for `.nothing`; the
-    /// host feeds that to its `SplitDNSEntryFileRepair`, which reports a
-    /// failure and retries it once the helper is available. Nothing is thrown:
-    /// a VPN transition handler has no caller to propagate to.
-    ///
-    /// The decision reads the gate's *current* state, so call this
-    /// synchronously (same isolation context) right after the `update(_:)`
-    /// whose result you are acting on — an `update(_:)` interleaved between the
-    /// two changes what this does.
-    package func reconcileEntryFiles(
+    /// The decision half of `reconcileEntryFiles`: the operation the current policy asks for, `nil` for `.nothing`. It reads the gate's
+    /// *current* state, so take it in the same turn as the `update(_:)` whose result you are acting on, and queue its `perform` in that
+    /// turn too: an `update(_:)` interleaved between them changes what is decided.
+    package func entryFileOperation(runtimeStarted: Bool) -> SplitDNSEntryFileRepair.Operation? {
+        switch action(runtimeStarted: runtimeStarted) {
+        case .apply: .apply
+        case .remove: .remove
+        case .nothing: nil
+        }
+    }
+
+    /// The execution half: writes or removes the entry files and says what happened. Blocks on the helper, so a host runs it on its
+    /// platform queue with inputs it captured when it decided. Nothing is thrown: a VPN transition handler has no caller to propagate to.
+    package static func perform(
+        _ operation: SplitDNSEntryFileRepair.Operation,
         config: ProxyConfig,
         dnsManager: DNSManager,
-        logger: any LogSink,
-        runtimeStarted: Bool
-    ) -> SplitDNSEntryFileRepair.Outcome? {
-        let operation: SplitDNSEntryFileRepair.Operation
-        switch action(runtimeStarted: runtimeStarted) {
-        case .apply: operation = .apply
-        case .remove: operation = .remove
-        case .nothing: return nil
-        }
+        logger: any LogSink
+    ) -> SplitDNSEntryFileRepair.Outcome {
         do {
             switch operation {
             case .apply: try dnsManager.applyEntryFiles(config: config, logger: logger)
@@ -117,6 +113,24 @@ package struct SplitDNSVPNGate: Sendable {
             return .succeeded(operation)
         } catch {
             return .failed(operation, error)
+        }
+    }
+
+    /// Acts on the current policy decision: writes the entry files when the VPN
+    /// came up under a running proxy, removes them whenever the VPN is down and
+    /// they are still on disk. Returns what it did, `nil` for `.nothing`; the
+    /// host feeds that to its `SplitDNSEntryFileRepair`, which reports a
+    /// failure and retries it once the helper is available. The decision and
+    /// the write in one call, for a caller that may block where it runs;
+    /// `RuntimeHost` decides with `entryFileOperation` and queues `perform`.
+    package func reconcileEntryFiles(
+        config: ProxyConfig,
+        dnsManager: DNSManager,
+        logger: any LogSink,
+        runtimeStarted: Bool
+    ) -> SplitDNSEntryFileRepair.Outcome? {
+        entryFileOperation(runtimeStarted: runtimeStarted).map {
+            Self.perform($0, config: config, dnsManager: dnsManager, logger: logger)
         }
     }
 }

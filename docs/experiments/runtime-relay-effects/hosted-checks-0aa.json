@@ -1,0 +1,40 @@
+{
+  "head": "0aa744adca47590dc4a9a11ac1e8362b442409c7",
+  "pr": 259,
+  "checked_at": "2026-10-28T05:06:11.480362+00:00",
+  "codeql": {
+    "id": 122635881314,
+    "conclusion": "success",
+    "annotations": 0
+  },
+  "actions": {
+    "id": 122635723477,
+    "conclusion": "success",
+    "annotations_read": true,
+    "notice": "ubuntu-latest Ubuntu 26 migration"
+  },
+  "python": {
+    "id": 122635723117,
+    "conclusion": "success",
+    "annotations_read": true,
+    "notice": "ubuntu-latest Ubuntu 26 migration"
+  },
+  "swift": {
+    "id": 122635733621,
+    "run": 40633710890,
+    "status": "completed",
+    "conclusion": "success",
+    "annotations_read": true,
+    "notice": "macOS arm64 runner capacity"
+  },
+  "reviews": [],
+  "threads": [],
+  "comments": [],
+  "legacy_statuses": [
+    {
+      "context": "Devin Review",
+      "state": "success",
+      "evidence": "Not counted as completed source review; prior service skipped"
+    }
+  ]
+}

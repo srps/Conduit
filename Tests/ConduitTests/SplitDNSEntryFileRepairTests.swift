@@ -185,6 +185,28 @@ final class SplitDNSEntryFileRepairTests: XCTestCase {
         XCTAssertNil(repair.pending, "a result with nothing recorded since is applied")
     }
 
+    /// Operations queued on the host's one platform queue land in queue order (#47). Two in flight at once are both recorded, the later
+    /// failure standing; only one that lands after an operation queued behind it was recorded is dropped.
+    func testOperationsInFlightTogetherAreRecordedInQueueOrder() {
+        var repair = SplitDNSEntryFileRepair()
+        let start = repair.queue()
+        let drop = repair.queue()
+        repair.record(.succeeded(.apply), source: .start, startedAt: start, report: report)
+        repair.record(.failed(.remove, RecordingPrivilegeClient.Refused(operation: .removeDNS, subject: nil)), source: .vpnTransition,
+                      startedAt: drop, report: report)
+        XCTAssertEqual(repair.pending?.operation, .remove, "the later failure stands")
+        XCTAssertFalse(events.contains { $0.event == "platform.split_dns_outcome_superseded" }, "neither was dropped")
+
+        let older = repair.queue()
+        let newer = repair.queue()
+        repair.record(.succeeded(.remove), source: .vpnTransition, startedAt: newer, report: report)
+        XCTAssertNil(repair.pending, "the newer removal repaired it")
+        repair.record(.failed(.apply, RecordingPrivilegeClient.Refused(operation: .applyDNS, subject: nil)), source: .start,
+                      startedAt: older, report: report)
+        XCTAssertNil(repair.pending, "an outcome queued before one already recorded is older than the disk")
+        XCTAssertEqual(events.last?.detail, "operation=apply source=start failed=true newer=1")
+    }
+
     /// Codex review: a deleted entry's file is swept only by a retry, so a
     /// success elsewhere must not settle the repair while it is on disk.
     func testASuccessThatLeavesAnUnconfiguredRecordedFileDoesNotSettle() throws {
