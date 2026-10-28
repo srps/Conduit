@@ -1,0 +1,13 @@
+{
+  "source_commit": "2e0f4d56609e8db300566ff991aa3ac19414ef5b",
+  "gate_report_head": "e120a5c62fd9203691d0e6994d50e1b9df94bb3c",
+  "gate_source_sha256": "0ffd7da9646d6242c0021d16f01c2a3209cbf1cae097ec8641161b1e400bb0a4",
+  "committed_relevant_source_sha256": "0ffd7da9646d6242c0021d16f01c2a3209cbf1cae097ec8641161b1e400bb0a4",
+  "matching": true,
+  "only_changed_paths_since_e120": [
+    "Tests/ConduitTests/ConfigurationStoreTests.swift"
+  ],
+  "product_source_unchanged": true,
+  "candidate_build_head": "e120a5c62fd9203691d0e6994d50e1b9df94bb3c",
+  "candidate_scope": "Candidate built at e120; no product source changed in test-only correction."
+}

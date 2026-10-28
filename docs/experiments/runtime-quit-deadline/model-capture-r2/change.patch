@@ -1,0 +1,155 @@
+diff --git a/Tests/ConduitTests/ConfigurationStoreTests.swift b/Tests/ConduitTests/ConfigurationStoreTests.swift
+index c327888..7bc3bef 100644
+--- a/Tests/ConduitTests/ConfigurationStoreTests.swift
++++ b/Tests/ConduitTests/ConfigurationStoreTests.swift
+@@ -1218,6 +1218,34 @@ final class ConfigurationStoreTests: XCTestCase {
+         }
+     }
+ 
++    /// The store state the preferences model tracks: the baseline the store last adopted, whether an observed change has latched it, the
++    /// store's file version, and the missing sidecar's source and value. It is a plain value that takes the external state as arguments,
++    /// so no helper captures the test's mutable locals.
++    private struct PreferencesModel {
++        var adopted = false
++        var latched = false
++        var baseline: Data?
++        var version: UInt64 = 0
++        /// The runtime variant the store last adopted as the missing sidecar's source, and the showMenuBarIcon it last adopted.
++        var sidecarSource: Int?
++        var adoptedShows = true
++
++        /// Adopts a load of the external state, and returns whether it was a reload where only the missing sidecar's value moved.
++        mutating func adoptLoad(external: Data?, externalShows: Bool?, runtimeVariant: Int?) -> Bool {
++            // The showMenuBarIcon a load adopts: the sidecar's own value, or the runtime file's legacy value when the sidecar is missing.
++            let loadedShows = external == nil ? runtimeVariant != 1 : externalShows != false
++            let valueMoved = external == nil && adoptedShows != loadedShows
++            let onlyValueMoved = adopted && !latched && baseline == external && valueMoved
++            if !adopted || latched || baseline != external || valueMoved { version += 1 }
++            baseline = external
++            sidecarSource = runtimeVariant
++            adoptedShows = loadedShows
++            adopted = true
++            latched = false
++            return onlyValueMoved
++        }
++    }
++
+     /// A bounded model of the preferences file. It tracks the external bytes, the baseline the store last adopted, whether an observed
+     /// change has latched that baseline, and the store's file version. It decides each result from those alone, following decisions 0027
+     /// and 0021. It also tracks the runtime file the missing sidecar takes its values from: its variant on disk (the defaults, the defaults
+@@ -1246,32 +1274,12 @@ final class ConfigurationStoreTests: XCTestCase {
+             for segment in 0..<3 {
+                 let fixture = try Fixture(preferences: external)
+                 defer { fixture.close() }
+-                var adopted = false
+-                var latched = false
+-                var modelBaseline: Data?
+-                var modelVersion: UInt64 = 0
++                var model = PreferencesModel()
+                 // The runtime variant on disk (nil is missing). A segment starts with the runtime file the fixture seeded: the defaults
+                 // beside a sidecar, and none beside a missing one.
+                 var runtimeVariant: Int? = fixture.seededRuntime != nil ? 0 : nil
+-                // The runtime variant the store last adopted as the missing sidecar's source, and the showMenuBarIcon it last adopted.
+-                var modelSource: Int?
+-                var adoptedShows = true
+-                /// The showMenuBarIcon a load adopts: the sidecar's own value, or the runtime file's legacy value when the sidecar is missing.
+-                @RuntimeActor func loadedShows() -> Bool {
+-                    external == nil ? runtimeVariant != 1 : externalShows != false
+-                }
+-                @RuntimeActor func adoptModel() {
+-                    let valueMoved = external == nil && adoptedShows != loadedShows()
+-                    if !adopted || latched || modelBaseline != external || valueMoved { modelVersion += 1 }
+-                    if adopted, !latched, modelBaseline == external, valueMoved { valueMovedReloads += 1 }
+-                    modelBaseline = external
+-                    modelSource = runtimeVariant
+-                    adoptedShows = loadedShows()
+-                    adopted = true
+-                    latched = false
+-                }
+                 guard await adoptedLoad(fixture) != nil else { return }
+-                adoptModel()
++                if model.adoptLoad(external: external, externalShows: externalShows, runtimeVariant: runtimeVariant) { valueMovedReloads += 1 }
+                 // A token saved at the start of a segment. It goes stale once the version moves, and it is never valid in another segment.
+                 let savedToken = fixture.store.baselineToken(for: .preferences)
+ 
+@@ -1294,10 +1302,10 @@ final class ConfigurationStoreTests: XCTestCase {
+                             runtimeVariant = variant
+                             fixture.access.externalEdit(.replace(runtimeVariants[variant]), at: fixture.plan.config.path)
+                             guard await adoptedLoad(fixture) != nil else { return XCTFail("the probe reload was not adopted, \(label)") }
+-                            adoptModel()
++                            if model.adoptLoad(external: external, externalShows: externalShows, runtimeVariant: runtimeVariant) { valueMovedReloads += 1 }
+                         }
+                         XCTAssertEqual(fixture.store.values?.preferences.showMenuBarIcon, false, label)
+-                        XCTAssertEqual(fixture.store.baselineToken(for: .preferences)?.version, modelVersion, label)
++                        XCTAssertEqual(fixture.store.baselineToken(for: .preferences)?.version, model.version, label)
+                     case 4:
+                         // A runtime edit with no reload: the defaults, the legacy value, or removal. Beside a missing sidecar it changes the
+                         // source the next first write checks, and the next reload's value.
+@@ -1347,53 +1355,53 @@ final class ConfigurationStoreTests: XCTestCase {
+                         if case .refused = report.outcome { isRefused = true }
+                         XCTAssertEqual(isRefused, refused, label)
+                         if refused {
+-                            latched = true
++                            model.latched = true
+                             refusedLoads += 1
+-                        } else {
+-                            adoptModel()
++                        } else if model.adoptLoad(external: external, externalShows: externalShows, runtimeVariant: runtimeVariant) {
++                            valueMovedReloads += 1
+                         }
+                     case 2, 3:
+                         // Op 3 is the no-op commit: the value the store last adopted or wrote, under the current token. It verifies a present
+                         // file without writing it and latches a changed one, or one that appeared. For a file still missing it would be a
+                         // first write, which op 2 covers, so the step leaves that file as it is.
+-                        if op == 3, !latched, modelBaseline == nil, external == nil {
++                        if op == 3, !model.latched, model.baseline == nil, external == nil {
+                             trace.append("no-op commit skipped: missing")
+                             break
+                         }
+                         var proposed = AppPreferences()
+                         let presented: ConfigurationBaselineToken?
+                         if op == 3 {
+-                            proposed.showMenuBarIcon = adoptedShows
++                            proposed.showMenuBarIcon = model.adoptedShows
+                             presented = token
+                         } else {
+                             proposed.showMenuBarIcon = source.next(2) == 0
+                             // One commit in four presents the segment's saved token, which goes stale once the version moves.
+                             presented = source.next(4) == 0 ? savedToken : token
+                         }
+-                        let presentedValid = presented?.version == modelVersion
++                        let presentedValid = presented?.version == model.version
+                         let staged = try AppPreferencesPersistence.stagedData(for: proposed)
+                         let expected: String
+-                        if latched {
++                        if model.latched {
+                             expected = "notAttempted(noAuthoritativeBaseline)"
+                         } else if !presentedValid {
+                             expected = "notAttempted(baselineMismatch)"
+-                        } else if modelBaseline == nil && runtimeVariant != modelSource {
++                        } else if model.baseline == nil && runtimeVariant != model.sidecarSource {
+                             // The adopted sidecar is missing, so its first write checks the runtime source before its own pre-read.
+                             expected = "notAttempted(sourceChanged)"
+-                            latched = true
+-                        } else if external != modelBaseline {
++                            model.latched = true
++                        } else if external != model.baseline {
+                             expected = "conflict"
+-                            latched = true
++                            model.latched = true
+                         } else if external != nil && externalShows == proposed.showMenuBarIcon {
+                             // The parsed value is equal, so the present file is verified and never rewritten, whatever its formatting.
+                             expected = "unchanged"
+                         } else {
+                             expected = "persisted"
+-                            modelBaseline = staged
++                            model.baseline = staged
+                             external = staged
+                             externalShows = proposed.showMenuBarIcon
+-                            adoptedShows = proposed.showMenuBarIcon
+-                            modelVersion += 1
++                            model.adoptedShows = proposed.showMenuBarIcon
++                            model.version += 1
+                         }
+                         trace.append("\(op == 3 ? "no-op " : "")commit prefs \(proposed.showMenuBarIcon ? "shows" : "other") \(presented == token ? "current" : "saved")")
+                         guard case .admitted(let result) = await fixture.store.commitPreferences(proposed, expecting: presented, context: Self.context) else {

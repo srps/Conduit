@@ -1,0 +1,33 @@
+{
+  "checks": [
+    {
+      "name": "optimized-build-tests",
+      "command": [
+        "xcrun",
+        "swift",
+        "build",
+        "-c",
+        "release",
+        "--build-tests",
+        "-Xswiftc",
+        "-enable-testing"
+      ],
+      "exit": 0,
+      "seconds": 196.55
+    },
+    {
+      "name": "optimized-model-tests",
+      "command": [
+        "xcrun",
+        "xctest",
+        "-XCTest",
+        "ConduitTests.ConfigurationStoreTests",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/.build/out/Products/Release/ConduitTests.xctest"
+      ],
+      "exit": 0,
+      "seconds": 1.0
+    }
+  ],
+  "stable": true,
+  "scope": "Local Swift6.4; exact hosted6.3.3 acceptance remains required."
+}

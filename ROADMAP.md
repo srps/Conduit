@@ -45,7 +45,7 @@ Release profile, optimized fairness and native Dev checks. Test-maintenance head
 and exact-head hosted CI, including the older Swift 6.3.3 compiler. PR #261
 merged into draft PR #258 as `b637ec1`, not into main; that merge head also passes hosted CI.
 The 0.6 metadata tree passes all 41 local checks with the same 3,768 tests, four skips
-and 103 scenarios; its final hosted checks remain due. No installed-app acceptance is claimed.
+and 103 scenarios. Later head e120a5c passes complete hosted Swift, slow-drain and CodeQL; Release’s full suite passes but its optimized build still rejects mutable captures in a model test. The test-only 2e0f4d5 correction replaces those captures with a plain model value and passes all 41 local checks (3,770 tests/four skips/103 scenarios), its optimized build and 33 optimized model tests. Independent review accepts unchanged semantics; new exact-head hosted optimized verification remains. No installed-app acceptance is claimed.
 
 Historical checkpoints follow. The [client-owner checkpoint](./docs/verification-runtime-client-owner-2026-10-27.md)
 records the scoped independent review and all 41 passing local gates: 3,619 tests
