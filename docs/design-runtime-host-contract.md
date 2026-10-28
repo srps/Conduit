@@ -849,12 +849,9 @@ for their affected slices, not blockers to independent work:
 | Persistence precision — selected | Keep schema2 and refuse inexact saves; fix safe whole-unit conversions ([0023](decisions/0023-exact-schema-two-persistence.md)) | Exact staging/read-back mechanisms are implemented; client adoption and real-machine acceptance remain separate. No schema3 migration or silent normalization |
 | Listener handoff on failed platform repoint | Prefer bind-new, verify-ready, repoint, then retire-old, with bounded old-listener retention on repoint failure; review feasibility and retirement budget | Otherwise explicitly report the service interruption/mismatched endpoint; saving intent alone does not prevent it |
 | Follow-up release scope | Keep full control-owner isolation in the 0.6 core; decide the bounded #194 applied-state slice, with full scheduler/leases separately scoped | Selected module/isolation shape does not silently expand the remaining release scope |
-| Resource and shutdown limits | Ordinary reply/stream frames are selected at 64 KiB; private editor replies and remaining service/shutdown budgets need measured selection, including helper calls and manager locks | Provisional numbers above are review inputs, not validated shipping defaults |
+| Resource and shutdown limits — selected profile; final acceptance open | Ordinary replies/streams: 64 KiB (0030); private editor requests/replies: 8 MiB (0019/0034); whole collection capture/retention: 4/8 MiB (0038); app Quit: one ten-second total (0039). `RuntimeServiceProfile.inProcessApp()` supplies the reviewed finite service terms | Current composition and fake-effect measurements are recorded; whole-owner fairness, native termination and applicable real-helper timing remain acceptance gates. Encoded byte custody is not app RAM |
 
-Concrete limit values and the full command/field inventory require stage-1 sizing
-and compatibility fixtures before those APIs are considered settled. The stage-1
-measurements so far are in the [inventory](./runtime-client-stage1-inventory.md);
-they select no limit. Any owner
+The [stage-1 inventory](./runtime-client-stage1-inventory.md) records the earlier sizing and compatibility analysis; it does not override the subsequently accepted limits above. Current profile and measurement evidence are linked from decisions 0030, 0034, 0038 and 0039. New fields still require bounded sizing and compatibility checks. Any owner
 choice that refines an accepted decision receives a new ADR or the appropriate
 implementation/evidence update when that choice is approved; no accepted record is rewritten
 into a different decision.

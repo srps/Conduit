@@ -1,10 +1,12 @@
 # Actual runtime client profile probe
 
-The current app composition is measured at clean source `673e53a` using
+The last complete app-composition profile before the isolation work was measured at clean source `673e53a` using
 `RuntimeServiceProfile.inProcessApp()` and the selected ten-second Quit total.
 [The lifetime-corrected run](runs/673e53a-lifetime/README.md) passes all 31 fresh trials and
 481 checks on stable source and linked objects. These are fake/scratch/loopback
 observations, separate from native/real-machine acceptance and app RAM bounds.
+
+The later [diagnostic checkpoint](../../verification-runtime-diagnostics-2026-10-28.md) records selected additional Release modes and optimized consumer tests on source `464e316`; these are narrower runs, not a replacement full profile. The [RuntimeActor preparation](../../verification-runtime-actor-preparation-2026-10-28.md) and whole-owner move require fresh source-qualified checks.
 
 The older `ef3e4df` measurements below remain historical. Their exact probe and
 runner are recoverable from the immutable Git links in that run's README;

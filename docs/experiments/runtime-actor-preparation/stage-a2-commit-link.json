@@ -1,0 +1,13 @@
+{
+  "source_commit": "345af207ea445f0afa152666d79a877e2371b12d",
+  "verification_head": "569f192a898188ebbed711aeace81d961ae585f6",
+  "relevant_source_sha256": "a871b84459561357b0871c4e81a025e7629e3c50c99fc8ed820dfa940ba096bb",
+  "snapshot_sha256": "674661b6b266852903bd31b90e254789929ea13b0f7f3bba40b0f6e3541757ad",
+  "snapshot_product_test_script_blobs_matching_commit": 743,
+  "all_checked_blobs_match": true,
+  "gate_checkout": "/private/tmp/cdt-stagea2-20261028",
+  "normal_environment": "LIBDISPATCH_COOPERATIVE_POOL_STRICT explicitly removed by runner",
+  "tests": 3741,
+  "existing_skips": 4,
+  "simulator_scenarios": 103
+}
