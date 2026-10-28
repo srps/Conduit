@@ -42,12 +42,13 @@ older Start → Stop → newer Start: the newer exact managed endpoint and journ
 survive the old completion, and final Stop clears both. A second existing test
 now explicitly asserts that the next proxy Start succeeds. Both pass.
 
-Independent subscription-backed Claude review returns SOURCE READY at immutable
+The pre-CI independent subscription-backed Claude review returned SOURCE READY at immutable
 r6 snapshot `69c3054d32b1f3a5737e27cc726ef24aa989e1e729b1cd3bab2b374123d2f977`
 and patch `3d852245c058cf78ae9610223fc17788cb79e8eec1b023095fa700aa37c1253d`,
 against base `d7d47d4f3e918ed9c96ec3ec9ebfcc55da758813`. Production source is
 byte-identical to the mutation-tested r5; only those two host tests changed.
-This is source review, not release acceptance.
+This was source review, not release acceptance. The subsequent hosted crash below
+invalidated that verdict as sufficient acceptance evidence.
 
 ## Behavior and limits
 
@@ -92,3 +93,34 @@ inspection is currently blocked by the locked Mac, so edit/Quit/AppKit checks ar
 not claimed. Exact-head hosted CI and applicable real-machine/release acceptance
 also remain open. No installed app/helper replacement or real VPN/auth test has
 occurred. Historical experimental measurements remain separately identified.
+
+## Hosted CI lifetime correction
+
+Hosted Swift at `cc300192` crashed on a destroyed unowned reference after a PAC
+preview test, despite the earlier local passes. The exact historical callback
+was not identified by its bounded log. Six editor/observer callbacks assumed
+AppState would outlive their tasks; canceled frame/page reads could still return
+after Stop and invoke them or revive the ended presentation.
+
+The correction uses weak UI callbacks (failure logging retains only the log
+sink), optional owner inputs checked before recording a submission, and the
+existing session close when the owner is absent. It manufactures no draft or
+intent, sends no new request, and preserves settlement of an already frozen
+request. Post-await observer guards make Stop final. These are internal client
+lifetime boundaries, with no wire/schema/persistence policy change.
+
+[Regression witnesses](experiments/appstate-lifetime-witnesses/README.md) preserve
+the incident, four semantic assertion failures and a separately labeled exact
+unowned runtime-trap reproduction. Every restored run passes. Five fresh
+processes each pass 17 relevant tests; both full focused runs pass 299 tests
+(two existing skips). The local weak probe uses the established weak-var form
+so this correction adds no toolchain requirement beyond the declared baseline.
+
+[The new complete workflow](experiments/appstate-lifetime-workflow/README.md)
+passes all 41 checks in one run on stable relevant-source fingerprint
+`01691fd16ac6d74d348bccb41c82f2dea51b882c70e4bcef81c811a088cdf402`: 3,700
+Swift tests (four skips), all 103 simulator records, perf and the remaining gates.
+Independent immutable fix review found no defect in its shape or tests. Fresh
+Release/consumer observations and hosted CI for the fix still need revalidation;
+native acceptance remains blocked by the locked Mac. No merge or release is
+claimed, and the installed app/helper remains untouched.

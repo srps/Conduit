@@ -1,0 +1,13 @@
+{
+  "head": "cc300192ee97788b5464e77ede7df1848d967465",
+  "run": 40610605122,
+  "job": 122560941577,
+  "conclusion": "failure",
+  "log_scope": "bounded120KBtail; no symbolic callback backtrace",
+  "excerpt": [
+    "2026-10-28T00:54:04.4529310Z Test Case '-[ConduitTests.PACPreviewTests testInvalidTargetsAreRejectedWithoutCrashing]' started.",
+    "2026-10-28T00:54:04.4558320Z Test Case '-[ConduitTests.PACPreviewTests testInvalidTargetsAreRejectedWithoutCrashing]' passed (0.042 seconds).",
+    "2026-10-28T00:54:04.4560200Z Test Case '-[ConduitTests.PACPreviewTests testPreviewShowsChainAndCapturesTargetWithOneOperationInFlight]' started.",
+    "2026-10-28T00:54:04.4561830Z Fatal error: Attempted to read an unowned reference but object 0xb48d7c000 was already destroyed"
+  ]
+}

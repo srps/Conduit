@@ -37,10 +37,11 @@ final class RuntimeEditorSession {
     private let observer: RuntimeObserver
     let incarnation: ControlHostIncarnation
     private(set) var ledger: RuntimeEditorLedger
-    /// The current drafts, read when an operation is frozen.
-    private let drafts: @MainActor () -> (config: ProxyConfig, platform: PlatformIntegrationConfig, preferences: AppPreferences)
-    /// The intent a Settings save carries per module: apply while running at the observed revision, otherwise save only.
-    private let moduleIntents: @MainActor (_ holdApply: Bool) -> PrivateModuleSlots<PrivateModuleIntent>
+    /// The current drafts, read when an operation is frozen. Nil once the app that owns them is gone.
+    private let drafts: @MainActor () -> (config: ProxyConfig, platform: PlatformIntegrationConfig, preferences: AppPreferences)?
+    /// The intent a Settings save carries per module: apply while running at the observed revision, otherwise save only. Nil once the
+    /// app is gone.
+    private let moduleIntents: @MainActor (_ holdApply: Bool) -> PrivateModuleSlots<PrivateModuleIntent>?
     private let report: @MainActor (Report) -> Void
 
     private var wanted: Set<RuntimeEditorLedger.Group> = []
@@ -59,8 +60,8 @@ final class RuntimeEditorSession {
         observer: RuntimeObserver,
         incarnation: ControlHostIncarnation,
         ledger: RuntimeEditorLedger,
-        drafts: @escaping @MainActor () -> (config: ProxyConfig, platform: PlatformIntegrationConfig, preferences: AppPreferences),
-        moduleIntents: @escaping @MainActor (_ holdApply: Bool) -> PrivateModuleSlots<PrivateModuleIntent>,
+        drafts: @escaping @MainActor () -> (config: ProxyConfig, platform: PlatformIntegrationConfig, preferences: AppPreferences)?,
+        moduleIntents: @escaping @MainActor (_ holdApply: Bool) -> PrivateModuleSlots<PrivateModuleIntent>?,
         report: @escaping @MainActor (Report) -> Void
     ) {
         self.control = control
@@ -121,6 +122,13 @@ final class RuntimeEditorSession {
         defer { starting = nil }
         if case .launchAtLogin? = starting { return true }
         return false
+    }
+
+    /// The app that owns the drafts is gone: no draft or intent is made up for it, nothing is sent and the ledger records nothing. The
+    /// session closes, so no later trigger (a snapshot's retry, an own command's explained mismatch) starts anything either. Called from
+    /// the drive, so no unstarted operation is pending.
+    private func ownerGone() {
+        close()
     }
 
     /// Replaces the ledger after an explicit reload's fresh read. Only while nothing is in flight.
@@ -201,7 +209,7 @@ final class RuntimeEditorSession {
     }
 
     private func runConfiguration() async {
-        let draft = drafts()
+        guard let draft = drafts() else { return ownerGone() }
         // The bridge refuses a value past an approved ceiling before mapping anything (decision 0021); the client reports a refusal its
         // producer threw only as a closed code, so the same check runs here first and names the field and the ceiling, never the value.
         if let violation = draft.config.resourceViolation() {
@@ -213,12 +221,13 @@ final class RuntimeEditorSession {
             return report(.refusedLocally(.configuration, .notStorable(field: refusal.field, requirement: refusal.requirement)))
         }
         let holdApply = !draft.config.startBlockingProblems.isEmpty
+        // Read in the drafts' turn, before the ledger records a submission, so an app gone by now leaves nothing half-submitted.
+        guard let modules = moduleIntents(holdApply) else { return ownerGone() }
         let requestID = ControlRequestID(rawValue: UUID())
         guard let submission = ledger.submitConfiguration(draft.config, draft.platform, requestID: requestID) else {
             // A file lost its baseline; only an explicit reload lets the editor write it again. Nothing is sent.
             return report(.refusedLocally(.configuration, .needsReload))
         }
-        let modules = moduleIntents(holdApply)
         let incarnation = incarnation
         let deadline = RuntimeDeadline.after(Self.exchangeBudget, from: .now)
         let baselines = submission.baselines
@@ -239,7 +248,7 @@ final class RuntimeEditorSession {
     }
 
     private func runPreferences() async {
-        let draft = drafts()
+        guard let draft = drafts() else { return ownerGone() }
         // As for the configuration: the bridge's own ceiling, checked before freezing, so the refusal names the field.
         if let violation = DomainResourceCheck.text(draft.preferences.preferredBrowserTestURL, .browserTestURL) {
             return report(.refusedLocally(.preferences, .resourceLimit(violation)))

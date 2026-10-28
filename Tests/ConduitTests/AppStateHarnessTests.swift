@@ -486,6 +486,43 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(state.controlsEnabled)
     }
 
+    /// The app's observer and editor session can outlive it: a read or a settlement wait can still be out when the quit returns and the
+    /// app is released. Their callbacks hold it weakly, so nothing keeps it after the quit; what an observer read still out would hand on
+    /// does not reach it, and the closed session starts no write however it is triggered.
+    func testAQuitAppIsReleasedAndLateObservationOrEditorWorkNeitherReachesItNorWrites() async throws {
+        let harness = try makeHarness()
+        weak var released: AppState?
+        let observer: RuntimeObserver
+        let editor: RuntimeEditorSession
+        do {
+            let state = await harness.ready()
+            released = state
+            observer = try XCTUnwrap(state.observer)
+            editor = try XCTUnwrap(state.editor)
+            state.config.profileName = "Frozen at quit"
+            XCTAssertTrue(state.beginQuit())
+            guard case .settled(.completed)? = await state.finishQuit()?.quit else { return XCTFail("the quit completed") }
+        }
+        XCTAssertEqual(try harness.savedConfig.profileName, "Frozen at quit", "the quit saved the draft it froze")
+        await harness.tearDown()
+        self.harness = nil
+        await harness.settle("nothing keeps the app after its quit") { released == nil }
+
+        // Every callback the observer holds, as a read still out after the quit would call it.
+        observer.onSnapshot?(try WireSnapshotFixture.snapshot(ProxyOrchestratorSnapshot()))
+        observer.onEvents?([ControlRuntimeEvent(timestamp: Date(timeIntervalSince1970: 1), kind: "proxy", event: "test.event")])
+        observer.onFailure?("a page read the quit cancelled")
+        // Every trigger the app or the observer could still pull on the closed session.
+        editor.edited(.configuration)
+        editor.save(.configuration)
+        editor.save(.preferences)
+        editor.revisionsMayHaveMoved()
+        XCTAssertFalse(editor.setLaunchAtLogin(true), "the closed session admits no write")
+        await editor.settle()
+        XCTAssertTrue(editor.isIdle)
+        XCTAssertNil(editor.ledger.active, "nothing was submitted after the quit")
+    }
+
     // MARK: Saves
 
     /// An edit saves once edits pause; its own receipt makes the draft clean, and the file holds it.
