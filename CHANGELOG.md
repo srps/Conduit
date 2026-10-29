@@ -7,16 +7,15 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
-The 0.6.1 notes below are prepared for packaging. 0.5.8 is the latest published
-release. The owner's installed 0.6.0 candidate passed a
-normal Stop/Start/Quit/relaunch check on the owner's machine
-([verification](./docs/verification-runtime-installed-2026-10-29.md)). The
-release-certificate signed tag build produced an unpublished draft. Publication
-is held for the [NIO concurrency repairs](./docs/verification-nio-concurrency-2026-10-29.md)
-and their verification; that earlier installed candidate does not contain them.
-The 0.6.0 tag is preserved, and 0.6.1 is the corrected candidate.
-
 ## 0.6.1
+
+[Published](https://github.com/srps/Conduit/releases/tag/v0.6.1) on 2026-10-29
+at 22:40:28 UTC. The signed bundle is installed and serving after its
+[scoped machine acceptance](./docs/verification-release-0.6.1-2026-10-29.md):
+Stop/Start/Quit/reopen, HTTPS, Kerberos and helper checks pass, with settings bytes
+unchanged. Hosted and signed-package gates pass. The old 0.6.0 tag/draft remain
+preserved. The separate Swift continuation/TSan finding stays open in #118;
+its full failed run is not counted as passed.
 
 The app now runs on the one runtime host that `ConduitDaemon` also uses (#186).
 It is an app-only update: helper protocol v5 and the helper's behaviour are

@@ -1,0 +1,337 @@
+{
+  "checks": [
+    {
+      "expected": "a new process at the installed executable path within 45 s",
+      "name": "baseline.process_opened",
+      "observed": {
+        "prompt_to_process_s": 10.3
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "running snapshot at or after the phase boundary, one exact-path listener owner, loopback connect accepted",
+      "name": "baseline.serving",
+      "observed": {
+        "already_serving": false,
+        "phase_boundary": "launch_epoch",
+        "prompt_to_serving_s_including_reaction": 6.51
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "HEAD https://example.com through Conduit's loopback proxy only, no direct fallback: 2xx/3xx with CONNECT 200; a local certificate-trust failure is attention",
+      "name": "baseline.https_via_loopback_proxy",
+      "observed": {
+        "connect_code": "200",
+        "curl_exit": 0,
+        "http_code": "200",
+        "trust_env_retained": 2
+      },
+      "status": "pass"
+    },
+    {
+      "expected": ">=1 auth.kerberos_succeeded since the phase boundary (see baseline.serving); observed beside the HTTPS check, not caused by it",
+      "name": "baseline.kerberos_events_since_phase",
+      "observed": {
+        "complete": true,
+        "kerberos_failed": 0,
+        "kerberos_succeeded": 280,
+        "rows": 515,
+        "status": "ok",
+        "undecodable": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": ">=1 succeeded auth.privilege_request, none failed and no helper problem event since the phase boundary; no failure is provable only with a complete window",
+      "name": "baseline.helper_requests_since_phase",
+      "observed": {
+        "complete": true,
+        "helper_failed": 0,
+        "helper_problem": 0,
+        "helper_succeeded": 58,
+        "rows": 515,
+        "status": "ok",
+        "undecodable": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "VPN, DNS and last-auth enums from the current snapshot; last_auth_fresh means lastAuthOutcomeAt at or after the phase boundary",
+      "name": "baseline.snapshot_observations",
+      "observed": {
+        "active_connections": 0,
+        "dns": "running",
+        "host_class": "loopback",
+        "last_auth": "kerberos",
+        "last_auth_fresh": true,
+        "port_known": true,
+        "state": "running",
+        "vpn": "connected"
+      },
+      "status": "observed"
+    },
+    {
+      "expected": "record counts and markers only",
+      "name": "baseline.journal",
+      "observed": {
+        "markers": {
+          "launchdEnvironment": "applied",
+          "resolverFile": "released",
+          "systemProxy": "released"
+        },
+        "records": {
+          "launchdEnvironment": 6,
+          "resolverFile": 7,
+          "systemDNS": 0,
+          "systemProxy": 8
+        },
+        "state": "loaded"
+      },
+      "status": "observed"
+    },
+    {
+      "expected": "fresh stopped snapshot, no listener, connect refused",
+      "name": "stop.stopped_listener_closed",
+      "observed": {
+        "prompt_to_stopped_s_including_reaction": 4.72
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "the serving process is still alive at the installed path",
+      "name": "stop.same_process_retained",
+      "observed": null,
+      "status": "pass"
+    },
+    {
+      "expected": "config/platform/preferences bytes equal the baseline freeze; a change's cause is not determined",
+      "name": "stop.files_unchanged",
+      "observed": {
+        "config": "unchanged",
+        "platform": "unchanged",
+        "preferences": "unchanged"
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "platform-state.json holds no non-marker record within 20 s. Journal only: not physical restoration, not global PAC absence",
+      "name": "stop.journal_records_released",
+      "observed": {
+        "markers": {
+          "resolverFile": "released",
+          "systemProxy": "released"
+        },
+        "records": {
+          "launchdEnvironment": 0,
+          "resolverFile": 0,
+          "systemDNS": 0,
+          "systemProxy": 0
+        },
+        "settle_s": 0.61,
+        "state": "loaded"
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "fresh running snapshot and accepting listener owned by the same process",
+      "name": "start.serving_same_process",
+      "observed": {
+        "prompt_to_serving_s_including_reaction": 5.51
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "lifecycle.module_settled module=proxy source=explicit outcome=started since the prompt",
+      "name": "start.proxy_module_settled",
+      "observed": {
+        "proxy_settled_other": 0,
+        "proxy_started": 1,
+        "status": "ok"
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "config/platform/preferences bytes equal the baseline freeze; a change's cause is not determined",
+      "name": "start.files_unchanged",
+      "observed": {
+        "config": "unchanged",
+        "platform": "unchanged",
+        "preferences": "unchanged"
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "no exact-path process and no listener, never forced",
+      "name": "quit.process_exited_listener_closed",
+      "observed": {
+        "prompt_to_exit_upper_bound_s_including_reaction": 5.92
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "config/platform/preferences bytes equal the baseline freeze; a change's cause is not determined",
+      "name": "after_quit.files_unchanged",
+      "observed": {
+        "config": "unchanged",
+        "platform": "unchanged",
+        "preferences": "unchanged"
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "platform-state.json holds no non-marker record within 20 s. Journal only: not physical restoration, not global PAC absence",
+      "name": "after_quit.journal_records_released",
+      "observed": {
+        "markers": {
+          "resolverFile": "released",
+          "systemProxy": "released"
+        },
+        "records": {
+          "launchdEnvironment": 0,
+          "resolverFile": 0,
+          "systemDNS": 0,
+          "systemProxy": 0
+        },
+        "settle_s": 0.01,
+        "state": "loaded"
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "observation only",
+      "name": "after_quit.final_snapshot",
+      "observed": {
+        "fresh": true,
+        "state": "stopped",
+        "status": "ok"
+      },
+      "status": "observed"
+    },
+    {
+      "expected": "a new process at the installed executable path within 45 s",
+      "name": "reopen.process_opened",
+      "observed": {
+        "prompt_to_process_s": 6.09
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "running snapshot at or after the phase boundary, one exact-path listener owner, loopback connect accepted",
+      "name": "reopen.serving",
+      "observed": {
+        "already_serving": false,
+        "phase_boundary": "before_open_prompt",
+        "prompt_to_serving_s_including_reaction": 4.43
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "new serving PID",
+      "name": "reopen.new_process",
+      "observed": null,
+      "status": "pass"
+    },
+    {
+      "expected": "HEAD https://example.com through Conduit's loopback proxy only, no direct fallback: 2xx/3xx with CONNECT 200; a local certificate-trust failure is attention",
+      "name": "reopen.https_via_loopback_proxy",
+      "observed": {
+        "connect_code": "200",
+        "curl_exit": 0,
+        "http_code": "200",
+        "trust_env_retained": 2
+      },
+      "status": "pass"
+    },
+    {
+      "expected": ">=1 auth.kerberos_succeeded since the phase boundary (see reopen.serving); observed beside the HTTPS check, not caused by it",
+      "name": "reopen.kerberos_events_since_phase",
+      "observed": {
+        "complete": true,
+        "kerberos_failed": 0,
+        "kerberos_succeeded": 5,
+        "rows": 145,
+        "status": "ok",
+        "undecodable": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": ">=1 succeeded auth.privilege_request, none failed and no helper problem event since the phase boundary; no failure is provable only with a complete window",
+      "name": "reopen.helper_requests_since_phase",
+      "observed": {
+        "complete": true,
+        "helper_failed": 0,
+        "helper_problem": 0,
+        "helper_succeeded": 21,
+        "rows": 145,
+        "status": "ok",
+        "undecodable": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "VPN, DNS and last-auth enums from the current snapshot; last_auth_fresh means lastAuthOutcomeAt at or after the phase boundary",
+      "name": "reopen.snapshot_observations",
+      "observed": {
+        "active_connections": 2,
+        "dns": "running",
+        "host_class": "loopback",
+        "last_auth": "kerberos",
+        "last_auth_fresh": true,
+        "port_known": true,
+        "state": "running",
+        "vpn": "connected"
+      },
+      "status": "observed"
+    },
+    {
+      "expected": "config/platform/preferences bytes equal the baseline freeze; a change's cause is not determined",
+      "name": "reopen.files_unchanged",
+      "observed": {
+        "config": "unchanged",
+        "platform": "unchanged",
+        "preferences": "unchanged"
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "Conduit is left running and serving",
+      "name": "final.serving",
+      "observed": null,
+      "status": "pass"
+    }
+  ],
+  "counts": {
+    "observed": 4,
+    "pass": 23
+  },
+  "errors": [],
+  "expected_version": "0.6.1",
+  "finished_utc": "2026-10-29T22:07:23Z",
+  "limits": [
+    "Reads: config 8,388,608 B and platform/preferences 131,072 B (DomainResourceLimits), snapshot 4 MiB, events tail 1 MiB / 20,000 rows, journal 1 MiB / 4,096 rows, Info.plist 1 MiB, executable 512 MiB. Larger is too_large and unproven.",
+    "Commands: /bin/ps, /usr/sbin/lsof, /usr/bin/curl, and /usr/bin/codesign in preflight only; 10 s timeout (curl 25 s, codesign 60 s), 4 MiB output. Only this tool's own timed-out child is killed, never Conduit.",
+    "Waits: 45 s per owner action, 20 s settle for journal and events, 0.25 s poll. Every duration includes the owner's reaction.",
+    "snapshot.json has no timestamp of its own; freshness is its mtime at or after the phase boundary. Baseline boundary: the --since launch epoch, else when this tool started; reopen: just before the Open prompt; Stop/Start/Quit: the prompt.",
+    "Event counts are since the phase boundary by event timestamp. They are complete only when a row older than the boundary is still in the read window (the 1 MiB events file truncates on rotation); an absence claim such as no helper failure needs that.",
+    "Journal checks count platform-state.json non-marker records only. They prove neither per-service physical restoration nor global PAC absence. User PAC priors are never read, judged or changed.",
+    "HTTPS success and Kerberos/helper events are recorded side by side; neither is claimed to cause the other.",
+    "Process identity is ps comm equal to the bundle's CFBundleExecutable path; the serving PID is the single lsof listener on the snapshot's loopback proxy port.",
+    "Connections rows are the owner's attestation, not tool evidence."
+  ],
+  "mode": "interactive",
+  "owner_attestations": {
+    "baseline_connections_live_rows": "yes"
+  },
+  "schema": 1,
+  "scope": "Installed signed 0.6.1 smoke for the pool/auth/fixture fixes: owner Start, Stop, Start, Quit, reopen and Start, with process, listener, file-hash, structured snapshot/event/journal observations and one HTTPS request through the loopback proxy. Platform ownership recovery is not re-verified here (validated separately on prior source). No claim of per-service physical restoration, global PAC absence, DNS or split-DNS, autostart, or product-only Quit duration.",
+  "skipped": [
+    {
+      "name": "quit.product_only_duration",
+      "reason": "only a prompt-to-exit upper bound including the owner's reaction is measured"
+    }
+  ],
+  "started_utc": "2026-10-29T22:06:02Z",
+  "verifier_sha256": "a07bafc602052766dc0d9e43dbf9afadf5b8a93780aea916842cf9fb12876fd9"
+}

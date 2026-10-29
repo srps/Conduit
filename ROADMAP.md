@@ -24,20 +24,18 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 
 The runtime architecture program ([#186](https://github.com/srps/Conduit/issues/186),
 [#180](https://github.com/srps/Conduit/issues/180),
-[#183](https://github.com/srps/Conduit/issues/183)) is **unreleased**: 0.5.8 is
-still the latest public release. The owner installed the locally signed 0.6.0
-candidate, which is now serving on the owner's machine and passed the
-[installed verification](./docs/verification-runtime-installed-2026-10-29.md).
-`VERSION` is 0.6.1, and the [CHANGELOG](./CHANGELOG.md) has versioned 0.6.1
-notes prepared for packaging. The preserved 0.6.0 tag produced an unpublished draft.
-Publication is held for [NIO concurrency repairs and verification](./docs/verification-nio-concurrency-2026-10-29.md):
-embedded-fixture thread violations, a VPN test synchronization race, and production
-pool metadata/retirement races found during the audit. PR #258 is merged at `15aabc1`. PR #262 carries the concurrency follow-up and
-strict NIO enforcement; its final local workflow passes all 20 steps, including
-3,780 tests/four skips and 104 simulator cases. A locally signed 0.6.1 candidate
-has built and passed signature/read-only helper preflight checks. Hosted checks,
-merge, release-certificate packaging and fresh native acceptance remain. The
-serving 0.6.0 app is unchanged; the local build is not native acceptance.
+[#183](https://github.com/srps/Conduit/issues/183)) shipped in
+[0.6.1](https://github.com/srps/Conduit/releases/tag/v0.6.1), published on
+2026-10-29 at 22:40:28 UTC. PR #258 merged the single AppState
+activation and RuntimeActor isolation; PR #262 merged the release-QA concurrency
+repairs and strict NIO enforcement. The owner-approved signed tag workflow,
+complete hosted gates and [normal-path signed machine acceptance](./docs/verification-release-0.6.1-2026-10-29.md)
+pass. The exact official 0.6.1 bundle is installed and serving, without a helper
+reinstall. The completed owner run has 23 passing checks, four observations and
+no errors. The old 0.6.0 tag/draft and earlier evidence stay preserved. The
+publication was observed during documentation closeout; this PR changes no
+release asset or tag. The independent Swift continuation/TSan finding
+remains tracked in #118, with its failed full run and scoped passes distinguished.
 On `512a6b0` the Release job stalled under buffered test output; its cause is
 unknown. Test-only guards and a line-buffered Release test step followed, with
 production Source unchanged
@@ -48,8 +46,8 @@ production Source unchanged
 | Contracts and mechanisms | Typed lifecycle/configuration values, framed client/service, bounded observation/replay, verified store and file readers are merged. | Broader event families migrate with their owners. |
 | Shared owner | PR253 converges DNS, tunnels and proxy on one lifecycle/store path, with preparation-time capture, exact freshness and Stop/Quit policy. PR257 adds guarded host-owned audit parity. | AppState now consumes the single owner; release acceptance is in the final row. |
 | Actual client integration | PR254 connects host admission/observation, private frozen updates, receipts, preferences/admin persistence and final Quit saves through the actual framed clients. | Integrated through AppState; final release gates are in the last row. |
-| Native client completion | PR256 merged saved Start receipts, explicit reload, bounded preflight/credential/wake operations, typed recovery and DNS health after local and hosted checks. | Selected ten-second Quit is integrated and passes the fake production profile. An installed normal-path Quit finished within 1.91 s, including the owner's reaction; expiry under a slow helper has not been observed on a real machine. |
-| AppState, isolation and release | The single AppState activation (0031) and RuntimeActor isolation merged in PR #258. The collection profile (0038), 64 KiB ordinary and 8 MiB private frames, production resource and fairness measurements, and source-qualified native Dev checks pass. The owner's installed 0.6.0 normal-path acceptance is scoped to that earlier source. PR #262 repairs the pool and test concurrency defects found during release QA. | Final hosted checks and merge of #262; release-certificate 0.6.1 packaging and a new-candidate machine check. The 0.6.0 tag/draft stay preserved. Publication waits for the owner. |
+| Native client completion | PR256 merged saved Start receipts, explicit reload, bounded preflight/credential/wake operations, typed recovery and DNS health after local and hosted checks. | Selected ten-second Quit passes the fake profile and scoped installed checks. Signed 0.6.1 Quit was observed within 5.92 s of the prompt, including owner reaction; slow-helper expiry remains unobserved on a real machine. |
+| AppState, isolation and release | The single AppState activation (0031) and RuntimeActor isolation merged in PR #258. The collection profile (0038), 64 KiB ordinary and 8 MiB private frames, production resource and fairness measurements, and source-qualified native Dev checks pass. PR #262 repairs the pool and test concurrency defects found during release QA. Final hosted and release-certificate packaging gates pass; the owner's signed 0.6.1 normal-path run passes its scoped acceptance. | Released as 0.6.1. Broader sanitizer/runtime and hardening follow-ups retain their recorded scope; the 0.6.0 tag/draft stay preserved. |
 
 The [RuntimeActor activation verification](./docs/verification-runtime-actor-activation-2026-10-28.md)
 keeps the source-qualified isolation, collection-fairness, sanitizer and native Dev

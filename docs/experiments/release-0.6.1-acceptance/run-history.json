@@ -1,0 +1,42 @@
+{
+  "runs": [
+    {
+      "file": "native-report-ad9154f3f9cc1beb.json",
+      "sha256": "fbf83de2734e225c379b286f06633e5c9e1396aa641b27dee7f46e576d46ac14",
+      "started_utc": "2026-10-29T21:59:28Z",
+      "finished_utc": "2026-10-29T21:59:55Z",
+      "counts": {
+        "observed": 1
+      },
+      "errors": [
+        "owner_declined"
+      ]
+    },
+    {
+      "file": "native-checks-20261029T220549Z.json",
+      "sha256": "bc43a16343d29bd235517cf5941353c554eb93743bece9b43e09f7f1b80e6794",
+      "started_utc": "2026-10-29T22:05:49Z",
+      "finished_utc": "2026-10-29T22:06:00Z",
+      "counts": {
+        "observed": 1,
+        "pass": 5,
+        "unproven": 1
+      },
+      "errors": [
+        "interactive_KeyboardInterrupt"
+      ]
+    },
+    {
+      "file": "native-checks-20261029T220602Z.json",
+      "sha256": "96da6e488388a8251c3086e433514a0fc927e12cad618b5c8fee5bc6357e20fb",
+      "started_utc": "2026-10-29T22:06:02Z",
+      "finished_utc": "2026-10-29T22:07:23Z",
+      "counts": {
+        "observed": 4,
+        "pass": 23
+      },
+      "errors": []
+    }
+  ],
+  "scope": "Earlier declined/interrupted runs remain as recorded; only the final run completed the lifecycle."
+}

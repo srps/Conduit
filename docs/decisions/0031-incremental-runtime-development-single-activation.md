@@ -293,3 +293,15 @@ The [activation checkpoint](../verification-runtime-actor-activation-2026-10-28.
 The [final activation checkpoint](../verification-runtime-actor-activation-2026-10-28.md) records the shared [RuntimeHost](../../Sources/ConduitRuntime/RuntimeHost.swift), [RuntimeActor](../../Sources/ProxyKernel/Abstractions/RuntimeActor.swift) and [off-owner capture flight](../../Sources/ConduitRuntime/RuntimeCaptureFlight.swift). AppState's replaced paths are deleted. Source review, all 41 local checks, scoped strict tests, unsuppressed TSan, optimized control-fairness and complete production-profile measurements pass. Final-source isolated native paged-client/active-tunnel Quit checks pass. Implementation is complete; the test-maintenance workflow also passes (3,768 tests with four existing skips and 103 scenarios); final hosted compiler compatibility, release integration and applicable real-machine acceptance remain distinct, with validation pending. Earlier partial/MainActor checkpoints are historical.
 
 Status 2026-10-29: the owner's installed-candidate run is recorded under Implementation evidence, and validation is passed for normal use. The Open questions text above that calls native edit/Quit acceptance pending, or real-machine/release acceptance still to verify, is historical. Exact-head hosted Swift 6.3.3 checks passed on `8a036fe`. Final-head CI, the merge of PR #258, release-certificate packaging and publication remain release work, not validation of this decision.
+
+### Signed 0.6.1 normal-path validation — 2026-10-29
+
+The [signed release closeout](../verification-release-0.6.1-2026-10-29.md) records
+owner-run acceptance of exact tag `v0.6.1` / `f809bb9`: 23 passing checks, four
+observations and no errors. Stop/Start, settings-byte preservation, Quit, reopen
+with manual Start, HTTPS, Kerberos and helper observations pass; Conduit remains
+serving. Quit was observed within 5.92 seconds of the prompt including owner
+reaction, not a product-only measurement. Journal release does not repeat
+physical per-service/global-proxy validation. Slow/stuck-helper expiry and power
+loss remain outside this native scope. Accepted policy and implementation status
+are unchanged; no new owner decision is inferred.
