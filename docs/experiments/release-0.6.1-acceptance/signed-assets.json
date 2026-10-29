@@ -1,0 +1,48 @@
+{
+  "assets": {
+    "tag": "v0.6.1",
+    "commit": "f809bb965ccdad9f6879f3eab73ea5b6b1e0881b",
+    "is_draft": true,
+    "assets": {
+      "appcast.xml": {
+        "bytes": 6224,
+        "sha256": "58c4d917bcc5d1078ba076768f93f0e2f32e86447acc7eba871b599aa79088a3",
+        "github_digest_matches": true
+      },
+      "Conduit-0.6.1-macOS26-arm64.dmg": {
+        "bytes": 31074999,
+        "sha256": "2be0f6a31eda8ad79daa723e9f21a22d46c63889d11d4a9e613980bb88be41d2",
+        "github_digest_matches": true
+      },
+      "Conduit-0.6.1-macOS26-arm64.sha256": {
+        "bytes": 196,
+        "sha256": "c3e38581ac91d7f97fb7021393da9182570f6060be727d019c4c35f0b837c5a1",
+        "github_digest_matches": true
+      },
+      "Conduit-0.6.1-macOS26-arm64.zip": {
+        "bytes": 25740407,
+        "sha256": "b4176875da94295c413ac7154e124cb76726d2587509dc49430bea61e61c9c4e",
+        "github_digest_matches": true
+      }
+    },
+    "sparkle_signature_valid": true,
+    "bad_signature_control_rejected": true,
+    "checksums_match": true,
+    "feed_version_url_length_match": true
+  },
+  "bundle": {
+    "version": "0.6.1",
+    "signed_executable_sha256": "88381b5f3d97f6e32f31e573093e996211ef3b509d0800c8e8220693d5c6d740",
+    "architecture": "arm64",
+    "release_signing_script_exit": 0,
+    "dmg_image_verified": true,
+    "dmg_app_signature_valid": true,
+    "dmg_and_zip_main_match": true,
+    "dmg_detached": true,
+    "helper_job_present": true,
+    "signed_helper_preflight_exit": 0,
+    "installed_executable_unchanged": true,
+    "serving_process_unchanged": true
+  },
+  "scope": "Asset verification before owner installation; unchanged installed app/process flags refer to that checkpoint. No helper reinstall or policy changes."
+}

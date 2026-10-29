@@ -1,0 +1,15 @@
+{
+  "checked_utc": "2026-10-29T22:11:26Z",
+  "installed_version": "0.6.1",
+  "signed_sha256_matches": true,
+  "state": "running",
+  "dns_state": "running",
+  "vpn_state": [
+    "connected"
+  ],
+  "last_auth": "kerberos",
+  "last_auth_after_start": true,
+  "active_connections": 53,
+  "settings_unchanged_since_before_install": true,
+  "installed_signature_valid": true
+}

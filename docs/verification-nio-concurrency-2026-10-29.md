@@ -1,9 +1,11 @@
 # NIO concurrency verification — 2026-10-29
 
-Status: implementation, independent review and local workflow gates passed.
-The first hosted Release checkpoint passed; its parallel Swift run found a separate
-Quit-test deadline race, repaired below. Final hosted checks and a new candidate
-remain pending. The existing 0.6.0 draft does not contain these repairs.
+Status: the repairs merged in PR #262, final hosted and signed-package gates
+pass, and the official 0.6.1 candidate passes its scoped normal machine check.
+[Release closeout](verification-release-0.6.1-2026-10-29.md) records the exact
+candidate and evidence. The earlier checkpoints below retain their original
+outcomes; the full unsuppressed TSan run remains failed on the separately
+reproduced Swift continuation finding in #118.
 
 ## Report and baseline
 

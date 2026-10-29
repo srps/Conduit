@@ -138,3 +138,15 @@ Real-clock expiry and held-teardown coverage remains separate. The selected ten
 seconds, receipt rules and wire contract are unchanged. See the
 [NIO/concurrency verification](../verification-nio-concurrency-2026-10-29.md) for
 checkpoint results, controls and final validation status.
+
+### Signed 0.6.1 normal-path validation — 2026-10-29
+
+The [signed release closeout](../verification-release-0.6.1-2026-10-29.md) records
+owner-run acceptance of exact tag `v0.6.1` / `f809bb9`: 23 passing checks, four
+observations and no errors. Stop/Start, settings-byte preservation, Quit, reopen
+with manual Start, HTTPS, Kerberos and helper observations pass; Conduit remains
+serving. Quit was observed within 5.92 seconds of the prompt including owner
+reaction, not a product-only measurement. Journal release does not repeat
+physical per-service/global-proxy validation. Slow/stuck-helper expiry and power
+loss remain outside this native scope. Accepted policy and implementation status
+are unchanged; no new owner decision is inferred.
