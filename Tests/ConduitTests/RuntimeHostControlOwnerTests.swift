@@ -78,6 +78,54 @@ private struct EarlyEndingClient: RuntimeClient {
     }
 }
 
+/// Holds the first keep-caller wait until release or cancellation. The optional second wait uses the real clock;
+/// recording is bounded to those two waits.
+private final class HeldQuitSleep: @unchecked Sendable {
+    private enum WaitError: Error { case tooManyWaits }
+    private let lock = NSLock()
+    private var instants: [ContinuousClock.Instant] = []
+    private var released = false
+    private var waiter: CheckedContinuation<Void, any Error>?
+
+    /// The instants the routine asked to sleep until, in order.
+    var requested: [ContinuousClock.Instant] { lock.withLock { instants } }
+    /// Whether the first call is waiting for `release()` now.
+    var isHolding: Bool { lock.withLock { waiter != nil } }
+
+    func sleep(until instant: ContinuousClock.Instant) async throws {
+        let first = try lock.withLock { () throws -> Bool in
+            guard instants.count < 2 else { throw WaitError.tooManyWaits }
+            instants.append(instant)
+            return instants.count == 1
+        }
+        guard first else { return try await Task.sleep(until: instant, clock: .continuous) }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                let answer = lock.withLock { () -> Result<Void, any Error>? in
+                    if released { return .success(()) }
+                    if Task.isCancelled { return .failure(CancellationError()) }
+                    waiter = continuation
+                    return nil
+                }
+                if let answer { continuation.resume(with: answer) }
+            }
+        } onCancel: {
+            lock.withLock { () -> CheckedContinuation<Void, any Error>? in
+                defer { waiter = nil }
+                return waiter
+            }?.resume(throwing: CancellationError())
+        }
+    }
+
+    func release() {
+        lock.withLock { () -> CheckedContinuation<Void, any Error>? in
+            released = true
+            defer { waiter = nil }
+            return waiter
+        }?.resume()
+    }
+}
+
 /// A request a test built ahead, sent through the client's single-use producer. Test-only: production maps inside the exchange.
 fileprivate extension PrivateEditorClient {
     func submit(_ request: PrivateConfigurationRequest, deadline: RuntimeDeadline) async throws -> ControlAdmission {
@@ -1403,11 +1451,13 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
     /// The earlier update is parked in its store step, so the one wait for it finds it pending. Both declared saves are still attempted:
     /// the configuration save waits for the held input, its producer is handed the receipt the one lookup after the release found, and the
     /// preferences save, attempted though no stream reports the configuration save, flushes after that save's release. With no stream to
-    /// report the Quit, the routine keeps its caller to the end of its total and reads the Quit completed there, so it never returns
-    /// while the host's teardown may still run. The total is the selected ten seconds (0039), not a shorter one the host's work could
-    /// outlast on a loaded machine; the deadline bound itself is witnessed by `testAQuitPastItsDeadlineGivesTheArtifactFlushNoFreshWait`.
+    /// report the Quit, the routine keeps its caller to its final read near the end of the selected ten-second total (0039) and reads the
+    /// Quit completed there, so it never returns while the host's teardown may still run. That wait is held, not timed (`endHeldQuit`): a
+    /// real-clock wait raced the host's end against 9.8 s on a loaded machine. The real-clock bound is
+    /// `testTheClientQuitKeepsItsCallerToTheTotalDeadlineWhileAnUnobservedTeardownIsHeld`.
     @RuntimeActor func testTheClientQuitFlushesBothDeclaredSavesWhenItsSubscriptionIsRefused() async throws {
         let files = HeldStateFileRead()
+        defer { files.hold.releaseAll() }
         let composed = try await compose(dnsForwarderEnabled: false, stateFiles: files)
         try await composed.host.startRuntime()
         let app = try await composed.client.subscribe(.live, deadline: deadline())
@@ -1432,9 +1482,13 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
             values, incarnation: incarnation, runtime: try XCTUnwrap(observed.components.runtime.baseline),
             platform: try XCTUnwrap(observed.components.platform.baseline), handedPrior: handedPrior
         )
+        let finalSleep = HeldQuitSleep()
+        defer { finalSleep.release() }
+        let returned = LockedSlot<RuntimeClientQuitResult>()
+        let began = ContinuousClock.now
         let quitting = Task { [client = composed.client, editor = editor(composed)] in
-            await RuntimeClientQuit.quit(
-                control: client, editor: editor, incarnation: incarnation, total: .seconds(10), priorUpdate: prior.requestID,
+            let result = await RuntimeClientQuit.quit(
+                control: client, editor: editor, incarnation: incarnation, total: .seconds(10), now: began, priorUpdate: prior.requestID,
                 configuration: configuration,
                 preferences: { requestID, _ in
                     var preferences = values.preferences
@@ -1443,16 +1497,31 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
                         preferences: preferences, requestID: requestID, incarnation: incarnation,
                         budget: try ControlWireBudget(1_000), preferencesBaseline: preferencesBaseline
                     )
-                }
+                },
+                sleep: { try await finalSleep.sleep(until: $0) }
             )
+            returned.set(result)
+            return result
+        }
+        addTeardownBlock {
+            files.hold.releaseAll()
+            finalSleep.release()
+            quitting.cancel()
+            _ = await quitting.value
         }
         let custody = composed.composition.privateCustody
         let waiting = try await eventually { custody.isAwaitingCapacity }
         XCTAssertTrue(waiting, "the final save waits for the held input though the quit has no stream")
         XCTAssertTrue(composed.host.workflow.isTerminal, "the Quit fenced first")
         XCTAssertNil(handedPrior.value, "nothing is mapped while that input is held")
+        // Handed on: the earlier update goes, and the preferences save, the last declared one, is held at its replacement's read.
+        files.hold.arm { [preferencesPath = composed.harness.session.plan.preferences.path] name, values in
+            name == "read" && values == [preferencesPath]
+        }
         files.hold.release()
-        let result = await quitting.value
+        let result = try await endHeldQuit(
+            composed, store: files.hold, sleep: finalSleep, began: began, total: .seconds(10), returned: returned, quitting
+        )
 
         XCTAssertEqual(result.observationFailure, .wire(.subscriberLimit))
         guard case .settled(.configurationSettled(let priorReceipt)) = result.priorUpdate else {
@@ -1464,10 +1533,9 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
             return XCTFail("the configuration save is read once the preferences save holds its released input: \(result.configuration)")
         }
         XCTAssertEqual(final.runtime.write, .persisted(reportedError: false))
-        switch result.preferences {
-        case .settled(.preferencesSettled(let receipt)): XCTAssertEqual(receipt.preferences.write, .persisted(reportedError: false))
-        case .unsettled: break
-        default: XCTFail("the preferences save is admitted: \(result.preferences)")
+        // Its store step was held through the routine's lookups of it and no stream reports it, so its file is the witness of its write.
+        guard case .unsettled = result.preferences else {
+            return XCTFail("the held preferences save is admitted and left unread: \(result.preferences)")
         }
         guard case .settled(let quit) = result.quit else { return XCTFail("the Quit is read settled before the routine returns: \(result.quit)") }
         XCTAssertEqual(completed(quit), .quit)
@@ -1479,10 +1547,11 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
 
     /// The client quit's stream ends before the earlier update settles. Its declared save is still attempted under the same capacity wait,
     /// rebases only from the receipt the one lookup after the release reads, and is written. With the stream gone, the routine keeps its
-    /// caller to the end of its total and reads the Quit completed there, so it never returns while the host's teardown may run. The
-    /// total is the selected ten seconds (0039), as in the refused-subscription case above.
+    /// caller to its final read near the end of the selected ten-second total (0039) and reads the Quit completed there, so it never
+    /// returns while the host's teardown may run. That wait is held, not timed, as in the refused-subscription case above.
     @RuntimeActor func testTheClientQuitFlushesItsDeclaredSaveWhenItsStreamEndsEarly() async throws {
         let files = HeldStateFileRead()
+        defer { files.hold.releaseAll() }
         let composed = try await compose(dnsForwarderEnabled: false, stateFiles: files)
         try await composed.host.startRuntime()
         let observed = try await observation(composed)
@@ -1500,34 +1569,98 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
             values, incarnation: incarnation, runtime: try XCTUnwrap(observed.components.runtime.baseline),
             platform: try XCTUnwrap(observed.components.platform.baseline), handedPrior: handedPrior
         )
+        let finalSleep = HeldQuitSleep()
+        defer { finalSleep.release() }
+        let returned = LockedSlot<RuntimeClientQuitResult>()
+        let began = ContinuousClock.now
         let quitting = Task { [client = EarlyEndingClient(inner: composed.client), editor = editor(composed)] in
-            await RuntimeClientQuit.quit(
-                control: client, editor: editor, incarnation: incarnation, total: .seconds(10), priorUpdate: prior.requestID,
-                configuration: configuration
+            let result = await RuntimeClientQuit.quit(
+                control: client, editor: editor, incarnation: incarnation, total: .seconds(10), now: began, priorUpdate: prior.requestID,
+                configuration: configuration, sleep: { try await finalSleep.sleep(until: $0) }
             )
+            returned.set(result)
+            return result
+        }
+        addTeardownBlock {
+            files.hold.releaseAll()
+            finalSleep.release()
+            quitting.cancel()
+            _ = await quitting.value
         }
         let custody = composed.composition.privateCustody
         let waiting = try await eventually { custody.isAwaitingCapacity }
         XCTAssertTrue(waiting, "the final save waits for the held input after the stream ended")
         XCTAssertNil(handedPrior.value)
+        // Handed on: the earlier update goes, its runtime write already revoked by the latch, and the declared save is held at its runtime
+        // replacement's read.
+        files.hold.arm { [runtimePath = composed.harness.session.plan.config.path] name, values in
+            name == "read" && values == [runtimePath]
+        }
         files.hold.release()
-        let result = await quitting.value
+        let result = try await endHeldQuit(
+            composed, store: files.hold, sleep: finalSleep, began: began, total: .seconds(10), returned: returned, quitting
+        )
 
         XCTAssertEqual(result.observationFailure, .streamClosed(.resyncRequired))
         guard case .settled(.configurationSettled) = result.priorUpdate else {
             return XCTFail("the one lookup after the release reads the earlier update's receipt: \(result.priorUpdate)")
         }
         XCTAssertEqual(handedPrior.value, result.priorUpdate)
-        switch result.configuration {
-        case .settled(.configurationSettled(let final)): XCTAssertEqual(final.runtime.write, .persisted(reportedError: false))
-        case .unsettled: break
-        default: XCTFail("the declared save is admitted: \(result.configuration)")
+        // Held through the routine's lookups of it with no stream to report it: its file is the witness of its write.
+        guard case .unsettled = result.configuration else {
+            return XCTFail("the held declared save is admitted and left unread: \(result.configuration)")
         }
         guard case .settled(let quit) = result.quit else { return XCTFail("the Quit is read settled before the routine returns: \(result.quit)") }
         XCTAssertEqual(completed(quit), .quit)
         XCTAssertFalse(composed.host.runtimeState().proxyIsUp, "the host's teardown ended before the routine returned")
         XCTAssertEqual(custody.held.input, false)
         XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Final")
+    }
+
+    /// The end of a client quit with no stream to report its Quit, made exact. `store` was armed for the last declared save's store step,
+    /// so the Quit's window stays open and the routine reads that save pending, then the Quit pending, and reaches its final-read wait
+    /// before the host's quit can end. Released there, the save lands and the host's quit ends. Only once that work has joined and every
+    /// operation has settled is the wait let go, with the final read's 200 ms reserve still ahead of the wire deadline, so the routine's
+    /// one final read finds the Quit settled. Every gate is released and the routine joined on every path, a failed one included.
+    @RuntimeActor private func endHeldQuit(
+        _ composed: Composed,
+        store: HeldCall,
+        sleep: HeldQuitSleep,
+        began: ContinuousClock.Instant,
+        total: Duration,
+        returned: LockedSlot<RuntimeClientQuitResult>,
+        _ quitting: Task<RuntimeClientQuitResult, Never>,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws -> RuntimeClientQuitResult {
+        let finalRead = began.advanced(by: total - .milliseconds(200))
+        do {
+            let held = await store.waitUntilReached(within: .seconds(10))
+            XCTAssertTrue(held, "the last declared save reached its store step", file: file, line: line)
+            let waiting = try await eventually { sleep.isHolding }
+            XCTAssertTrue(waiting, "the routine reached its final-read wait", file: file, line: line)
+            XCTAssertEqual(
+                sleep.requested, [finalRead], "its one wait is for the final read, its reserve before the deadline", file: file, line: line
+            )
+            XCTAssertNil(returned.value, "the routine keeps its caller", file: file, line: line)
+            XCTAssertFalse(composed.host.quitEnded, "the held save keeps the Quit's window open", file: file, line: line)
+            store.release()
+            let ended = try await eventually {
+                composed.host.quitEnded && composed.host.pendingAdmissions == 0 && composed.composition.service.pendingOperationCount == 0
+            }
+            XCTAssertTrue(ended, "the host's quit ended and every operation settled", file: file, line: line)
+            XCTAssertNil(returned.value, "the routine still keeps its caller after the host's end", file: file, line: line)
+            XCTAssertLessThan(ContinuousClock.now, finalRead, "released with the final read's reserve still ahead", file: file, line: line)
+        } catch {
+            store.releaseAll()
+            sleep.release()
+            quitting.cancel()
+            _ = await quitting.value
+            throw error
+        }
+        store.releaseAll()
+        sleep.release()
+        return await quitting.value
     }
 
     /// With no stream to report it and the host's teardown held on a machine call, the Quit is still pending at the one final read, so the
