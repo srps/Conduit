@@ -1,0 +1,10 @@
+--- r2/Tests/ConduitTests/DaemonRuntimeHostTests.swift
++++ second-record-gate-removed/Tests/ConduitTests/DaemonRuntimeHostTests.swift
+@@ -3719,7 +3719,6 @@
+ 
+         // The next removal is the switch-on's correction, queued once the write was recorded. Armed while the drop's removal is held,
+         // the hold passes on again: the release lets the drop's removal be refused, and the correction is held behind it.
+-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.removeDNS.rawValue }
+         harness.hold.release()
+         let correctionHeld = await harness.hold.waitUntilReached(within: .seconds(5))
+         XCTAssertTrue(correctionHeld, "the switch-on's correction removal reached the platform queue")

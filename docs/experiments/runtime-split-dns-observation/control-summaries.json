@@ -1,0 +1,68 @@
+{
+  "second-record-gate-removed": {
+    "sha256": "848e64dfafb1a2c320439a85d00c3d386b878348d91677cb4888ce0bf9614590",
+    "failure_lines": [
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3729: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertTrue failed - the correction is held on the platform queue",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3731: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertEqual failed: (\"2\") is not equal to (\"1\") - only the drop's removal reached the helper",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3732: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertEqual failed: (\"[\"operation=remove source=vpn_transition attempt=1\", \"operation=remove source=vpn_transition attempt=2\"]\") is not equal to (\"[\"operation=remove source=vpn_transition attempt=1\"]\") - the drop's refusal is recorded first",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3736: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertEqual failed: (\"Optional(2)\") is not equal to (\"Optional(1)\")"
+    ],
+    "summary": [
+      "Executed 1 test, with 4 failures (0 unexpected) in 1.594 (1.594) seconds",
+      "Executed 1 test, with 4 failures (0 unexpected) in 1.594 (1.594) seconds",
+      "Executed 1 test, with 4 failures (0 unexpected) in 1.594 (1.600) seconds"
+    ]
+  },
+  "baseline": {
+    "sha256": "b173bce2d7e7803c0ed50e7f121653979718fdf981f8f3803f3c5d63dcbb9c06",
+    "failure_lines": [],
+    "summary": [
+      "Executed 16 tests, with 0 failures (0 unexpected) in 0.062 (0.063) seconds",
+      "Executed 17 tests, with 0 failures (0 unexpected) in 0.214 (0.215) seconds",
+      "Executed 17 tests, with 0 failures (0 unexpected) in 0.214 (0.221) seconds"
+    ]
+  },
+  "first-record-gate-removed": {
+    "sha256": "1f5504fb0118d67da71bc030b2a5ca9881d051f988597e69be8d39398cf2f088",
+    "failure_lines": [
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3712: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertTrue failed - the drop's removal is held on the platform queue",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3714: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertTrue failed - no removal reached the helper yet",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3715: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertEqual failed: (\"[\"operation=remove source=vpn_transition attempt=1\"]\") is not equal to (\"[]\") - nothing has failed yet",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3717: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertNil failed: \"Pending(operation: PlatformMac.SplitDNSEntryFileRepair.Operation.remove, source: PlatformMac.SplitDNSEntryFileRepair.Source.vpnTransition, attempts: 1)\" - the write's success leaves nothing pending",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3724: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertTrue failed - the switch-on's correction removal reached the platform queue",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3729: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertTrue failed - the correction is held on the platform queue",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3730: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertTrue failed - the correction was held on the platform queue, not the owner",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3731: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertEqual failed: (\"2\") is not equal to (\"1\") - only the drop's removal reached the helper",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3732: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertEqual failed: (\"[\"operation=remove source=vpn_transition attempt=1\", \"operation=remove source=vpn_transition attempt=2\"]\") is not equal to (\"[\"operation=remove source=vpn_transition attempt=1\"]\") - the drop's refusal is recorded first",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3736: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertEqual failed: (\"Optional(2)\") is not equal to (\"Optional(1)\")"
+    ],
+    "summary": [
+      "Executed 1 test, with 10 failures (0 unexpected) in 5.172 (5.172) seconds",
+      "Executed 1 test, with 10 failures (0 unexpected) in 5.172 (5.172) seconds",
+      "Executed 1 test, with 10 failures (0 unexpected) in 5.172 (5.178) seconds"
+    ]
+  },
+  "supersession-guard-omitted": {
+    "sha256": "634ddfe9402609784a7f708d9df267e7afd419dbb46af36c590a4075be457516",
+    "failure_lines": [
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/SplitDNSEntryFileRepairTests.swift:229: error: -[ConduitTests.SplitDNSEntryFileRepairTests testAnOlderRefusalObservedAfterANewerRefusalIsSupersededAndTheNewerStands] : XCTAssertEqual failed: (\"Optional(2)\") is not equal to (\"Optional(1)\") - the dropped refusal is not counted",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/SplitDNSEntryFileRepairTests.swift:230: error: -[ConduitTests.SplitDNSEntryFileRepairTests testAnOlderRefusalObservedAfterANewerRefusalIsSupersededAndTheNewerStands] : XCTAssertEqual failed: (\"2\") is not equal to (\"3\") - the older outcome did not take the newest place",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/SplitDNSEntryFileRepairTests.swift:231: error: -[ConduitTests.SplitDNSEntryFileRepairTests testAnOlderRefusalObservedAfterANewerRefusalIsSupersededAndTheNewerStands] : XCTAssertEqual failed: (\"[\"platform.split_dns_failed\", \"platform.split_dns_failed\"]\") is not equal to (\"[\"platform.split_dns_failed\", \"platform.split_dns_outcome_superseded\"]\")",
+      "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/SplitDNSEntryFileRepairTests.swift:234: error: -[ConduitTests.SplitDNSEntryFileRepairTests testAnOlderRefusalObservedAfterANewerRefusalIsSupersededAndTheNewerStands] : XCTAssertEqual failed: (\"Optional(\"operation=remove source=vpn_transition attempt=2 reason=helper refused remove-dns\")\") is not equal to (\"Optional(\"operation=remove source=vpn_transition failed=true newer=1\")\")"
+    ],
+    "summary": [
+      "Executed 1 test, with 4 failures (0 unexpected) in 0.879 (0.879) seconds",
+      "Executed 1 test, with 4 failures (0 unexpected) in 0.879 (0.879) seconds",
+      "Executed 1 test, with 4 failures (0 unexpected) in 0.879 (0.886) seconds"
+    ]
+  },
+  "restored": {
+    "sha256": "aa2ad7dfdaefe5a0840f05c07ef446d285b140843a7888e81d5b0a309e111709",
+    "failure_lines": [],
+    "summary": [
+      "Executed 16 tests, with 0 failures (0 unexpected) in 0.043 (0.044) seconds",
+      "Executed 17 tests, with 0 failures (0 unexpected) in 0.166 (0.167) seconds",
+      "Executed 17 tests, with 0 failures (0 unexpected) in 0.166 (0.173) seconds"
+    ]
+  }
+}

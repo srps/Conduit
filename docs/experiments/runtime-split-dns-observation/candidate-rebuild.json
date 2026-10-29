@@ -1,0 +1,19 @@
+{
+  "time": "2026-10-28T19:50:24.695896+00:00",
+  "commit": "97a5b43a0d8d7504b760b4b05aece3a8f66f5914",
+  "candidate_version": "0.6.0",
+  "executable_sha256": "a894b35af9ca03f9ca171b7c9e2a808fecfec70afa28dc88fcc4b2347fc4eb35",
+  "signature_verification": "strict/deep exit0 observed separately19:49UTC",
+  "helper_preflight": "early read-only worker exit0 observed separately19:49UTC",
+  "installed_helper_path_exists": true,
+  "runtime_started": false,
+  "installed_or_replaced": false,
+  "requires_mechanical_source_provenance_rebuild": false,
+  "production_change_since_e120": "SplitDNSEntryFileRepair queue() documentation only; non-doc lines mechanically identical.",
+  "scope": "Local Conduit Local Signing acceptance candidate, not release-certificate artifact, tag or published update.",
+  "archive": {
+    "sha256": "c9fb6a130f1ae57984e96bf5ecb45054dfab83ac427e2b9d2bd0b97ebc266eb1",
+    "bytes": 26096092,
+    "zip_integrity": "pass"
+  }
+}

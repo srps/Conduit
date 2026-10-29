@@ -1,0 +1,10 @@
+--- r2/Tests/ConduitTests/DaemonRuntimeHostTests.swift
++++ first-record-gate-removed/Tests/ConduitTests/DaemonRuntimeHostTests.swift
+@@ -3701,7 +3701,6 @@
+ 
+         // The first removal is the drop's. Armed while the drift pass is held, the hold passes on: the next release lets the drift pass
+         // go, the write lands, and the drop's removal is held before it reaches the helper. Only the write can be recorded meanwhile.
+-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.removeDNS.rawValue }
+         let beforeWrite = host.splitDNSRepair.generation
+         harness.hold.release()
+         let dropHeld = await harness.hold.waitUntilReached(within: .seconds(5))

@@ -1,0 +1,10 @@
+{
+  "baseline": "6cb3657ffb1873837f53d83392b90719909881d5",
+  "files_sha256": {
+    "Sources/PlatformMac/SplitDNSEntryFileRepair.swift": "dd27a59879d1771ff7f571aff9653d9c39cbf64abc5be37e0bad58e1b6b1e589",
+    "Tests/ConduitTests/DaemonRuntimeHostTests.swift": "f69e561e653bca808655150812eac497676730f3e4a77961c4b145d7ae7c9405",
+    "Tests/ConduitTests/SplitDNSEntryFileRepairTests.swift": "d3d386e9b00e9df84fb9cd8bf689ed38ef3ea907cb851cbaa907fd16964491f7"
+  },
+  "patch_sha256": "7cb4b278f752bdbee6ba5f590d350d3e99db75d494926e708d94444ec0d55670",
+  "production_non_doc_lines_identical": true
+}

@@ -1,0 +1,7 @@
+{
+  "sha256": "e3039eff4ee75300cc97ed769265cce77307f8ee78f35c156c56e4228333a580",
+  "format": "Parsed SIM_NDJSON records",
+  "scenario_records": 103,
+  "passed_records": 103,
+  "failed_scenarios": []
+}

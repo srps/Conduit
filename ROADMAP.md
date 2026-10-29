@@ -43,18 +43,26 @@ evidence. The [Quit correction](./docs/verification-runtime-quit-deadline-2026-1
 is the production checkpoint: seven affected production Release trials/162 checks
 pass with fake effects. Earlier measurements remain scoped to unchanged paths.
 
-The [real-tunnel fixture checkpoint](./docs/verification-runtime-tunnel-fixture-2026-10-28.md)
-records the latest test-only correction, `c6e2c41`: all 41 local checks pass
-(3,770 tests/four skips/103 scenarios), with independent source and causal-control
-reviews. Its optimized build, 90 affected tests and ten fresh Debug tunnel trials also pass. Pushed head `f59dbb9` passes the
-complete hosted Swift workflow, slow-drain and CodeQL; its Release standard suite
-crashed while a legacy fixture was active (origin unproven), before optimized compilation. The correction removes that
-copied path without changing production code. Final-head hosted standard and
-optimized checks, merge to main, normal real-helper/VPN/auth acceptance and
-release-signed packaging remain. Production acceptance requires the owner to quit
-serving 0.5.8 and approve the proposed stable Applications installation: normal
-Start applies the saved login-item flag. Rollback uses preserved 0.5.8 at that
-stable path, never the inactive 0.5.5 copy. No installed-app acceptance is claimed.
+The [observation-order checkpoint](./docs/verification-runtime-split-dns-observation-2026-10-28.md)
+records the latest correction, `97a5b43`: all 41 local checks pass
+(3,771 tests/four skips/103 scenarios), with independent source and causal-control
+reviews. The host test explicitly selects its intended record order, while a unit
+witness covers the other valid order implied by CI. Production executable lines
+are unchanged; a misleading comment is corrected. The optimized build, 107 affected
+tests and ten fresh Debug host histories pass. The exact-source mechanical candidate
+rebuild, strict/deep signature verification and early read-only helper preflight pass;
+the candidate is archived and remains unlaunched and uninstalled. The [real-tunnel checkpoint](./docs/verification-runtime-tunnel-fixture-2026-10-28.md)
+retains the prior copied-handler removal and actual-forwarder coverage.
+
+Pushed head `6cb3657` passes the complete hosted Swift workflow, slow-drain and
+CodeQL. Its Release standard suite completed with two order-dependent assertions
+failing before optimized compilation; the selected production contract preserved
+the correct final state. New final-head hosted standard/optimized/package checks,
+merge to main, normal real-helper/VPN/auth acceptance and release-signed packaging
+remain. Production acceptance requires the owner to quit serving 0.5.8 and approve
+the proposed stable Applications installation: normal Start applies the saved
+login-item flag. Rollback uses preserved 0.5.8 at that stable path, never the
+inactive 0.5.5 copy. No installed-app acceptance is claimed.
 
 Historical checkpoints follow. The [client-owner checkpoint](./docs/verification-runtime-client-owner-2026-10-27.md)
 records the scoped independent review and all 41 passing local gates: 3,619 tests

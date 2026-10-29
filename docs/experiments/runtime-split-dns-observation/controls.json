@@ -1,0 +1,80 @@
+{
+  "checks": [
+    {
+      "name": "baseline",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "DaemonRuntimeHostTests.testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending|SplitDNSEntryFileRepairTests"
+      ],
+      "exit": 0,
+      "seconds": 6.14,
+      "expected_failure": false,
+      "intended_result": true,
+      "crash_marker": false
+    },
+    {
+      "name": "first-record-gate-removed",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "DaemonRuntimeHostTests.testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending"
+      ],
+      "exit": 1,
+      "seconds": 14.28,
+      "expected_failure": true,
+      "intended_result": true,
+      "crash_marker": false
+    },
+    {
+      "name": "second-record-gate-removed",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "DaemonRuntimeHostTests.testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending"
+      ],
+      "exit": 1,
+      "seconds": 10.76,
+      "expected_failure": true,
+      "intended_result": true,
+      "crash_marker": false
+    },
+    {
+      "name": "supersession-guard-omitted",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "SplitDNSEntryFileRepairTests.testAnOlderRefusalObservedAfterANewerRefusalIsSupersededAndTheNewerStands"
+      ],
+      "exit": 1,
+      "seconds": 12.21,
+      "expected_failure": true,
+      "intended_result": true,
+      "crash_marker": false
+    },
+    {
+      "name": "restored",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "DaemonRuntimeHostTests.testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending|SplitDNSEntryFileRepairTests"
+      ],
+      "exit": 0,
+      "seconds": 5.62,
+      "expected_failure": false,
+      "intended_result": true,
+      "crash_marker": false
+    }
+  ],
+  "restored": true
+}

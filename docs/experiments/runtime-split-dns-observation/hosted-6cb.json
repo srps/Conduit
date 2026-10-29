@@ -1,0 +1,33 @@
+{
+  "head": "6cb3657ffb1873837f53d83392b90719909881d5",
+  "observed": "2026-10-29T08:34Z",
+  "Swift": {
+    "run": 40747764885,
+    "job": 123026015244,
+    "conclusion": "success",
+    "annotations_read": "runner capacity notice only"
+  },
+  "Release": {
+    "run": 40747764902,
+    "job": 123026013386,
+    "conclusion": "failure",
+    "stage": "standard Debug full suite",
+    "optimized_reached": false,
+    "summary": "Executed 3770 tests, with 4 tests skipped and 2 failures (0 unexpected) in 489.126 (489.966) seconds",
+    "assertions": "hosted-6cb-assertions.txt"
+  },
+  "SlowDrain": {
+    "run": 40747764869,
+    "job": 123026016525,
+    "conclusion": "success",
+    "annotations_read": "runner capacity notice only"
+  },
+  "CodeQL": {
+    "summary": 123026342136,
+    "actions": 123025991780,
+    "python": 123025991363,
+    "conclusion": "success",
+    "annotations_read": "300-file diff limit and Ubuntu image notices"
+  },
+  "scope": "Swift/Release/SlowDrain conclusions rechecked via connected workflow tool; job IDs and annotations previously observed with check diagnostics; complete Release summary retained from full job log retained privately outside this repository. CodeQL success previously observed, not a claim of complete security diff review."
+}
