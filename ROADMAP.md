@@ -32,7 +32,12 @@ candidate, which is now serving on the owner's machine and passed the
 notes prepared for packaging. The preserved 0.6.0 tag produced an unpublished draft.
 Publication is held for [NIO concurrency repairs and verification](./docs/verification-nio-concurrency-2026-10-29.md):
 embedded-fixture thread violations, a VPN test synchronization race, and production
-pool metadata/retirement races found during the audit. A new candidate is required.
+pool metadata/retirement races found during the audit. PR #258 is merged at `15aabc1`. PR #262 carries the concurrency follow-up and
+strict NIO enforcement; its final local workflow passes all 20 steps, including
+3,780 tests/four skips and 104 simulator cases. A locally signed 0.6.1 candidate
+has built and passed signature/read-only helper preflight checks. Hosted checks,
+merge, release-certificate packaging and fresh native acceptance remain. The
+serving 0.6.0 app is unchanged; the local build is not native acceptance.
 On `512a6b0` the Release job stalled under buffered test output; its cause is
 unknown. Test-only guards and a line-buffered Release test step followed, with
 production Source unchanged
@@ -44,7 +49,7 @@ production Source unchanged
 | Shared owner | PR253 converges DNS, tunnels and proxy on one lifecycle/store path, with preparation-time capture, exact freshness and Stop/Quit policy. PR257 adds guarded host-owned audit parity. | AppState now consumes the single owner; release acceptance is in the final row. |
 | Actual client integration | PR254 connects host admission/observation, private frozen updates, receipts, preferences/admin persistence and final Quit saves through the actual framed clients. | Integrated through AppState; final release gates are in the last row. |
 | Native client completion | PR256 merged saved Start receipts, explicit reload, bounded preflight/credential/wake operations, typed recovery and DNS health after local and hosted checks. | Selected ten-second Quit is integrated and passes the fake production profile. An installed normal-path Quit finished within 1.91 s, including the owner's reaction; expiry under a slow helper has not been observed on a real machine. |
-| AppState, isolation and release | The single AppState activation (0031) and RuntimeActor isolation are implemented in draft PR #258. The collection profile (0038), 64 KiB ordinary and 8 MiB private frames, production resource and fairness measurements, and source-qualified native Dev checks pass. The owner's installed-candidate run passes for normal use; 0031 and 0039 validation is recorded. | Hosted CI on #258's final head and its merge to main. Then a release-certificate tag build and draft through the approved release environment. Publication waits for the owner. |
+| AppState, isolation and release | The single AppState activation (0031) and RuntimeActor isolation merged in PR #258. The collection profile (0038), 64 KiB ordinary and 8 MiB private frames, production resource and fairness measurements, and source-qualified native Dev checks pass. The owner's installed 0.6.0 normal-path acceptance is scoped to that earlier source. PR #262 repairs the pool and test concurrency defects found during release QA. | Final hosted checks and merge of #262; release-certificate 0.6.1 packaging and a new-candidate machine check. The 0.6.0 tag/draft stay preserved. Publication waits for the owner. |
 
 The [RuntimeActor activation verification](./docs/verification-runtime-actor-activation-2026-10-28.md)
 keeps the source-qualified isolation, collection-fairness, sanitizer and native Dev
@@ -52,7 +57,7 @@ evidence. The [Quit correction](./docs/verification-runtime-quit-deadline-2026-1
 is the production checkpoint: seven affected production Release trials/162 checks
 pass with fake effects. Earlier measurements remain scoped to unchanged paths.
 
-Current state (2026-10-29). The installed candidate's executable (`a894b35a…`) was built from
+Historical installed checkpoint (2026-10-29, before PR #258 merged). The installed candidate's executable (`a894b35a…`) was built from
 `97a5b43`, without a helper reinstall or helper change. In the owner's lifecycle run, 37 checks
 pass, 1 is attention and none fail or are unproven. After both Stop and Quit, all eight
 journal-scoped per-service proxy field sets, seven resolver files and six launchd variables
@@ -62,8 +67,9 @@ worked. The Stop attention is a preserved user prior under existing policy. Whet
 route to Conduit remained after Quit is unproven. The run does not cover heavy load, a slow
 helper or autostart. `983ba39` adds two recovery-policy tests and no Source change. With them,
 all 41 local checks pass: 3,773 tests, four skips and 103 scenarios. Hosted Swift, Release
-(Swift 6.3.3), slow-drain and CodeQL pass on `8a036fe`. Final-head CI, the merge of #258,
-release-certificate packaging and owner-approved publication remain.
+(Swift 6.3.3), slow-drain and CodeQL pass on `8a036fe`. At that checkpoint, final-head CI, the merge of #258,
+release-certificate packaging and owner-approved publication remained. The merge
+and 0.6.0 draft have since completed; current 0.6.1 work is recorded above.
 
 Historical checkpoint (2026-10-28, before installation). The [observation-order checkpoint](./docs/verification-runtime-split-dns-observation-2026-10-28.md)
 records the correction `97a5b43`: all 41 local checks pass
