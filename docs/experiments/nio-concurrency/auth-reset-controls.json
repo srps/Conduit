@@ -1,0 +1,13 @@
+{
+  "original_sha256": "f9a5d64d8dbce39b2f3e1b74f364d5193faa10f0591dea9270dbd20bc13610f9",
+  "negative_build": 0,
+  "negative_exit": 1,
+  "failed_assertions": [
+    "the held exchange left the connection to authenticate again",
+    "the request after the reset carried credentials"
+  ],
+  "semantic_failure": true,
+  "exactly_restored": true,
+  "restored_build": 0,
+  "restored_exit": 0
+}

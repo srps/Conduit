@@ -1,0 +1,38 @@
+[
+  {
+    "mode": "handoff",
+    "iterations": 200000,
+    "exit": -6,
+    "race": true,
+    "summary": [
+      "SUMMARY: ThreadSanitizer: data race /<compiler-generated> in withUnsafeThrowingContinuation<A>(_:)"
+    ]
+  },
+  {
+    "mode": "resume-first",
+    "iterations": 100000,
+    "exit": -6,
+    "race": true,
+    "summary": [
+      "SUMMARY: ThreadSanitizer: data race /<compiler-generated> in withUnsafeThrowingContinuation<A>(_:)"
+    ]
+  },
+  {
+    "mode": "await-first",
+    "iterations": 50000,
+    "exit": 0,
+    "race": false,
+    "summary": [
+      "mode=await-first driver=actor iterations=50000 delayMicros=20 checksum=625000000 elapsed=1.998307084 seconds"
+    ]
+  },
+  {
+    "mode": "inline",
+    "iterations": 200000,
+    "exit": 0,
+    "race": false,
+    "summary": [
+      "mode=inline driver=actor iterations=200000 delayMicros=0 checksum=10000000000 elapsed=0.585567959 seconds"
+    ]
+  }
+]

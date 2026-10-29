@@ -233,6 +233,8 @@ final class GatewayReachabilityProbeTests: XCTestCase {
     /// the deadline is counted in advanced time, not raced.
     func testProbeWithAHungLookupEndsAtItsDeadlineAndFreesItsSlot() {
         let loop = EmbeddedEventLoop()
+        // On this thread, like a channel's finish: runs what is queued.
+        defer { XCTAssertNoThrow(try loop.syncShutdownGracefully()) }
         let resolver = ProbeResolver(.held)
         let detector = DirectConnectDetector(
             group: loop, logger: DiscardingLogSink(), baseTimeoutMS: 100, resolver: resolver.resolve

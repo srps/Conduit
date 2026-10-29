@@ -1,0 +1,13 @@
+{
+  "control": "throw after task cleanup registration, before entering the final-wait helper",
+  "original_sha256": "acb92b71ee2f4b3c5c722f86717e0262cab5bfa90810ed72a0c06b1e68b48d99",
+  "negative_exit": 1,
+  "negative_seconds": 13.661,
+  "failed_cases": [
+    "Test Case '-[ConduitTests.RuntimeHostControlOwnerTests testTheClientQuitFlushesBothDeclaredSavesWhenItsSubscriptionIsRefused]' failed (1.505 seconds)."
+  ],
+  "cleanup_control_pass": true,
+  "exactly_restored": true,
+  "restored_exit": 0,
+  "restored_seconds": 11.403
+}

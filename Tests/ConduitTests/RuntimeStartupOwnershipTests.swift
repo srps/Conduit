@@ -461,8 +461,13 @@ final class RuntimeStartupOwnershipTests: XCTestCase {
             init(session: StateRootSession) { self.session = session }
         }
         var owner: Owner? = Owner(session: try XCTUnwrap(bootstrapSession(.isolated(stateDirectory: directory))))
-        XCTAssertEqual(refusal(bootstrap(.isolated(stateDirectory: directory))), .busy, "the owner still holds the root")
+        weak var session: StateRootSession?
+        session = owner?.session
+        withExtendedLifetime(owner) {
+            XCTAssertEqual(refusal(bootstrap(.isolated(stateDirectory: directory))), .busy, "the owner still holds the root")
+        }
         owner = nil
+        XCTAssertNil(session, "the owner held the session's only reference, so dropping it ended the session")
         let second = try XCTUnwrap(bootstrapSession(.isolated(stateDirectory: directory)), "the root is free once the session is gone")
         releaseScratchStateRoot(second)
     }
@@ -572,10 +577,10 @@ private final class ReplacingRootIdentity: StateRootFileSystem, @unchecked Senda
 final class RuntimeStartupDevPairingTests: XCTestCase {
     private var scratch: [URL] = []
 
-    override func tearDown() {
+    override func tearDown() async throws {
         removeScratch(scratch)
         scratch = []
-        super.tearDown()
+        try await super.tearDown()
     }
 
     private func makeScratch() throws -> URL {

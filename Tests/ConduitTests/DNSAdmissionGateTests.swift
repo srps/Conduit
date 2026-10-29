@@ -42,8 +42,9 @@ final class DNSAdmissionGateTests: XCTestCase {
         let armPark: @Sendable () -> Void
         let releasePark: @Sendable () -> Void
 
-        func tearDown() async {
-            _ = try? await channel.finish()
+        func tearDown() async throws {
+            // These admission tests intentionally leave response packets unread.
+            _ = try await channel.finish()
         }
     }
 
@@ -129,8 +130,10 @@ final class DNSAdmissionGateTests: XCTestCase {
             logger: logger,
             configProvider: { provider.provide() }
         )
+        let channel = await NIOAsyncTestingChannel(handler: handler)
+        addTeardownBlock { _ = try await channel.finish(acceptAlreadyClosed: true) }
         return Gate(
-            channel: await NIOAsyncTestingChannel(handler: handler),
+            channel: channel,
             inFlight: inFlight,
             decisions: decisions,
             armPark: { provider.arm() },
@@ -172,7 +175,7 @@ final class DNSAdmissionGateTests: XCTestCase {
 
         let reply = try await gate.channel.readOutbound(as: AddressedEnvelope<ByteBuffer>.self)
         XCTAssertNil(reply, "A runt carries no transaction ID, so there is nothing to answer")
-        await gate.tearDown()
+        try await gate.tearDown()
     }
 
     /// A datagram of exactly the header length is not a runt. Pins the boundary
@@ -184,7 +187,7 @@ final class DNSAdmissionGateTests: XCTestCase {
 
         XCTAssertEqual(gate.decisions(), 1, "A 12-byte datagram is header-sized and must be admitted")
 
-        await gate.tearDown()
+        try await gate.tearDown()
     }
 
     /// The control for the counters themselves: a real query takes exactly one
@@ -221,7 +224,7 @@ final class DNSAdmissionGateTests: XCTestCase {
         XCTAssertTrue(released, "The admission slot was never released (in flight: \(gate.inFlight()))")
         XCTAssertEqual(gate.decisions(), 1, "Releasing a slot must not re-open a decision")
 
-        await gate.tearDown()
+        try await gate.tearDown()
     }
 
     /// The user-visible consequence: a garbage flood does not starve a real
@@ -249,7 +252,7 @@ final class DNSAdmissionGateTests: XCTestCase {
             "Runt datagrams must never drive the forwarder to its in-flight cap"
         )
 
-        await gate.tearDown()
+        try await gate.tearDown()
     }
 
     private func pollUntil(timeoutSeconds: Int, _ condition: () -> Bool) async -> Bool {

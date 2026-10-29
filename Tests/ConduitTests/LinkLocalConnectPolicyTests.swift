@@ -182,7 +182,10 @@ final class LinkLocalConnectPolicyTests: XCTestCase {
         let loop = MultiThreadedEventLoopGroup.singleton.next()
         let attempts = NIOLockedValueBox(0)
         let first = loop.makePromise(of: Channel.self)
-        let connected = EmbeddedChannel()
+        // The policy hands it back untouched, but it rides `loop`'s callbacks
+        // and outlives the awaits: it needs a thread-safe loop.
+        let connected = NIOAsyncTestingChannel()
+        finishAtTearDown(connected)
 
         let leader = LinkLocalConnectPolicy.dial(host: "169.254.10.1", port: 22, on: loop, eventSink: nil) { _ in
             attempts.withLockedValue { $0 += 1 }
@@ -198,29 +201,36 @@ final class LinkLocalConnectPolicyTests: XCTestCase {
         _ = try await joiner.get()
         XCTAssertEqual(attempts.withLockedValue { $0 }, 2)
         XCTAssertEqual(LinkLocalFailureMemo.shared.count, 0)
+        let leftOvers = try await connected.finish()
+        XCTAssertTrue(leftOvers.isClean)
     }
 
     /// Codex on PR #106: joiners released by a leader that did not time out
     /// must not queue behind whichever of them leads next. Every one dials
     /// at once, whether the leader connected or failed another way.
     func testReleasedJoinersDialIndependentlyAfterASuccess() async throws {
-        try await assertReleasedJoinersDialIndependently { $0.succeed(EmbeddedChannel()) }
+        try await assertReleasedJoinersDialIndependently { leader, connected in leader.succeed(connected) }
     }
 
     func testReleasedJoinersDialIndependentlyAfterANonTimeoutFailure() async throws {
-        try await assertReleasedJoinersDialIndependently {
-            $0.fail(IOError(errnoCode: ECONNREFUSED, reason: "connect"))
+        try await assertReleasedJoinersDialIndependently { leader, _ in
+            leader.fail(IOError(errnoCode: ECONNREFUSED, reason: "connect"))
         }
     }
 
+    /// `finishLeader` completes the leader's dial; a success hands back
+    /// `connected`, the token every successful dial shares.
     private func assertReleasedJoinersDialIndependently(
-        finishLeader: (EventLoopPromise<Channel>) -> Void,
+        finishLeader: (EventLoopPromise<Channel>, Channel) -> Void,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
         LinkLocalFailureMemo.shared.reset()
         defer { LinkLocalFailureMemo.shared.reset() }
         let loop = MultiThreadedEventLoopGroup.singleton.next()
+        // Rides `loop`'s callbacks and outlives the awaits: a thread-safe loop.
+        let connected = NIOAsyncTestingChannel()
+        finishAtTearDown(connected)
         // Every dial gets its own promise the test controls; none completes
         // until the test says so.
         let dials = NIOLockedValueBox<[EventLoopPromise<Channel>]>([])
@@ -235,7 +245,7 @@ final class LinkLocalConnectPolicyTests: XCTestCase {
         let joiners = (0..<3).map { _ in dial() }
         XCTAssertEqual(dials.withLockedValue { $0.count }, 1, "the joiners wait for the leader", file: file, line: line)
 
-        finishLeader(dials.withLockedValue { $0[0] })
+        finishLeader(dials.withLockedValue { $0[0] }, connected)
         // Completion callbacks run on `loop`; a task queued behind them runs
         // after every released joiner has made its decision.
         try await loop.submit {}.get()
@@ -247,10 +257,12 @@ final class LinkLocalConnectPolicyTests: XCTestCase {
         for _ in 0..<joiners.count {
             let open = dials.withLockedValue { Array($0.dropFirst(completed)) }
             completed += open.count
-            for promise in open { promise.succeed(EmbeddedChannel()) }
+            for promise in open { promise.succeed(connected) }
             try await loop.submit {}.get()
         }
         _ = try? await leader.get()
         for joiner in joiners { _ = try await joiner.get() }
+        let leftOvers = try await connected.finish()
+        XCTAssertTrue(leftOvers.isClean, file: file, line: line)
     }
 }

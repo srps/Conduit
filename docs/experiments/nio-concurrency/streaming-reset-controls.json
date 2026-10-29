@@ -1,0 +1,10 @@
+{
+  "original_sha256": "f9a5d64d8dbce39b2f3e1b74f364d5193faa10f0591dea9270dbd20bc13610f9",
+  "negative_exit": 1,
+  "failed_cases": [
+    "Test Case '-[ConduitTests.ConnectionPoolConcurrencyTests testAResetDuringAStreamingExchangeMakesTheConnectionAuthenticateAgain]' failed (1.442 seconds)."
+  ],
+  "semantic_failure": true,
+  "exactly_restored": true,
+  "restored_exit": 0
+}

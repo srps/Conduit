@@ -1067,6 +1067,8 @@ package final class ProxyOrchestrator {
     /// When a confirmed transition sweeps again, after its first sweep:
     /// routes keep settling after the VPN report (#156).
     private let strandedResweepDelays: [Duration]
+    /// Waits out a re-sweep delay; tests step it by hand.
+    private let strandedResweepSleep: @Sendable (Duration) async throws -> Void
     /// How long direct mode waits before reprobing, by cause; tests shorten it.
     private let reprobeInterval: @Sendable (DirectModeCause) -> TimeInterval
     /// The sweeps of the last confirmed transition still to run.
@@ -1307,12 +1309,14 @@ package final class ProxyOrchestrator {
         connectivityProbe: (@Sendable ([UpstreamProxy]) async -> UpstreamProbeSummary)? = nil,
         socketPaths: any SocketPathChecking = SystemSocketPaths(),
         strandedResweepDelays: [Duration] = [.seconds(2), .seconds(10)],
+        strandedResweepSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         directReprobeInterval: @escaping @Sendable (DirectModeCause) -> TimeInterval = ProxyOrchestrator.directReprobeInterval(for:)
     ) {
         self.reprobeInterval = directReprobeInterval
         self.connectivityProbe = connectivityProbe
         self.socketPaths = socketPaths
         self.strandedResweepDelays = strandedResweepDelays
+        self.strandedResweepSleep = strandedResweepSleep
         self.relayAcceptProbe = relayAcceptProbe
         self.authFallbackEventGate = authFallbackEventGate
         self.strictHintSettleWindow = strictHintSettleWindow
@@ -2487,12 +2491,12 @@ package final class ProxyOrchestrator {
     ) {
         strandedSweeps?.cancel()
         let delays = (immediately ? [Duration.zero] : []) + (resweeps ?? strandedResweepDelays)
-        strandedSweeps = Task { [weak self] in
+        strandedSweeps = Task { [weak self, sleep = strandedResweepSleep] in
             var waited = Duration.zero
             for (pass, delay) in delays.enumerated() {
                 if delay > waited {
                     do {
-                        try await Task.sleep(for: delay - waited)
+                        try await sleep(delay - waited)
                     } catch {
                         // Cancelled: a newer VPN report owns the sweeps.
                         return

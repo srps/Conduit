@@ -28,16 +28,31 @@ final class TunnelForwarderTests: XCTestCase {
         }
     }
 
+    /// The record of one test's mock channels, settled by a teardown block after the test's clients and listeners close
+    /// and before `tearDown()` shuts the group down. Call it before registering any other teardown block: the blocks run
+    /// last-registered first, so this one runs last.
+    private func mockChannels() -> MockChannelLifetimes {
+        let channels = MockChannelLifetimes()
+        addTeardownBlock {
+            for failure in await channels.settle() {
+                XCTFail("Cleanup failed: \(failure)")
+            }
+        }
+        return channels
+    }
+
     // MARK: - Direct tunnel through production TunnelForwarder
 
     @MainActor
     func testDirectTunnelForwardsBytes() async throws {
         let logger = RecordingLogSink(minLevel: .debug)
+        let channels = mockChannels()
 
         let targetReceived = NIOLockedValueBox<ByteBuffer?>(nil)
-        let targetServer = try await MockTCPEchoServer.start(group: group, onReceive: { buf in
+        let targetServer = try await MockTCPEchoServer.start(group: group, channels: channels, onReceive: { buf in
             targetReceived.withLockedValue { $0 = buf }
         })
+        closeAtTearDown(targetServer)
         let targetPort = targetServer.localAddress!.port!
 
         let pool = ConnectionPool(
@@ -64,6 +79,7 @@ final class TunnelForwarderTests: XCTestCase {
             .connectTimeout(.seconds(5))
             .connect(host: "127.0.0.1", port: tunnelPort)
             .get()
+        closeAtTearDown(clientChannel)
 
         var sendBuf = clientChannel.allocator.buffer(capacity: 5)
         sendBuf.writeString("hello")
@@ -89,14 +105,17 @@ final class TunnelForwarderTests: XCTestCase {
     @MainActor
     func testProxiedTunnelForwardsBytes() async throws {
         let logger = RecordingLogSink(minLevel: .debug)
+        let channels = mockChannels()
 
         let targetReceived = NIOLockedValueBox<ByteBuffer?>(nil)
-        let targetServer = try await MockTCPEchoServer.start(group: group, onReceive: { buf in
+        let targetServer = try await MockTCPEchoServer.start(group: group, channels: channels, onReceive: { buf in
             targetReceived.withLockedValue { $0 = buf }
         })
+        closeAtTearDown(targetServer)
         let targetPort = targetServer.localAddress!.port!
 
-        let mockProxy = try await MockConnectProxy.start(group: group)
+        let mockProxy = try await MockConnectProxy.start(group: group, channels: channels)
+        closeAtTearDown(mockProxy)
         let proxyPort = mockProxy.localAddress!.port!
 
         let upstream = UpstreamProxy(name: "mock", host: "127.0.0.1", port: proxyPort, priority: 0)
@@ -125,6 +144,7 @@ final class TunnelForwarderTests: XCTestCase {
             .connectTimeout(.seconds(5))
             .connect(host: "127.0.0.1", port: tunnelPort)
             .get()
+        closeAtTearDown(clientChannel)
 
         var sendBuf = clientChannel.allocator.buffer(capacity: 5)
         sendBuf.writeString("proxy")
@@ -151,11 +171,13 @@ final class TunnelForwarderTests: XCTestCase {
     /// A MongoDB OP_MSG crosses the production proxied tunnel bit for bit, and the real handler logs the protocol it
     /// detected. The mock proxy holds its dial to the target until that log appears: the handler logs on its first client
     /// read, while CONNECT is still pending, so the log does not show that any byte reached the target. The test waits for
-    /// the bytes themselves. Teardown joins the mock's dials before the group shuts down, on every path, because
-    /// `forwarder.stop()` closes only the listeners and does not wait for a pending CONNECT.
+    /// the bytes themselves. Teardown joins the mock's dials, then waits for every mock channel to close, before the group
+    /// shuts down, on every path, because `forwarder.stop()` closes only the listeners and waits for neither a pending
+    /// CONNECT nor a tunnel's close.
     @MainActor
     func testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol() async throws {
         let message = Self.buildMongoDBOpMsg()
+        let channels = mockChannels()
         let loop = group.next()
         let detectionLogged = loop.makePromise(of: Void.self)
         let logger = TunnelLogSignal(marker: "detected MongoDB wire protocol", signal: detectionLogged)
@@ -170,7 +192,7 @@ final class TunnelForwarderTests: XCTestCase {
         var failure: Error?
 
         do {
-            let targetServer = try await MockTCPEchoServer.start(group: group, onReceive: { buffer in
+            let targetServer = try await MockTCPEchoServer.start(group: group, channels: channels, onReceive: { buffer in
                 let count = received.withLockedValue { bytes in
                     bytes += buffer.getBytes(at: buffer.readerIndex, length: buffer.readableBytes) ?? []
                     return bytes.count
@@ -178,7 +200,7 @@ final class TunnelForwarderTests: XCTestCase {
                 if count >= message.count { bytesArrived.succeed(()) }
             })
             target = targetServer
-            let mockProxy = try await MockConnectProxy.start(group: group, dials: dials)
+            let mockProxy = try await MockConnectProxy.start(group: group, channels: channels, dials: dials)
             proxy = mockProxy
 
             let proxyPort = try XCTUnwrap(mockProxy.localAddress?.port)
@@ -229,7 +251,8 @@ final class TunnelForwarderTests: XCTestCase {
         }
 
         // Teardown on every path leaves no dial in flight when the group shuts down: the client first, then the listeners,
-        // then the mock's dials (any still held end without dialing), then the servers.
+        // then the mock's dials (any still held end without dialing), then the servers. The teardown block from
+        // `mockChannels()` then waits for the mock's accepted and dialed channels to close.
         var cleanupFailures: [String] = []
         if let failed = await Self.closeFailure(client, "the client") { cleanupFailures.append(failed) }
         await forwarder?.stop()
@@ -367,13 +390,16 @@ final class TunnelForwarderTests: XCTestCase {
     @MainActor
     func testProxiedTunnelDeliversServerFirstBytes() async throws {
         let logger = RecordingLogSink(minLevel: .debug)
+        let channels = mockChannels()
         let greetings: [[UInt8]] = [Array("SSH-2.0-Upstream\r\n".utf8) + [0, 0xff], Array("220 later\r\n".utf8)]
         let proxy = try await ServerBootstrap(group: group)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandler(GreetingConnectProxy(greetings: greetings))
+                guard channels.admit(channel) else { return channel.eventLoop.makeFailedFuture(MockChannelLifetimes.Refused()) }
+                return channel.pipeline.addHandler(GreetingConnectProxy(greetings: greetings))
             }
             .bind(host: "127.0.0.1", port: 0)
             .get()
+        closeAtTearDown(proxy)
         var config = ProxyConfig.testFixture()
         config.upstreams = [UpstreamProxy(name: "greeting", host: "127.0.0.1", port: proxy.localAddress!.port!, priority: 0)]
         let fixedConfig = config
@@ -401,6 +427,7 @@ final class TunnelForwarderTests: XCTestCase {
             }
             .connect(host: "127.0.0.1", port: tunnelPort)
             .get()
+        closeAtTearDown(client)
         let timeout = group.next().scheduleTask(in: .seconds(5)) {
             received.fail(ChannelError.connectTimeout(.seconds(5)))
         }
@@ -435,6 +462,7 @@ final class TunnelForwarderTests: XCTestCase {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .bind(host: "127.0.0.1", port: 0)
             .get()
+        closeAtTearDown(blocker)
         let blockedPort = blocker.localAddress!.port!
 
         let tunnels = [
@@ -474,6 +502,7 @@ final class TunnelForwarderTests: XCTestCase {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .bind(host: "127.0.0.1", port: 0)
             .get()
+        closeAtTearDown(blocker)
         let blockedPort = blocker.localAddress!.port!
 
         let tunnels = [
@@ -493,8 +522,10 @@ final class TunnelForwarderTests: XCTestCase {
     @MainActor
     func testDNSOverrideOnlyIncludesSuccessfullyBoundHostnames() async throws {
         let logger = RecordingLogSink(minLevel: .debug)
+        let channels = mockChannels()
 
-        let mockProxy = try await MockConnectProxy.start(group: group)
+        let mockProxy = try await MockConnectProxy.start(group: group, channels: channels)
+        closeAtTearDown(mockProxy)
         let proxyPort = mockProxy.localAddress!.port!
 
         let upstream = UpstreamProxy(name: "mock", host: "127.0.0.1", port: proxyPort, priority: 0)
@@ -516,6 +547,7 @@ final class TunnelForwarderTests: XCTestCase {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .bind(host: "127.0.0.1", port: 0)
             .get()
+        closeAtTearDown(blocker)
         let blockedPort = blocker.localAddress!.port!
 
         let tunnels = [
@@ -706,8 +738,10 @@ final class TunnelForwarderTests: XCTestCase {
     @MainActor
     func testSessionLimitRejectsExcessConnections() async throws {
         let logger = RecordingLogSink(minLevel: .debug)
+        let channels = mockChannels()
 
-        let targetServer = try await MockTCPEchoServer.start(group: group, onReceive: { _ in })
+        let targetServer = try await MockTCPEchoServer.start(group: group, channels: channels, onReceive: { _ in })
+        closeAtTearDown(targetServer)
         let targetPort = targetServer.localAddress!.port!
 
         let pool = ConnectionPool(
@@ -732,6 +766,7 @@ final class TunnelForwarderTests: XCTestCase {
             .connectTimeout(.seconds(5))
             .connect(host: "127.0.0.1", port: tunnelPort)
             .get()
+        closeAtTearDown(client1)
 
         try await Task.sleep(for: .milliseconds(200))
 
@@ -761,12 +796,14 @@ final class TunnelForwarderTests: XCTestCase {
 private enum MockTCPEchoServer {
     static func start(
         group: EventLoopGroup,
+        channels: MockChannelLifetimes,
         onReceive: @escaping @Sendable (ByteBuffer) -> Void
     ) async throws -> Channel {
         try await ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandler(EchoHandler(onReceive: onReceive))
+                guard channels.admit(channel) else { return channel.eventLoop.makeFailedFuture(MockChannelLifetimes.Refused()) }
+                return channel.pipeline.addHandler(EchoHandler(onReceive: onReceive))
             }
             .bind(host: "127.0.0.1", port: 0)
             .get()
@@ -789,12 +826,14 @@ private enum MockTCPEchoServer {
 }
 
 private enum MockConnectProxy {
-    /// Without `dials`, each CONNECT dials its target at once and nothing records the dial.
-    static func start(group: EventLoopGroup, dials: MockProxyDials? = nil) async throws -> Channel {
+    /// Without `dials`, each CONNECT dials its target at once and nothing holds the dial. `channels` records every channel
+    /// the mock accepts and every channel it dials, whether or not `dials` is given.
+    static func start(group: EventLoopGroup, channels: MockChannelLifetimes, dials: MockProxyDials? = nil) async throws -> Channel {
         try await ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandler(ConnectHandler(group: group, dials: dials))
+                guard channels.admit(channel) else { return channel.eventLoop.makeFailedFuture(MockChannelLifetimes.Refused()) }
+                return channel.pipeline.addHandler(ConnectHandler(group: group, channels: channels, dials: dials))
             }
             .bind(host: "127.0.0.1", port: 0)
             .get()
@@ -804,13 +843,16 @@ private enum MockConnectProxy {
         typealias InboundIn = ByteBuffer
 
         private let group: EventLoopGroup
+        private let channels: MockChannelLifetimes
         private let dials: MockProxyDials?
         private var accumulated = ByteBufferAllocator().buffer(capacity: 4096)
         private var upstream: Channel?
         private var tunnelEstablished = false
+        private var clientGone = false
 
-        init(group: EventLoopGroup, dials: MockProxyDials?) {
+        init(group: EventLoopGroup, channels: MockChannelLifetimes, dials: MockProxyDials?) {
             self.group = group
+            self.channels = channels
             self.dials = dials
         }
 
@@ -844,9 +886,15 @@ private enum MockConnectProxy {
             }
             let host = String(hostPort[0])
             let group = self.group
+            let channels = self.channels
             let connect: @Sendable () -> EventLoopFuture<Channel> = {
                 ClientBootstrap(group: group)
                     .connectTimeout(.seconds(5))
+                    .channelInitializer { channel in
+                        channels.admit(channel)
+                            ? channel.eventLoop.makeSucceededVoidFuture()
+                            : channel.eventLoop.makeFailedFuture(MockChannelLifetimes.Refused())
+                    }
                     .connect(host: host, port: port)
             }
             let dial: EventLoopFuture<Channel>
@@ -868,6 +916,12 @@ private enum MockConnectProxy {
                 .whenComplete { result in
                     switch result {
                     case .success(let upstreamChannel):
+                        if self.clientGone {
+                            // The forwarder closed this side while the dial was in flight, so channelInactive had no
+                            // upstream to close.
+                            upstreamChannel.close(mode: .all, promise: nil)
+                            return
+                        }
                         self.upstream = upstreamChannel
                         self.tunnelEstablished = true
 
@@ -890,6 +944,7 @@ private enum MockConnectProxy {
         }
 
         func channelInactive(context: ChannelHandlerContext) {
+            clientGone = true
             upstream?.close(mode: .all, promise: nil)
             context.fireChannelInactive()
         }
@@ -956,7 +1011,7 @@ private final class MockProxyDials: Sendable {
 
     /// Closes the record, ends any dial still held without starting it, then waits for every recorded dial to finish. It
     /// describes each dial that failed for another reason. Once closed, the record admits no dial, released or not. A
-    /// connected dial's channel belongs to the mock, which closes it with its peer.
+    /// connected dial's channel belongs to the mock, which closes it with its peer; `MockChannelLifetimes` waits for that.
     func join() async -> [String] {
         let dials = record.withLockedValue { record in
             record.closed = true
@@ -975,6 +1030,85 @@ private final class MockProxyDials: Sendable {
             }
         }
         return failures
+    }
+}
+
+/// Every channel a test's mock servers accept and its mock proxy dials, recorded so teardown can wait for each to close
+/// before the group shuts down. Closing a listener does not close what it accepted, and a mock channel's handler closes its
+/// peer on another loop as it goes inactive, which a shut-down loop would refuse. A mock channel closes when the
+/// forwarder's side of it does, so its close also shows the forwarder's tunnel finished first. The record has a fixed
+/// capacity and closes when settled; an initializer refuses a channel the record does not admit, before adding any
+/// handler, so a channel accepted while its listener closes closes with no handler to reach another loop.
+private final class MockChannelLifetimes: Sendable {
+    static let capacity = 16
+    static let settleTimeout: TimeAmount = .seconds(5)
+
+    /// One lock covers admission and the list, so no channel is admitted after `settle()` takes its snapshot. No channel
+    /// operation runs while it is held.
+    private let record = NIOLockedValueBox(Record())
+
+    private struct Record {
+        var closed = false
+        var refusedAtCapacity = 0
+        var channels: [Channel] = []
+    }
+
+    /// An initializer's failure for a channel the record did not admit; the bootstrap then closes the channel.
+    struct Refused: Error {}
+
+    /// Records `channel`, or returns false when the record is full or settled.
+    func admit(_ channel: Channel) -> Bool {
+        record.withLockedValue { record in
+            guard !record.closed else { return false }
+            guard record.channels.count < Self.capacity else {
+                record.refusedAtCapacity += 1
+                return false
+            }
+            record.channels.append(channel)
+            return true
+        }
+    }
+
+    /// Closes the record, then waits up to `settleTimeout` in all for every recorded channel to close. By then the test
+    /// has closed its clients, listeners and pool, so each channel's peer is closing it; one still open at the deadline is
+    /// closed here and reported, as is any channel refused at capacity.
+    func settle() async -> [String] {
+        let (channels, refused) = record.withLockedValue { record in
+            record.closed = true
+            return (record.channels, record.refusedAtCapacity)
+        }
+        var failures: [String] = []
+        if refused > 0 {
+            failures.append("the mock channel record refused \(refused) channel(s) at its capacity of \(Self.capacity)")
+        }
+        let deadline = NIODeadline.now() + Self.settleTimeout
+        for channel in channels {
+            if await Self.closes(channel, by: deadline) { continue }
+            let peer = String(describing: channel.remoteAddress)
+            failures.append("a mock channel to \(peer) was still open five seconds into teardown")
+            do {
+                try await channel.close().get()
+            } catch ChannelError.alreadyClosed {
+            } catch {
+                failures.append("closing a mock channel to \(peer): \(error)")
+            }
+        }
+        return failures
+    }
+
+    /// Whether `channel` closes by `deadline`. The close and the deadline succeed the same promise on the channel's loop,
+    /// so the wait is bounded and the promise is fulfilled before the timer is cancelled.
+    private static func closes(_ channel: Channel, by deadline: NIODeadline) async -> Bool {
+        let closed = channel.eventLoop.makePromise(of: Bool.self)
+        channel.closeFuture.whenComplete { _ in closed.succeed(true) }
+        let timeout = channel.eventLoop.scheduleTask(deadline: deadline) { closed.succeed(false) }
+        defer { timeout.cancel() }
+        do {
+            return try await closed.futureResult.get()
+        } catch {
+            XCTFail("observing a mock channel close failed: \(error)")
+            return false
+        }
     }
 }
 

@@ -44,8 +44,22 @@ final class ConnectionPoolMigrationTests: XCTestCase {
         events.withLockedValue { $0 }.filter { $0.event == LateDialRetired.event }.compactMap(\.detail)
     }
 
+    /// Every channel `dialed` made; the test's `defer { finishDialed() }`
+    /// finishes them on its thread.
+    private var dialedChannels: [EmbeddedChannel] = []
+
+    /// The registry, the pool or the test may already have closed a channel;
+    /// finishing runs the cleanup that close queued.
+    private func finishDialed(file: StaticString = #filePath, line: UInt = #line) {
+        for channel in dialedChannels {
+            XCTAssertNoThrow(try channel.finish(acceptAlreadyClosed: true), file: file, line: line)
+        }
+        dialedChannels.removeAll()
+    }
+
     private func dialed(local: String? = nil) throws -> PooledUpstreamConnection {
         let channel = EmbeddedChannel()
+        dialedChannels.append(channel)
         if let local { channel.localAddress = try SocketAddress(ipAddress: local, port: 50_000) }
         try channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 9)).wait()
         return PooledUpstreamConnection(proxy: proxy, channel: channel)
@@ -56,6 +70,7 @@ final class ConnectionPoolMigrationTests: XCTestCase {
     }
 
     func testADialWhosePathIsGoneIsClosedAndFailsItsAcquisition() throws {
+        defer { finishDialed() }
         let transitions = makeRegistry()
         let pool = makePool(transitions)
         let late = try dialed(local: "10.20.30.40")           // dialed over the VPN
@@ -75,6 +90,7 @@ final class ConnectionPoolMigrationTests: XCTestCase {
     }
 
     func testADialOnACurrentPathIsInsertedAndTracked() throws {
+        defer { finishDialed() }
         let transitions = makeRegistry()
         let pool = makePool(transitions)
         let fresh = try dialed()
@@ -88,6 +104,7 @@ final class ConnectionPoolMigrationTests: XCTestCase {
     /// A dial that completes after its pool was released (shutdown, a config
     /// restart) is closed, not handed back untracked (#159).
     func testADialOutlivingItsPoolIsClosed() throws {
+        defer { finishDialed() }
         let orphan = try dialed()
         XCTAssertThrowsError(try ConnectionPool.insert(orphan.channel, proxy: proxy, target: "origin.test:443", into: nil))
         settle(orphan)
@@ -137,6 +154,7 @@ final class ConnectionPoolMigrationTests: XCTestCase {
     }
 
     func testTheSweepClosesEstablishedConnectionsItSelectsAndThePoolDropsThem() throws {
+        defer { finishDialed() }
         let transitions = makeRegistry()
         let pool = makePool(transitions)
         let overVPN = try dialed(local: "10.20.30.40"), overWiFi = try dialed(local: "192.168.2.20")

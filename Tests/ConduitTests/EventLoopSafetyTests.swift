@@ -13,7 +13,7 @@ final class EventLoopSafetyTests: XCTestCase {
 
     @MainActor
     func testConnectionPoolExposesEventLoop() {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = MultiThreadedEventLoopGroup.singleton
         let config = ProxyConfig.testFixture()
 
         let pool = ConnectionPool(
@@ -29,7 +29,7 @@ final class EventLoopSafetyTests: XCTestCase {
 
     @MainActor
     func testConnectionPoolEnabledUpstreamCount() {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = MultiThreadedEventLoopGroup.singleton
         var config = ProxyConfig.testFixture()
 
         let pool = ConnectionPool(
@@ -58,9 +58,13 @@ final class EventLoopSafetyTests: XCTestCase {
 
     @MainActor
     func testFutureHopPreservesValue() async throws {
+        // Its own group: the hop needs two distinct loops, which a shared
+        // group's `next()` does not promise.
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        addTeardownBlock { try await group.shutdownGracefully() }
         let el1 = group.next()
         let el2 = group.next()
+        XCTAssertFalse(el1 === el2)
 
         let promise = el1.makePromise(of: String.self)
         let hopped = promise.futureResult.hop(to: el2)
@@ -74,8 +78,10 @@ final class EventLoopSafetyTests: XCTestCase {
     @MainActor
     func testFutureHopPreservesError() async {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        addTeardownBlock { try await group.shutdownGracefully() }
         let el1 = group.next()
         let el2 = group.next()
+        XCTAssertFalse(el1 === el2)
 
         let promise = el1.makePromise(of: String.self)
         let hopped = promise.futureResult.hop(to: el2)
@@ -95,6 +101,7 @@ final class EventLoopSafetyTests: XCTestCase {
     func testForwarderWritesToClientChannelFromUpstreamEL() throws {
         let loop = EmbeddedEventLoop()
         let clientChannel = EmbeddedChannel(loop: loop)
+        defer { XCTAssertNoThrow(try clientChannel.finish()) }
         try clientChannel.pipeline.syncOperations.addHandler(HTTPResponseEncoder())
 
         let completed = XCTestExpectation(description: "forwarder completed")
@@ -105,6 +112,7 @@ final class EventLoopSafetyTests: XCTestCase {
         )
 
         let upstreamChannel = EmbeddedChannel(handlers: [forwarder], loop: loop)
+        defer { XCTAssertNoThrow(try upstreamChannel.finish()) }
 
         let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: ["Content-Length": "2"])
         try upstreamChannel.writeInbound(HTTPClientResponsePart.head(head))
@@ -121,8 +129,6 @@ final class EventLoopSafetyTests: XCTestCase {
         XCTAssertGreaterThan(totalBytes, 0)
 
         wait(for: [completed], timeout: 1.0)
-        try? clientChannel.close().wait()
-        try? upstreamChannel.close().wait()
     }
 
     // MARK: - ClientIPFilter with EmbeddedChannel
@@ -131,8 +137,8 @@ final class EventLoopSafetyTests: XCTestCase {
     func testClientIPFilterDoesNotCrashWithNilRemoteAddress() throws {
         let filter = ClientIPFilter(allowedIPs: ["127.0.0.1"], logger: DiscardingLogSink())
         let channel = EmbeddedChannel(handler: filter)
+        defer { XCTAssertNoThrow(try channel.finish()) }
         XCTAssertNotNil(channel.pipeline)
-        try? channel.close().wait()
     }
 
     // MARK: - NoProxyMatcher thread safety (stateless)

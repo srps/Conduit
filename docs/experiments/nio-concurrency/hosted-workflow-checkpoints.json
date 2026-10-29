@@ -1,0 +1,32 @@
+{
+  "head": "9b39c78907111e4e94facb1f2adc6a7abf974c72",
+  "checkpoints": [
+    {
+      "workflow": "Release packages",
+      "url": "https://github.com/srps/Conduit/actions/runs/40932847845",
+      "conclusion": "success",
+      "standard_tests": 3780,
+      "skips": 4,
+      "failures": 0,
+      "nio_misuse_diagnostics": 0,
+      "optimized_pac": "passed",
+      "zip_dmg_verification": "passed",
+      "signing": "ad-hoc PR build; no release secrets",
+      "log_sha256": "a4389143afc7c59b2897b5273b80c3911f525b4dca14f7b2bf8e03ede97b549c"
+    },
+    {
+      "workflow": "Swift",
+      "url": "https://github.com/srps/Conduit/actions/runs/40932847931",
+      "conclusion": "failure",
+      "standard_tests": 3780,
+      "skips": 4,
+      "failures": 1,
+      "nio_misuse_diagnostics": 0,
+      "failed_test": "RuntimeHostControlOwnerTests.testTheClientQuitFlushesBothDeclaredSavesWhenItsSubscriptionIsRefused",
+      "assertion": "expected settled Quit; received unsettled at total deadline",
+      "seconds": 10.836,
+      "log_sha256": "d49c4b726c43b3aad5d2950a80ebaea6bf7ad695ca79b7590fc434480875f9d2"
+    }
+  ],
+  "scope": "Historical checkpoint before deterministic client Quit wait follow-up; the failed run remains failed."
+}

@@ -108,6 +108,7 @@ final class AuditRegressionTests: XCTestCase {
 
     func testStalledConnectionCleanupIgnoresInUseConnections() throws {
         let channel = EmbeddedChannel()
+        defer { XCTAssertNoThrow(try channel.finish()) }
         let connection = PooledUpstreamConnection.makeForTesting(
             proxy: UpstreamProxy(name: "proxy", host: "127.0.0.1", port: 8080, priority: 0),
             channel: channel,
@@ -118,7 +119,6 @@ final class AuditRegressionTests: XCTestCase {
         connection.lastUsedAt = Date().addingTimeInterval(-120)
 
         XCTAssertFalse(ConnectionPool.stalledConnectionIDs(from: [connection], olderThan: 45).contains(connection.id))
-        try? channel.close().wait()
     }
 
     func testUpstreamRequestStripsConnectionNamedHopByHopHeaders() async throws {
@@ -158,9 +158,11 @@ final class AuditRegressionTests: XCTestCase {
     func testDirectHTTPResponseForwarderStripsConnectionNamedHopByHopHeaders() throws {
         let loop = EmbeddedEventLoop()
         let clientChannel = EmbeddedChannel(loop: loop)
+        defer { XCTAssertNoThrow(try clientChannel.finish()) }
         try clientChannel.pipeline.syncOperations.addHandler(HTTPResponseEncoder())
         let forwarder = DirectHTTPResponseForwarder(clientChannel: clientChannel, onComplete: {}, onError: { _ in })
         let upstreamChannel = EmbeddedChannel(handlers: [forwarder], loop: loop)
+        defer { XCTAssertNoThrow(try upstreamChannel.finish()) }
         var headers = HTTPHeaders()
         headers.add(name: "Connection", value: "X-Hop")
         headers.add(name: "X-Hop", value: "direct-hop")
@@ -174,9 +176,6 @@ final class AuditRegressionTests: XCTestCase {
         }
 
         XCTAssertFalse(raw.contains("\r\nX-Hop: direct-hop\r\n"))
-
-        try? clientChannel.close().wait()
-        try? upstreamChannel.close().wait()
     }
 
     func testSOCKS5GreetingRejectsNoAuthWhenClientDidNotOfferIt() async throws {

@@ -57,6 +57,8 @@ package enum RuntimeClientQuit {
     /// total deadline; the Quit still ends then. This returns once the Quit is read settled, or at the total deadline: with no stream to
     /// report the Quit, it keeps the caller for the rest of the deadline and reads the Quit's outcome once near its end, so a terminating
     /// caller never leaves while the host may still be tearing down. No step is retried.
+    ///
+    /// The wait effect defaults to continuous-clock sleep; deadline checks always use that clock.
     package static func quit(
         control: any RuntimeClient,
         editor: PrivateEditorClient,
@@ -65,7 +67,10 @@ package enum RuntimeClientQuit {
         now: ContinuousClock.Instant = .now,
         priorUpdate: ControlRequestID? = nil,
         configuration: (@Sendable (ControlRequestID, RuntimeQuitStep) throws -> PrivateConfigurationRequest)? = nil,
-        preferences: (@Sendable (ControlRequestID, RuntimeQuitStep) throws -> PrivatePreferencesRequest)? = nil
+        preferences: (@Sendable (ControlRequestID, RuntimeQuitStep) throws -> PrivatePreferencesRequest)? = nil,
+        sleep: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void = { instant in
+            try await Task.sleep(until: instant, clock: .continuous)
+        }
     ) async -> RuntimeClientQuitResult {
         let deadline = RuntimeDeadline.after(total, from: now)
         var result = RuntimeClientQuitResult(
@@ -94,7 +99,7 @@ package enum RuntimeClientQuit {
         }
 
         // Subscribed after the fence. Each wait looks its operation up once first, so a settlement published before this point is not missed.
-        let settlements = SettlementWaiter(control: control, incarnation: incarnation, deadline: deadline, quit: quitOperation)
+        let settlements = SettlementWaiter(control: control, incarnation: incarnation, deadline: deadline, quit: quitOperation, sleep: sleep)
         await settlements.subscribe()
         defer {
             settlements.cancel()
@@ -164,6 +169,7 @@ private final class SettlementWaiter: @unchecked Sendable {
     private let control: any RuntimeClient
     private let incarnation: ControlHostIncarnation
     private let deadline: RuntimeDeadline
+    private let sleep: @Sendable (ContinuousClock.Instant) async throws -> Void
     private var stream: RuntimeSubscription?
     private var streamEnded = true
     private var watched: Set<ControlOperationID>
@@ -172,10 +178,17 @@ private final class SettlementWaiter: @unchecked Sendable {
     private var lookedUpAfterRelease: Set<ControlOperationID> = []
     private(set) var failure: RuntimeClientError?
 
-    init(control: any RuntimeClient, incarnation: ControlHostIncarnation, deadline: RuntimeDeadline, quit: ControlOperationID) {
+    init(
+        control: any RuntimeClient,
+        incarnation: ControlHostIncarnation,
+        deadline: RuntimeDeadline,
+        quit: ControlOperationID,
+        sleep: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void
+    ) {
         self.control = control
         self.incarnation = incarnation
         self.deadline = deadline
+        self.sleep = sleep
         watched = [quit]
     }
 
@@ -273,7 +286,7 @@ private final class SettlementWaiter: @unchecked Sendable {
     private func keepCaller(until instant: ContinuousClock.Instant) async -> Bool {
         guard ContinuousClock.now < instant else { return true }
         do {
-            try await Task.sleep(until: instant, clock: .continuous)
+            try await sleep(instant)
             return true
         } catch {
             return false

@@ -12,10 +12,10 @@ final class ClientIPFilterTests: XCTestCase {
         let logger = DiscardingLogSink()
         let filter = ClientIPFilter(allowedIPs: ["127.0.0.1", "::1"], logger: logger)
         let channel = EmbeddedChannel(handler: filter)
+        defer { XCTAssertNoThrow(try channel.finish()) }
         // EmbeddedChannel has no real remote address, so channelActive sees nil.
         // We verify the filter is correctly added and handles nil gracefully.
         XCTAssertNotNil(channel.pipeline)
-        try? channel.close().wait()
     }
 
     @MainActor func testAllowedIPSetDeduplicates() {
@@ -28,8 +28,8 @@ final class ClientIPFilterTests: XCTestCase {
         let logger = DiscardingLogSink()
         let filter = ClientIPFilter(allowedIPs: [], logger: logger)
         let channel = EmbeddedChannel(handler: filter)
+        defer { XCTAssertNoThrow(try channel.finish()) }
         XCTAssertNotNil(filter)
-        try? channel.close().wait()
     }
 
     func testDefaultConfigAllowedClients() {

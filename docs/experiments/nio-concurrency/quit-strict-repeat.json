@@ -1,0 +1,146 @@
+{
+  "trials": [
+    {
+      "trial": 1,
+      "exit": 0,
+      "seconds": 3.592,
+      "misuse": 0,
+      "log_sha256": "752ee76ba09aeac43e6da6af5b00413e8633b62b0a889047a56d6129644bba5e"
+    },
+    {
+      "trial": 2,
+      "exit": 0,
+      "seconds": 1.014,
+      "misuse": 0,
+      "log_sha256": "93f53437146424d4e5b075cca0e1e204a29a57d6da85c03a3c3371fc9cd52d71"
+    },
+    {
+      "trial": 3,
+      "exit": 0,
+      "seconds": 1.05,
+      "misuse": 0,
+      "log_sha256": "c8638c440cc386a746f2123e3dc8e8070ea5903af80f3dc57dcba7d8ba8dd376"
+    },
+    {
+      "trial": 4,
+      "exit": 0,
+      "seconds": 1.132,
+      "misuse": 0,
+      "log_sha256": "3e7936f85190cac10791b997a8e922ea567ae884191473adafe155ca4203d0e9"
+    },
+    {
+      "trial": 5,
+      "exit": 0,
+      "seconds": 1.066,
+      "misuse": 0,
+      "log_sha256": "abc28c8096fca6d2f30414797f076c8c66f05d1917a0958505e0113c4e9d5711"
+    },
+    {
+      "trial": 6,
+      "exit": 0,
+      "seconds": 1.155,
+      "misuse": 0,
+      "log_sha256": "fbf0b8fd8cf4fb8cc205bf977b96fd2ec8095fbbcb888285a3ef7ceba0a25907"
+    },
+    {
+      "trial": 7,
+      "exit": 0,
+      "seconds": 1.072,
+      "misuse": 0,
+      "log_sha256": "200005350bcdeb3056074b7a337d75e356377354d17e31a1ecffd166f0e0722d"
+    },
+    {
+      "trial": 8,
+      "exit": 0,
+      "seconds": 1.101,
+      "misuse": 0,
+      "log_sha256": "6e71bcb633d0dc1e910baac58e8d643e42362313033ecbbb727749885d743f29"
+    },
+    {
+      "trial": 9,
+      "exit": 0,
+      "seconds": 1.063,
+      "misuse": 0,
+      "log_sha256": "1193fca9da92033919f6ef48785d0113ddc127324815ad1d762c763dbbf37e40"
+    },
+    {
+      "trial": 10,
+      "exit": 0,
+      "seconds": 1.038,
+      "misuse": 0,
+      "log_sha256": "06d9f7f3d59d451f607a709a7bd68d5ffd6d41dd32b5d03021ca6fa96489935f"
+    },
+    {
+      "trial": 11,
+      "exit": 0,
+      "seconds": 1.192,
+      "misuse": 0,
+      "log_sha256": "dd1f2c983ebe5b77469d4fa7944c10634ee381153e4fe38e43b7034f7a243403"
+    },
+    {
+      "trial": 12,
+      "exit": 0,
+      "seconds": 1.15,
+      "misuse": 0,
+      "log_sha256": "2ebce8dd679055b4518d97d68883d7093b7e9582803958b5cce6d6e314582a37"
+    },
+    {
+      "trial": 13,
+      "exit": 0,
+      "seconds": 1.065,
+      "misuse": 0,
+      "log_sha256": "085144a9bba25f15b216a41be36099e68c2e199ee395fc0a0b754f86b042854a"
+    },
+    {
+      "trial": 14,
+      "exit": 0,
+      "seconds": 1.108,
+      "misuse": 0,
+      "log_sha256": "c24192b65505e3655b425c7c7b82666919fd2430ed794d2ceb30b934a5874e95"
+    },
+    {
+      "trial": 15,
+      "exit": 0,
+      "seconds": 1.196,
+      "misuse": 0,
+      "log_sha256": "e9863c2e035cc0c1c9ecc6a0a1767306d1c878351bb13eff97a5b60a65ee0b49"
+    },
+    {
+      "trial": 16,
+      "exit": 0,
+      "seconds": 1.078,
+      "misuse": 0,
+      "log_sha256": "6737a9f18827dab7a56cbf3ea1d8ec63101b3929bdd249026dae442521d53e6c"
+    },
+    {
+      "trial": 17,
+      "exit": 0,
+      "seconds": 1.156,
+      "misuse": 0,
+      "log_sha256": "5650dfaf38a8c8456950a65ec85e90eb57aa644d8959612ecc2d2d1da97b4cfc"
+    },
+    {
+      "trial": 18,
+      "exit": 0,
+      "seconds": 1.116,
+      "misuse": 0,
+      "log_sha256": "8f14a3c0dc99d07c910c3c8514f3eb249404deef9abafb7c29000613337abf33"
+    },
+    {
+      "trial": 19,
+      "exit": 0,
+      "seconds": 1.119,
+      "misuse": 0,
+      "log_sha256": "4b9187f237a024d0046007ba5a891ed8a974f6198aa460e6d7a7af967ba9cca6"
+    },
+    {
+      "trial": 20,
+      "exit": 0,
+      "seconds": 1.061,
+      "misuse": 0,
+      "log_sha256": "85ad5abc1d0c2b04b6e7429d09dbf0fd6cf647442d39aa6e26603ff62bd2fafe"
+    }
+  ],
+  "tests_per_trial": 2,
+  "all_pass": true
+}

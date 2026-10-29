@@ -822,11 +822,12 @@ final class AppStateActivationParityTests: XCTestCase {
         state.commitPendingEdit(trigger: .submit)
         await held.hold.waitUntilReached()
         XCTAssertTrue(state.beginQuit())
-        Task { @MainActor in
+        let release = Task { @MainActor in
+            defer { held.hold.release() }
             try await Task.sleep(for: .milliseconds(100))
-            held.hold.release()
         }
         let finished = await state.finishQuit()
+        try await release.value
         guard case .settled(.completed)? = finished?.quit else { return XCTFail("the quit completed: \(String(describing: finished))") }
         XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy), "the quit cleared what the Start applied")
         XCTAssertFalse(harness.machine.service("Wi-Fi").webProxy.enabled)
@@ -852,11 +853,12 @@ final class AppStateActivationParityTests: XCTestCase {
         XCTAssertEqual(state.phase, .opening)
         XCTAssertNotNil(state.editor, "the clients and the editor exist; only the override's save is held")
         XCTAssertTrue(state.beginQuit())
-        Task { @MainActor in
+        let release = Task { @MainActor in
+            defer { held.hold.release() }
             try await Task.sleep(for: .milliseconds(100))
-            held.hold.release()
         }
         let finished = await state.finishQuit()
+        try await release.value
         guard case .settled(.completed)? = finished?.quit else { return XCTFail("the quit completed: \(String(describing: finished))") }
         await state.opening?.value
         XCTAssertEqual(state.phase, .quitting, "the opening never finished ready")
@@ -893,11 +895,12 @@ final class AppStateActivationParityTests: XCTestCase {
         let held = await harness.hold.waitUntilReached(within: .seconds(5))
         XCTAssertTrue(held, "the Start reached its resolver write")
         XCTAssertTrue(state.beginQuit())
-        Task { @MainActor in
+        let release = Task { @MainActor in
+            defer { harness.hold.release() }
             try await Task.sleep(for: .milliseconds(100))
-            harness.hold.release()
         }
         let finished = await state.finishQuit()
+        try await release.value
         guard case .settled(.completed)? = finished?.quit else { return XCTFail("the quit completed: \(String(describing: finished))") }
         XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "the quit cleared the entry file the held Start wrote")
         XCTAssertNil(harness.machine.launchdEnvironment["HTTP_PROXY"])

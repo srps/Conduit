@@ -1,0 +1,241 @@
+{
+  "fingerprint_before": "db11f4abd775b55fe565a185b7d3431177b5a6cb38a4c472df31274270982436",
+  "steps": [
+    {
+      "name": "Build",
+      "exit": 0,
+      "seconds": 5.06,
+      "log": "01.log"
+    },
+    {
+      "name": "Kernel import and process fence",
+      "exit": 0,
+      "seconds": 26.77,
+      "log": "02.log"
+    },
+    {
+      "name": "Third-party license notices",
+      "exit": 0,
+      "seconds": 0.83,
+      "log": "03.log"
+    },
+    {
+      "name": "Event catalogue",
+      "exit": 0,
+      "seconds": 88.48,
+      "log": "04.log"
+    },
+    {
+      "name": "Decision records",
+      "exit": 0,
+      "seconds": 5.04,
+      "log": "05.log"
+    },
+    {
+      "name": "Run tests",
+      "exit": 0,
+      "seconds": 270.19,
+      "log": "06.log"
+    },
+    {
+      "name": "App entry sequencing (stand-in modules, child processes)",
+      "exit": 0,
+      "seconds": 15.22,
+      "log": "07.log"
+    },
+    {
+      "name": "Kerberos worker entry points",
+      "exit": 0,
+      "seconds": 2.05,
+      "log": "08.log"
+    },
+    {
+      "name": "Install script argument parsing",
+      "exit": 0,
+      "seconds": 0.78,
+      "log": "09.log"
+    },
+    {
+      "name": "Dev bundle packaging (stand-in tools, nothing signed or installed)",
+      "exit": 0,
+      "seconds": 3.06,
+      "log": "10.log"
+    },
+    {
+      "name": "Signing identity script keeps the key secret",
+      "exit": 0,
+      "seconds": 0.93,
+      "log": "11.log"
+    },
+    {
+      "name": "Self-update end to end (stand-in host, local feed)",
+      "exit": 0,
+      "seconds": 55.07,
+      "log": "12.log"
+    },
+    {
+      "name": "Release identity script keeps the keys secret",
+      "exit": 0,
+      "seconds": 10.66,
+      "log": "13.log"
+    },
+    {
+      "name": "Update feed release notes render",
+      "exit": 0,
+      "seconds": 0.08,
+      "log": "14.log"
+    },
+    {
+      "name": "Security boundary regressions",
+      "exit": 0,
+      "seconds": 3.71,
+      "log": "15.log"
+    },
+    {
+      "name": "Perf gate",
+      "exit": 0,
+      "seconds": 14.83,
+      "log": "16.log"
+    },
+    {
+      "name": "Simulator outcomes and full scenario suite",
+      "exit": 0,
+      "seconds": 165.29,
+      "log": "17.log"
+    },
+    {
+      "name": "HTTP request-target preservation",
+      "exit": 0,
+      "seconds": 5.0,
+      "log": "18.log"
+    },
+    {
+      "name": "Forced routing regression",
+      "exit": 0,
+      "seconds": 0.72,
+      "log": "19.log"
+    },
+    {
+      "name": "Resource bounds and standalone shutdown regressions",
+      "exit": 0,
+      "seconds": 6.28,
+      "log": "20.log"
+    }
+  ],
+  "fingerprint_after": "db11f4abd775b55fe565a185b7d3431177b5a6cb38a4c472df31274270982436",
+  "complete": true,
+  "stable": true,
+  "logs": [
+    {
+      "name": "01.log",
+      "bytes": 53473,
+      "sha256": "bed6bccef90bf441670750fdeeaa910a803cba75bb90b8cd8cc4ffbd4c6ef1ef"
+    },
+    {
+      "name": "02.log",
+      "bytes": 291,
+      "sha256": "6c2c55b845198fdc5c35bfd7321e37cd6efa22d71a6e303e203e52d4a7220abe"
+    },
+    {
+      "name": "03.log",
+      "bytes": 174,
+      "sha256": "7e15164176391c75954cf328b64c17274f37c2100046fa8ea5cb842623716c17"
+    },
+    {
+      "name": "04.log",
+      "bytes": 184,
+      "sha256": "659869075207e1ad31794af2cc2b2b19a0bb83538edad8642d0c75f55cf57389"
+    },
+    {
+      "name": "05.log",
+      "bytes": 196,
+      "sha256": "1cbc7bfbac559b4f19830f38c78f013b426221511a832734104530df80444e3b"
+    },
+    {
+      "name": "06.log",
+      "bytes": 1235180,
+      "sha256": "77cdf2e1f16acecfe0d29c6a42afc32b0e3c01f663d34a6781befd0a37f08cc0"
+    },
+    {
+      "name": "07.log",
+      "bytes": 433,
+      "sha256": "d4e931c6be7b5eb51bb0905a201aed64b067e747cbba24797c42ba2361a6b0e2"
+    },
+    {
+      "name": "08.log",
+      "bytes": 79,
+      "sha256": "a263b2bdfe74c3d95a4356abfbfa546451ab788aae8fac034ba49a225fa23082"
+    },
+    {
+      "name": "09.log",
+      "bytes": 825,
+      "sha256": "312e3bd6426322f1a220515ab1e4892ad65200688a1872e3fe70256106c379ec"
+    },
+    {
+      "name": "10.log",
+      "bytes": 1643,
+      "sha256": "8d2a31af972ceea509b14fe1fd5a51a530798cba5189fccf5892b1785cff0668"
+    },
+    {
+      "name": "11.log",
+      "bytes": 605,
+      "sha256": "2319a08076be9bd1c00bfbe7e620e1e33a5fb5f0cf7cbc385c5c73c25bc41b23"
+    },
+    {
+      "name": "12.log",
+      "bytes": 1109,
+      "sha256": "013248a282260bc47d48a4415b9811458c47dba3df89d3d40ffab8b6c24c94c2"
+    },
+    {
+      "name": "13.log",
+      "bytes": 1505,
+      "sha256": "e5b2bfd0c13581f8169202a5d9d18d3ff56df77d8f1019635f9f3ef5cb4bd5dc"
+    },
+    {
+      "name": "14.log",
+      "bytes": 611,
+      "sha256": "109c9100970f9021495b96167ee95a10d99c5efc15c9e8611428f8eafdff93e2"
+    },
+    {
+      "name": "15.log",
+      "bytes": 9019,
+      "sha256": "c158b4d042012a0dfd3560efa7f9658deab356316f6a4ed0c2c99a224015308a"
+    },
+    {
+      "name": "16.log",
+      "bytes": 4432,
+      "sha256": "c95b141d01f3d8e3571b029b8c1ed65fa3d98d6d74425eceda4fe848082d2d0e"
+    },
+    {
+      "name": "17.log",
+      "bytes": 264227,
+      "sha256": "1fc9e22124fec27e7d3518804fad816b5bd2368e8f9d1182cb746bfe64a41d9b"
+    },
+    {
+      "name": "18.log",
+      "bytes": 116,
+      "sha256": "d882991f898256265205d875b6a4c286e4d090a2aa0b7108dbc6ad2d0e315c66"
+    },
+    {
+      "name": "19.log",
+      "bytes": 4370,
+      "sha256": "d4e9092ae0c22272664f41c2a54f7d1f9339d51b07c10d6a2cf457494e025668"
+    },
+    {
+      "name": "20.log",
+      "bytes": 5400,
+      "sha256": "03156483748f882ee470cd18c07ea3ceee90d05484bf5cbb04a3e9509b8b106b"
+    }
+  ],
+  "verification": {
+    "tests": 3780,
+    "skips": 4,
+    "failures": 0,
+    "nio_misuse_diagnostics": 0,
+    "simulator_cases": 104,
+    "simulator_failed": 0,
+    "perf_wall_seconds": 10.13,
+    "perf_max_rss_bytes": 34783232
+  },
+  "scope": "Final code/test tree, including deterministic Quit follow-up. Documentation receipts and final status wording were added afterwards; their checks were rerun."
+}

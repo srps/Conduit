@@ -1,0 +1,14 @@
+{
+  "original_sha256": "3c81847a878c72a3398359956165ab5154f84d2b37ca2600783c174cc1461980",
+  "cases": [
+    {
+      "name": "failure-while-target-dial-held",
+      "exit": 1,
+      "failed_cases": [
+        "Test Case '-[ConduitTests.TunnelForwarderTests testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol]' failed (1.519 seconds)."
+      ],
+      "expected_failure_surfaces": true
+    }
+  ],
+  "exactly_restored": true
+}

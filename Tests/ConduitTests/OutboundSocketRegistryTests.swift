@@ -28,11 +28,25 @@ final class OutboundSocketRegistryTests: XCTestCase {
         events.withLockedValue { $0 }.filter { $0.event == name }.compactMap(\.detail)
     }
 
+    /// Every channel this test made; its `defer { finishChannels() }` finishes
+    /// them on the test's thread.
+    private var channels: [EmbeddedChannel] = []
+
     private func channel(local: String = "192.168.2.20") throws -> EmbeddedChannel {
         let channel = EmbeddedChannel()
+        channels.append(channel)
         channel.localAddress = try SocketAddress(ipAddress: local, port: 50_000)
         try channel.connect(to: SocketAddress(ipAddress: "192.0.2.10", port: 443)).wait()
         return channel
+    }
+
+    /// A sweep or a refused registration may already have closed a channel;
+    /// finishing runs the cleanup that close queued.
+    private func finishChannels(file: StaticString = #filePath, line: UInt = #line) {
+        for channel in channels {
+            XCTAssertNoThrow(try channel.finish(acceptAlreadyClosed: true), file: file, line: line)
+        }
+        channels.removeAll()
     }
 
     private func strand(_ local: String, _ label: String = "address_gone") {
@@ -45,6 +59,7 @@ final class OutboundSocketRegistryTests: XCTestCase {
     }
 
     func testASweepClosesOnlySocketsWhosePathIsGone() throws {
+        defer { finishChannels() }
         let registry = makeRegistry()
         let overVPN = try channel(local: "10.20.30.40")
         let upstreamOverVPN = try channel(local: "10.20.30.40")
@@ -68,6 +83,7 @@ final class OutboundSocketRegistryTests: XCTestCase {
     }
 
     func testAnAddressOnlySweepKeepsSocketsWhoseRouteMoved() throws {
+        defer { finishChannels() }
         let registry = makeRegistry()
         let addressGone = try channel(local: "10.20.30.40")
         let routeMoved = try channel(local: "10.20.30.41")
@@ -84,6 +100,7 @@ final class OutboundSocketRegistryTests: XCTestCase {
     /// A socket that connected over a path a transition then removed is
     /// closed when it registers, whenever its setup started.
     func testASocketWhosePathIsGoneWhenItRegistersIsRetired() throws {
+        defer { finishChannels() }
         let registry = makeRegistry()
         strand("10.20.30.40", "interface_changed")
         let late = try channel(local: "10.20.30.40")
@@ -101,6 +118,7 @@ final class OutboundSocketRegistryTests: XCTestCase {
     /// A burst of retirements for one target is one event and a summary,
     /// not one event each: the event log is bounded and shared.
     func testABurstOfRetirementsForOneTargetCoalesces() throws {
+        defer { finishChannels() }
         let registry = makeRegistry()
         strand("10.20.30.40")
         for _ in 0..<5 {
@@ -110,6 +128,7 @@ final class OutboundSocketRegistryTests: XCTestCase {
     }
 
     func testAClosedSocketLeavesTheRegistry() throws {
+        defer { finishChannels() }
         let registry = makeRegistry()
         let socket = try channel()
         try open(registry, socket)
@@ -121,6 +140,7 @@ final class OutboundSocketRegistryTests: XCTestCase {
     }
 
     func testAFullRegistryClosesAndRefusesTheSocket() throws {
+        defer { finishChannels() }
         let registry = makeRegistry(capacity: 1)
         let tracked = try channel(), overflow = try channel()
         try open(registry, tracked)
@@ -134,6 +154,7 @@ final class OutboundSocketRegistryTests: XCTestCase {
     }
 
     func testRoutingDirectClosesEveryUpstreamSocketAndNoDirectOne() throws {
+        defer { finishChannels() }
         let registry = makeRegistry()
         let upstream = try channel(), direct = try channel()
         try open(registry, upstream, route: .upstream)
@@ -148,6 +169,7 @@ final class OutboundSocketRegistryTests: XCTestCase {
     func testASocketWithoutAddressesIsNeverJudged() throws {
         let registry = makeRegistry()
         let unconnected = EmbeddedChannel()
+        defer { XCTAssertNoThrow(try unconnected.finish()) }
         try open(registry, unconnected)
         paths.withLockedValue { $0[""] = .stranded("address_gone") }
         XCTAssertEqual(registry.closeStranded(), .init())

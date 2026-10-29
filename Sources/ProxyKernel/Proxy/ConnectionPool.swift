@@ -170,20 +170,59 @@ package struct StreamingExchangeAttempt {
     package let result: EventLoopFuture<StreamingExchangeResult>
 }
 
+/// An upstream connection and the pool's bookkeeping for it.
+///
+/// Its mutable fields are read and written from the pool's callers, the
+/// channel's loop and `CONNECTHandler`, so they live together behind one
+/// lock: a reader sees one consistent `Metadata`, never a field from before
+/// and another from after a change. That lock is a leaf: it is taken alone
+/// or with the pool lock already held (pool, then connection, never the
+/// reverse), and nothing runs under it but the field access. What the pool
+/// decides from these fields (whether an idle connection may be handed out
+/// or retired) is decided under the pool lock, which every `inUse` change
+/// the pool makes also holds.
 package final class PooledUpstreamConnection: @unchecked Sendable {
+    fileprivate struct Metadata {
+        var authenticated = false
+        /// Bumped by each `ConnectionPool.resetAuthentication`, so an
+        /// exchange that began before a reset cannot mark the connection
+        /// authenticated again when it ends.
+        var authGeneration: UInt64 = 0
+        var authMethod: String?
+        var inUse = false
+        var lastUsedAt = Date()
+        var isDedicatedTunnel = false
+    }
+
     package let id = UUID()
     package let proxy: UpstreamProxy
     package let channel: Channel
     package let createdAt = Date()
-    package fileprivate(set) var authenticated = false
-    package fileprivate(set) var authMethod: String?
-    package fileprivate(set) var inUse = false
-    package var lastUsedAt = Date()
-    package var isDedicatedTunnel = false
+    private let metadata = NIOLockedValueBox(Metadata())
+    package fileprivate(set) var authenticated: Bool {
+        get { metadata.withLockedValue { $0.authenticated } }
+        set { metadata.withLockedValue { $0.authenticated = newValue } }
+    }
+    package var authMethod: String? { metadata.withLockedValue { $0.authMethod } }
+    package fileprivate(set) var inUse: Bool {
+        get { metadata.withLockedValue { $0.inUse } }
+        set { metadata.withLockedValue { $0.inUse = newValue } }
+    }
+    package var lastUsedAt: Date {
+        get { metadata.withLockedValue { $0.lastUsedAt } }
+        set { metadata.withLockedValue { $0.lastUsedAt = newValue } }
+    }
+    /// Set by the pool before it publishes a dedicated tunnel, never after.
+    /// Package-settable so tests can build synthetic states for the pure
+    /// filters.
+    package var isDedicatedTunnel: Bool {
+        get { metadata.withLockedValue { $0.isDedicatedTunnel } }
+        set { metadata.withLockedValue { $0.isDedicatedTunnel = newValue } }
+    }
     /// The runtime transition registry's record of it, set before the pool
-    /// publishes it (#156). Retired once a confirmed-VPN-transition sweep
-    /// closed it: whatever its exchange then fails with is the sweep's
-    /// doing, not the upstream's.
+    /// publishes it (#156), and never again. Retired once a
+    /// confirmed-VPN-transition sweep closed it: whatever its exchange then
+    /// fails with is the sweep's doing, not the upstream's.
     package fileprivate(set) var transitionTicket: TransitionTicket?
 
     /// Whether a VPN-transition sweep closed it.
@@ -195,9 +234,45 @@ package final class PooledUpstreamConnection: @unchecked Sendable {
     }
 
     package func markAuthenticated(authMethod: String?) {
-        authenticated = true
-        if let authMethod {
-            self.authMethod = authMethod
+        metadata.withLockedValue { state in
+            state.authenticated = true
+            if let authMethod {
+                state.authMethod = authMethod
+            }
+        }
+    }
+
+    /// One consistent copy of the fields, for a decision that reads several.
+    fileprivate var snapshot: Metadata { metadata.withLockedValue { $0 } }
+
+    fileprivate func update<T>(_ body: (inout Metadata) -> T) -> T {
+        metadata.withLockedValue(body)
+    }
+
+    /// Whether it is authenticated, and the reset generation that answer
+    /// belongs to; hand the generation back to `markAuthenticated(since:)`.
+    fileprivate func authenticationState() -> (authenticated: Bool, generation: UInt64) {
+        metadata.withLockedValue { ($0.authenticated, $0.authGeneration) }
+    }
+
+    /// An exchange that began at `generation` succeeded. It marks the
+    /// connection authenticated only if no reset came in between; the auth
+    /// method it used is recorded either way, since that is what it used.
+    fileprivate func markAuthenticated(since generation: UInt64, authMethod: String?) {
+        metadata.withLockedValue { state in
+            if state.authGeneration == generation {
+                state.authenticated = true
+            }
+            if let authMethod {
+                state.authMethod = authMethod
+            }
+        }
+    }
+
+    fileprivate func resetAuthentication() {
+        metadata.withLockedValue { state in
+            state.authenticated = false
+            state.authGeneration &+= 1
         }
     }
 
@@ -559,31 +634,37 @@ package final class ConnectionPool: @unchecked Sendable {
         olderThan timeout: TimeInterval
     ) -> Set<UUID> {
         let cutoff = Date().addingTimeInterval(-timeout)
-        return Set(connections.filter { !$0.inUse && !$0.isDedicatedTunnel && $0.lastUsedAt < cutoff }.map(\.id))
+        return Set(connections.filter {
+            let state = $0.snapshot
+            return !state.inUse && !state.isDedicatedTunnel && state.lastUsedAt < cutoff
+        }.map(\.id))
     }
 
+    /// Chooses and removes the stalled connections in one hold of the pool
+    /// lock, so an acquisition can never hand one out after it was chosen;
+    /// the channels close, and the log lines go out, after the lock is
+    /// released.
     @discardableResult
     package func closeStalledConnections(olderThan timeout: TimeInterval) -> Int {
-        let snapshot = lock.withLock { Array(allConnections.values) }
-        let staleIDs = Self.stalledConnectionIDs(from: snapshot, olderThan: timeout)
-        guard !staleIDs.isEmpty else { return 0 }
-
-        for connection in snapshot where staleIDs.contains(connection.id) {
+        let stale = lock.withLock {
+            retireConnectionsLocked(ids: Self.stalledConnectionIDs(from: allConnections.values, olderThan: timeout))
+        }
+        for connection in stale {
             connection.channel.close(mode: .all, promise: nil)
             logger.log(.warning, "Closed stalled upstream connection to \(connection.proxy.endpoint).", category: .proxy)
         }
-        lock.withLockVoid {
-            removeConnectionsLocked(ids: staleIDs)
-        }
-        return staleIDs.count
+        return stale.count
     }
 
     // MARK: - Pool management
 
+    /// Every connection in the pool authenticates again on its next
+    /// exchange, including one whose exchange is in flight now: when that
+    /// exchange ends it does not mark the connection authenticated again.
     package func resetAuthentication() {
         lock.withLockVoid {
             for connection in allConnections.values {
-                connection.authenticated = false
+                connection.resetAuthentication()
             }
         }
     }
@@ -639,20 +720,20 @@ package final class ConnectionPool: @unchecked Sendable {
     /// New control-plane callers (listener recycle, proxy-config restart) should pass
     /// `.allButDedicated` or `.idleOnly` to avoid tearing down active client-owned tunnels.
     /// See `docs/design-vpn-flap-resilience.md` for the policy.
+    ///
+    /// The connections are chosen and removed in one hold of the pool lock,
+    /// so a concurrent acquisition either took an idle connection first (it
+    /// is then in use, and `.idleOnly` keeps it) or can no longer find it.
+    /// The channels close after the lock is released.
     @discardableResult
     package func closeAll(scope: CloseScope = .all) -> Int {
-        let snapshot = lock.withLock { Array(allConnections.values) }
-        let closeIDs = Self.connectionIDsToClose(from: snapshot, scope: scope)
-        guard !closeIDs.isEmpty else { return 0 }
-
-        for connection in snapshot where closeIDs.contains(connection.id) {
+        let closing = lock.withLock {
+            retireConnectionsLocked(ids: Self.connectionIDsToClose(from: allConnections.values, scope: scope))
+        }
+        for connection in closing {
             connection.channel.close(mode: .all, promise: nil)
         }
-
-        lock.withLockVoid {
-            removeConnectionsLocked(ids: closeIDs)
-        }
-        return closeIDs.count
+        return closing.count
     }
 
     /// The runtime's outbound socket registry, for a caller dialing DIRECT
@@ -672,7 +753,10 @@ package final class ConnectionPool: @unchecked Sendable {
         case .allButDedicated:
             return Set(connections.lazy.filter { !$0.isDedicatedTunnel }.map(\.id))
         case .idleOnly:
-            return Set(connections.lazy.filter { !$0.inUse && !$0.isDedicatedTunnel }.map(\.id))
+            return Set(connections.lazy.filter {
+                let state = $0.snapshot
+                return !state.inUse && !state.isDedicatedTunnel
+            }.map(\.id))
         }
     }
 
@@ -695,19 +779,21 @@ package final class ConnectionPool: @unchecked Sendable {
     ) -> EventLoopFuture<PooledUpstreamConnection> {
         let config = configProvider()
         let maxConns = config.maxConnections
+        var retired: [PooledUpstreamConnection] = []
         let result: AcquireResult = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
-            pruneExpiredIdleConnectionsLocked(now: .now)
+            retired = pruneExpiredIdleConnectionsLocked(now: .now)
             if !preferFreshConnection {
                 while let existing = idleConnections[proxy.id]?.popLast() {
                     guard allConnections[existing.id] != nil else { continue }
                     if isConnectionExpired(existing, now: .now) || !existing.channel.isActive || existing.wasRetiredByVPNTransition {
-                        existing.channel.close(mode: .all, promise: nil)
-                        removeConnectionLocked(id: existing.id)
+                        retired.append(contentsOf: retireConnectionsLocked(ids: [existing.id]))
                         continue
                     }
-                    existing.inUse = true
-                    existing.lastUsedAt = .now
+                    existing.update { state in
+                        state.inUse = true
+                        state.lastUsedAt = .now
+                    }
                     if selects { lastSelectedUpstreamID = proxy.id }
                     return .idle(existing)
                 }
@@ -719,6 +805,9 @@ package final class ConnectionPool: @unchecked Sendable {
             if selects { lastSelectedUpstreamID = proxy.id }
             preconditionCapacityLocked(maxConnections: maxConns)
             return .needsNew
+        }
+        for connection in retired {
+            connection.channel.close(mode: .all, promise: nil)
         }
 
         switch result {
@@ -742,9 +831,10 @@ package final class ConnectionPool: @unchecked Sendable {
         config: ProxyConfig
     ) -> EventLoopFuture<(PooledUpstreamConnection, ProxyConfig)> {
         let maxConns = config.maxConnections
+        var retired: [PooledUpstreamConnection] = []
         let result: AcquireResult = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
-            pruneExpiredIdleConnectionsLocked(now: .now)
+            retired = pruneExpiredIdleConnectionsLocked(now: .now)
             guard allConnections.count + pendingConnectionCount < maxConns else {
                 return .exhausted
             }
@@ -752,6 +842,9 @@ package final class ConnectionPool: @unchecked Sendable {
             lastSelectedUpstreamID = proxy.id
             preconditionCapacityLocked(maxConnections: maxConns)
             return .needsNew
+        }
+        for connection in retired {
+            connection.channel.close(mode: .all, promise: nil)
         }
 
         switch result {
@@ -761,8 +854,7 @@ package final class ConnectionPool: @unchecked Sendable {
             return group.next().makeFailedFuture(ConnectionPoolError.poolExhausted)
         case .needsNew:
             return makeRawConnection(to: proxy, target: target).map { conn in
-                conn.isDedicatedTunnel = true
-                return (conn, config)
+                (conn, config)
             }.always { [weak self] _ in
                 self?.lock.withLockVoid {
                     self?.pendingConnectionCount -= 1
@@ -776,24 +868,40 @@ package final class ConnectionPool: @unchecked Sendable {
         guard keepAlive, connection.channel.isActive, !isConnectionExpired(connection, now: .now) else {
             connection.channel.close(mode: .all, promise: nil)
             lock.withLockVoid {
-                connection.lastUsedAt = .now
-                connection.inUse = false
+                connection.update { state in
+                    state.lastUsedAt = .now
+                    state.inUse = false
+                }
                 self.removeConnectionLocked(id: connection.id)
             }
             return
         }
 
-        lock.withLockVoid {
-            connection.lastUsedAt = .now
-            connection.inUse = false
+        let pooled: Bool = lock.withLock {
+            connection.update { state in
+                state.lastUsedAt = .now
+                state.inUse = false
+            }
+            // A connection retired while it was in use (`closeAll`, a close
+            // that already landed) stays out: idle means a pool member.
+            guard self.allConnections[connection.id] != nil else { return false }
             self.idleConnections[connection.proxy.id, default: []].append(connection)
+            return true
+        }
+        if !pooled {
+            // Whatever retired it closes it; this only makes sure nothing
+            // outside the pool is left open.
+            connection.channel.close(mode: .all, promise: nil)
         }
     }
 
     private func makeRawConnection(to proxy: UpstreamProxy, target: String) -> EventLoopFuture<PooledUpstreamConnection> {
         return connectToUpstreamProxy(proxy)
             .flatMapThrowing { [weak self] channel in
-                let connection = try Self.insert(channel, proxy: proxy, target: target, into: self)
+                // Only dedicated CONNECT tunnels dial raw; classified before
+                // the pool publishes it, so no `closeAll(scope:
+                // .allButDedicated)` can take it for a pooled connection.
+                let connection = try Self.insert(channel, proxy: proxy, target: target, into: self, dedicatedTunnel: true)
                 self?.logger.log(.info, "Connected to upstream proxy \(proxy.endpoint) (raw).", category: .proxy)
                 return connection
             }
@@ -803,13 +911,17 @@ package final class ConnectionPool: @unchecked Sendable {
     /// dial was in flight (shutdown, a config restart) closes the channel
     /// and fails the dial: nothing else would ever track or close it (#159).
     static func insert(
-        _ channel: Channel, proxy: UpstreamProxy, target: String, into pool: ConnectionPool?, selects: Bool = true
+        _ channel: Channel, proxy: UpstreamProxy, target: String, into pool: ConnectionPool?, selects: Bool = true,
+        dedicatedTunnel: Bool = false
     ) throws -> PooledUpstreamConnection {
         guard let pool else {
             channel.close(mode: .all, promise: nil)
             throw ChannelError.ioOnClosedChannel
         }
         let connection = PooledUpstreamConnection(proxy: proxy, channel: channel)
+        if dedicatedTunnel {
+            connection.isDedicatedTunnel = true
+        }
         try pool.insertDialedConnection(connection, target: target, selects: selects)
         return connection
     }
@@ -836,7 +948,8 @@ package final class ConnectionPool: @unchecked Sendable {
     /// tracks it. A path a VPN transition removed while it connected (or a
     /// full registry) closes it instead, reports it, and fails the
     /// acquisition locally (#156). `target` is what the request asked for,
-    /// sanitized here.
+    /// sanitized here. A dedicated tunnel arrives already marked: once the
+    /// lock below is released, any caller can see it.
     func insertDialedConnection(_ connection: PooledUpstreamConnection, target: String, selects: Bool = true) throws {
         connection.transitionTicket = try sockets.register(
             connection.channel, route: .upstream,
@@ -1070,14 +1183,14 @@ package final class ConnectionPool: @unchecked Sendable {
         proxy: UpstreamProxy,
         authSource: String?
     ) -> EventLoopFuture<UpstreamExchangeResponse> {
-        let isAuthenticated = self.lock.withLock { connection.authenticated }
+        let auth = connection.authenticationState()
         let promise = connection.channel.eventLoop.makePromise(of: UpstreamExchangeResponse.self)
         let handler = HTTPExchangeHandler(
             connection: connection,
             authenticatorProvider: self.authenticatorProvider,
             originalHead: head,
             body: requestBody,
-            isAuthenticated: isAuthenticated,
+            isAuthenticated: auth.authenticated,
             authSource: authSource,
             authHandshakeLimiter: authHandshakeLimiter,
             authLimitProvider: authHandshakeLimits,
@@ -1098,12 +1211,7 @@ package final class ConnectionPool: @unchecked Sendable {
             }
             return connection.channel.eventLoop.makeFailedFuture(error)
         }.flatMap { response in
-            self.lock.withLockVoid {
-                connection.authenticated = true
-                if let authMethod = response.authMethod {
-                    connection.authMethod = authMethod
-                }
-            }
+            connection.markAuthenticated(since: auth.generation, authMethod: response.authMethod)
             self.release(connection, keepAlive: response.head.isKeepAlive)
             return connection.channel.eventLoop.makeSucceededFuture(response)
         }
@@ -1117,14 +1225,14 @@ package final class ConnectionPool: @unchecked Sendable {
         proxy: UpstreamProxy,
         authSource: String?
     ) -> EventLoopFuture<StreamingExchangeResult> {
-        let isAuthenticated = self.lock.withLock { connection.authenticated }
+        let auth = connection.authenticationState()
         let promise = connection.channel.eventLoop.makePromise(of: StreamingExchangeResult.self)
         let handler = HTTPExchangeHandler(
             connection: connection,
             authenticatorProvider: self.authenticatorProvider,
             originalHead: head,
             body: requestBody,
-            isAuthenticated: isAuthenticated,
+            isAuthenticated: auth.authenticated,
             authSource: authSource,
             authHandshakeLimiter: authHandshakeLimiter,
             authLimitProvider: authHandshakeLimits,
@@ -1148,12 +1256,7 @@ package final class ConnectionPool: @unchecked Sendable {
             }
             return connection.channel.eventLoop.makeFailedFuture(error)
         }.flatMap { result in
-            self.lock.withLockVoid {
-                connection.authenticated = true
-                if let authMethod = result.authMethod {
-                    connection.authMethod = authMethod
-                }
-            }
+            connection.markAuthenticated(since: auth.generation, authMethod: result.authMethod)
             self.release(connection, keepAlive: result.keepAlive)
             return connection.channel.eventLoop.makeSucceededFuture(result)
         }
@@ -1417,16 +1520,24 @@ package final class ConnectionPool: @unchecked Sendable {
         logger.log(.notice, logMessage, category: .network)
     }
 
-    private func pruneExpiredIdleConnectionsLocked(now: Date) {
+    /// Removes the expired idle connections and returns them; the caller
+    /// closes them once the lock is released.
+    private func pruneExpiredIdleConnectionsLocked(now: Date) -> [PooledUpstreamConnection] {
         let expiredIDs = allConnections.values.compactMap { connection in
             (!connection.inUse && isConnectionExpired(connection, now: now)) ? connection.id : nil
         }
-        guard !expiredIDs.isEmpty else { return }
-        let expiredSet = Set(expiredIDs)
-        for id in expiredIDs {
-            allConnections[id]?.channel.close(mode: .all, promise: nil)
-        }
-        removeConnectionsLocked(ids: expiredSet)
+        return retireConnectionsLocked(ids: Set(expiredIDs))
+    }
+
+    /// Removes `ids` from the pool and returns the connections removed. The
+    /// choice of `ids` and this removal belong in one hold of the lock: in
+    /// between, an acquisition could hand out a connection being retired.
+    /// The caller closes the returned channels after releasing the lock, so
+    /// no close callback can run under it.
+    private func retireConnectionsLocked(ids: Set<UUID>) -> [PooledUpstreamConnection] {
+        let retired = ids.compactMap { allConnections[$0] }
+        removeConnectionsLocked(ids: ids)
+        return retired
     }
 
     private func insertConnectionLocked(_ connection: PooledUpstreamConnection) {

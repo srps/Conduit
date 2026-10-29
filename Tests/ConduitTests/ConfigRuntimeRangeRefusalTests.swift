@@ -11,8 +11,8 @@ import XCTest
 final class ConfigRuntimeRangeRefusalTests: XCTestCase {
     private var group: MultiThreadedEventLoopGroup!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
 
