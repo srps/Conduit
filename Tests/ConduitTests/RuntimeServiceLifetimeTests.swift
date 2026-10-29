@@ -85,6 +85,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         XCTAssertEqual(harness.core.parkedWaiterCount, 1, "the pull parked on its registration")
         let armed = await awaitState { harness.timing.armedTimerCount == 1 }
         XCTAssertTrue(armed)
+        guard queued, armed else { return abandonAfterFailure(harness) { parked.cancel(); subscription.cancel() } }
 
         harness.timing.fireAll()
         let timedOut = await thrownError { try await parked.value }
@@ -102,12 +103,85 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         let again = Task { try await subscription.next(deadline) }
         let againQueued = await awaitState { harness.scheduling.pendingCount > 0 }
         XCTAssertTrue(againQueued)
+        guard againQueued else { return abandonAfterFailure(harness) { again.cancel(); subscription.cancel() } }
         harness.scheduling.drainAll()
         XCTAssertEqual(harness.core.parkedWaiterCount, 1, "the next pull parks instead of reporting busy")
 
         subscription.cancel()
         harness.scheduling.drainAll()
         _ = await thrownError { try await again.value }
+    }
+
+    // MARK: - Abandoning after a failed gate
+
+    /// A guard that returns after a failed gate leaves no suspended pull, so its test fails instead of hanging the suite. A pull whose
+    /// task has not started is still abandoned: the task inherits this actor, so it cannot start before the test suspends.
+    @RuntimeActor func testAPullAbandonedBeforeItStartedEnds() async throws {
+        final class Answered: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            var value: Bool { lock.withLock { done } }
+            func set() { lock.withLock { done = true } }
+        }
+        let harness = try RuntimeServiceHarness()
+        let transport = harness.transport()
+        let client = try makeClient(harness, transport)
+        let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
+        let subscription = try await runCall(harness.scheduling) { try await client.subscribe(.live, deadline: deadline) }
+        _ = try await subscription.next(deadline)
+
+        let started = Answered()
+        let ended = Answered()
+        let parked = Task {
+            started.set()
+            defer { ended.set() }
+            _ = try await subscription.next(deadline)
+        }
+        XCTAssertFalse(started.value, "the pull has not started: its task inherits this actor, which the test still holds")
+
+        abandonAfterFailure(harness) {
+            parked.cancel()
+            subscription.cancel()
+        }
+        let pullEnded = await awaitState { ended.value }
+        XCTAssertTrue(pullEnded, "the abandoned pull ends instead of staying suspended")
+    }
+
+    /// The state a missed `fireAll` leaves: the pull is parked on its registration and its timer is armed, and nothing fires it.
+    @RuntimeActor func testAParkedPullAbandonedWithItsTimerUnfiredEnds() async throws {
+        final class Answered: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            var value: Bool { lock.withLock { done } }
+            func set() { lock.withLock { done = true } }
+        }
+        let harness = try RuntimeServiceHarness()
+        let transport = harness.transport()
+        let client = try makeClient(harness, transport)
+        let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
+        let subscription = try await runCall(harness.scheduling) { try await client.subscribe(.live, deadline: deadline) }
+        _ = try await subscription.next(deadline)
+
+        let ended = Answered()
+        let parked = Task {
+            defer { ended.set() }
+            _ = try await subscription.next(deadline)
+        }
+        let queued = await awaitState { harness.scheduling.pendingCount > 0 }
+        XCTAssertTrue(queued)
+        harness.scheduling.drainAll()
+        XCTAssertEqual(harness.core.parkedWaiterCount, 1, "the pull parked on its registration")
+        let armed = await awaitState { harness.timing.armedTimerCount == 1 }
+        XCTAssertTrue(armed)
+        guard queued, armed else { return abandonAfterFailure(harness) { parked.cancel(); subscription.cancel() } }
+
+        // No `fireAll`: a timer that armed just after its gate leaves exactly this state.
+        abandonAfterFailure(harness) {
+            parked.cancel()
+            subscription.cancel()
+        }
+        let pullEnded = await awaitState { ended.value }
+        XCTAssertTrue(pullEnded, "the abandoned pull ends although its timer was never fired")
     }
 
     @RuntimeActor func testAStalledOwnerHoldsItsReservationsAndRefillsAreBoundedByTheLane() async throws {
@@ -124,6 +198,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
             }
             let armed = await awaitState { harness.timing.armedTimerCount == 1 }
             XCTAssertTrue(armed)
+            guard armed else { return abandonAfterFailure(harness) { call.cancel() } }
             harness.timing.fireAll()
             let outcome = await thrownError { try await call.value }
             XCTAssertEqual(outcome, .notSent(.deadlineExpired), "the owner never claimed the call")
@@ -274,6 +349,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         XCTAssertEqual(harness.core.parkedWaiterCount, 1)
         let armed = await awaitState { harness.timing.armedTimerCount == 1 }
         XCTAssertTrue(armed)
+        guard queued, armed else { return abandonAfterFailure(harness) { parked.cancel(); subscription.cancel() } }
 
         parked.cancel()
         let cancelled = await thrownError { try await parked.value }
@@ -282,6 +358,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         XCTAssertTrue(held, "the cancelled timer's completion is held")
         XCTAssertEqual(harness.scheduling.pendingCount, 1, "the registration's cleanup is queued")
         XCTAssertEqual(transport.lanes.inFlight(.stream), 1, "the timer and the cleanup still hold the reservation")
+        guard held else { return abandonAfterFailure(harness) { subscription.cancel() } }
         let refusedWhileHeld = await thrownError { try await subscription.next(deadline) }
         XCTAssertEqual(refusedWhileHeld, .readAborted(.transportBusy))
 
@@ -498,6 +575,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         }
         let queued = await awaitState { harness.scheduling.pendingCount > 0 }
         XCTAssertTrue(queued)
+        guard queued else { return abandonAfterFailure(harness) { waiter.cancel() } }
         harness.scheduling.drainAll()
 
         XCTAssertEqual(core.openSubscriberCount, 0, "the subscriber registered inside the lost open is removed")
@@ -682,7 +760,10 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         XCTAssertTrue(armed)
         let queued = await awaitState { harness.scheduling.pendingCount == 1 }
         XCTAssertTrue(queued)
-        XCTAssertTrue(harness.scheduling.runNext(), "the round runs and resolves the wait")
+        guard armed, queued else { return abandonAfterFailure(harness) { waiter.cancel() } }
+        let ran = harness.scheduling.runNext()
+        XCTAssertTrue(ran, "the round runs and resolves the wait")
+        guard ran else { return abandonAfterFailure(harness) { waiter.cancel() } }
         XCTAssertTrue(freed.value, "the resolved wait released the closure that captured its request")
         XCTAssertEqual(lanes.inFlight(.read), 1, "the held timer still holds the lane")
 
@@ -748,7 +829,10 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         XCTAssertTrue(armed)
         let queued = await awaitState { harness.scheduling.pendingCount == 1 }
         XCTAssertTrue(queued)
-        XCTAssertTrue(harness.scheduling.runNext(), "the round runs and parks")
+        guard armed, queued else { return abandonAfterFailure(harness) { waiter.cancel() } }
+        let ran = harness.scheduling.runNext()
+        XCTAssertTrue(ran, "the round runs and parks")
+        guard ran else { return abandonAfterFailure(harness) { waiter.cancel() } }
         XCTAssertNil(verdict.lockWasFree, "a parked wait still holds its closure")
 
         harness.timing.fireAll()

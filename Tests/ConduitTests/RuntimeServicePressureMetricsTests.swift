@@ -185,6 +185,9 @@ final class RuntimeServicePressureMetricsTests: XCTestCase {
         _ = try await parkStreamPulls(harness, transport, count: harness.limits.streamLaneCapacity)
         let extra = try await openStream(harness, transport, id: 700)
         let deadline = RuntimeDeadline.after(.seconds(60), from: harness.timing.now)
+        guard transport.lanes.inFlight(.stream) == harness.limits.streamLaneCapacity else {
+            return XCTFail("the stream lane is full of parked pulls before the extra pull")
+        }
         do {
             _ = try await extra.next(deadline)
             XCTFail("a pull beyond the stream lane must be refused")
