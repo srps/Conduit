@@ -1,0 +1,230 @@
+{
+  "fingerprint_before": "82315c5308a1869e96cc360917f2263ab8e85ad3a2db01f817e02a0cb974a441",
+  "steps": [
+    {
+      "name": "Build",
+      "exit": 0,
+      "seconds": 5.99,
+      "log": "01.log"
+    },
+    {
+      "name": "Kernel import and process fence",
+      "exit": 0,
+      "seconds": 23.14,
+      "log": "02.log"
+    },
+    {
+      "name": "Third-party license notices",
+      "exit": 0,
+      "seconds": 0.83,
+      "log": "03.log"
+    },
+    {
+      "name": "Event catalogue",
+      "exit": 0,
+      "seconds": 87.34,
+      "log": "04.log"
+    },
+    {
+      "name": "Decision records",
+      "exit": 0,
+      "seconds": 5.29,
+      "log": "05.log"
+    },
+    {
+      "name": "Run tests",
+      "exit": 0,
+      "seconds": 290.37,
+      "log": "06.log"
+    },
+    {
+      "name": "App entry sequencing (stand-in modules, child processes)",
+      "exit": 0,
+      "seconds": 12.27,
+      "log": "07.log"
+    },
+    {
+      "name": "Kerberos worker entry points",
+      "exit": 0,
+      "seconds": 2.01,
+      "log": "08.log"
+    },
+    {
+      "name": "Install script argument parsing",
+      "exit": 0,
+      "seconds": 0.71,
+      "log": "09.log"
+    },
+    {
+      "name": "Dev bundle packaging (stand-in tools, nothing signed or installed)",
+      "exit": 0,
+      "seconds": 3.19,
+      "log": "10.log"
+    },
+    {
+      "name": "Signing identity script keeps the key secret",
+      "exit": 0,
+      "seconds": 1.04,
+      "log": "11.log"
+    },
+    {
+      "name": "Self-update end to end (stand-in host, local feed)",
+      "exit": 0,
+      "seconds": 62.26,
+      "log": "12.log"
+    },
+    {
+      "name": "Release identity script keeps the keys secret",
+      "exit": 0,
+      "seconds": 9.88,
+      "log": "13.log"
+    },
+    {
+      "name": "Update feed release notes render",
+      "exit": 0,
+      "seconds": 0.13,
+      "log": "14.log"
+    },
+    {
+      "name": "Security boundary regressions",
+      "exit": 0,
+      "seconds": 3.66,
+      "log": "15.log"
+    },
+    {
+      "name": "Perf gate",
+      "exit": 0,
+      "seconds": 15.58,
+      "log": "16.log"
+    },
+    {
+      "name": "Simulator outcomes and full scenario suite",
+      "exit": 0,
+      "seconds": 164.82,
+      "log": "17.log"
+    },
+    {
+      "name": "HTTP request-target preservation",
+      "exit": 0,
+      "seconds": 5.57,
+      "log": "18.log"
+    },
+    {
+      "name": "Forced routing regression",
+      "exit": 0,
+      "seconds": 0.66,
+      "log": "19.log"
+    },
+    {
+      "name": "Resource bounds and standalone shutdown regressions",
+      "exit": 0,
+      "seconds": 6.38,
+      "log": "20.log"
+    }
+  ],
+  "fingerprint_after": "82315c5308a1869e96cc360917f2263ab8e85ad3a2db01f817e02a0cb974a441",
+  "complete": true,
+  "stable": true,
+  "logs": [
+    {
+      "name": "01.log",
+      "bytes": 50978,
+      "sha256": "a90657ef34066c98ae27188fedf0ae07fe7e5b70f5f50a98315b46b95963ebb3"
+    },
+    {
+      "name": "02.log",
+      "bytes": 291,
+      "sha256": "6c2c55b845198fdc5c35bfd7321e37cd6efa22d71a6e303e203e52d4a7220abe"
+    },
+    {
+      "name": "03.log",
+      "bytes": 174,
+      "sha256": "7e15164176391c75954cf328b64c17274f37c2100046fa8ea5cb842623716c17"
+    },
+    {
+      "name": "04.log",
+      "bytes": 184,
+      "sha256": "659869075207e1ad31794af2cc2b2b19a0bb83538edad8642d0c75f55cf57389"
+    },
+    {
+      "name": "05.log",
+      "bytes": 196,
+      "sha256": "1cbc7bfbac559b4f19830f38c78f013b426221511a832734104530df80444e3b"
+    },
+    {
+      "name": "06.log",
+      "bytes": 1235714,
+      "sha256": "5fdfe52e19d53790cefe515ffc7e30ed53826bbff7098356e128b216f5d79780"
+    },
+    {
+      "name": "07.log",
+      "bytes": 433,
+      "sha256": "d4e931c6be7b5eb51bb0905a201aed64b067e747cbba24797c42ba2361a6b0e2"
+    },
+    {
+      "name": "08.log",
+      "bytes": 79,
+      "sha256": "a263b2bdfe74c3d95a4356abfbfa546451ab788aae8fac034ba49a225fa23082"
+    },
+    {
+      "name": "09.log",
+      "bytes": 825,
+      "sha256": "312e3bd6426322f1a220515ab1e4892ad65200688a1872e3fe70256106c379ec"
+    },
+    {
+      "name": "10.log",
+      "bytes": 1643,
+      "sha256": "8d2a31af972ceea509b14fe1fd5a51a530798cba5189fccf5892b1785cff0668"
+    },
+    {
+      "name": "11.log",
+      "bytes": 605,
+      "sha256": "2319a08076be9bd1c00bfbe7e620e1e33a5fb5f0cf7cbc385c5c73c25bc41b23"
+    },
+    {
+      "name": "12.log",
+      "bytes": 1109,
+      "sha256": "bdc7b898e6d6ff732637199b2808edbe3e3bdf0d11c42f26cc8f829799e6aac9"
+    },
+    {
+      "name": "13.log",
+      "bytes": 1505,
+      "sha256": "e5b2bfd0c13581f8169202a5d9d18d3ff56df77d8f1019635f9f3ef5cb4bd5dc"
+    },
+    {
+      "name": "14.log",
+      "bytes": 611,
+      "sha256": "109c9100970f9021495b96167ee95a10d99c5efc15c9e8611428f8eafdff93e2"
+    },
+    {
+      "name": "15.log",
+      "bytes": 9020,
+      "sha256": "9d37b0d40b3643acfd977ece997da1dd85d2888d70932e467dae43b0393e69cf"
+    },
+    {
+      "name": "16.log",
+      "bytes": 4478,
+      "sha256": "c9318aad5eb44c33062578d3cee992d44e07ae55cf28eed1083b3b388ebbd61c"
+    },
+    {
+      "name": "17.log",
+      "bytes": 264214,
+      "sha256": "40d67b484a0e9e1554bd7db32b3a9517ea9b8ac8df970612287a521a393cbb40"
+    },
+    {
+      "name": "18.log",
+      "bytes": 116,
+      "sha256": "d882991f898256265205d875b6a4c286e4d090a2aa0b7108dbc6ad2d0e315c66"
+    },
+    {
+      "name": "19.log",
+      "bytes": 4369,
+      "sha256": "725fef0215002380538d414f0f67a55a23c0005bd5828a570f9b39fe48c78fde"
+    },
+    {
+      "name": "20.log",
+      "bytes": 5401,
+      "sha256": "ce2baa6dc795e3d8df253ad623eecd68f9bff46651cff2eedae8f2bc4a8d82ee"
+    }
+  ]
+}

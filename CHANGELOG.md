@@ -7,13 +7,16 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
-The 0.6.0 notes below are prepared for packaging. 0.6.0 is not published, and
-0.5.8 is the latest release. The owner's installed 0.6.0 candidate passed a
+The 0.6.1 notes below are prepared for packaging. 0.5.8 is the latest published
+release. The owner's installed 0.6.0 candidate passed a
 normal Stop/Start/Quit/relaunch check on the owner's machine
 ([verification](./docs/verification-runtime-installed-2026-10-29.md)). The
-release-certificate signed tag build and publication remain.
+release-certificate signed tag build produced an unpublished draft. Publication
+is held for the [NIO concurrency repairs](./docs/verification-nio-concurrency-2026-10-29.md)
+and their verification; that earlier installed candidate does not contain them.
+The 0.6.0 tag is preserved, and 0.6.1 is the corrected candidate.
 
-## 0.6.0
+## 0.6.1
 
 The app now runs on the one runtime host that `ConduitDaemon` also uses (#186).
 It is an app-only update: helper protocol v5 and the helper's behaviour are
@@ -22,6 +25,17 @@ the platform-state journal format and the v1 control protocol are unchanged, so
 0.5.8 can still read what this version writes. The production daemon and its
 socket, the remaining event families and the follow-up hardening work are not
 part of this release.
+
+### Fixed
+
+- Pool cleanup retires connections before closing them, so another request cannot
+  acquire a connection already chosen for closure. Newly connected dedicated
+  tunnels are classified before becoming visible to cleanup. An authentication
+  reset during a buffered or streaming response remains effective for the next
+  request on the same connection.
+- NIO test fixtures respect thread confinement and close their owned resources.
+  VPN re-sweep tests control their delays, and CI treats NIO threading and
+  shutdown misuse as failures.
 
 ### Changed
 

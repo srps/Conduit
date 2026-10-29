@@ -1,0 +1,89 @@
+{
+  "originals": {
+    "Sources/ProxyKernel/Proxy/ConnectionPool.swift": "f9a5d64d8dbce39b2f3e1b74f364d5193faa10f0591dea9270dbd20bc13610f9",
+    "Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift": "0deb9f32e1f6e716e08a374944b0167cb394497338ae0a4763d4a87a718693e6"
+  },
+  "cases": [
+    {
+      "name": "retire-after-close",
+      "exit": 1,
+      "semantic_failure": true,
+      "failed_cases": [
+        "Test Case '-[ConduitTests.ConnectionPoolConcurrencyTests testCloseAllRemovesEveryConnectionItRetiresBeforeClosingAny]' failed (1.333 seconds).",
+        "Test Case '-[ConduitTests.ConnectionPoolConcurrencyTests testCloseStalledRemovesEveryConnectionItRetiresBeforeClosingAny]' failed (0.002 seconds)."
+      ],
+      "errors": [
+        "Tests/ConduitTests/ConnectionPoolConcurrencyTests.swift:35: error: -[ConduitTests.ConnectionPoolConcurrencyTests testCloseAllRemovesEveryConnectionItRetiresBeforeClosingAny] : XCTAssertTrue failed - a connection being retired was still acquirable when a close began",
+        "Tests/ConduitTests/ConnectionPoolConcurrencyTests.swift:35: error: -[ConduitTests.ConnectionPoolConcurrencyTests testCloseAllRemovesEveryConnectionItRetiresBeforeClosingAny] : XCTAssertTrue failed - a connection being retired was still acquirable when a close began",
+        "Tests/ConduitTests/ConnectionPoolConcurrencyTests.swift:42: error: -[ConduitTests.ConnectionPoolConcurrencyTests testCloseStalledRemovesEveryConnectionItRetiresBeforeClosingAny] : XCTAssertTrue failed - a connection being retired was still acquirable when a close began",
+        "Tests/ConduitTests/ConnectionPoolConcurrencyTests.swift:42: error: -[ConduitTests.ConnectionPoolConcurrencyTests testCloseStalledRemovesEveryConnectionItRetiresBeforeClosingAny] : XCTAssertTrue failed - a connection being retired was still acquirable when a close began"
+      ]
+    },
+    {
+      "name": "dedicated-after-publication",
+      "exit": 1,
+      "semantic_failure": true,
+      "failed_cases": [
+        "Test Case '-[ConduitTests.ConnectionPoolConcurrencyTests testAControlPlaneSweepAtPublicationKeepsTheNewDedicatedTunnel]' failed (0.869 seconds)."
+      ],
+      "errors": [
+        "Tests/ConduitTests/ConnectionPoolConcurrencyTests.swift:122: error: -[ConduitTests.ConnectionPoolConcurrencyTests testAControlPlaneSweepAtPublicationKeepsTheNewDedicatedTunnel] : XCTAssertEqual failed: (\"[1]\") is not equal to (\"[0]\") - the sweep at publication closes nothing",
+        "Tests/ConduitTests/ConnectionPoolConcurrencyTests.swift:124: error: -[ConduitTests.ConnectionPoolConcurrencyTests testAControlPlaneSweepAtPublicationKeepsTheNewDedicatedTunnel] : XCTAssertTrue failed - the new tunnel survives the sweep",
+        "Tests/ConduitTests/ConnectionPoolConcurrencyTests.swift:125: error: -[ConduitTests.ConnectionPoolConcurrencyTests testAControlPlaneSweepAtPublicationKeepsTheNewDedicatedTunnel] : XCTAssertEqual failed: (\"[]\") is not equal to (\"[29AC749A-23B7-4EFF-8149-F397B90A1089]\")",
+        "Tests/ConduitTests/ConnectionPoolConcurrencyTests.swift:127: error: -[ConduitTests.ConnectionPoolConcurrencyTests testAControlPlaneSweepAtPublicationKeepsTheNewDedicatedTunnel] : XCTAssertEqual failed: (\"0\") is not equal to (\"1\")"
+      ]
+    },
+    {
+      "name": "retire-noop-cleanup-guard",
+      "exit": 1,
+      "semantic_failure": true,
+      "failed_cases": [
+        "Test Case '-[ConduitTests.ConnectionPoolConcurrencyTests testCloseAllRemovesEveryConnectionItRetiresBeforeClosingAny]' failed (0.980 seconds)."
+      ],
+      "errors": [
+        "Tests/ConduitTests/ConnectionPoolConcurrencyTests.swift:35: error: -[ConduitTests.ConnectionPoolConcurrencyTests testCloseAllRemovesEveryConnectionItRetiresBeforeClosingAny] : XCTAssertEqual failed: (\"0\") is not equal to (\"2\")",
+        "Tests/ConduitTests/ConnectionPoolConcurrencyTests.swift:35: error: -[ConduitTests.ConnectionPoolConcurrencyTests testCloseAllRemovesEveryConnectionItRetiresBeforeClosingAny] : XCTAssertEqual failed: (\"0\") is not equal to (\"2\") - every retired channel is closed",
+        "Tests/ConduitTests/ConnectionPoolConcurrencyTests.swift:35: error: -[ConduitTests.ConnectionPoolConcurrencyTests testCloseAllRemovesEveryConnectionItRetiresBeforeClosingAny] : XCTAssertTrue failed"
+      ]
+    },
+    {
+      "name": "recovery-judges-routes",
+      "exit": 1,
+      "semantic_failure": true,
+      "failed_cases": [
+        "Test Case '-[ConduitTests.VPNTunnelMigrationTests testAFlapRecoveryClosesOnlySocketsWhoseAddressIsGone]' failed (1.032 seconds)."
+      ],
+      "errors": [
+        "Tests/ConduitTests/VPNTunnelMigrationTests.swift:283: error: -[ConduitTests.VPNTunnelMigrationTests testAFlapRecoveryClosesOnlySocketsWhoseAddressIsGone] : XCTAssertTrue failed",
+        "Tests/ConduitTests/VPNTunnelMigrationTests.swift:284: error: -[ConduitTests.VPNTunnelMigrationTests testAFlapRecoveryClosesOnlySocketsWhoseAddressIsGone] : XCTAssertEqual failed: (\"[\"transition=flap_recovered phase=paths pass=1 upstream_closed=0 direct_closed=2 unchecked=0\"]\") is not equal to (\"[\"transition=flap_recovered phase=addresses pass=1 upstream_closed=0 direct_closed=1 unchecked=0\"]\")"
+      ]
+    },
+    {
+      "name": "owed-sweep-ignores-routes",
+      "exit": 1,
+      "semantic_failure": true,
+      "failed_cases": [
+        "Test Case '-[ConduitTests.VPNTunnelMigrationTests testAFlapHoldsThePendingReSweepsUntilItRecovers]' failed (7.257 seconds).",
+        "Test Case '-[ConduitTests.VPNTunnelMigrationTests testAReSweepClosesASocketWhosePathMovedAfterTheFirstPass]' failed (3.018 seconds)."
+      ],
+      "errors": [
+        "Tests/ConduitTests/VPNTunnelMigrationTests.swift:219: error: -[ConduitTests.VPNTunnelMigrationTests testAFlapHoldsThePendingReSweepsUntilItRecovers] : XCTUnwrap failed: expected non-nil value of type \"Bool\" - timed out [\"transition=disconnected phase=routing reason=user routing=upstream upstream_closed=0\", \"transition=disconnected phase=paths pass=0 upstream_closed=0 direct_closed=0 unchecked=0\", \"transition=connected phase=paths pass=0 upstream_closed=0 direct_closed=0 unchecked=0\"]",
+        "Tests/ConduitTests/VPNTunnelMigrationTests.swift:186: error: -[ConduitTests.VPNTunnelMigrationTests testAReSweepClosesASocketWhosePathMovedAfterTheFirstPass] : XCTUnwrap failed: expected non-nil value of type \"Bool\" - timed out [\"transition=disconnected phase=routing reason=user routing=upstream upstream_closed=0\", \"transition=disconnected phase=paths pass=0 upstream_closed=0 direct_closed=0 unchecked=0\", \"transition=connected phase=paths pass=0 upstream_closed=0 direct_closed=0 unchecked=0\"]"
+      ]
+    },
+    {
+      "name": "cancelled-sweep-closes",
+      "exit": 1,
+      "semantic_failure": true,
+      "failed_cases": [
+        "Test Case '-[ConduitTests.VPNTunnelMigrationTests testAFlapDuringASweepsCheckStopsItsClosures]' failed (1.281 seconds)."
+      ],
+      "errors": [
+        "Tests/ConduitTests/VPNTunnelMigrationTests.swift:250: error: -[ConduitTests.VPNTunnelMigrationTests testAFlapDuringASweepsCheckStopsItsClosures] : XCTAssertTrue failed",
+        "Tests/ConduitTests/VPNTunnelMigrationTests.swift:251: error: -[ConduitTests.VPNTunnelMigrationTests testAFlapDuringASweepsCheckStopsItsClosures] : XCTAssertFalse failed"
+      ]
+    }
+  ],
+  "exactly_restored": true,
+  "restored_exit": 0
+}

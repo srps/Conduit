@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Fail on NIO threading and lifecycle misuse, including subprocesses.
+  SWIFTNIO_STRICT: "1"
+
 jobs:
   build:
 

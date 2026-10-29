@@ -28,8 +28,11 @@ The runtime architecture program ([#186](https://github.com/srps/Conduit/issues/
 still the latest public release. The owner installed the locally signed 0.6.0
 candidate, which is now serving on the owner's machine and passed the
 [installed verification](./docs/verification-runtime-installed-2026-10-29.md).
-`VERSION` is 0.6.0, and the [CHANGELOG](./CHANGELOG.md) has versioned 0.6.0
-notes prepared for packaging. The signed tag build and publication are pending.
+`VERSION` is 0.6.1, and the [CHANGELOG](./CHANGELOG.md) has versioned 0.6.1
+notes prepared for packaging. The preserved 0.6.0 tag produced an unpublished draft.
+Publication is held for [NIO concurrency repairs and verification](./docs/verification-nio-concurrency-2026-10-29.md):
+embedded-fixture thread violations, a VPN test synchronization race, and production
+pool metadata/retirement races found during the audit. A new candidate is required.
 On `512a6b0` the Release job stalled under buffered test output; its cause is
 unknown. Test-only guards and a line-buffered Release test step followed, with
 production Source unchanged

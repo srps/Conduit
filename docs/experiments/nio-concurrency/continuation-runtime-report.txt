@@ -1,0 +1,33 @@
+==================
+WARNING: ThreadSanitizer: data race (pid=68913)
+  Write of size 8 at 0x00010e402e18 by thread T2:
+    #0 withUnsafeThrowingContinuation<A>(_:) /<compiler-generated> (handoff-repro:arm64+0x100004948)
+    #1 swift::runJobInEstablishedExecutorContext(swift::Job*) <null> (libswift_Concurrency.dylib:arm64e+0x2e14)
+
+  Previous read of size 8 at 0x00010e402e18 by thread T1:
+    #0 UnsafeContinuation.resume(returning:) /<compiler-generated> (handoff-repro:arm64+0x100004454)
+    #1 closure #1 in closure #1 in get<A>(_:_:) tsan-continuation-handoff-repro.swift:110 (handoff-repro:arm64+0x100004584)
+    #2 partial apply for closure #1 in closure #1 in get<A>(_:_:) /<compiler-generated> (handoff-repro:arm64+0x10000db4c)
+    #3 Resumer.run() tsan-continuation-handoff-repro.swift:91 (handoff-repro:arm64+0x100002c2c)
+    #4 closure #1 in Resumer.start() tsan-continuation-handoff-repro.swift:56 (handoff-repro:arm64+0x10000273c)
+    #5 partial apply for closure #1 in Resumer.start() /<compiler-generated> (handoff-repro:arm64+0x1000027c4)
+    #6 thunk for @escaping @callee_guaranteed @Sendable () -> () /<compiler-generated> (handoff-repro:arm64+0x10000c1d8)
+    #7 __NSThread__start__ <null> (Foundation:arm64e+0x53b88)
+
+  Location is heap block of size 1016 at 0x00010e402c00 allocated by main thread:
+    #0 malloc <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64e+0x67d68)
+    #1 _malloc_type_malloc_outlined <null> (libsystem_malloc.dylib:arm64e+0x1e6a4)
+    #2 swift::runJobInEstablishedExecutorContext(swift::Job*) <null> (libswift_Concurrency.dylib:arm64e+0x2e14)
+    #3 start <null> (dyld:arm64e+0x204e0)
+
+  Thread T2 (tid=848254, running) is a GCD worker thread
+
+  Thread T1 (tid=848253, running) created by main thread at:
+    #0 pthread_create <null> (libclang_rt.tsan_osx_dynamic.dylib:arm64e+0x33bac)
+    #1 -[NSThread startAndReturnError:] <null> (Foundation:arm64e+0xb1fec8)
+    #2 static HandoffRepro.main() tsan-continuation-handoff-repro.swift:165 (handoff-repro:arm64+0x1000085cc)
+    #3 swift::runJobInEstablishedExecutorContext(swift::Job*) <null> (libswift_Concurrency.dylib:arm64e+0x2e14)
+    #4 start <null> (dyld:arm64e+0x204e0)
+
+SUMMARY: ThreadSanitizer: data race /<compiler-generated> in withUnsafeThrowingContinuation<A>(_:)
+==================

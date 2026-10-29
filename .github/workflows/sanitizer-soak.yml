@@ -18,10 +18,11 @@ permissions:
   contents: read
 
 env:
-  # NIO ByteBuffer CoW reports are a known TSan false-positive class —
-  # see .tsan-suppressions for the full rationale. Real races in our own
-  # code carry ProxyKernel frames and are not suppressed.
+  # Existing NIO storage suppressions have a documented blind spot;
+  # see .tsan-suppressions for their scope and rationale.
   TSAN_OPTIONS: suppressions=${{ github.workspace }}/.tsan-suppressions
+  # NIO misuse crashes the run instead of warning (see swift.yml).
+  SWIFTNIO_STRICT: "1"
 
 jobs:
   asan:
