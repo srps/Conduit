@@ -534,12 +534,14 @@ final class AppStateHarnessTests: XCTestCase {
         let begun = ContinuousClock.now
         XCTAssertTrue(state.beginQuit())
         XCTAssertFalse(state.beginQuit(), "a second request joins the first")
-        Task { @MainActor in
+        let release = Task { @MainActor in
+            defer { held.hold.release() }
             try await Task.sleep(for: .milliseconds(100))
-            held.hold.release()
         }
         let result = await state.finishQuit()
-        XCTAssertLessThan(begun.duration(to: .now), .seconds(5), "the quit ended within its total")
+        let waited = begun.duration(to: .now)
+        try await release.value
+        XCTAssertLessThan(waited, .seconds(5), "the quit ended within its total")
         XCTAssertNil(result, "no host was built, so there was nothing to fence")
         await state.opening?.value
         try await Task.sleep(for: .milliseconds(200))
@@ -896,13 +898,15 @@ final class AppStateHarnessTests: XCTestCase {
         state.config.health.checkInterval = 53
         let begun = ContinuousClock.now
         XCTAssertTrue(state.beginQuit())
-        Task { @MainActor in
+        let release = Task { @MainActor in
+            defer { held.hold.release() }
             try await Task.sleep(for: .milliseconds(100))
-            held.hold.release()
         }
         let finished = await state.finishQuit()
+        let waited = begun.duration(to: .now)
+        try await release.value
         let result = try XCTUnwrap(finished)
-        XCTAssertLessThan(begun.duration(to: .now), .seconds(4), "the quit ended on the host's answer, not at its total")
+        XCTAssertLessThan(waited, .seconds(4), "the quit ended on the host's answer, not at its total")
         guard case .settled(.configurationSettled(let prior)) = result.priorUpdate, case .conflict = prior.runtime.write else {
             return XCTFail("the save out at the quit met the outside edit: \(result.priorUpdate)")
         }
@@ -988,11 +992,12 @@ final class AppStateHarnessTests: XCTestCase {
         let reached = await held.hold.waitUntilReached(within: .seconds(5))
         XCTAssertTrue(reached, "the admin write reached the store")
         XCTAssertTrue(state.beginQuit())
-        Task { @MainActor in
+        let release = Task { @MainActor in
+            defer { held.hold.release() }
             try await Task.sleep(for: .milliseconds(100))
-            held.hold.release()
         }
         let finished = await state.finishQuit()
+        try await release.value
         let result = try XCTUnwrap(finished)
         guard case .settled(.completed) = result.priorUpdate else {
             return XCTFail("the admin write settled as the quit's prior: \(result.priorUpdate)")

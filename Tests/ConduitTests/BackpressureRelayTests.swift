@@ -12,13 +12,13 @@ final class BackpressureRelayTests: XCTestCase {
 
     func testEmbeddedChannelWritabilityDefaultsToTrue() {
         let channel = EmbeddedChannel()
+        defer { XCTAssertNoThrow(try channel.finish()) }
         XCTAssertTrue(channel.isWritable, "New channels should be writable by default")
-        try? channel.close().wait()
     }
 
     func testAutoReadOptionToggle() throws {
         let channel = EmbeddedChannel()
-        defer { try? channel.close().wait() }
+        defer { XCTAssertNoThrow(try channel.finish()) }
 
         // Set autoRead to false
         try channel.setOption(ChannelOptions.autoRead, value: false).wait()
@@ -30,7 +30,7 @@ final class BackpressureRelayTests: XCTestCase {
     func testWritabilityChangedFires() throws {
         let handler = WritabilityTracker()
         let channel = EmbeddedChannel(handler: handler)
-        defer { try? channel.close().wait() }
+        defer { XCTAssertNoThrow(try channel.finish()) }
 
         // Manually fire writability changed
         channel.pipeline.fireChannelWritabilityChanged()

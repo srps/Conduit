@@ -10,12 +10,17 @@ final class TunnelExemptionTests: XCTestCase {
 
     func testDedicatedTunnelSurvivesStalledReaping() {
         let proxy = ProxyConfig.testFixture().enabledUpstreams[0]
+        let tunnelChannel = EmbeddedChannel(), pooledChannel = EmbeddedChannel()
+        defer {
+            XCTAssertNoThrow(try tunnelChannel.finish())
+            XCTAssertNoThrow(try pooledChannel.finish())
+        }
 
-        let tunnel = PooledUpstreamConnection(proxy: proxy, channel: EmbeddedChannel())
+        let tunnel = PooledUpstreamConnection(proxy: proxy, channel: tunnelChannel)
         tunnel.isDedicatedTunnel = true
         tunnel.lastUsedAt = Date.distantPast
 
-        let pooled = PooledUpstreamConnection(proxy: proxy, channel: EmbeddedChannel())
+        let pooled = PooledUpstreamConnection(proxy: proxy, channel: pooledChannel)
         pooled.lastUsedAt = Date.distantPast
 
         let stale = ConnectionPool.stalledConnectionIDs(from: [tunnel, pooled], olderThan: 0)
@@ -25,8 +30,10 @@ final class TunnelExemptionTests: XCTestCase {
 
     func testNonTunnelConnectionIsReaped() {
         let proxy = ProxyConfig.testFixture().enabledUpstreams[0]
+        let channel = EmbeddedChannel()
+        defer { XCTAssertNoThrow(try channel.finish()) }
 
-        let conn = PooledUpstreamConnection(proxy: proxy, channel: EmbeddedChannel())
+        let conn = PooledUpstreamConnection(proxy: proxy, channel: channel)
         conn.lastUsedAt = Date.distantPast
 
         let stale = ConnectionPool.stalledConnectionIDs(from: [conn], olderThan: 0)
@@ -35,8 +42,10 @@ final class TunnelExemptionTests: XCTestCase {
 
     func testRecentConnectionNotReaped() {
         let proxy = ProxyConfig.testFixture().enabledUpstreams[0]
+        let channel = EmbeddedChannel()
+        defer { XCTAssertNoThrow(try channel.finish()) }
 
-        let conn = PooledUpstreamConnection(proxy: proxy, channel: EmbeddedChannel())
+        let conn = PooledUpstreamConnection(proxy: proxy, channel: channel)
         conn.lastUsedAt = Date()
 
         let stale = ConnectionPool.stalledConnectionIDs(from: [conn], olderThan: 60)
@@ -53,7 +62,7 @@ final class TunnelExemptionTests: XCTestCase {
 
     @MainActor func testRemoveDedicatedTunnelByChannelIsCallable() {
         let logger = DiscardingLogSink()
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = MultiThreadedEventLoopGroup.singleton
         let config = ProxyConfig.testFixture()
         let pool = ConnectionPool(
             group: group,
@@ -64,6 +73,7 @@ final class TunnelExemptionTests: XCTestCase {
         defer { pool.closeAll() }
 
         let channel = EmbeddedChannel()
+        defer { XCTAssertNoThrow(try channel.finish()) }
         pool.removeDedicatedTunnelByChannel(channel)
     }
 }

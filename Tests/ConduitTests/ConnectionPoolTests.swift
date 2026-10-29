@@ -65,8 +65,7 @@ final class ConnectionPoolTests: XCTestCase {
 
     @MainActor func testActiveUpstreamReturnsNilWhenEmpty() {
         let logger = DiscardingLogSink()
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { try? group.syncShutdownGracefully() }
+        let group = MultiThreadedEventLoopGroup.singleton
 
         var cleared = ProxyConfig.testFixture()
         cleared.upstreams = []
@@ -114,9 +113,11 @@ final class ConnectionPoolTests: XCTestCase {
 
     func testConnectionIDsToCloseAllReturnsEverything() {
         let proxy = ProxyConfig.testFixture().enabledUpstreams[0]
-        let dedicated = PooledUpstreamConnection(proxy: proxy, channel: EmbeddedChannel())
+        let dedicatedChannel = EmbeddedChannel(), pooledChannel = EmbeddedChannel()
+        defer { Self.finish([dedicatedChannel, pooledChannel]) }
+        let dedicated = PooledUpstreamConnection(proxy: proxy, channel: dedicatedChannel)
         dedicated.isDedicatedTunnel = true
-        let pooled = PooledUpstreamConnection(proxy: proxy, channel: EmbeddedChannel())
+        let pooled = PooledUpstreamConnection(proxy: proxy, channel: pooledChannel)
 
         let ids = ConnectionPool.connectionIDsToClose(from: [dedicated, pooled], scope: .all)
         XCTAssertEqual(ids, Set([dedicated.id, pooled.id]),
@@ -125,9 +126,11 @@ final class ConnectionPoolTests: XCTestCase {
 
     func testConnectionIDsToCloseAllButDedicatedPreservesTunnels() {
         let proxy = ProxyConfig.testFixture().enabledUpstreams[0]
-        let dedicated = PooledUpstreamConnection(proxy: proxy, channel: EmbeddedChannel())
+        let dedicatedChannel = EmbeddedChannel(), pooledChannel = EmbeddedChannel()
+        defer { Self.finish([dedicatedChannel, pooledChannel]) }
+        let dedicated = PooledUpstreamConnection(proxy: proxy, channel: dedicatedChannel)
         dedicated.isDedicatedTunnel = true
-        let pooled = PooledUpstreamConnection(proxy: proxy, channel: EmbeddedChannel())
+        let pooled = PooledUpstreamConnection(proxy: proxy, channel: pooledChannel)
 
         let ids = ConnectionPool.connectionIDsToClose(from: [dedicated, pooled], scope: .allButDedicated)
         XCTAssertFalse(ids.contains(dedicated.id),
@@ -138,9 +141,11 @@ final class ConnectionPoolTests: XCTestCase {
 
     func testConnectionIDsToCloseIdleOnlyPreservesDedicated() {
         let proxy = ProxyConfig.testFixture().enabledUpstreams[0]
-        let dedicated = PooledUpstreamConnection(proxy: proxy, channel: EmbeddedChannel())
+        let dedicatedChannel = EmbeddedChannel(), idleChannel = EmbeddedChannel()
+        defer { Self.finish([dedicatedChannel, idleChannel]) }
+        let dedicated = PooledUpstreamConnection(proxy: proxy, channel: dedicatedChannel)
         dedicated.isDedicatedTunnel = true
-        let idle = PooledUpstreamConnection(proxy: proxy, channel: EmbeddedChannel())
+        let idle = PooledUpstreamConnection(proxy: proxy, channel: idleChannel)
 
         let ids = ConnectionPool.connectionIDsToClose(from: [dedicated, idle], scope: .idleOnly)
         XCTAssertFalse(ids.contains(dedicated.id),
@@ -151,10 +156,12 @@ final class ConnectionPoolTests: XCTestCase {
 
     func testConnectionIDsToCloseIdleOnlyPreservesInUse() {
         let proxy = ProxyConfig.testFixture().enabledUpstreams[0]
+        let inUseChannel = EmbeddedChannel(), idleChannel = EmbeddedChannel()
+        defer { Self.finish([inUseChannel, idleChannel]) }
         let inUse = PooledUpstreamConnection.makeForTesting(
-            proxy: proxy, channel: EmbeddedChannel(), inUse: true
+            proxy: proxy, channel: inUseChannel, inUse: true
         )
-        let idle = PooledUpstreamConnection(proxy: proxy, channel: EmbeddedChannel())
+        let idle = PooledUpstreamConnection(proxy: proxy, channel: idleChannel)
 
         let ids = ConnectionPool.connectionIDsToClose(from: [inUse, idle], scope: .idleOnly)
         XCTAssertFalse(ids.contains(inUse.id),
@@ -165,17 +172,19 @@ final class ConnectionPoolTests: XCTestCase {
 
     func testConnectionIDsToCloseIdleOnlyPreservesInUseAndDedicated() {
         let proxy = ProxyConfig.testFixture().enabledUpstreams[0]
+        let channels = (0..<4).map { _ in EmbeddedChannel() }
+        defer { Self.finish(channels) }
         let inUseDedicated = PooledUpstreamConnection.makeForTesting(
-            proxy: proxy, channel: EmbeddedChannel(),
+            proxy: proxy, channel: channels[0],
             inUse: true, isDedicatedTunnel: true
         )
         let inUsePooled = PooledUpstreamConnection.makeForTesting(
-            proxy: proxy, channel: EmbeddedChannel(), inUse: true
+            proxy: proxy, channel: channels[1], inUse: true
         )
         let idleDedicated = PooledUpstreamConnection.makeForTesting(
-            proxy: proxy, channel: EmbeddedChannel(), isDedicatedTunnel: true
+            proxy: proxy, channel: channels[2], isDedicatedTunnel: true
         )
-        let idlePooled = PooledUpstreamConnection(proxy: proxy, channel: EmbeddedChannel())
+        let idlePooled = PooledUpstreamConnection(proxy: proxy, channel: channels[3])
 
         let ids = ConnectionPool.connectionIDsToClose(
             from: [inUseDedicated, inUsePooled, idleDedicated, idlePooled],
@@ -188,11 +197,13 @@ final class ConnectionPoolTests: XCTestCase {
 
     func testConnectionIDsToCloseAllButDedicatedClosesInUseNonDedicated() {
         let proxy = ProxyConfig.testFixture().enabledUpstreams[0]
+        let pooledChannel = EmbeddedChannel(), dedicatedChannel = EmbeddedChannel()
+        defer { Self.finish([pooledChannel, dedicatedChannel]) }
         let inUsePooled = PooledUpstreamConnection.makeForTesting(
-            proxy: proxy, channel: EmbeddedChannel(), inUse: true
+            proxy: proxy, channel: pooledChannel, inUse: true
         )
         let inUseDedicated = PooledUpstreamConnection.makeForTesting(
-            proxy: proxy, channel: EmbeddedChannel(),
+            proxy: proxy, channel: dedicatedChannel,
             inUse: true, isDedicatedTunnel: true
         )
 
@@ -226,11 +237,11 @@ final class ConnectionPoolTests: XCTestCase {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in channel.eventLoop.makeSucceededVoidFuture() }
             .bind(host: "127.0.0.1", port: 0).get()
-        addTeardownBlock { try? server.close().wait() }
+        closeAtTearDown(server)
 
         let clientChannel = try await ClientBootstrap(group: group)
             .connect(to: server.localAddress!).get()
-        addTeardownBlock { try? clientChannel.close().wait() }
+        closeAtTearDown(clientChannel)
 
         let proxy = UpstreamProxy(name: "PAC de", host: "localhost", port: 8080, priority: 0)
         actor FallbackWitness { var invoked = false; func mark() { invoked = true } }
@@ -253,8 +264,12 @@ final class ConnectionPoolTests: XCTestCase {
 
     func testApplyHalfOpenUpstreamFallback_nilRemoteAddress_reconnectsToProxyIPv4() async throws {
         let loop = MultiThreadedEventLoopGroup.singleton.next()
-        let halfOpen = EmbeddedChannel(loop: EmbeddedEventLoop())
-        let replacement = EmbeddedChannel(loop: EmbeddedEventLoop())
+        // Both outlive the awaits below, and an embedded loop belongs to the
+        // thread that made it: they need thread-safe loops.
+        let halfOpen = NIOAsyncTestingChannel()
+        finishAtTearDown(halfOpen)
+        let replacement = NIOAsyncTestingChannel()
+        finishAtTearDown(replacement)
         let proxy = UpstreamProxy(name: "PAC de", host: "localhost", port: 8080, priority: 0)
 
         struct WitnessState {
@@ -282,13 +297,19 @@ final class ConnectionPoolTests: XCTestCase {
         XCTAssertEqual(receivedAddress?.ipAddress, "127.0.0.1")
         XCTAssertEqual(receivedAddress?.port, 8080)
         XCTAssertTrue(result === replacement)
+
+        // The fallback closed `halfOpen`; `replacement` was only handed back.
+        let halfOpenLeftOvers = try await halfOpen.finish(acceptAlreadyClosed: true)
+        XCTAssertTrue(halfOpenLeftOvers.isClean)
+        let replacementLeftOvers = try await replacement.finish()
+        XCTAssertTrue(replacementLeftOvers.isClean)
     }
 
     // MARK: - streamingExchange with no upstreams
 
-    @MainActor func testStreamingExchangeNoUpstreamsFails() async {
+    @MainActor func testStreamingExchangeNoUpstreamsFails() async throws {
         let logger = DiscardingLogSink()
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = MultiThreadedEventLoopGroup.singleton
 
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -300,7 +321,10 @@ final class ConnectionPoolTests: XCTestCase {
             authenticatorProvider: { _ in throw CredentialManagerError.missingCredentials }
         )
 
-        let clientChannel = EmbeddedChannel()
+        // The exchange writes to its client from the upstream's loop, and
+        // `get()` resumes off this thread: the client needs a thread-safe loop.
+        let clientChannel = NIOAsyncTestingChannel()
+        finishAtTearDown(clientChannel)
 
         let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://test.com/")
         do {
@@ -310,14 +334,15 @@ final class ConnectionPoolTests: XCTestCase {
             // Expected
         }
 
-        try? await clientChannel.close().get()
+        let leftOvers = try await clientChannel.finish()
+        XCTAssertTrue(leftOvers.isClean, "a failed exchange writes nothing to the client")
     }
 
     // MARK: - exchange (buffered) with no upstreams
 
     @MainActor func testBufferedExchangeNoUpstreamsFails() async {
         let logger = DiscardingLogSink()
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = MultiThreadedEventLoopGroup.singleton
 
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -356,7 +381,7 @@ final class ConnectionPoolTests: XCTestCase {
             }
             .bind(host: "127.0.0.1", port: 0)
             .get()
-        addTeardownBlock { try? await upstream.close().get() }
+        closeAtTearDown(upstream)
 
         var config = ProxyConfig.testFixture()
         config.upstreams = [UpstreamProxy(name: "upstream", host: "127.0.0.1", port: try XCTUnwrap(upstream.localAddress?.port), priority: 0)]
@@ -389,7 +414,7 @@ final class ConnectionPoolTests: XCTestCase {
     @MainActor func testAuthHandshakeLimitDoesNotRecordBufferedUpstreamFailure() async throws {
         let group = MultiThreadedEventLoopGroup.singleton
         let upstream = try await Self.startAcceptingServer(group: group)
-        addTeardownBlock { try? upstream.close().wait() }
+        closeAtTearDown(upstream)
 
         let port = try XCTUnwrap(upstream.localAddress?.port)
         var config = ProxyConfig.testFixture()
@@ -433,7 +458,7 @@ final class ConnectionPoolTests: XCTestCase {
     @MainActor func testAuthHandshakeLimitDoesNotRecordStreamingUpstreamFailure() async throws {
         let group = MultiThreadedEventLoopGroup.singleton
         let upstream = try await Self.startAcceptingServer(group: group)
-        addTeardownBlock { try? upstream.close().wait() }
+        closeAtTearDown(upstream)
 
         let port = try XCTUnwrap(upstream.localAddress?.port)
         var config = ProxyConfig.testFixture()
@@ -458,8 +483,12 @@ final class ConnectionPoolTests: XCTestCase {
         )
         defer { pool.closeAll() }
 
-        let clientChannel = EmbeddedChannel()
-        addTeardownBlock { try? clientChannel.close().wait() }
+        // The exchange handler installs and removes its backpressure observer
+        // on this channel from the upstream's loop, so it needs a thread-safe
+        // loop. Both are queued on it before the exchange fails, so `finish`
+        // runs after them.
+        let clientChannel = NIOAsyncTestingChannel()
+        finishAtTearDown(clientChannel)
         let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://example.com/")
 
         do {
@@ -470,6 +499,8 @@ final class ConnectionPoolTests: XCTestCase {
         } catch {
             XCTFail("unexpected error: \(error)")
         }
+        let leftOvers = try await clientChannel.finish()
+        XCTAssertTrue(leftOvers.isClean, "a throttled exchange writes nothing to the client")
 
         let status = try XCTUnwrap(pool.upstreamStatuses().first)
         XCTAssertEqual(status.consecutiveFailures, 0)
@@ -495,7 +526,7 @@ final class ConnectionPoolTests: XCTestCase {
     @MainActor func testAuthHandshakeLimitDoesNotRetryConnectAcrossUpstreams() async throws {
         let group = MultiThreadedEventLoopGroup.singleton
         let liveUpstream = try await Self.startAcceptingServer(group: group)
-        addTeardownBlock { try? liveUpstream.close().wait() }
+        closeAtTearDown(liveUpstream)
 
         let livePort = try XCTUnwrap(liveUpstream.localAddress?.port)
         var config = ProxyConfig.testFixture()
@@ -556,48 +587,64 @@ final class ConnectionPoolTests: XCTestCase {
 
     // MARK: - Pool exhaustion with pendingConnectionCount
 
-    @MainActor func testPoolExhaustedWhenMaxConnectionsReached() async {
-        let logger = DiscardingLogSink()
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+    /// The second exchange starts inside the first dial, from the socket
+    /// registry's path check. That check runs after the connect and before
+    /// the pool counts the dial done, so the second exchange meets exactly
+    /// one pending connection on every run, with no timing involved.
+    func testPoolExhaustedWhenMaxConnectionsReached() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let upstream = try await ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in channel.pipeline.addHandler(AnswerAfterRequestHandler()) }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        addTeardownBlock { try await upstream.close().get() }
 
         var config = ProxyConfig.testFixture()
         config.maxConnections = 1
-        // Long enough for the first connect to still be pending 50 ms in.
-        config.upstreamConnectTimeoutSeconds = 0.2
         config.upstreams = [
-            UpstreamProxy(name: "Slow", host: "192.0.2.1", port: 9999, priority: 0)
+            UpstreamProxy(name: "Held", host: "127.0.0.1", port: try XCTUnwrap(upstream.localAddress?.port), priority: 0)
         ]
-
-        let pool = ConnectionPool(
-            group: group,
-            logger: logger,
-            configProvider: { config },
-            authenticatorProvider: { _ in
-                NTLMAuthenticator(credentials: ProxyCredentials(username: "test", domain: "TEST", workstation: "MAC", ntHash: SecretBytes.repeating(0, count: 16)))
-            },
-            minimumConnectTimeout: 0.2
-        )
-        defer { pool.closeAll() }
-
         let head = HTTPRequestHead(version: .http1_1, method: .HEAD, uri: "http://example.com/")
 
-        async let first: Void = {
-            _ = try? await pool.exchange(head: head, body: nil).get()
-        }()
+        let poolBox = NIOLockedValueBox<ConnectionPool?>(nil)
+        let second = NIOLockedValueBox<EventLoopFuture<UpstreamExchangeResponse>?>(nil)
+        let sockets = OutboundSocketRegistry.standalone(paths: ClosureSocketPaths { _ in
+            // Taking the pool out runs this once and breaks the pool -> registry -> box cycle.
+            let pool = poolBox.withLockedValue { box -> ConnectionPool? in
+                defer { box = nil }
+                return box
+            }
+            if let pool {
+                let exchange = pool.exchange(head: head, body: nil)
+                second.withLockedValue { $0 = exchange }
+            }
+            return .current
+        })
+        let pool = ConnectionPool(
+            group: group,
+            logger: DiscardingLogSink(),
+            configProvider: { config },
+            authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "dGVzdA==") },
+            sockets: sockets
+        )
+        defer { pool.closeAll() }
+        poolBox.withLockedValue { $0 = pool }
+        defer { poolBox.withLockedValue { $0 = nil } }
 
-        try? await Task.sleep(for: .milliseconds(50))
+        let first = try await pool.exchange(head: head, body: nil).get()
+        XCTAssertEqual(first.head.status, .ok, "the dial holding the only slot completes")
 
+        let rejected = try XCTUnwrap(second.withLockedValue { $0 }, "the first dial's path check started the second exchange")
         do {
-            _ = try await pool.exchange(head: head, body: nil).get()
+            _ = try await rejected.get()
             XCTFail("Second exchange should fail with poolExhausted")
         } catch let error as ConnectionPoolError {
             XCTAssertEqual(error, .poolExhausted,
                            "With maxConnections=1 and one pending connect, second request should be rejected")
         } catch {
-            // Connection error is also acceptable if the first slot connected and failed
+            XCTFail("unexpected error: \(error)")
         }
-
-        _ = await first
     }
 
     @MainActor func testBufferedPoolExhaustionDoesNotRecordUpstreamFailure() async throws {
@@ -645,8 +692,9 @@ final class ConnectionPoolTests: XCTestCase {
         )
         defer { pool.closeAll() }
 
-        let clientChannel = EmbeddedChannel()
-        addTeardownBlock { try? clientChannel.close().wait() }
+        let clientChannel = NIOAsyncTestingChannel()
+
+        finishAtTearDown(clientChannel)
         let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://example.com/")
         do {
             _ = try await pool.streamingExchange(head: head, body: nil, clientChannel: clientChannel).get()
@@ -656,6 +704,8 @@ final class ConnectionPoolTests: XCTestCase {
         } catch {
             XCTFail("unexpected error: \(error)")
         }
+        let leftOvers = try await clientChannel.finish()
+        XCTAssertTrue(leftOvers.isClean, "a refused exchange writes nothing to the client")
 
         let status = try XCTUnwrap(pool.upstreamStatuses().first)
         XCTAssertEqual(status.consecutiveFailures, 0, "streaming pool exhaustion must not poison upstream failure counters")
@@ -683,8 +733,9 @@ final class ConnectionPoolTests: XCTestCase {
         )
         defer { pool.closeAll() }
 
-        let clientChannel = EmbeddedChannel()
-        addTeardownBlock { try? clientChannel.close().wait() }
+        let clientChannel = NIOAsyncTestingChannel()
+
+        finishAtTearDown(clientChannel)
         let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://example.com/")
         do {
             _ = try await pool.streamingExchange(head: head, body: nil, clientChannel: clientChannel).get()
@@ -694,6 +745,8 @@ final class ConnectionPoolTests: XCTestCase {
         } catch {
             // Expected: acquireConnection failed before streaming exchange began.
         }
+        let leftOvers = try await clientChannel.finish()
+        XCTAssertTrue(leftOvers.isClean, "a failed connect writes nothing to the client")
 
         let status = try XCTUnwrap(pool.upstreamStatuses().first)
         XCTAssertEqual(status.circuitState, .open, "streaming acquireConnection failure must feed the breaker")
@@ -737,7 +790,7 @@ final class ConnectionPoolTests: XCTestCase {
         // CircuitBreakerWindowTests.
         var config = ProxyConfig.testFixture()
         config.circuitBreakerWindowSeconds = 0
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = MultiThreadedEventLoopGroup.singleton
         let pool = ConnectionPool(
             group: group,
             logger: logger,
@@ -774,7 +827,7 @@ final class ConnectionPoolTests: XCTestCase {
     @MainActor func testUpstreamStatusesTrackEWMA() {
         let logger = DiscardingLogSink()
         let config = ProxyConfig.testFixture()
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = MultiThreadedEventLoopGroup.singleton
         let pool = ConnectionPool(
             group: group,
             logger: logger,
@@ -802,11 +855,19 @@ final class ConnectionPoolTests: XCTestCase {
 
     // MARK: - Helper
 
+    /// Finishes channels that only stand in for a connection's socket, on the
+    /// test's own thread, so the close's queued cleanup runs.
+    private static func finish(_ channels: [EmbeddedChannel], file: StaticString = #filePath, line: UInt = #line) {
+        for channel in channels {
+            XCTAssertTrue(try channel.finish().isClean, file: file, line: line)
+        }
+    }
+
     @MainActor
     private func makePool() -> ConnectionPool {
         let logger = DiscardingLogSink()
         let config = ProxyConfig.testFixture()
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let group = MultiThreadedEventLoopGroup.singleton
 
         return ConnectionPool(
             group: group,
@@ -863,5 +924,29 @@ private final class CloseAfterRequestHandler: ChannelInboundHandler, @unchecked 
         guard received.getString(at: received.readerIndex, length: received.readableBytes)?.contains("\r\n\r\n") == true else { return }
         requestsSeen.withLockedValue { $0 += 1 }
         context.close(promise: nil)
+    }
+}
+
+/// Answers each request with an empty `200 OK` once its blank line arrives.
+/// A head that outgrows the ceiling closes the connection instead.
+private final class AnswerAfterRequestHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+
+    private static let maxHeadBytes = 8 * 1024
+
+    private var received = ByteBuffer()
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buffer = unwrapInboundIn(data)
+        guard received.readableBytes + buffer.readableBytes <= Self.maxHeadBytes else {
+            received.clear()
+            context.close(promise: nil)
+            return
+        }
+        received.writeBuffer(&buffer)
+        guard received.getString(at: received.readerIndex, length: received.readableBytes)?.contains("\r\n\r\n") == true else { return }
+        received.clear()
+        context.writeAndFlush(wrapOutboundOut(ByteBuffer(string: "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")), promise: nil)
     }
 }

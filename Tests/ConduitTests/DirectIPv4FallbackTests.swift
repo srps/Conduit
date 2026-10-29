@@ -153,9 +153,11 @@ final class DirectIPv4FallbackTests: XCTestCase {
     }
 
     /// Half-open models the ENOTCONN bug: `remoteAddress == nil` on a
-    /// channel NIO's ClientBootstrap reported as succeeding. `EmbeddedChannel`
-    /// is the canonical "no remote" channel we can build in a test without
-    /// reaching into NIO's happy-eyeballs internals.
+    /// channel NIO's ClientBootstrap reported as succeeding. A testing
+    /// channel is the canonical "no remote" channel we can build in a test
+    /// without reaching into NIO's happy-eyeballs internals. It must be the
+    /// thread-safe `NIOAsyncTestingChannel`: it outlives the awaits, and an
+    /// embedded loop belongs to the thread that made it.
     ///
     /// Expected behaviour:
     /// - The bogus channel is closed (not leaked forward to `attachDirectTunnel`).
@@ -165,17 +167,18 @@ final class DirectIPv4FallbackTests: XCTestCase {
     func testApplyHalfOpenFallback_nilRemoteAddress_fallsBackToIPv4Reconnect() async throws {
         let loop = MultiThreadedEventLoopGroup.singleton.next()
 
-        let embeddedLoop = EmbeddedEventLoop()
-        let halfOpen = EmbeddedChannel(loop: embeddedLoop)
+        let halfOpen = NIOAsyncTestingChannel()
+
+        finishAtTearDown(halfOpen)
         // Confirm the precondition we're modelling.
         XCTAssertNil(halfOpen.remoteAddress,
-                     "EmbeddedChannel models the half-open bug by having nil remoteAddress")
+                     "The testing channel models the half-open bug by having nil remoteAddress")
 
         // Build a "replacement" channel that `ipv4Reconnect` will hand back.
         // It must be distinct from `halfOpen` so the identity assertion below
         // is meaningful.
-        let replacementLoop = EmbeddedEventLoop()
-        let replacement = EmbeddedChannel(loop: replacementLoop)
+        let replacement = NIOAsyncTestingChannel()
+        finishAtTearDown(replacement)
 
         struct WitnessState {
             var invoked = false
@@ -202,6 +205,12 @@ final class DirectIPv4FallbackTests: XCTestCase {
         XCTAssertEqual(receivedAddress?.port, 443)
         XCTAssertTrue(result === replacement,
                       "Final channel must be the one returned by ipv4Reconnect, not the bogus half-open one")
+
+        // The fallback closed `halfOpen`; `replacement` was only handed back.
+        let halfOpenLeftOvers = try await halfOpen.finish(acceptAlreadyClosed: true)
+        XCTAssertTrue(halfOpenLeftOvers.isClean)
+        let replacementLeftOvers = try await replacement.finish()
+        XCTAssertTrue(replacementLeftOvers.isClean)
     }
 
     /// Pairs with the error-path coverage: if the fallback's getaddrinfo
@@ -212,8 +221,9 @@ final class DirectIPv4FallbackTests: XCTestCase {
     func testApplyHalfOpenFallback_nilRemoteAddress_resolutionFailure_surfacesFallbackError() async throws {
         let loop = MultiThreadedEventLoopGroup.singleton.next()
 
-        let embeddedLoop = EmbeddedEventLoop()
-        let halfOpen = EmbeddedChannel(loop: embeddedLoop)
+        let halfOpen = NIOAsyncTestingChannel()
+
+        finishAtTearDown(halfOpen)
 
         actor Witness { var invoked = false; func mark() { invoked = true } }
         let witness = Witness()
@@ -245,5 +255,8 @@ final class DirectIPv4FallbackTests: XCTestCase {
 
         let fired = await witness.invoked
         XCTAssertFalse(fired, "ipv4Reconnect must NOT fire when getaddrinfo itself fails")
+        // The fallback closed `halfOpen` before it resolved.
+        let leftOvers = try await halfOpen.finish(acceptAlreadyClosed: true)
+        XCTAssertTrue(leftOvers.isClean)
     }
 }

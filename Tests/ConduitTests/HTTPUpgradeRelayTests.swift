@@ -80,6 +80,13 @@ final class HTTPUpgradeRelayTests: XCTestCase {
         let loop: EmbeddedEventLoop
         let client: EmbeddedChannel
         let upstream: EmbeddedChannel
+
+        /// On the test's thread. The relay closes either side, or both, on
+        /// some paths; closing one side of a spliced tunnel closes the other.
+        func finish(file: StaticString = #filePath, line: UInt = #line) {
+            XCTAssertNoThrow(try client.finish(acceptAlreadyClosed: true), file: file, line: line)
+            XCTAssertNoThrow(try upstream.finish(acceptAlreadyClosed: true), file: file, line: line)
+        }
     }
 
     private func makeFixture(
@@ -143,6 +150,7 @@ final class HTTPUpgradeRelayTests: XCTestCase {
     func testRelaySplicesOn101AndForwardsLeftoverBytes() throws {
         nonisolated(unsafe) var established = false
         let fixture = try makeFixture(onTunnelEstablished: { established = true })
+        defer { fixture.finish() }
 
         // 101 plus a frame the origin sent in the same flight: the leftover
         // bytes must reach the client raw, after the encoded 101.
@@ -177,9 +185,6 @@ final class HTTPUpgradeRelayTests: XCTestCase {
         fixture.loop.run()
         let clientSaw2 = try drainClientOutput(fixture.client)
         XCTAssertEqual(clientSaw2, "ORIGIN-FRAME")
-
-        try? fixture.client.close().wait()
-        try? fixture.upstream.close().wait()
     }
 
     func testRelayForwardsRefusedUpgradeAndCloses() throws {
@@ -189,6 +194,7 @@ final class HTTPUpgradeRelayTests: XCTestCase {
             onRefusedResponseComplete: { refusalCompleted = true },
             onFailure: { failed = true }
         )
+        defer { fixture.finish() }
 
         var raw = fixture.upstream.allocator.buffer(capacity: 256)
         raw.writeString(
@@ -212,6 +218,7 @@ final class HTTPUpgradeRelayTests: XCTestCase {
     func testRelayFailsWhenOriginClosesBeforeResponding() throws {
         nonisolated(unsafe) var failed = false
         let fixture = try makeFixture(onFailure: { failed = true })
+        defer { fixture.finish() }
 
         fixture.upstream.pipeline.fireChannelInactive()
         fixture.loop.run()

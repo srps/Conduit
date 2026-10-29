@@ -180,7 +180,8 @@ final class EnvironmentManagerTests: XCTestCase {
     /// clear a stop or quit makes meanwhile goes ahead.
     func testAHungInspectionReadDoesNotHoldUpAClear() throws {
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        let config = makeConfig()
+        try manager.apply(config: config, logger: nil)
         let reached = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
         let held = NIOLockedValueBox(true)
         let run = launchctl.run
@@ -191,22 +192,34 @@ final class EnvironmentManagerTests: XCTestCase {
             }
             return try run(path, arguments)
         })
-        let inspected = DispatchSemaphore(value: 0)
+        let inspected = DispatchSemaphore(value: 0), cleared = DispatchSemaphore(value: 0)
+        let clearOutcome = NIOLockedValueBox<Result<Void, any Error>?>(nil)
+        var clearPending = false
+        // Every exit lets the hung read go and joins both threads, so a failed wait leaves neither parked on a semaphore.
+        defer {
+            release.signal()
+            XCTAssertEqual(inspected.wait(timeout: .now() + 5), .success, "the inspection ended once its read was let go")
+            if clearPending {
+                XCTAssertEqual(cleared.wait(timeout: .now() + 5), .success, "the clear ended once the read was let go")
+            }
+        }
         DispatchQueue.global().async {
-            _ = blocking.inspect(config: self.makeConfig())
+            _ = blocking.inspect(config: config)
             inspected.signal()
         }
         XCTAssertEqual(reached.wait(timeout: .now() + 5), .success)
 
-        let cleared = DispatchSemaphore(value: 0)
+        clearPending = true
         DispatchQueue.global().async {
-            try? blocking.clear(logger: nil)
+            let outcome = Result<Void, any Error> { _ = try blocking.clear(logger: nil) }
+            clearOutcome.withLockedValue { $0 = outcome }
             cleared.signal()
         }
-        XCTAssertEqual(cleared.wait(timeout: .now() + 5), .success, "the clear did not wait for the hung read")
+        let clearWait = cleared.wait(timeout: .now() + 5)
+        clearPending = clearWait != .success
+        XCTAssertEqual(clearWait, .success, "the clear did not wait for the hung read")
+        try XCTUnwrap(clearOutcome.withLockedValue { $0 }, "the clear finished").get()
         XCTAssertNil(launchctl.environment["HTTP_PROXY"])
-        release.signal()
-        XCTAssertEqual(inspected.wait(timeout: .now() + 5), .success)
     }
 
     /// Our own URL, left by an earlier run, with the journal unwritable: it

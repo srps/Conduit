@@ -27,6 +27,7 @@ final class HTTPExpectContinueTests: XCTestCase {
 
     func testAnswers100ContinueAndStripsExpectation() throws {
         let channel = try makeChannel()
+        defer { XCTAssertNoThrow(try channel.finish()) }
 
         var head = HTTPRequestHead(version: .http1_1, method: .PUT, uri: "http://origin.example/upload")
         head.headers.add(name: "Host", value: "origin.example")
@@ -47,6 +48,7 @@ final class HTTPExpectContinueTests: XCTestCase {
 
     func testPassesThroughWithoutExpectation() throws {
         let channel = try makeChannel()
+        defer { XCTAssertNoThrow(try channel.finish()) }
 
         var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://origin.example/")
         head.headers.add(name: "Host", value: "origin.example")
@@ -62,6 +64,7 @@ final class HTTPExpectContinueTests: XCTestCase {
 
     func testPreservesUnknownExpectations() throws {
         let channel = try makeChannel()
+        defer { XCTAssertNoThrow(try channel.finish()) }
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "http://origin.example/x")
         head.headers.add(name: "Expect", value: "100-continue, x-custom-expectation")
@@ -81,6 +84,7 @@ final class HTTPExpectContinueTests: XCTestCase {
     /// whole approach needs rework — fail loudly here, not in the field.
     func testEncoderAcceptsFinalResponseAfterInterim100() throws {
         let channel = try makeChannel()
+        defer { XCTAssertNoThrow(try channel.finish()) }
 
         var head = HTTPRequestHead(version: .http1_1, method: .PUT, uri: "http://origin.example/upload")
         head.headers.add(name: "Expect", value: "100-continue")
