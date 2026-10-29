@@ -98,7 +98,7 @@ final class AuthProviderStackDepthTests: XCTestCase {
     /// If this ever regresses, the failure message prints the growing
     /// frame counts — 500 iterations produces ~2000 extra frames in the
     /// regressed path, matching the crash report's observed depth exactly.
-    @MainActor
+    @RuntimeActor
     func testLateBoundProviderFrameCountIsBounded() async throws {
         let orchestrator = ProxyOrchestrator(
             config: .testFixture(),
@@ -138,7 +138,7 @@ final class AuthProviderStackDepthTests: XCTestCase {
     /// call would add frames. This test simulates that misuse to see
     /// how fast frames accumulate and confirm the ABI-thunk cost per
     /// wrap.
-    @MainActor
+    @RuntimeActor
     func testWrappedProviderFrameGrowth() async throws {
         let orchestrator = ProxyOrchestrator(
             config: .testFixture(),

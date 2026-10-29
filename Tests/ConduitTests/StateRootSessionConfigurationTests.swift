@@ -10,7 +10,6 @@ import XCTest
 /// Each test takes its session through the production bootstrap over a scratch root before it seeds anything, and releases it only after its
 /// own work has quiesced. The refusals that the store's raw-plan constructor used to make run here instead, at the bootstrap, where a name or
 /// a file outside the root is refused before any write.
-@MainActor
 final class StateRootSessionConfigurationTests: XCTestCase {
     private static let context = ConfigurationOperationContext(
         requestID: ControlRequestID(rawValue: UUID()),
@@ -57,6 +56,7 @@ final class StateRootSessionConfigurationTests: XCTestCase {
 
     /// Makes a store over a session for the root, loads through it once, and returns whether the load was admitted. The store and its session
     /// are locals of this call, so when it returns the last reference to both is gone.
+    @RuntimeActor
     private func loadThroughAStore(_ environment: RuntimeEnvironment, access: any StateFileAccessing) async throws -> Bool {
         let session = try acquireScratchStateRoot(environment)
         let store = ConfigurationStore(session: session, access: access, work: PlatformWork(label: "test.session-load"))
@@ -204,7 +204,8 @@ final class StateRootSessionConfigurationTests: XCTestCase {
 
     /// A store keeps its session's lease. A second bootstrap of the root is busy while the store lives, and once the store is dropped the
     /// lease closes and the root can be taken again.
-    func testAStoreKeepsTheRootBusyUntilItIsDroppedThenTheRootIsTakenAgain() throws {
+    @RuntimeActor
+    func testAStoreKeepsTheRootBusyUntilItIsDroppedThenTheRootIsTakenAgain() async throws {
         let scratch = try StateRootScratch.make("session-store-lifetime")
         defer { removeScratch([scratch]) }
         let environment = Self.environment(scratch)
@@ -230,6 +231,7 @@ final class StateRootSessionConfigurationTests: XCTestCase {
     /// The store owns its session for its whole life, so the session stays held while the call's physical read runs. A second bootstrap made
     /// from inside that read is busy. The probe counts each attempt and keeps no authority. Once the store's call returns and the store is gone,
     /// the root can be taken again.
+    @RuntimeActor
     func testASecondBootstrapIsBusyFromInsideAStoreCallsPhysicalReads() async throws {
         let scratch = try StateRootScratch.make("session-in-flight")
         defer { removeScratch([scratch]) }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import ProxyKernel
 
 /// Verdicts are data. Notes, byte counters and expected early closes are never
 /// interpreted by the runner to decide whether a scenario passed.
@@ -54,12 +55,12 @@ extension ScenarioResult {
 
 /// Async defers are registered by each scenario and awaited by the runner
 /// before the next scenario starts (including after a thrown error).
-@MainActor
+@RuntimeActor
 final class ScenarioCleanup {
     @TaskLocal static var current: ScenarioCleanup?
-    private var actions: [@MainActor () async -> Void] = []
+    private var actions: [@RuntimeActor () async -> Void] = []
 
-    static func register(_ action: @escaping @MainActor () async -> Void) {
+    static func register(_ action: @escaping @RuntimeActor () async -> Void) {
         guard let current else { preconditionFailure("scenario must run inside cleanup scope") }
         precondition(current.actions.count < 64, "bounded scenario cleanup list")
         current.actions.append(action)

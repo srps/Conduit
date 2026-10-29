@@ -4,7 +4,7 @@ import Foundation
 import PlatformMac
 import ProxyKernel
 
-/// The host's preflight state, twin of `AppState`'s helper verdict and refresh ID. The held verdict is what a `busy` read keeps
+/// The host's preflight state: the helper verdict it holds for display and its refresh generation. The held verdict is what a `busy` read keeps
 /// (`HelperToolPrivilegeClient.Status.updated(by:)`). A helper replacement marks it stale and advances `generation`, so a pass that began
 /// before it changes and repairs nothing. At most two passes exist: the one running, and the one pending that every request launched
 /// meanwhile joins. No waiter list is kept: each launched operation's effect awaits its pass, and the service's ordinary capacity bounds them.
@@ -35,7 +35,7 @@ extension RuntimeHost {
     func preflightPass() -> Task<ControlOperationOutcome, Never> {
         if let pending = preflight.pending { return pending }
         let previous = preflight.running
-        let pass = Task { @MainActor [weak self] () -> ControlOperationOutcome in
+        let pass = Task { [weak self] () -> ControlOperationOutcome in
             _ = await previous?.value
             guard let self else { return .failed(.internalFailure) }
             // This pass begins, and it is the pending one: only its own start clears that slot. A request from here on makes the next pass.
@@ -49,7 +49,7 @@ extension RuntimeHost {
         return pass
     }
 
-    /// One pass, twin of `AppState.refreshPreflight`. After launch recovery it captures, in one owner turn, the stamp, the requested pair,
+    /// One pass, as the app's preflight refresh asks for it. After launch recovery it captures, in one owner turn, the stamp, the requested pair,
     /// the run state, the VPN gate and the held verdict; the helper read and the evaluation run on a global queue, never on `platformWork`, so
     /// no teardown queues behind a slow ping. A pass that begins after the quit latched reads nothing, and one whose generation moved or that
     /// ends after the latch fails `staleRevision`: its reading may describe a replaced helper, so it updates no verdict and repairs nothing.

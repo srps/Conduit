@@ -1,0 +1,10 @@
+--- r2/Tests/ConduitTests/TunnelForwarderTests.swift
++++ held-dial-error-cleanup/Tests/ConduitTests/TunnelForwarderTests.swift
+@@ -214,7 +214,6 @@
+             try await Self.awaitSignal(dials.requested, "the mock proxy's dial request")
+             XCTAssertEqual(received.withLockedValue { $0 }, [], "No byte may reach the target while its dial is held")
+ 
+-            dials.release()
+             try await Self.awaitSignal(bytesArrived, "the OP_MSG at the target")
+             let bytes = received.withLockedValue { $0 }
+             XCTAssertEqual(bytes, message, "Wire protocol bytes should be bit-identical")

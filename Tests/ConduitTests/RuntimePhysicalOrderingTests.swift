@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 import XCTest
@@ -35,7 +36,7 @@ private actor BindGate {
 }
 
 /// Waits, bounded, for something the event loops do off the main actor, such as accepting a connection.
-@MainActor
+@RuntimeActor
 private func eventually(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
     for _ in 0..<1_000 where !condition() {
         try await Task.sleep(for: .milliseconds(10))
@@ -48,7 +49,7 @@ private struct BoundExhausted: Error {}
 
 /// The port the held caller passed. Bounded: if no caller reaches the gate, it fails the test, opens the gate so a late caller does not
 /// park, and throws, so the test's teardown stops what it started.
-@MainActor
+@RuntimeActor
 private func arrival(at gate: BindGate, file: StaticString = #filePath, line: UInt = #line) async throws -> Int {
     for _ in 0..<1_000 {
         if let port = await gate.heldPort { return port }
@@ -61,7 +62,7 @@ private func arrival(at gate: BindGate, file: StaticString = #filePath, line: UI
 
 /// Every DNS and tunnel run state change the orchestrator publishes once `record` is called, so a test sees a stale `running` even when a
 /// later teardown publishes `stopped` over it. Changes only: other publishes, such as a config edit's, repeat the module's state unchanged.
-@MainActor
+@RuntimeActor
 private final class PublishedStates {
     var dns: [ModuleRunState] = []
     var tunnels: [ModuleRunState] = []
@@ -77,12 +78,12 @@ private final class PublishedStates {
     }
 }
 
-@MainActor
+@RuntimeActor
 private final class Trace {
     var steps: [String] = []
 }
 
-@MainActor
+@RuntimeActor
 private func waitUntil(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
     var turns = 0
     while !condition(), turns < 10_000 {
@@ -95,13 +96,12 @@ private func waitUntil(_ condition: () -> Bool, file: StaticString = #filePath, 
 /// The DNS forwarder and the tunnel listeners on real loopback sockets. A stop admitted while a DNS start or restart is inside its bind
 /// (held at `willBindTCP`), or while a tunnel start or reconcile is queued behind a held effect, leaves no listener open and nothing
 /// published; a config edit never starts a stopped module, nor restarts or reconciles one whose stop is still tearing down.
-@MainActor
 final class RuntimePhysicalOrderingTests: XCTestCase {
     private let group = MultiThreadedEventLoopGroup.singleton
 
     /// A configured `port`, so the forwarder binds the pair once, on that number, and the gate's port is its own: with `port: 0` it rightly
     /// retries past a TCP number another socket holds, and the gate would keep the number it gave up.
-    private func makeDNSOrchestrator(gate: BindGate, port: Int) -> ProxyOrchestrator {
+    @RuntimeActor private func makeDNSOrchestrator(gate: BindGate, port: Int) -> ProxyOrchestrator {
         var config = GenericDefaults.shared.makeConfig()
         config.proxy.port = 0
         config.upstreams = []
@@ -117,7 +117,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
         return orchestrator
     }
 
-    private func makeTunnelOrchestrator(ports: [Int], upstreams: [UpstreamProxy] = []) -> ProxyOrchestrator {
+    @RuntimeActor private func makeTunnelOrchestrator(ports: [Int], upstreams: [UpstreamProxy] = []) -> ProxyOrchestrator {
         var config = GenericDefaults.shared.makeConfig()
         config.proxy.port = 0
         config.upstreams = upstreams
@@ -132,10 +132,10 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
     /// Below the macOS ephemeral range (49152 up), whose numbers any outbound socket on the machine, or another test process, may take
     /// after a release, so a probe there cannot tell a leak from a stranger. Each pick is used once per process; the window comes from the
     /// pid so concurrent test processes start apart.
-    private static var nextPort = 20_000 + Int(getpid()) % 280 * 100
+    @RuntimeActor private static var nextPort = 20_000 + Int(getpid()) % 280 * 100
 
     /// A loopback port free on both TCP and UDP right now, distinct from `excluding`, in a bounded number of picks.
-    private func freePort(excluding: Set<Int> = []) async throws -> Int {
+    @RuntimeActor private func freePort(excluding: Set<Int> = []) async throws -> Int {
         for _ in 0..<64 {
             let port = Self.nextPort
             Self.nextPort = port + 1 < 48_000 ? port + 1 : 20_000
@@ -146,7 +146,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
     }
 
     /// Binds both without `SO_REUSEADDR`, as the release probes do; only `EADDRINUSE` means taken.
-    private func isFree(_ port: Int) async throws -> Bool {
+    @RuntimeActor private func isFree(_ port: Int) async throws -> Bool {
         do {
             let tcp = try await ServerBootstrap(group: group).bind(host: "127.0.0.1", port: port).get()
             try await tcp.close().get()
@@ -159,7 +159,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
     }
 
     /// Binds without `SO_REUSEADDR`, so a listener still open on `port` fails it.
-    private func assertReleased(tcp port: Int, file: StaticString = #filePath, line: UInt = #line) async {
+    @RuntimeActor private func assertReleased(tcp port: Int, file: StaticString = #filePath, line: UInt = #line) async {
         do {
             let probe = try await ServerBootstrap(group: group).bind(host: "127.0.0.1", port: port).get()
             try await probe.close().get()
@@ -168,7 +168,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
         }
     }
 
-    private func assertReleased(udp port: Int, file: StaticString = #filePath, line: UInt = #line) async {
+    @RuntimeActor private func assertReleased(udp port: Int, file: StaticString = #filePath, line: UInt = #line) async {
         do {
             let probe = try await DatagramBootstrap(group: group).bind(host: "127.0.0.1", port: port).get()
             try await probe.close().get()
@@ -177,7 +177,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
         }
     }
 
-    private func assertDNSStopped(_ orchestrator: ProxyOrchestrator, port: Int, file: StaticString = #filePath, line: UInt = #line) async {
+    @RuntimeActor private func assertDNSStopped(_ orchestrator: ProxyOrchestrator, port: Int, file: StaticString = #filePath, line: UInt = #line) async {
         XCTAssertEqual(orchestrator.snapshot.dnsRunState, .stopped, file: file, line: line)
         XCTAssertNil(orchestrator.snapshot.bindings.dnsPort, file: file, line: line)
         XCTAssertNil(orchestrator.dnsForwarder.listeningPort, file: file, line: line)
@@ -187,7 +187,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
     }
 
     /// Holds `lifecycle`'s slot with a gated effect under the latest epoch, so the next operation queues behind it, before its claim.
-    private func holdSlot(_ lifecycle: PhysicalLifecycle, gate: BindGate) async throws -> Task<Bool, Error> {
+    @RuntimeActor private func holdSlot(_ lifecycle: PhysicalLifecycle, gate: BindGate) async throws -> Task<Bool, Error> {
         let epoch = lifecycle.epoch
         let held = Task { try await lifecycle.run(epoch: epoch) { await gate.hold(0) } }
         _ = try await arrival(at: gate)
@@ -196,7 +196,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
 
     /// Applies `edited` in a task and waits, bounded, for it to return without the held slot opening: an edit that queued a restart or
     /// reconcile behind the slot fails here, and the caller still opens the gate and joins.
-    private func applyWhileHeld(
+    @RuntimeActor private func applyWhileHeld(
         _ edited: ProxyConfig,
         to orchestrator: ProxyOrchestrator,
         file: StaticString = #filePath,
@@ -215,7 +215,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
 
     /// The stop used to find no channel while the bind was pending, publish `stopped`, and then watch the start publish `running` over it
     /// with both listeners open.
-    func testDNSStopAdmittedDuringTheBindClosesItAndPublishesStopped() async throws {
+    @RuntimeActor func testDNSStopAdmittedDuringTheBindClosesItAndPublishesStopped() async throws {
         let port = try await freePort()
         let gate = BindGate()
         let orchestrator = makeDNSOrchestrator(gate: gate, port: port)
@@ -243,7 +243,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
     }
 
     /// The restart used to await the stop, then call the public start, which bound again after a stop admitted during it.
-    func testDNSConfigRestartSupersededByAStopDuringItsRebindStaysStopped() async throws {
+    @RuntimeActor func testDNSConfigRestartSupersededByAStopDuringItsRebindStaysStopped() async throws {
         let port = try await freePort()
         let gate = BindGate(armed: false)
         let orchestrator = makeDNSOrchestrator(gate: gate, port: port)
@@ -282,7 +282,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
     /// A stop skipped because a newer start superseded it before its teardown leaves the stale bind to that start, which closes it before
     /// binding its own. Both bind the one configured port, and neither UDP nor TCP admits a second socket on it, so the newer start holds
     /// the full pair only if it closed the stale one.
-    func testANewerStartClosesTheBindOfTheStartItSuperseded() async throws {
+    @RuntimeActor func testANewerStartClosesTheBindOfTheStartItSuperseded() async throws {
         let port = try await freePort()
         let gate = BindGate()
         let orchestrator = makeDNSOrchestrator(gate: gate, port: port)
@@ -315,7 +315,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
 
     /// A start while running, with no stop since, never reaches a bind: the armed gate stays empty and the listeners keep their port. The
     /// config restart still rebinds, on the edited port.
-    func testADNSStartWhileRunningIsANoOpAndARestartStillBindsTheEditedPort() async throws {
+    @RuntimeActor func testADNSStartWhileRunningIsANoOpAndARestartStillBindsTheEditedPort() async throws {
         let port = try await freePort()
         let gate = BindGate(armed: false)
         let orchestrator = makeDNSOrchestrator(gate: gate, port: port)
@@ -350,7 +350,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
         await assertReleased(tcp: port)
     }
 
-    func testAConfigEditLeavesStoppedDNSStopped() async throws {
+    @RuntimeActor func testAConfigEditLeavesStoppedDNSStopped() async throws {
         let port = try await freePort()
         let orchestrator = makeDNSOrchestrator(gate: BindGate(armed: false), port: port)
         addTeardownBlock { await orchestrator.stopDNS() }
@@ -371,7 +371,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
 
     /// A stop admitted while its teardown waits behind a held effect leaves the snapshot `running`. A DNS edit then must not restart: the
     /// restart would run under the stop's epoch, after its teardown, and bind the edited port with nothing left to close it.
-    func testADNSEditDuringAStopsHeldTeardownNeitherRestartsNorBinds() async throws {
+    @RuntimeActor func testADNSEditDuringAStopsHeldTeardownNeitherRestartsNorBinds() async throws {
         let port = try await freePort()
         let editedPort = try await freePort(excluding: [port])
         let orchestrator = makeDNSOrchestrator(gate: BindGate(armed: false), port: port)
@@ -411,7 +411,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
 
     /// A restart takes the epoch of the start it found running. A stop and then a newer start admitted during its rebind supersede it: its
     /// partial bind publishes nothing, and the newer start closes that bind and holds the full edited pair itself.
-    func testADNSRestartSupersededDuringItsRebindByAStopAndANewerStartLeavesTheNewerStartRunning() async throws {
+    @RuntimeActor func testADNSRestartSupersededDuringItsRebindByAStopAndANewerStartLeavesTheNewerStartRunning() async throws {
         let port = try await freePort()
         let editedPort = try await freePort(excluding: [port])
         let gate = BindGate(armed: false)
@@ -457,7 +457,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
 
     /// A second start while the first is inside its bind joins that start's completion, the forwarder and what it publishes together. It
     /// admits nothing, and returns only once the first published `running`, rather than reading the first's `starting` as done.
-    func testADNSStartBesideABindInFlightReturnsWithThatBindsCompletion() async throws {
+    @RuntimeActor func testADNSStartBesideABindInFlightReturnsWithThatBindsCompletion() async throws {
         let port = try await freePort()
         let gate = BindGate()
         let orchestrator = makeDNSOrchestrator(gate: gate, port: port)
@@ -487,7 +487,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
 
     /// A stop admitted while a joiner waits on the start in flight still wins: it supersedes that start, and the joiner returns to the stop's
     /// outcome having admitted and bound nothing of its own.
-    func testAStopDuringAJoinedDNSStartStillWins() async throws {
+    @RuntimeActor func testAStopDuringAJoinedDNSStartStillWins() async throws {
         let port = try await freePort()
         let gate = BindGate()
         let orchestrator = makeDNSOrchestrator(gate: gate, port: port)
@@ -515,7 +515,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
 
     /// A second tunnel start while the first is queued behind a held effect joins it: it admits nothing and returns with the first's
     /// published `running`.
-    func testATunnelStartBesideAStartInFlightReturnsWithItsCompletion() async throws {
+    @RuntimeActor func testATunnelStartBesideAStartInFlightReturnsWithItsCompletion() async throws {
         let port = try await freePort()
         let orchestrator = makeTunnelOrchestrator(ports: [port])
         let gate = BindGate()
@@ -548,7 +548,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
     /// The point tested is before the claim, not inside the bind: a start queued behind a held effect, then superseded by a stop, binds
     /// nothing and publishes nothing. (The real partial-bind case is the DNS tests' `willBindTCP` hold.) The old start never waited for
     /// anything, so it bound and published `running` around a stop admitted meanwhile.
-    func testATunnelStartQueuedBehindAHeldEffectAndSupersededByAStopBindsNothing() async throws {
+    @RuntimeActor func testATunnelStartQueuedBehindAHeldEffectAndSupersededByAStopBindsNothing() async throws {
         let port = try await freePort()
         let orchestrator = makeTunnelOrchestrator(ports: [port])
         let gate = BindGate()
@@ -580,7 +580,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
 
     /// Before the claim, as above: a reconcile queued behind a held effect, then superseded by a stop, binds no added tunnel, and the stop
     /// closes the running one.
-    func testATunnelReconcileQueuedBehindAHeldEffectAndSupersededByAStopBindsNothing() async throws {
+    @RuntimeActor func testATunnelReconcileQueuedBehindAHeldEffectAndSupersededByAStopBindsNothing() async throws {
         let kept = try await freePort()
         let added = try await freePort(excluding: [kept])
         let orchestrator = makeTunnelOrchestrator(ports: [kept])
@@ -620,7 +620,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
     /// The pool is shared with the transparent proxy, so a first tunnel start leaves its connections alone; only an explicit stop, or a
     /// start whose every bind failed, closes them. A start while running, with no stop since, is a no-op: the same listener, the same
     /// session and its count, the same pooled connection. A start after a stop runs.
-    func testATunnelStartLeavesTheSharedPoolAloneAndARepeatedStartKeepsListenerAndSessions() async throws {
+    @RuntimeActor func testATunnelStartLeavesTheSharedPoolAloneAndARepeatedStartKeepsListenerAndSessions() async throws {
         // Loopback only: the fake upstream is both the pooled connection's proxy and the tunnel's remote.
         let upstream = try await ServerBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
         addTeardownBlock { try await upstream.close().get() }
@@ -670,7 +670,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
         XCTAssertEqual(orchestrator.tunnelLifecycle.epoch, epoch + 2)
     }
 
-    func testAConfigEditLeavesStoppedTunnelsStopped() async throws {
+    @RuntimeActor func testAConfigEditLeavesStoppedTunnelsStopped() async throws {
         let port = try await freePort()
         let added = try await freePort(excluding: [port])
         let orchestrator = makeTunnelOrchestrator(ports: [port])
@@ -691,7 +691,7 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
 
     /// As for DNS: a tunnel edit while a stop's teardown waits behind a held effect, with the snapshot still `running`, decides no
     /// reconcile. The reconcile's own `admitsRunning` check would still bind nothing, so the decision event is what tells them apart.
-    func testATunnelEditDuringAStopsHeldTeardownNeitherReconcilesNorBinds() async throws {
+    @RuntimeActor func testATunnelEditDuringAStopsHeldTeardownNeitherReconcilesNorBinds() async throws {
         let kept = try await freePort()
         let added = try await freePort(excluding: [kept])
         let orchestrator = makeTunnelOrchestrator(ports: [kept])
@@ -730,12 +730,135 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
         await assertReleased(tcp: kept)
         await assertReleased(tcp: added)
     }
+
+    // MARK: - Counter hops
+
+    /// The tunnel session signal's value is not what its hop publishes: the hop reads the tracker's locked count when it lands, and
+    /// publishes zero once a stop was admitted, across a stop and a restart. The production callback is driven with values no state holds.
+    /// A sentinel written in the signal's own owner turn is replaced only by a hop that landed after it, and every hop publishes what the
+    /// state says when it lands, so whichever one replaced it, its value is the claim. No order among the hops is assumed.
+    @RuntimeActor func testATunnelSessionHopPublishesTheLockedCountAndZeroAfterAStopAcrossARestart() async throws {
+        let port = try await freePort()
+        let orchestrator = makeTunnelOrchestrator(ports: [port])
+        addTeardownBlock { await orchestrator.stopTunnels() }
+        let tracker = orchestrator.tunnelForwarder.sessionTracker
+        let signal = try XCTUnwrap(tracker.onChange, "the orchestrator wired its hop")
+
+        await orchestrator.startTunnels()
+        XCTAssertEqual(orchestrator.snapshot.tunnelsRunState, .running)
+        XCTAssertTrue(tracker.tryAcquire(tunnelPort: port))
+        XCTAssertTrue(tracker.tryAcquire(tunnelPort: port))
+        let running = try await sessionHop(on: orchestrator) { signal(9) }
+        XCTAssertEqual(running, 2, "running: the locked count, not the value the signal carried")
+
+        await orchestrator.stopTunnels()
+        XCTAssertEqual(tracker.totalActiveSessions, 0, "the stop reset the tracker")
+        // A session acquired after the stop, as a late child handler's would be, signals its own locked count of one.
+        let stopped = try await sessionHop(on: orchestrator) { XCTAssertTrue(tracker.tryAcquire(tunnelPort: port)) }
+        XCTAssertEqual(stopped, 0, "after the admitted stop: zero, not the late session's locked count")
+        tracker.release(tunnelPort: port)
+
+        await orchestrator.startTunnels()
+        XCTAssertEqual(orchestrator.snapshot.tunnelsRunState, .running, "a start after a stop runs")
+        let restarted = try await sessionHop(on: orchestrator) { signal(7) }
+        XCTAssertEqual(restarted, 0, "restarted with no session: the locked count, not the value the signal carried")
+        let acquired = try await sessionHop(on: orchestrator) { XCTAssertTrue(tracker.tryAcquire(tunnelPort: port)) }
+        XCTAssertEqual(acquired, 1)
+        tracker.release(tunnelPort: port)
+    }
+
+    /// The DNS metrics signal carries no values: its hop reads the running core's counters, under their lock, when it lands, and only while
+    /// DNS admits running. Driven by intercepted queries over loopback through the orchestrator's own forwarder. In each run the queries are
+    /// answered while one owner turn holds every hop they signal behind it, and that turn writes a sentinel last; the first hop to land
+    /// replaces it, which is the positive witness. Whichever hop that was, it published the counts at landing, not at its signal. A stop
+    /// zeroes the counts and drops the core; the restarted core counts from zero. No order among the hops is assumed.
+    @RuntimeActor func testTheDNSMetricsHopPublishesTheRunningCoresCountsAtLandingAcrossAStopAndRestart() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.proxy.port = 0
+        config.upstreams = []
+        config.dnsForwarderEnabled = true
+        config.dnsForwarderPort = 0
+        config.transparentProxyEnabled = false
+        config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.intercept.test", interceptIP: "127.44.3.1", enabled: true)]
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
+        addTeardownBlock { await orchestrator.stopDNS() }
+
+        await orchestrator.startDNS()
+        let first = try XCTUnwrap(orchestrator.dnsForwarder.listeningPort)
+        XCTAssertTrue(answerWhileTheOwnerIsHeld(2, port: first, on: orchestrator), "both queries were answered")
+        try await eventually { orchestrator.snapshot.dnsQueryCount != Self.sentinel }
+        XCTAssertEqual(orchestrator.snapshot.dnsQueryCount, 2, "the first hop to land read both queries, not only its own")
+        XCTAssertEqual(orchestrator.dnsForwarder.metricCounts?.queries, 2)
+
+        await orchestrator.stopDNS()
+        XCTAssertEqual(orchestrator.snapshot.dnsQueryCount, 0)
+        XCTAssertNil(orchestrator.dnsForwarder.metricCounts, "the stop dropped the core, so a hop landing now has nothing to publish")
+
+        await orchestrator.startDNS()
+        let second = try XCTUnwrap(orchestrator.dnsForwarder.listeningPort)
+        XCTAssertTrue(answerWhileTheOwnerIsHeld(1, port: second, on: orchestrator), "the query was answered")
+        try await eventually { orchestrator.snapshot.dnsQueryCount != Self.sentinel }
+        XCTAssertEqual(orchestrator.snapshot.dnsQueryCount, 1, "the restarted core's count, from zero")
+    }
+
+    /// A published counter value no state holds.
+    private static let sentinel = -1
+
+    /// Writes the sentinel over the published session count, runs `signal` in the same owner turn, and returns what the first hop to land
+    /// after it published.
+    @RuntimeActor private func sessionHop(on orchestrator: ProxyOrchestrator, after signal: () -> Void) async throws -> Int {
+        orchestrator.mutateSnapshotForTesting { $0.tunnelSessionCount = Self.sentinel }
+        signal()
+        try await eventually { orchestrator.snapshot.tunnelSessionCount != Self.sentinel }
+        return orchestrator.snapshot.tunnelSessionCount
+    }
+
+    /// One owner turn that cannot suspend: `count` intercepted queries are answered while the owner is held, so the hop each one signals
+    /// queues behind this turn, and the sentinel is written over the published query count last. The forwarder resolves off the owner, on
+    /// the concurrency pool, so this needs more than one pool thread; the wait for the answers is bounded.
+    @RuntimeActor private func answerWhileTheOwnerIsHeld(_ count: Int, port: Int, on orchestrator: ProxyOrchestrator) -> Bool {
+        let answered = NIOLockedValueBox(0)
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            for index in 0..<count {
+                if Self.interceptedAnswer(for: "q\(index).intercept.test", port: port) { answered.withLockedValue { $0 += 1 } }
+            }
+            done.signal()
+        }
+        let finished = done.wait(timeout: .now() + 10) == .success
+        orchestrator.mutateSnapshotForTesting { $0.dnsQueryCount = Self.sentinel }
+        return finished && answered.withLockedValue { $0 } == count
+    }
+
+    /// One query over loopback UDP from a plain BSD socket, blocking up to two seconds: whether the intercept rule's address came back.
+    private static func interceptedAnswer(for name: String, port: Int) -> Bool {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = UInt16(port).bigEndian
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let query = DNSWireFormat.buildQuery(domain: name, txID: 0x5150, qtype: 1)
+        let sent = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                sendto(fd, query, query.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard sent == query.count else { return false }
+        var buffer = [UInt8](repeating: 0, count: 512)
+        let received = recv(fd, &buffer, buffer.count, 0)
+        guard received > 0 else { return false }
+        return DNSWireFormat.firstIPv4Answer(in: Array(buffer.prefix(received)))?.ip == "127.44.3.1"
+    }
 }
 
 /// Three direct histories of the helper alone, not an exploration of its interleavings: the order its effects run in, and which run at all.
-@MainActor
 final class PhysicalLifecycleTests: XCTestCase {
-    func testAnEffectSupersededBeforeItsClaimRunsNothing() async throws {
+    @RuntimeActor func testAnEffectSupersededBeforeItsClaimRunsNothing() async throws {
         let lifecycle = PhysicalLifecycle()
         let trace = Trace()
         let start = lifecycle.admit(running: true)
@@ -750,7 +873,7 @@ final class PhysicalLifecycleTests: XCTestCase {
 
     /// A claimed bind runs to its end even once superseded; the teardown admitted meanwhile runs after it, never beside it, and an operation
     /// superseded while it waited runs nothing.
-    func testAClaimedEffectRunsToItsEndBeforeTheNextAndAStaleWaiterRunsNothing() async throws {
+    @RuntimeActor func testAClaimedEffectRunsToItsEndBeforeTheNextAndAStaleWaiterRunsNothing() async throws {
         let lifecycle = PhysicalLifecycle()
         let gate = BindGate()
         let trace = Trace()
@@ -784,7 +907,7 @@ final class PhysicalLifecycleTests: XCTestCase {
         XCTAssertTrue(lifecycle.admitsRunning)
     }
 
-    func testABodyFailureReachesTheCallerAndFreesTheSlot() async throws {
+    @RuntimeActor func testABodyFailureReachesTheCallerAndFreesTheSlot() async throws {
         struct BindFailed: Error {}
         let lifecycle = PhysicalLifecycle()
         let trace = Trace()
@@ -802,7 +925,7 @@ final class PhysicalLifecycleTests: XCTestCase {
 
     /// The one joinable start: a stop leaves none, a start admitted after it is the joinable one, and the older start's completion never
     /// clears it. A start clears only its own, and a joiner gets the start's own error.
-    func testOnlyTheLatestStartIsJoinableAndAnOlderCompletionNeverClearsIt() async throws {
+    @RuntimeActor func testOnlyTheLatestStartIsJoinableAndAnOlderCompletionNeverClearsIt() async throws {
         struct BindFailed: Error {}
         let lifecycle = PhysicalLifecycle()
         let olderGate = BindGate()

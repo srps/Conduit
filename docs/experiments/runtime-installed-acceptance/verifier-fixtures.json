@@ -1,0 +1,231 @@
+{
+  "utility_sha256": "e8405532a98359e4e816e2bd90499eb7f45aa60ce1a3e4c8f7d903a1e25139c4",
+  "cases": [
+    {
+      "case": "exact-prior-restored",
+      "pass": true
+    },
+    {
+      "case": "applied-retained",
+      "pass": true
+    },
+    {
+      "case": "external-enable-not-falsely-retained",
+      "pass": true
+    },
+    {
+      "case": "external-host-not-falsely-retained",
+      "pass": true
+    },
+    {
+      "case": "previous-generation-retained",
+      "pass": true
+    },
+    {
+      "case": "identical-prior-and-applied-preserved",
+      "pass": true
+    },
+    {
+      "case": "introduced-route",
+      "pass": true
+    },
+    {
+      "case": "inactive-prior-does-not-authorize",
+      "pass": true
+    },
+    {
+      "case": "disabled-prior-does-not-authorize",
+      "pass": true
+    },
+    {
+      "case": "unstable-store-unknown",
+      "pass": true
+    },
+    {
+      "case": "unattributed-global-route",
+      "pass": true
+    },
+    {
+      "case": "preexisting-route-with-pass",
+      "pass": true
+    },
+    {
+      "case": "preexisting-route-with-fail",
+      "pass": true
+    },
+    {
+      "case": "preexisting-route-with-pending",
+      "pass": true
+    },
+    {
+      "case": "preexisting-route-with-unproven",
+      "pass": true
+    },
+    {
+      "case": "preexisting-route-with-attention",
+      "pass": true
+    },
+    {
+      "case": "unknown-route-no-pass",
+      "pass": true
+    },
+    {
+      "case": "unattributed-route-fails",
+      "pass": true
+    },
+    {
+      "case": "plist-bool-normalized",
+      "pass": true
+    },
+    {
+      "case": "integral-float-normalized",
+      "pass": true
+    },
+    {
+      "case": "nonintegral-unknown",
+      "pass": true
+    },
+    {
+      "case": "PAC-userinfo-unknown",
+      "pass": true
+    },
+    {
+      "case": "nonstring-list-unknown",
+      "pass": true
+    },
+    {
+      "case": "unmanaged-key-ignored",
+      "pass": true
+    },
+    {
+      "case": "stable-member-readable",
+      "pass": true
+    },
+    {
+      "case": "unlinked-member-unknown",
+      "pass": true
+    },
+    {
+      "case": "disabled-service-represented",
+      "pass": true
+    },
+    {
+      "case": "bad-active-set-unknown",
+      "pass": true
+    },
+    {
+      "case": "location-cap",
+      "pass": true
+    },
+    {
+      "case": "membership-cap",
+      "pass": true
+    },
+    {
+      "case": "changed-read-is-unstable",
+      "pass": true
+    },
+    {
+      "case": "physical-exact-restore-pass",
+      "pass": true
+    },
+    {
+      "case": "retained-applied-fails",
+      "pass": true
+    },
+    {
+      "case": "retained-record-pending",
+      "pass": true
+    },
+    {
+      "case": "unknown-record-unproven",
+      "pass": true
+    },
+    {
+      "case": "new-session-uses-start-prior",
+      "pass": true
+    },
+    {
+      "case": "preflight-capture-not-overwritten",
+      "pass": true
+    },
+    {
+      "case": "group-level-rebase-detected",
+      "pass": true
+    },
+    {
+      "case": "rebased-reference-unproven",
+      "pass": true
+    },
+    {
+      "case": "rebased-reference-never-owns-prior",
+      "pass": true
+    },
+    {
+      "case": "rebased-reference-never-attention",
+      "pass": true
+    },
+    {
+      "case": "not-reapplied-keeps-preflight-ref",
+      "pass": true
+    },
+    {
+      "case": "unknown-start-record-retained",
+      "pass": true
+    },
+    {
+      "case": "same-session-drift-to-applied-still-fails",
+      "pass": true
+    },
+    {
+      "case": "scoped-report-does-not-leak-values-or-IDs",
+      "pass": true
+    },
+    {
+      "case": "rebased-held-exact-origin",
+      "pass": true
+    },
+    {
+      "case": "rebased-route-exact-pass",
+      "pass": true
+    },
+    {
+      "case": "rebased-route-exact-unproven",
+      "pass": true
+    },
+    {
+      "case": "rebased-route-exact-fail",
+      "pass": true
+    },
+    {
+      "case": "rebased-route-exact-pending",
+      "pass": true
+    },
+    {
+      "case": "rebased-inactive-not-held",
+      "pass": true
+    },
+    {
+      "case": "rebased-inactive-still-fails",
+      "pass": true
+    },
+    {
+      "case": "rebased-disabled-not-held",
+      "pass": true
+    },
+    {
+      "case": "rebased-disabled-still-fails",
+      "pass": true
+    },
+    {
+      "case": "mixed-introduced-dominates-rebased",
+      "pass": true
+    },
+    {
+      "case": "mixed-introduced-still-fails",
+      "pass": true
+    }
+  ],
+  "count": 56,
+  "scope": "Independent curated pure/helper-stub cases only; no app controls or normal-mode execution."
+}

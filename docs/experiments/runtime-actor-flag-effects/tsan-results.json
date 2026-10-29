@@ -1,0 +1,25 @@
+{
+  "source_snapshot": {
+    "head": "0b5c533c16c7a6e8580a4073b209df3730b61908",
+    "review_base": "0b5c533c16c7a6e8580a4073b209df3730b61908",
+    "snapshot_sha256": "63677eefea448c5a94a4fa9c22f01703691763468ee48051dd60d8b92ddc9c25",
+    "files": 790,
+    "author_manifest": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-flags-manifest.json",
+    "new_files_in_patch": [],
+    "patch_sha256": "5e798e53a3a222be8d9294a41b3b2dfc97d63b2f624701e4b760bf19584c59e4",
+    "stable": true
+  },
+  "command": [
+    "xcrun",
+    "swift",
+    "test",
+    "--scratch-path",
+    "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-flags-tsan-authorized/build",
+    "--sanitize=thread",
+    "--filter",
+    "RuntimeReconcilerTests|RuntimePhysicalOrderingTests|RuntimeHostControlOwnerTests|DaemonRuntimeHostTests"
+  ],
+  "exit": 0,
+  "seconds": 172.467,
+  "suppression": ""
+}

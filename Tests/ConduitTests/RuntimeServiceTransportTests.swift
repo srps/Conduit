@@ -2,14 +2,14 @@
 import XCTest
 @testable import ConduitRuntime
 import ConduitShared
+import ProxyKernel
 
 /// The framed client over the production in-memory transport, with a manual clock and a manual owner hop queue. Each test
 /// states what the transport did, and the owner and the service record what they admitted.
-@MainActor
 final class RuntimeServiceTransportTests: XCTestCase {
     private let frameLimits = try! ControlFrameLimits(maxFrameBytes: 64 * 1024)
 
-    private func thrownError<T>(_ body: () async throws -> T) async -> RuntimeClientError? {
+    @RuntimeActor private func thrownError<T>(_ body: () async throws -> T) async -> RuntimeClientError? {
         do {
             _ = try await body()
             return nil
@@ -18,7 +18,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
         }
     }
 
-    private func makeClient(
+    @RuntimeActor private func makeClient(
         _ harness: RuntimeServiceHarness,
         _ transport: RuntimeInMemoryTransport,
         frame: ControlFrameLimits? = nil
@@ -33,7 +33,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
         )
     }
 
-    private func publishHosts(_ harness: RuntimeServiceHarness, hosts: [String], revision: Int = 1) throws {
+    @RuntimeActor private func publishHosts(_ harness: RuntimeServiceHarness, hosts: [String], revision: Int = 1) throws {
         harness.owner.dnsHostnames = hosts
         harness.owner.snapshotValue = try RuntimeServiceFixtures.snapshot(
             incarnation: 1,
@@ -42,43 +42,44 @@ final class RuntimeServiceTransportTests: XCTestCase {
         )
     }
 
-    private func readHosts(
+    @RuntimeActor private func readHosts(
         _ client: any RuntimeClient,
         _ harness: RuntimeServiceHarness,
         incarnation: Int = 1,
         cursor: ControlPageCursor? = nil
-    ) async -> Result<ControlPageReply, RuntimeClientError> {
+    ) async throws -> Result<ControlPageReply, RuntimeClientError> {
         let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
         let request = ControlPageRequest(
             expectedIncarnation: RuntimeServiceFixtures.incarnation(incarnation),
             collection: .tunnelDNSHosts,
             cursor: cursor
         )
+        // Only the client's own answer is a result. A driver failure is the test's, and it is thrown as itself.
         do {
-            return .success(try await runCall(harness.scheduling) { try await client.readPage(request, deadline: deadline) })
-        } catch {
-            return .failure(error as? RuntimeClientError ?? .unexpectedReply)
+            return .success(try await runDrainingCall(harness.scheduling) { try await client.readPage(request, deadline: deadline) })
+        } catch let error as RuntimeClientError {
+            return .failure(error)
         }
     }
 
     /// A closed read failure reaches the client as its stable wire error, with no transport meaning and no admission to protect.
-    func testAnInternalProjectionFailureIsAStableWireErrorNotAnInvalidReply() async throws {
+    @RuntimeActor func testAnInternalProjectionFailureIsAStableWireErrorNotAnInvalidReply() async throws {
         let harness = try RuntimeServiceHarness()
         try publishHosts(harness, hosts: ["a"])
         harness.owner.projectionOverride = { _, _ in .internalFailure }
         let client = try makeClient(harness, harness.transport())
-        guard case .failure(let error) = await readHosts(client, harness) else {
+        guard case .failure(let error) = try await readHosts(client, harness) else {
             return XCTFail("a failed projection is not a reply")
         }
         XCTAssertEqual(error, .wire(.internalFailure))
         XCTAssertEqual(harness.owner.faults, [.projectionNotEncodable], "the owner is told once, with the closed case")
     }
 
-    func testAChangedIncarnationReadIsAStableWireErrorAndNothingIsProjected() async throws {
+    @RuntimeActor func testAChangedIncarnationReadIsAStableWireErrorAndNothingIsProjected() async throws {
         let harness = try RuntimeServiceHarness()
         try publishHosts(harness, hosts: ["a"])
         let client = try makeClient(harness, harness.transport())
-        guard case .failure(let error) = await readHosts(client, harness, incarnation: 2) else {
+        guard case .failure(let error) = try await readHosts(client, harness, incarnation: 2) else {
             return XCTFail("a read of another incarnation is refused")
         }
         XCTAssertEqual(error, .wire(.changedIncarnation))
@@ -86,12 +87,12 @@ final class RuntimeServiceTransportTests: XCTestCase {
     }
 
     /// An offset past the total the revision is known to have is an invalid value. It is refused before any capture or projection.
-    func testAnOffsetPastTheKnownTotalIsAStableInvalidValueBeforeAnyCapture() async throws {
+    @RuntimeActor func testAnOffsetPastTheKnownTotalIsAStableInvalidValueBeforeAnyCapture() async throws {
         let harness = try RuntimeServiceHarness()
         try publishHosts(harness, hosts: ["a", "b"])
         let client = try makeClient(harness, harness.transport())
         let cursor = ControlPageCursor(revision: try XCTUnwrap(ControlCollectionRevision(rawValue: 1)), offset: try ControlCount(5))
-        guard case .failure(let error) = await readHosts(client, harness, cursor: cursor) else {
+        guard case .failure(let error) = try await readHosts(client, harness, cursor: cursor) else {
             return XCTFail("an offset past the total is refused")
         }
         XCTAssertEqual(error, .wire(.invalidValue))
@@ -99,13 +100,13 @@ final class RuntimeServiceTransportTests: XCTestCase {
     }
 
     /// A row that fits the capture bound can still be larger than one caller's reply frame. The caller learns the frame is too small.
-    func testARowLargerThanTheCallersFrameIsAStableFrameTooLargeWireError() async throws {
+    @RuntimeActor func testARowLargerThanTheCallersFrameIsAStableFrameTooLargeWireError() async throws {
         let harness = try RuntimeServiceHarness()
         // A 3,000-byte host is cut to the 512-byte diagnostic cap (decision 0029), so the row is about 600 bytes. A 512-byte frame is smaller than it.
         try publishHosts(harness, hosts: [String(repeating: "h", count: 3_000)])
         let small = try ControlFrameLimits(maxFrameBytes: 512)
         let client = try makeClient(harness, harness.transport(), frame: small)
-        guard case .failure(let error) = await readHosts(client, harness) else {
+        guard case .failure(let error) = try await readHosts(client, harness) else {
             return XCTFail("a row larger than the caller's frame is not a page")
         }
         XCTAssertEqual(error, .wire(.frameTooLarge))
@@ -113,19 +114,19 @@ final class RuntimeServiceTransportTests: XCTestCase {
     }
 
     /// The unavailable reply names its exact total through the framed client, so the caller can tell how many rows the refusal is about.
-    func testAnOverBudgetRefusalCarriesItsExactTotalThroughTheFramedClient() async throws {
+    @RuntimeActor func testAnOverBudgetRefusalCarriesItsExactTotalThroughTheFramedClient() async throws {
         let harness = try RuntimeServiceHarness()
         let hosts = (1...17).map { "h\($0).example" }
         try publishHosts(harness, hosts: hosts)
         let client = try makeClient(harness, harness.transport())
-        guard case .success(let reply) = await readHosts(client, harness) else {
+        guard case .success(let reply) = try await readHosts(client, harness) else {
             return XCTFail("an over-budget refusal is a reply, not a failure")
         }
         XCTAssertEqual(reply, .unavailable(.tunnelDNSHosts, .retentionBudgetExceeded, knownTotal: try ControlCount(17)))
     }
 
     /// The byte sizes of the three frames a snapshot read touches, under one fixed correlation: the request, the `frameTooLarge` failure, and the snapshot.
-    private func snapshotFrameSizes(_ harness: RuntimeServiceHarness) throws -> (request: Int, failure: Int, snapshot: Int) {
+    @RuntimeActor private func snapshotFrameSizes(_ harness: RuntimeServiceHarness) throws -> (request: Int, failure: Int, snapshot: Int) {
         let correlation = RuntimeServiceFixtures.requestID(7)
         let request = try ControlRuntimeCodec.encodeFrame(
             ControlRuntimeMessage(
@@ -147,7 +148,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
 
     /// The snapshot is larger than the caller's frame, while the request that asks for it fits. The caller learns the size as the stable
     /// `frameTooLarge` wire error, not as a corrupt reply.
-    func testASnapshotLargerThanTheCallersFrameIsAStableFrameTooLargeWireError() async throws {
+    @RuntimeActor func testASnapshotLargerThanTheCallersFrameIsAStableFrameTooLargeWireError() async throws {
         let harness = try RuntimeServiceHarness()
         let sizes = try snapshotFrameSizes(harness)
         XCTAssertLessThan(max(sizes.request, sizes.failure), sizes.snapshot, "the snapshot is the one reply that cannot fit the caller's frame")
@@ -161,7 +162,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
     }
 
     /// No failure fits the frame that holds the request, so the answer ends as a bounded disconnect. It is never reported as a corrupt reply.
-    func testAnAnswerThatNoFailureCanFitIsADisconnectNotAnInvalidReply() async throws {
+    @RuntimeActor func testAnAnswerThatNoFailureCanFitIsADisconnectNotAnInvalidReply() async throws {
         let harness = try RuntimeServiceHarness()
         let sizes = try snapshotFrameSizes(harness)
         XCTAssertGreaterThan(sizes.failure, sizes.request, "the failure is larger than the request, so the request's frame cannot hold it")
@@ -186,7 +187,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
         XCTAssertEqual(failure, .sent(.disconnected), "the request was admitted and read, and its reply has no frame that can carry it")
     }
 
-    func testAnAdmittedCommandAnswersThroughTheFramedClient() async throws {
+    @RuntimeActor func testAnAdmittedCommandAnswersThroughTheFramedClient() async throws {
         let harness = try RuntimeServiceHarness()
         let client = try makeClient(harness, harness.transport())
         let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
@@ -202,7 +203,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
         XCTAssertEqual(harness.owner.fenceLog.count, 1)
     }
 
-    func testALostReplyIsRecoveredByLookupAndNeverResent() async throws {
+    @RuntimeActor func testALostReplyIsRecoveredByLookupAndNeverResent() async throws {
         let harness = try RuntimeServiceHarness()
         let transport = harness.transport()
         let client = try makeClient(harness, transport)
@@ -227,7 +228,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
         XCTAssertEqual(harness.owner.fenceLog.count, 1)
     }
 
-    func testAnExpiredDeadlineIsRefusedBeforeTheOwnerClaimsIt() async throws {
+    @RuntimeActor func testAnExpiredDeadlineIsRefusedBeforeTheOwnerClaimsIt() async throws {
         let harness = try RuntimeServiceHarness()
         let transport = harness.transport()
         let limits = frameLimits
@@ -257,7 +258,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
 
     /// A subscribe is opened only through `openStream`. An exchange that carries one is refused at the front door, before any lane is
     /// reserved or any owner hop is queued, so the answer is a closed not-sent refusal and the owner never sees the request.
-    func testASubscribeThroughExchangeIsRefusedBeforeAnyOwnerHop() async throws {
+    @RuntimeActor func testASubscribeThroughExchangeIsRefusedBeforeAnyOwnerHop() async throws {
         let harness = try RuntimeServiceHarness()
         let transport = harness.transport()
         let limits = frameLimits
@@ -283,7 +284,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
         XCTAssertEqual(harness.core.openSubscriberCount, 0)
     }
 
-    func testASubscriberPastTheLimitIsRefusedOnTheWire() async throws {
+    @RuntimeActor func testASubscriberPastTheLimitIsRefusedOnTheWire() async throws {
         let harness = try RuntimeServiceHarness(subscribers: 1)
         let client = try makeClient(harness, harness.transport())
         let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
@@ -300,7 +301,7 @@ final class RuntimeServiceTransportTests: XCTestCase {
         harness.scheduling.drainAll()
     }
 
-    func testAPublishedEventWakesAParkedStreamWait() async throws {
+    @RuntimeActor func testAPublishedEventWakesAParkedStreamWait() async throws {
         let harness = try RuntimeServiceHarness()
         let client = try makeClient(harness, harness.transport())
         let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)

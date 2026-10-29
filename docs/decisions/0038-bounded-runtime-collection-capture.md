@@ -2,7 +2,7 @@
 
 - Date: 2026-10-27
 - Decision: accepted (owner, 2026-10-27, #186: selected “4 MiB capture / 8 MiB retained (Recommended)”)
-- Implementation: planned
+- Implementation: implemented
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -84,7 +84,20 @@ record the rows that fit. The actual event feed and shutdown were missing at tha
 checkpoint, so it is not final production-profile acceptance. The fresh [corrected-source run](../experiments/actual-runtime-client-profile/runs/ef3e4df-OdAmdZ/README.md)
 passes all 31 mode/trials, including actual event delivery and host shutdown, at
 clean/stable source `ef3e4df`. Its row-shape measurements remain synthetic;
-production composition and AppState adoption remain open.
+that run preceded production composition and AppState adoption.
+
+[`RuntimeServiceProfile.inProcessApp`](../../Sources/ConduitRuntime/RuntimeServiceProfile.swift)
+now supplies the selected bounds to the app's actual framed clients and shared
+host. [`RuntimeServiceShippingProfileTests`](../../Tests/ConduitTests/RuntimeServiceShippingProfileTests.swift)
+pin the caps and codec-derived custody terms.
+[`RuntimePresentationAdapterTests`](../../Tests/ConduitTests/RuntimePresentationAdapterTests.swift)
+exercise a complete 10,000-row capture across four revisions through the actual
+observer/client/service and preserve unavailable totals. The collector enforces
+4 MiB and 10,000 rows; the host ledger owns the 8 MiB retained encoded-row budget.
+The display adapter's object/string memory is not included in that host accounting.
+The [fresh activation measurements](../verification-appstate-activation-2026-10-28.md)
+pass all 31 Release profile trials and three Debug consumer trials on stable
+source. Native acceptance remains pending; no app RAM bound follows.
 
 Does not prove: production app memory, normal usage row sizes, installed-machine
 behavior or release readiness.
@@ -92,3 +105,7 @@ behavior or release readiness.
 ## Open questions
 
 Other composition capacities and deadlines remain separate from this selected pair.
+
+### Control-fairness correction — 2026-10-28
+
+The [activation checkpoint](../verification-runtime-actor-activation-2026-10-28.md) measures a long synchronous projection and records the reviewed off-owner correction. [One shared capture flight](../../Sources/ConduitRuntime/RuntimeCaptureFlight.swift) across kinds reuses the existing one-capture staging term in [RuntimeServiceLimits](../../Sources/ConduitRuntime/RuntimeServiceLimits.swift), without reserving budget early or changing eviction. Eight MiB remains retained encoded rows, with up to one four-MiB capture in progress; these accounts exclude object memory. Source, causal checks and final-source resource acceptance pass in the linked checkpoint. A small-kind capture can keep an unselected larger collection alive, so neither the row cap nor these encoded accounts bound the whole frozen value or app RAM.

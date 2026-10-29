@@ -97,19 +97,27 @@ final class BoundedRecordWriterTests: XCTestCase {
         XCTAssertEqual(file.rotationCount, 1)
     }
 
-    @MainActor
-    func testTerminationDrainsAlreadyAcceptedAuditRecords() throws {
+    /// The exit's diagnostic flush, the one the host and pm-proxy run, drains an audit record accepted before it into the file whole.
+    func testTheExitFlushDrainsAlreadyAcceptedAuditRecords() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("audit.ndjson")
+        let events = RuntimeEventLog(capacity: 8)
         let sink = FileConnectionAuditSink(fileURL: url, logger: DiscardingLogSink(),
-                                           destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
+                                           destinationGuard: UncheckedRecordFileDestination(), eventLog: events)
+        let eventsWriter = RuntimeEventFileWriter(fileURL: directory.appendingPathComponent("events.ndjson"), logger: DiscardingLogSink(),
+                                                  destinationGuard: UncheckedRecordFileDestination(), eventLog: events)
         let record = ConnectionAuditRecord(id: UUID(), timestamp: Date(), clientAddress: "127.0.0.1",
             scheme: .https, target: "fixture.test:443", pacDecision: nil, chosenUpstream: "DIRECT",
             authMethod: nil, bytesSent: 1, bytesReceived: 1, durationMS: 1, outcome: .success)
-        let orchestrator = ProxyOrchestrator(config: GenericDefaults.shared.makeConfig(), auditSink: sink)
         sink.record(record)
-        orchestrator.performTerminationCleanup()
+        let report = await DiagnosticFlush.run(
+            phase: DiagnosticFlushPhase(), audit: sink, events: eventsWriter,
+            snapshot: makeSnapshotArtifactWriter(fileURL: directory.appendingPathComponent("snapshot.json"),
+                                                 logger: DiscardingLogSink(),
+                                                 destinationGuard: UncheckedRecordFileDestination(), eventLog: events),
+            eventLog: events, logger: DiscardingLogSink())
+        XCTAssertEqual(report.audit, .drained)
         XCTAssertEqual(sink.statistics.pendingRecords, 0)
         let line = try Data(contentsOf: url).split(separator: 0x0A).first!
         let decoded = try CanonicalJSON.decoder().decode(ConnectionAuditRecord.self, from: Data(line))

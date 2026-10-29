@@ -88,11 +88,11 @@ let package = Package(
             path: "Sources/PlatformMac",
             exclude: ["AGENTS.md"]
         ),
-        // The shared runtime host (decision 0013). Extracted from ConduitDaemon
-        // with its policy unchanged. ConduitDaemon, the tests and `pm-sim` depend
-        // on it; the updater must not, and AppState does not adopt it yet. `pm-sim`
-        // uses it only for headless actual-host scenarios with explicitly injected
-        // effects and owned scratch state (decision 0033).
+        // The shared runtime host (decisions 0013 and 0031). The app hosts it in
+        // process over its framed clients; ConduitDaemon, the tests and `pm-sim`
+        // depend on it too; the updater must not. `pm-sim` uses it only for
+        // headless actual-host scenarios with explicitly injected effects and
+        // owned scratch state (decision 0033).
         .target(
             name: "ConduitRuntime",
             dependencies: ["ProxyKernel", "ProxyControlBridge", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared", "RuntimeEvents", .product(name: "NIOConcurrencyHelpers", package: "swift-nio")],
@@ -101,7 +101,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "Conduit",
-            dependencies: ["ProxyKernel", "ProxyControlBridge", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared", "RuntimeEvents"],
+            dependencies: ["ConduitRuntime", "ProxyKernel", "ProxyControlBridge", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared", "RuntimeEvents"],
             path: "Sources/Conduit",
             exclude: ["AGENTS.md"]
         ),

@@ -1,0 +1,52 @@
+{
+  "source_diff_97a_to_983": [],
+  "tests_sha256": "7cdfbf058855a55375a37d7f415baba66b277440205bfd745438532b213a5b33",
+  "fingerprints": {
+    "policy_controls": "SHA256 of single LocationSettingsRecovery.swift source file",
+    "local_gates": "aggregate fingerprint of Source/Tests/scripts/.github/Resources/Package*/bundle/VERSION files per full workflow driver; not comparable to a single-file hash"
+  },
+  "recovery_comparison": {
+    "base": "v0.5.8",
+    "target": "97a5b43",
+    "files": [
+      {
+        "path": "Sources/PlatformMac/LocationSettingsRecovery.swift",
+        "identical": true,
+        "sha256": "90252b9b065e2e30ce9c23ca92f2cb96ef4357cac0fbf6cdc59630aff5d67993"
+      },
+      {
+        "path": "Sources/PlatformMac/PlatformStateJournal.swift",
+        "identical": true,
+        "sha256": "13ef493e89520103de3fc9b29c04e4bedbe9300f4a79f01ff7477b989c99357b"
+      }
+    ]
+  },
+  "changes_97a_to_8a": [
+    "ROADMAP.md",
+    "docs/experiments/runtime-split-dns-observation/README.md",
+    "docs/experiments/runtime-split-dns-observation/author-diagnosis.md",
+    "docs/experiments/runtime-split-dns-observation/author-r2.md",
+    "docs/experiments/runtime-split-dns-observation/candidate-rebuild.json",
+    "docs/experiments/runtime-split-dns-observation/control-summaries.json",
+    "docs/experiments/runtime-split-dns-observation/controls-review.md",
+    "docs/experiments/runtime-split-dns-observation/controls.json",
+    "docs/experiments/runtime-split-dns-observation/first-record-gate-removed.patch",
+    "docs/experiments/runtime-split-dns-observation/full-workflow.json",
+    "docs/experiments/runtime-split-dns-observation/hosted-6cb-assertions.txt",
+    "docs/experiments/runtime-split-dns-observation/hosted-6cb.json",
+    "docs/experiments/runtime-split-dns-observation/independent-diagnosis.md",
+    "docs/experiments/runtime-split-dns-observation/independent-final-evidence-review-r1.md",
+    "docs/experiments/runtime-split-dns-observation/independent-final-evidence-review-r2.md",
+    "docs/experiments/runtime-split-dns-observation/optimized-and-fresh.json",
+    "docs/experiments/runtime-split-dns-observation/reviewed-source.json",
+    "docs/experiments/runtime-split-dns-observation/second-record-gate-removed.patch",
+    "docs/experiments/runtime-split-dns-observation/simulator-summary.json",
+    "docs/experiments/runtime-split-dns-observation/source-commit-link.json",
+    "docs/experiments/runtime-split-dns-observation/source-review-r1.md",
+    "docs/experiments/runtime-split-dns-observation/source-review-r2.md",
+    "docs/experiments/runtime-split-dns-observation/supersession-guard-omitted.patch",
+    "docs/experiments/runtime-split-dns-observation/test-summaries.json",
+    "docs/experiments/runtime-split-dns-observation/unmodified-ten-fresh.json",
+    "docs/verification-runtime-split-dns-observation-2026-10-28.md"
+  ]
+}

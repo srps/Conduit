@@ -8,7 +8,6 @@ import XCTest
 /// #96: a VPN transition changes the network the PAC was fetched and
 /// evaluated on, so the orchestrator drops the engine's answers and fetches
 /// the PAC again, ignoring the failure backoff.
-@MainActor
 final class VPNPACRefreshTests: XCTestCase {
 
     /// Serves one script off the VPN and another on it, the way a corporate
@@ -42,6 +41,7 @@ final class VPNPACRefreshTests: XCTestCase {
         }
     }
 
+    @RuntimeActor
     private func makeOrchestrator(pac: NetworkPAC) -> ProxyOrchestrator {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
@@ -57,11 +57,11 @@ final class VPNPACRefreshTests: XCTestCase {
 
     /// Cold start: the PAC loads before the VPN observer primes. The priming
     /// `.connected` verdict fetches it again.
-    func testPrimingToConnectedFetchesThePACAgain() async throws {
+    @RuntimeActor func testPrimingToConnectedFetchesThePACAgain() async throws {
         let pac = NetworkPAC()
         let orchestrator = makeOrchestrator(pac: pac)
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
         XCTAssertEqual(pac.fetches, 1, "the proxy start loads the PAC once")
 
         pac.setOnVPN(true)
@@ -78,7 +78,7 @@ final class VPNPACRefreshTests: XCTestCase {
 
     /// The app's proxy.log keeps NOTICE and above and it writes no
     /// events.ndjson, so both the drop and the reload show there.
-    func testTheDropAndTheReloadAreVisibleAtNotice() async throws {
+    @RuntimeActor func testTheDropAndTheReloadAreVisibleAtNotice() async throws {
         let pac = NetworkPAC()
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
@@ -88,7 +88,7 @@ final class VPNPACRefreshTests: XCTestCase {
         let log = RecordingLogSink(minLevel: .notice)
         let orchestrator = ProxyOrchestrator(config: config, logger: log, pacEvaluator: pac)
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         pac.setOnVPN(true)
         let cutoff = Date()
@@ -102,12 +102,12 @@ final class VPNPACRefreshTests: XCTestCase {
     }
 
     /// A full outage and reconnect: each side of it fetches the PAC.
-    func testDisconnectAndReconnectEachFetchThePAC() async throws {
+    @RuntimeActor func testDisconnectAndReconnectEachFetchThePAC() async throws {
         let pac = NetworkPAC()
         pac.setOnVPN(true)
         let orchestrator = makeOrchestrator(pac: pac)
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
         await orchestrator.handleVPNStateChange(.connected)
         let primed = pac.fetches
 
@@ -130,12 +130,12 @@ final class VPNPACRefreshTests: XCTestCase {
 
     /// A PAC server that failed off the VPN is in backoff; the VPN coming up
     /// is a different network, so the fetch runs anyway.
-    func testReconnectFetchesDespiteTheFailureBackoff() async throws {
+    @RuntimeActor func testReconnectFetchesDespiteTheFailureBackoff() async throws {
         let pac = NetworkPAC()
         pac.setFailing(true)
         let orchestrator = makeOrchestrator(pac: pac)
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
         XCTAssertEqual(pac.fetches, 1)
 
         pac.setFailing(false)
@@ -149,12 +149,12 @@ final class VPNPACRefreshTests: XCTestCase {
     }
 
     /// A flap keeps the network; it neither drops the routes nor fetches.
-    func testFlapRecoveryLeavesThePACAlone() async throws {
+    @RuntimeActor func testFlapRecoveryLeavesThePACAlone() async throws {
         let pac = NetworkPAC()
         pac.setOnVPN(true)
         let orchestrator = makeOrchestrator(pac: pac)
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
         await orchestrator.handleVPNStateChange(.connected)
         let primed = pac.fetches
 

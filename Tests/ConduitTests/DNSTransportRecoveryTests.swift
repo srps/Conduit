@@ -18,17 +18,16 @@ import XCTest
 /// pin the *event surface* (kind, name, source tag, count) so log pipelines
 /// and `pmctl events` can group on it without parsing prose. Mechanical reset
 /// behaviour is covered by `DNSForwarderIntegrationTests`.
-@MainActor
 final class DNSTransportRecoveryTests: XCTestCase {
 
-    private func makeOrchestrator() -> ProxyOrchestrator {
+    @RuntimeActor private func makeOrchestrator() -> ProxyOrchestrator {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.upstreams = []
         return ProxyOrchestrator(config: config, logger: DiscardingLogSink())
     }
 
-    private func transportResetEvents(
+    @RuntimeActor private func transportResetEvents(
         in log: RuntimeEventLog,
         since: Date
     ) -> [RuntimeEvent] {
@@ -46,7 +45,7 @@ final class DNSTransportRecoveryTests: XCTestCase {
         )
     }
 
-    private func startOrchestratorWithDNS() async throws -> ProxyOrchestrator {
+    @RuntimeActor private func startOrchestratorWithDNS() async throws -> ProxyOrchestrator {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
         var config = orchestrator.config
@@ -58,9 +57,9 @@ final class DNSTransportRecoveryTests: XCTestCase {
         return orchestrator
     }
 
-    func testNetworkChangeEmitsTransportResetWhenDNSRunning() async throws {
+    @RuntimeActor func testNetworkChangeEmitsTransportResetWhenDNSRunning() async throws {
         let orchestrator = try await startOrchestratorWithDNS()
-        defer { Task { @MainActor in await orchestrator.stopDNS(); await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopDNS(); await orchestrator.stopProxy() } }
 
         let cutoff = Date()
         let acted = await orchestrator.handleNetworkPath(Self.wifi())
@@ -83,9 +82,9 @@ final class DNSTransportRecoveryTests: XCTestCase {
     /// #101: `NWPathMonitor` delivered an update every ~75 s for hours with
     /// nothing material changed, and each one reset the DoH transports and
     /// refetched the PAC. Identical updates must do neither.
-    func testIdenticalPathUpdatesResetNothing() async throws {
+    @RuntimeActor func testIdenticalPathUpdatesResetNothing() async throws {
         let orchestrator = try await startOrchestratorWithDNS()
-        defer { Task { @MainActor in await orchestrator.stopDNS(); await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopDNS(); await orchestrator.stopProxy() } }
         await orchestrator.handleNetworkPath(Self.wifi())
 
         let cutoff = Date()
@@ -107,7 +106,7 @@ final class DNSTransportRecoveryTests: XCTestCase {
 
     /// A Wi-Fi roam keeps the interface and moves the gateway. It must still
     /// act, and the event and NOTICE line must say what moved.
-    func testGatewayChangeResetsOnceAndNamesTheField() async throws {
+    @RuntimeActor func testGatewayChangeResetsOnceAndNamesTheField() async throws {
         let logger = RecordingLogSink(minLevel: .notice)
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
@@ -117,7 +116,7 @@ final class DNSTransportRecoveryTests: XCTestCase {
         let orchestrator = ProxyOrchestrator(config: config, logger: logger)
         try await orchestrator.startProxy()
         await orchestrator.startDNS()
-        defer { Task { @MainActor in await orchestrator.stopDNS(); await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopDNS(); await orchestrator.stopProxy() } }
         XCTAssertEqual(orchestrator.snapshot.dnsRunState, .running, "DNS forwarder must bind for this test")
         await orchestrator.handleNetworkPath(Self.wifi())
         for _ in 0..<3 { await orchestrator.handleNetworkPath(Self.wifi()) }
@@ -142,7 +141,7 @@ final class DNSTransportRecoveryTests: XCTestCase {
     /// The event is the record and the log line derives from it (AGENTS:
     /// structured events first). An unsatisfied path decides "skip" inside
     /// the same event rather than through a second one (#40).
-    func testNetworkChangeEmitsThePathEventBeforeItsLogLine() async throws {
+    @RuntimeActor func testNetworkChangeEmitsThePathEventBeforeItsLogLine() async throws {
         let logger = RecordingLogSink(minLevel: .info)
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
@@ -172,10 +171,10 @@ final class DNSTransportRecoveryTests: XCTestCase {
 
     // MARK: - handleSystemWake
 
-    func testSystemWakeEmitsTransportResetWithSystemWakeSource() async throws {
+    @RuntimeActor func testSystemWakeEmitsTransportResetWithSystemWakeSource() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         // Prime: walk through a stable .connected state so wake has a real
         // baseline to recover into.
@@ -194,10 +193,10 @@ final class DNSTransportRecoveryTests: XCTestCase {
 
     // MARK: - .reasserting -> .connected (flap recovery)
 
-    func testFlapRecoveryEmitsTransportResetWithFlapSource() async throws {
+    @RuntimeActor func testFlapRecoveryEmitsTransportResetWithFlapSource() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
         await orchestrator.handleVPNStateChange(.reasserting)
@@ -213,10 +212,10 @@ final class DNSTransportRecoveryTests: XCTestCase {
 
     // MARK: - .disconnected -> .connected (real-outage recovery)
 
-    func testReconnectAfterDisconnectEmitsTransportResetWithReconnectSource() async throws {
+    @RuntimeActor func testReconnectAfterDisconnectEmitsTransportResetWithReconnectSource() async throws {
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
@@ -232,14 +231,14 @@ final class DNSTransportRecoveryTests: XCTestCase {
 
     // MARK: - Negative cases
 
-    func testReassertingTransitionDoesNotEmitTransportReset() async throws {
+    @RuntimeActor func testReassertingTransitionDoesNotEmitTransportReset() async throws {
         // The flap *start* is a silent-grace transition — no reset until
         // recovery. The reset is what restores reachable transports; tearing
         // them down at flap-start would orphan in-flight DoH lookups for the
         // duration of the grace window.
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
         let cutoff = Date()
@@ -251,13 +250,13 @@ final class DNSTransportRecoveryTests: XCTestCase {
                       ".reasserting (grace start) must NOT recycle transports — recovery is what triggers the reset")
     }
 
-    func testRepeatedConnectedStateProducesNoTransportResetStorm() async throws {
+    @RuntimeActor func testRepeatedConnectedStateProducesNoTransportResetStorm() async throws {
         // Idempotence guard at the top of handleVPNStateChange short-circuits
         // duplicate states. Confirm the reset path also benefits — no event
         // storm if a flaky observer fires .connected repeatedly.
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
         let cutoff = Date()
@@ -273,14 +272,14 @@ final class DNSTransportRecoveryTests: XCTestCase {
 
     // MARK: - End-to-end transition sequence
 
-    func testFullNetworkTransitionEmitsExactlyThreeTransportResets() async throws {
+    @RuntimeActor func testFullNetworkTransitionEmitsExactlyThreeTransportResets() async throws {
         // The `network-transition` scenario: wake → flap → reconnect.
         // Each phase emits exactly one reset with its own source tag. The
         // full sequence is the contract pmctl/menu-bar consume to render
         // recovery progress.
         let orchestrator = makeOrchestrator()
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
         let cutoff = Date()

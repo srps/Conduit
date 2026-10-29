@@ -1,0 +1,22 @@
+{
+  "swift-tests": {
+    "sha256": "366232143a4ac39a31460bad02e926caa17dd6fda31014e7e042d8a1d5fcbac4",
+    "summaries": [
+      "Test Suite 'ConfigurationStoreTests' passed at 2026-10-28 17:25:27.331.",
+      "Executed 33 tests, with 0 failures (0 unexpected) in 0.199 (0.201) seconds",
+      "Executed 33 tests, with 0 failures (0 unexpected) in 0.009 (0.011) seconds",
+      "Executed 3770 tests, with 4 tests skipped and 0 failures (0 unexpected) in 288.014 (288.327) seconds",
+      "Test Suite 'All tests' passed at 2026-10-28 17:29:04.336.",
+      "Executed 3770 tests, with 4 tests skipped and 0 failures (0 unexpected) in 288.014 (288.335) seconds"
+    ]
+  },
+  "optimized-model-tests": {
+    "sha256": "5ece5f2471ad41a372ca6b29c53702be5ab57b2aef775ce72002d8c1936822d7",
+    "summaries": [
+      "Test Suite 'ConfigurationStoreTests' passed at 2026-10-28 17:37:31.101.",
+      "Executed 33 tests, with 0 failures (0 unexpected) in 0.289 (0.293) seconds",
+      "Executed 33 tests, with 0 failures (0 unexpected) in 0.289 (0.293) seconds",
+      "Executed 33 tests, with 0 failures (0 unexpected) in 0.289 (0.301) seconds"
+    ]
+  }
+}

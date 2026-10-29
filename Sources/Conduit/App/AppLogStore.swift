@@ -10,24 +10,28 @@
 // LogSink conformance design: the protocol requirement `logImpl` is the
 // raw sink primitive — it assumes the caller has already filtered by
 // `minLevel` (the `LogSink.log` extension does this before calling
-// `logImpl`). `AppLogStore.logImpl` Tasks back to MainActor for the
-// `entries` ring-buffer + file-write side effects, with a synchronous
-// `MainActor.assumeIsolated` fast path when the caller is already on
-// main. The fast path preserves the "read `entries` right after
-// `log`" semantics that AppState callers and LoggingTests rely on; the
-// Task-hop branch keeps the nonisolated entry valid for NIO callers.
+// `logImpl`). `AppLogStore.logImpl` builds one `LogEntry` and one
+// formatted line, and writes the physical outputs (the file writer's
+// bounded admission, the shared bounded stderr writer, the unified log)
+// in the caller's own turn, on whatever thread it is. Only the UI history
+// crosses to MainActor: off main through one bounded locked hand-off and
+// at most one scheduled drain, and on main inline, after the hand-off's
+// earlier entries, which preserves the "read `entries` right after `log`"
+// semantics that AppState callers and LoggingTests rely on. A history
+// entry evicted from that bounded hand-off is not a lost record: the
+// physical outputs already have it.
 //
-// Per-output filter logic (stderr vs buffer vs file) stays inside
-// `appendOnMain` because each output has its own threshold: a line may
-// pass the outer `minLevel` filter (so `logImpl` runs) yet only land in
-// the buffer, not stderr — or vice versa.
+// Per-output filter logic (stderr vs buffer vs file) is per output because
+// each has its own threshold: a line may pass the outer `minLevel` filter
+// (so `logImpl` runs) yet only land in the buffer, not stderr — or vice
+// versa. The file and the unified log take every line that reaches the store.
 //
 // Filter levels (`minStderrLevel`, `minBufferedLevel`) are stored in
 // `NIOLockedValueBox` so the LogSink-required `minLevel` accessor can
 // read them from any thread without crossing actor isolation. Settings-
 // driven writes from MainActor go through the same boxes — uniform,
-// concurrency-safe, and the lock cost is negligible compared to the file-
-// write or Task-hop the call usually triggers anyway.
+// concurrency-safe, and the lock cost is negligible compared to the
+// write the call usually triggers anyway.
 
 import Combine
 import Foundation
@@ -41,8 +45,8 @@ package final class AppLogStore: ObservableObject, LogSink {
     @Published package private(set) var entries: [LogEntry] = []
 
     /// Steady-state ring-buffer capacity. After a trim we keep exactly this
-    /// many entries.
-    private let maxEntries = 2000
+    /// many entries. The off-main hand-off is bounded the same way.
+    nonisolated private static let maxEntries = 2000
 
     /// Overflow slack: we let `entries` grow up to `maxEntries + trimSlack`
     /// before trimming back to `maxEntries`. Trimming is `removeFirst(N)`,
@@ -50,8 +54,9 @@ package final class AppLogStore: ObservableObject, LogSink {
     /// hit the cap meant a 1999-element memmove per log line under burst
     /// load. Spreading the trim across `trimSlack` appends amortises the
     /// cost to O(1) per append at the cost of `trimSlack` extra entries
-    /// briefly held in memory (≈ a few KB of `LogEntry`s).
-    private let trimSlack = 256
+    /// briefly held in memory (≈ a few KB of `LogEntry`s). The hand-off
+    /// trims the same way.
+    nonisolated private static let trimSlack = 256
 
     private let stderrLevelBox = NIOLockedValueBox<LogLevel>(.notice)
     private let bufferedLevelBox = NIOLockedValueBox<LogLevel>(.notice)
@@ -82,7 +87,38 @@ package final class AppLogStore: ObservableObject, LogSink {
         return min(stderr, buf)
     }
 
-    private var logFile: (any RotatingByteWriter)?
+    /// The current file writer and the counters of the writers it replaced. A line is only admitted under this lock,
+    /// and the swap happens under it, so no line reaches a writer after its counters were folded. Never held across a
+    /// close, a wait or a publication.
+    private struct Writers {
+        var file: (any RotatingByteWriter)?
+        /// The written, dropped and failed counts of every writer closed by a toggle.
+        var folded = Folded()
+        /// The waits this store saw time out. Owned here, not summed from the writers, so a wait that ends after its
+        /// writer was replaced is counted once.
+        var waitTimeouts: UInt64 = 0
+    }
+    /// A closed writer's monotonic counters. Its queue is empty once its close returned, so nothing pending is folded.
+    private struct Folded {
+        var written: UInt64 = 0
+        var dropped: UInt64 = 0
+        var failed: UInt64 = 0
+    }
+    private let writers = NIOLockedValueBox(Writers())
+    /// The shared bounded stderr writer.
+    private let console = ConsoleLogSink(minLevel: .debug)
+
+    /// Entries emitted off main and not yet in `entries`, bounded like `entries`, and whether a drain is scheduled.
+    private struct History {
+        var pending: [LogEntry] = []
+        var scheduled = false
+        /// Drains scheduled over the store's life. Test observation.
+        var drainsScheduled = 0
+        /// Entries evicted from the hand-off before they reached `entries`. UI history only, never a lost record.
+        var evicted = 0
+    }
+    private let history = NIOLockedValueBox(History())
+
     private let fileLogMaxBytes: Int
     private let fileLogArchives: Int
     /// The guard every file open and archive rotation is judged by. Required: no unchecked default is built into production.
@@ -104,16 +140,30 @@ package final class AppLogStore: ObservableObject, LogSink {
     /// Setting this opens the file for **append**; it never truncates. The
     /// previous implementation did, on every toggle flip. The file opens on
     /// its first write, never here.
+    ///
+    /// A change closes the current writer first, with no lock held: the close writes what that writer had admitted and
+    /// blocks this turn until it has, as before. A line logged meanwhile reaches the closed writer and is counted
+    /// dropped. Then, under the lock, the closed writer's counters are folded in and the new writer takes its place.
     package var logFileURL: URL? {
         didSet {
-            logFile?.close()
-            logFile = nil
-            guard let url = logFileURL else { return }
-            logFile = rotatingLogFile(
-                url: url, maxBytes: fileLogMaxBytes, archives: fileLogArchives,
-                destinationGuard: destinationGuard, gate: destinationGate,
-                eventLog: diagnosticEventLog, logger: fileLogSink
-            )
+            let closing = writers.withLockedValue { $0.file }
+            closing?.close()
+            let next = logFileURL.map { url in
+                rotatingLogFile(
+                    url: url, maxBytes: fileLogMaxBytes, archives: fileLogArchives,
+                    destinationGuard: destinationGuard, gate: destinationGate,
+                    eventLog: diagnosticEventLog, logger: fileLogSink
+                )
+            }
+            writers.withLockedValue { value in
+                if let closing {
+                    let statistics = closing.statistics
+                    value.folded.written &+= statistics.writtenRecords
+                    value.folded.dropped &+= statistics.droppedRecords
+                    value.folded.failed &+= statistics.failedRecords
+                }
+                value.file = next
+            }
         }
     }
 
@@ -124,11 +174,16 @@ package final class AppLogStore: ObservableObject, LogSink {
     /// Public on purpose: the lines are already sanitised by `LogSink` and
     /// already land in a user-readable file. `info`/`debug` are not
     /// persisted by the system, which matches what is worth reading later.
-    private static let unifiedLog = Logger(subsystem: HelperConstants.logSubsystem, category: "app")
+    nonisolated private static let unifiedLog = Logger(subsystem: HelperConstants.logSubsystem, category: "app")
 
-    /// Drains pending file writes. For tests and shutdown.
-    package func flushFileLog() {
-        logFile?.flush()
+    /// Waits up to `timeout` for the file writer's admitted lines. False, and a counted timeout, when they had not
+    /// left its queue. For tests and Settings; the runtime owner drains asynchronously instead.
+    @discardableResult
+    package nonisolated func flushFileLog(timeout: TimeInterval = 2) -> Bool {
+        guard let file = writers.withLockedValue({ $0.file }) else { return true }
+        let completed = file.flush(timeout: timeout)
+        if !completed { writers.withLockedValue { $0.waitTimeouts &+= 1 } }
+        return completed
     }
 
     package init(
@@ -145,6 +200,8 @@ package final class AppLogStore: ObservableObject, LogSink {
         sink.bind(self)
     }
 
+    // MARK: - LogSink
+
     /// `LogSink` protocol primitive. Not called directly — the
     /// `LogSink.log` extension filters by `minLevel` and autoclosures the
     /// message, then routes here. Callers use `logger.log(.level, "msg",
@@ -152,62 +209,138 @@ package final class AppLogStore: ObservableObject, LogSink {
     /// `category` to `.general`; the extension then invokes this method
     /// with the fully-built message.
     ///
-    /// Threading: when called from the main thread (typical for AppState
-    /// callbacks + LoggingTests), appends synchronously via
-    /// `MainActor.assumeIsolated`. When called off the main thread
-    /// (kernel files via NIO event loops), Tasks back to MainActor for the
-    /// append. The split preserves synchronous semantics for direct
-    /// AppState / test calls — those callers can read `entries` immediately
-    /// after — while keeping the nonisolated entry valid for kernel
-    /// callers that can't statically prove they're on MainActor.
-    ///
-    /// The per-output filter (stderr vs buffer vs file) stays inside
-    /// `appendOnMain`: a line that passes the outer `minLevel` gate may
-    /// still only satisfy one of the two thresholds, and `appendOnMain`
-    /// decides where each line lands based on per-output comparison.
+    /// Threading: the physical outputs are written here, on any thread, and only admit to bounded writers. The UI
+    /// history entry is appended inline when called on the main thread (typical for AppState callbacks and
+    /// LoggingTests), after any entries still in the hand-off, so those callers can read `entries` immediately after.
+    /// Off main it goes to the bounded hand-off, which one scheduled drain appends.
     package nonisolated func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
+        let entry = LogEntry(level: level, category: category, message: message)
+        let line = Data((entry.formatted() + "\n").utf8)
+        writers.withLockedValue { $0.file?.write(line) }
+        if level >= minStderrLevel { console.write(line: line) }
+        Self.unifiedLog.log(level: level.osLogType, "[\(category.rawValue, privacy: .public)] \(message, privacy: .public)")
+        let buffered = level >= minBufferedLevel
         if Thread.isMainThread {
-            // Already on main; append inline. Preserves the
-            // synchronous semantics that AppState's @MainActor callers and
-            // the LoggingTests rely on (read `entries` right after calling
-            // `log`). MainActor IS the main thread on Apple platforms;
-            // `assumeIsolated` is the documented way to opt into the
-            // synchronous fast path.
-            MainActor.assumeIsolated {
-                appendOnMain(level: level, message: message, category: category)
-            }
-        } else {
-            // Off main (NIO event loops via `any LogSink` from kernel
-            // files). Dispatch through MainActor for the ring-buffer +
-            // file-write side effects.
-            Task { @MainActor in
-                self.appendOnMain(level: level, message: message, category: category)
-            }
+            // MainActor IS the main thread on Apple platforms; `assumeIsolated` is the documented way to opt into the
+            // synchronous path.
+            MainActor.assumeIsolated { appendOnMain(buffered ? entry : nil) }
+        } else if buffered {
+            handOff(entry)
         }
     }
 
-    /// MainActor-isolated body. Performs the ring-buffer append + the
-    /// stderr/file writes. Private; the only entry point is the nonisolated
-    /// `logImpl` above.
-    private func appendOnMain(level: LogLevel, message: String, category: LogCategory) {
-        let entry = LogEntry(level: level, category: category, message: message)
-        if level >= minBufferedLevel {
-            entries.append(entry)
-            // Amortised trim: only act once we cross `maxEntries + trimSlack`,
-            // then drop back to `maxEntries`. A burst of N appends after the
-            // buffer is full triggers exactly ⌈N / trimSlack⌉ memmoves
-            // instead of N — ~1/256× the work in the worst case.
-            if entries.count > maxEntries + trimSlack {
-                entries.removeFirst(entries.count - maxEntries)
+    /// The physical outputs' counters: the folded writers, the current file writer and the shared stderr writer.
+    /// `flushTimeouts` is this store's own count of waits that timed out, not the writers' sum.
+    package nonisolated var statistics: RecordWriterStatistics {
+        let (folded, file, waitTimeouts) = writers.withLockedValue { ($0.folded, $0.file?.statistics, $0.waitTimeouts) }
+        var total = console.statistics
+        if let file {
+            total.pendingRecords += file.pendingRecords
+            total.pendingBytes += file.pendingBytes
+            total.writtenRecords &+= file.writtenRecords
+            total.droppedRecords &+= file.droppedRecords
+            total.failedRecords &+= file.failedRecords
+        }
+        total.writtenRecords &+= folded.written
+        total.droppedRecords &+= folded.dropped
+        total.failedRecords &+= folded.failed
+        // The writers' own timeout counts are left out: a wait is counted once, by this store.
+        total.flushTimeouts = waitTimeouts
+        return total
+    }
+
+    /// Waits for the file writer's and stderr's admitted lines, both under one absolute deadline. Honest and bounded,
+    /// for callers outside the runtime owner. False when either had not drained.
+    @discardableResult
+    package nonisolated func flush(timeout: TimeInterval) -> Bool {
+        let deadline = DispatchTime.now() + timeout
+        let remaining = { max(0, Double(Int64(deadline.uptimeNanoseconds) - Int64(DispatchTime.now().uptimeNanoseconds)) / 1e9) }
+        var timeouts: UInt64 = 0
+        let file = writers.withLockedValue { $0.file }
+        if let file, !file.flush(timeout: remaining()) { timeouts += 1 }
+        if !console.flush(timeout: remaining()) { timeouts += 1 }
+        if timeouts > 0 { writers.withLockedValue { $0.waitTimeouts &+= timeouts } }
+        return timeouts == 0
+    }
+
+    /// Awaits the file writer's and stderr's admitted lines without blocking, both under the same absolute `deadline`.
+    /// Each eligible output is tried whatever the other answered, and the first outcome that is not `drained` is the
+    /// result. Each wait that times out is counted once, here.
+    package nonisolated func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome {
+        let file = writers.withLockedValue { $0.file }
+        var result = RecordDrainOutcome.drained
+        if let file { result = await record(file.drain(until: deadline), after: result) }
+        return await record(console.drain(until: deadline), after: result)
+    }
+
+    private nonisolated func record(_ outcome: RecordDrainOutcome, after result: RecordDrainOutcome) -> RecordDrainOutcome {
+        if outcome == .timedOut { writers.withLockedValue { $0.waitTimeouts &+= 1 } }
+        return result == .drained ? outcome : result
+    }
+
+    // MARK: - UI history
+
+    /// Drains scheduled over the store's life, and entries evicted from the hand-off. Test observation.
+    nonisolated var historyDrainsScheduled: Int { history.withLockedValue { $0.drainsScheduled } }
+    nonisolated var historyEvicted: Int { history.withLockedValue { $0.evicted } }
+
+    /// Adds an off-main entry to the bounded hand-off, trimmed like `entries`, and schedules one drain if none is.
+    private nonisolated func handOff(_ entry: LogEntry) {
+        let schedule = history.withLockedValue { value -> Bool in
+            value.pending.append(entry)
+            if value.pending.count > Self.maxEntries + Self.trimSlack {
+                let excess = value.pending.count - Self.maxEntries
+                value.pending.removeFirst(excess)
+                value.evicted += excess
             }
+            guard !value.scheduled else { return false }
+            value.scheduled = true
+            value.drainsScheduled += 1
+            return true
         }
-        let line = entry.formatted() + "\n"
-        let lineData = Data(line.utf8)
-        if level >= minStderrLevel {
-            FileHandle.standardError.write(lineData)
+        if schedule {
+            Task { @MainActor [weak self] in self?.drainHandOff() }
         }
-        logFile?.write(lineData)
-        Self.unifiedLog.log(level: level.osLogType, "[\(category.rawValue, privacy: .public)] \(message, privacy: .public)")
+    }
+
+    /// The scheduled drain: everything handed off so far, in one mutation of `entries`.
+    private func drainHandOff() {
+        let batch = history.withLockedValue { value -> [LogEntry] in
+            value.scheduled = false
+            return Self.take(&value.pending)
+        }
+        guard !batch.isEmpty else { return }
+        Self.appendHistory(batch, to: &entries)
+    }
+
+    /// The main thread's own entry, after whatever the hand-off still holds, in one mutation of `entries`. A scheduled
+    /// drain stays scheduled and finds less to do.
+    private func appendOnMain(_ entry: LogEntry?) {
+        var batch = history.withLockedValue { Self.take(&$0.pending) }
+        if batch.isEmpty {
+            guard let entry else { return }
+            Self.appendHistory(CollectionOfOne(entry), to: &entries)
+            return
+        }
+        if let entry { batch.append(entry) }
+        Self.appendHistory(batch, to: &entries)
+    }
+
+    private nonisolated static func take(_ pending: inout [LogEntry]) -> [LogEntry] {
+        guard !pending.isEmpty else { return [] }
+        var taken: [LogEntry] = []
+        swap(&taken, &pending)
+        return taken
+    }
+
+    /// Appends, then applies the amortised trim: only act once we cross `maxEntries + trimSlack`, then drop back to
+    /// `maxEntries`. A burst of N appends after the buffer is full triggers exactly ⌈N / trimSlack⌉ memmoves instead of
+    /// N — ~1/256× the work in the worst case. One `inout` access, so one published change per batch.
+    private static func appendHistory<S: Sequence>(_ batch: S, to entries: inout [LogEntry]) where S.Element == LogEntry {
+        entries.append(contentsOf: batch)
+        if entries.count > maxEntries + trimSlack {
+            entries.removeFirst(entries.count - maxEntries)
+        }
     }
 
     package func exportDiagnosticLog() -> String {
@@ -215,6 +348,7 @@ package final class AppLogStore: ObservableObject, LogSink {
     }
 
     package func clearEntries() {
+        history.withLockedValue { $0.pending.removeAll() }
         entries.removeAll()
     }
 }
@@ -234,6 +368,11 @@ private final class WeakStoreLogSink: LogSink, @unchecked Sendable {
     }
 
     var minLevel: LogLevel { current?.minLevel ?? .error }
+
+    func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome {
+        guard let store = current else { return .unavailable }
+        return await store.drain(until: deadline)
+    }
 
     func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
         current?.logImpl(level, message, category: category)

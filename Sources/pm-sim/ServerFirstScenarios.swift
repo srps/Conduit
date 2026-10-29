@@ -2,6 +2,7 @@
 import Foundation
 import NIOCore
 import NIOPosix
+import ProxyKernel
 
 /// Server-first protocols (SSH banners, SMTP/FTP greetings) through an
 /// upstream proxy. The fake upstream writes its `200` and the first greeting
@@ -17,7 +18,7 @@ enum ServerFirstScenarios {
     ]
     private static let clientBytes = Array("CLIENT-AFTER-GREETING".utf8)
 
-    @MainActor
+    @RuntimeActor
     static func run(_ entry: Entry, verbose: Bool) async throws -> ScenarioResult {
         let start = Date()
         let harness = SimHarness(verbose: verbose)

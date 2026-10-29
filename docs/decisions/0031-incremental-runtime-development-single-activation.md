@@ -2,8 +2,8 @@
 
 - Date: 2026-10-25
 - Decision: accepted (owner, 2026-10-25, #186: selected “Incremental development; one final AppState switch (Recommended)”)
-- Implementation: partial
-- Validation: none
+- Implementation: implemented
+- Validation: passed
 - Supersedes: 0001, 0013
 - Superseded by: none
 
@@ -123,6 +123,9 @@ installed over the serving daily-driver app for verification.
 
 ## Implementation evidence
 
+The milestones below record their state at each checkpoint; the later AppState
+activation entry records current adoption.
+
 Partial: [`StateRootSession`](../../Sources/PlatformMac/StateRootSession.swift)
 now owns the exhaustive component-to-file mapping and delegates replacement to
 the existing primitive with its private lease.
@@ -170,16 +173,123 @@ adds the shared host's guarded startup audit sink before activation, with actual
 framed-client tests in [RuntimeHostAuditTests.swift](../../Tests/ConduitTests/RuntimeHostAuditTests.swift).
 The legacy app construction remains until the single cut.
 
+### Activation compatibility clarification (2026-10-27)
+
+The app now reaches the selected preparation-time replacement rule (0037):
+enabling DNS while a proxy Start is applying can supersede that Start and tear
+down its partial resources. The app must report the interruption and require an
+explicit retry, rather than follow the newer input. This differs from the
+legacy app path; the owner has been notified, and the integration witness and
+release acceptance remain due. See 0037's compatibility clarification.
+
+### AppState activation implementation checkpoint (2026-10-28)
+
+[`AppComposition`](../../Sources/Conduit/App/AppComposition.swift) now opens the
+shared host with explicit effects. [`AppState`](../../Sources/Conduit/App/AppState.swift)
+uses the ordinary/private clients; its replaced runtime, reconciler, machine
+observer and direct configuration-writer paths are removed.
+[`RuntimeEditorLedger`](../../Sources/Conduit/App/RuntimeEditorLedger.swift) owns
+only draft/receipt authority, and
+[`RuntimeObserver`](../../Sources/Conduit/App/RuntimeObserver.swift) owns bounded
+client observation. The [activation checkpoint](../verification-appstate-activation-2026-10-28.md)
+records focused tests, executed guard witnesses and independent source review,
+with full/native/release gates separate. A subsequent hosted lifetime crash exposed unsafe unowned UI callbacks. The
+internal client bridge now reads optional owner inputs before submission and
+uses weak UI callbacks; observer Stop fences late results. The checkpoint records
+the failure and corrected workflow evidence. This implementation is under
+verification and unreleased. The complete RuntimeActor move remains unimplemented, so this
+record's overall implementation status remains partial.
+
+### Blocking-effect prerequisite implementation (2026-10-28)
+
+[`RuntimeReconciler`](../../Sources/PlatformMac/RuntimeReconciler.swift) now awaits
+flag effects through the existing single quiescence handle;
+[`RuntimeHost`](../../Sources/ConduitRuntime/RuntimeHost.swift) enqueues their
+physical work on its existing PlatformWork. Per-action landed facts remain
+truthful without stale whole-baseline or desired-intent promotion. The
+[prerequisite checkpoint](../verification-runtime-actor-prerequisites-2026-10-28.md)
+records focused actual-client/host tests and remaining inline/blocking work. This
+is current-isolation preparation, not the whole RuntimeActor move or its
+acceptance. The single owner/store/workflow and selected Stop/Quit policy remain
+unchanged.
+
+The [split-DNS prerequisite](../verification-runtime-dns-effects-2026-10-28.md)
+queues gate/file, retry, residue and intercept-refresh work through the same
+PlatformWork, with queue-order freshness and Start-tail Stop protection. Focused
+checks, all 41 workflow checks and independent corrected-source review pass.
+Two review findings have test-first regressions, with invalid fixture/check
+attempts preserved separately. It preserves
+files-before-orchestrator ordering and records its latency tradeoff and revisit
+condition. This is still preparation under MainActor, not completed isolation.
+
+The [relay prerequisite](../verification-runtime-relay-effects-2026-10-28.md)
+replaces the kernel's direct helper with an async command on the host's existing
+PlatformWork, orders reassert through the DNS physical slot and bounds it to one
+in flight. It deletes unused termination/queue-drain paths while retaining audit
+assertions on the consumed diagnostic path. Focused and all 41 workflow checks
+pass after causal test-fixture corrections; independent review accepts Source.
+Diagnostic/logger work and the whole RuntimeActor move remain open.
+
+
+The [diagnostic prerequisite](../verification-runtime-diagnostics-2026-10-28.md)
+adds the asynchronous [LogSink drain](../../Sources/ProxyKernel/Abstractions/LogSink.swift),
+bounded [file writer](../../Sources/ProxyKernel/Support/RotatingLogFile.swift) and
+[AppLogStore history handoff](../../Sources/Conduit/App/AppLogStore.swift), with the
+[host](../../Sources/ConduitRuntime/RuntimeHost.swift) and
+[app Quit tail](../../Sources/Conduit/App/AppState.swift) using bounded waits.
+Misses use a typed lifecycle event with separate wire mapping. Independent review
+found and corrected a write/close admission race; focused tests, control
+witnesses and all 41 corrected workflow checks pass. Fresh Release host/writer
+and optimized consumer/logger measurements pass; new-head hosted checks remain
+pending. The full-list baseline still shows a long current-owner turn, so whole
+RuntimeActor and full-capture control fairness remain required.
+No registry, queue or runtime/store path is added. Native activation and
+applicable machine checks are now due, so validation is pending; unit tests,
+models and hosted CI are not recorded as owner/real-machine validation.
+
+### Installed-candidate validation — 2026-10-29
+
+Validation: the owner installed the activated 0.6.0 candidate (executable
+`a894b35a…`, built from `97a5b43`, locally signed rather than release-certificate
+signed) and ran normal Stop, Start, Connections, Quit and a relaunch with manual
+Start, using the real helper, VPN and Kerberos. The run reported 37 pass,
+1 attention and 0 fail or unproven. All eight journal-scoped per-service proxy
+field sets, seven resolver files and six launchd variables returned to their
+captured priors after both Stop and Quit. After relaunch, HTTPS and CONNECT
+answered 200, Kerberos succeeded and 21 helper requests succeeded with none
+failed. The Stop attention is a preserved user prior under existing policy. The
+after-Quit global-route result is qualified as unproven. Results, scope and
+limits are in the [installed verification](../verification-runtime-installed-2026-10-29.md).
+This validates the single activation for normal use on the owner's machine. It
+does not cover heavy load, a slow helper, release-certificate packaging,
+publication or production daemon ownership.
+
 ## Open questions
 
-Complete the workflow freshness/private-editor observation API, preserving
-client-observed prior component preconditions separately from runtime views and
-intent fences. [0034](0034-private-editor-reply-frame-cap.md) selects the private
-reply ceiling; actual-adapter custody and responsiveness still need verification.
-Select the remaining coherent profile from measurements before
-the affected adoption. [0032](0032-explicit-reload-and-reconcile.md) selects
-read-only reload-and-reconcile of eligible inputs; that policy is resolved. Revisit the
-activation sequence if a demonstrated delivery/compatibility need outweighs the
-cost of temporary capabilities; return the concrete ownership/deletion plan for
-owner review before changing this sequence. Subsystem actors or broad module
-splits still require measured contention or dependency evidence.
+The workflow freshness/private-editor observation API, private reply ceiling
+(0034), collection limits (0038), production profile and total Quit budget (0039)
+are selected and consumed by the AppState candidate. Local full-workflow,
+actual-adapter resource checks and exact-head hosted CI have passed. Native
+edit/Quit acceptance remains pending. [0032](0032-explicit-reload-and-reconcile.md)
+settles reload-and-reconcile policy; no configuration-store policy choice remains
+open here.
+
+Complete the remaining blocking-effect prerequisites and whole RuntimeActor move,
+then verify owner fairness and applicable real-machine/release acceptance.
+Subsystem actors or broad module splits still require measured contention or
+dependency evidence. Revisit activation sequencing only if a demonstrated
+compatibility need outweighs temporary capabilities, with a concrete ownership
+and deletion plan for owner review.
+
+
+The [isolation preparation checkpoint](../verification-runtime-actor-preparation-2026-10-28.md) makes callback/effect contracts Sendable, preserves bounded generation-checked timer hops and moves launch recovery onto the existing physical worker. Review also fixes observer restart (#260). The control cluster still runs on MainActor; this is a prerequisite rather than completion of the selected whole RuntimeActor move. A2 focused normal/scoped-strict checks and all 41 repository checks pass (3,741 tests, four existing skips, 103 simulator scenarios). Independent review accepts Source and records three test-quality improvements carried into the actor slice. Whole-actor and native/real-machine acceptance remain pending.
+
+### Whole control-owner activation checkpoint — 2026-10-28
+
+The [activation checkpoint](../verification-runtime-actor-activation-2026-10-28.md) records the whole cluster on [RuntimeActor](../../Sources/ProxyKernel/Abstractions/RuntimeActor.swift), including [RuntimeHost](../../Sources/ConduitRuntime/RuntimeHost.swift), the workflow/store, lifecycle/reconciler and framed service. AppState holds clients and presentation remains MainActor. Parked-main and held-effect tests pass, as do all 41 checks on the frozen candidate. Independent source review accepts the final authority correction. Native isolated Dev lifecycle, focused final-edit Quit and relaunch checks pass. At this intermediate checkpoint implementation was partial and validation pending; the next section records completion of implementation while release validation remains pending. Earlier MainActor checkpoints above remain historical evidence.
+
+### Completed implementation and separate release gates — 2026-10-28
+
+The [final activation checkpoint](../verification-runtime-actor-activation-2026-10-28.md) records the shared [RuntimeHost](../../Sources/ConduitRuntime/RuntimeHost.swift), [RuntimeActor](../../Sources/ProxyKernel/Abstractions/RuntimeActor.swift) and [off-owner capture flight](../../Sources/ConduitRuntime/RuntimeCaptureFlight.swift). AppState's replaced paths are deleted. Source review, all 41 local checks, scoped strict tests, unsuppressed TSan, optimized control-fairness and complete production-profile measurements pass. Final-source isolated native paged-client/active-tunnel Quit checks pass. Implementation is complete; the test-maintenance workflow also passes (3,768 tests with four existing skips and 103 scenarios); final hosted compiler compatibility, release integration and applicable real-machine acceptance remain distinct, with validation pending. Earlier partial/MainActor checkpoints are historical.
+
+Status 2026-10-29: the owner's installed-candidate run is recorded under Implementation evidence, and validation is passed for normal use. The Open questions text above that calls native edit/Quit acceptance pending, or real-machine/release acceptance still to verify, is historical. Exact-head hosted Swift 6.3.3 checks passed on `8a036fe`. Final-head CI, the merge of PR #258, release-certificate packaging and publication remain release work, not validation of this decision.

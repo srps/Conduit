@@ -1,0 +1,11 @@
+{
+  "proxyPort": 60434,
+  "scope": "Owned loopback echo server/client through isolated FakeMachine Dev proxy; no upstream, DNS, helper or machine-setting operation",
+  "targetPort": 60782,
+  "status": "HTTP/1.1 200 OK",
+  "echoVerified": true,
+  "closedByProxy": true,
+  "result": "PASS echo and proxy-driven close",
+  "serverThreadEnded": true,
+  "errors": []
+}

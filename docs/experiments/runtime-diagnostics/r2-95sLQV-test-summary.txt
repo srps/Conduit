@@ -1,0 +1,5 @@
+Test Case '-[ConduitTests.RotatingLogFileProtectionTests testConcurrentWritesAndCloseAccountForEveryRecord]' started.
+Test Case '-[ConduitTests.RotatingLogFileProtectionTests testConcurrentWritesAndCloseAccountForEveryRecord]' passed (0.051 seconds).
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.051 (0.051) seconds
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.051 (0.051) seconds
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.051 (0.057) seconds

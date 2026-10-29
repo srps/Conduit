@@ -59,7 +59,7 @@ struct RuntimeAdmittedStart: Sendable {
 
 /// The facts one Start produced for its request's receipt: its commit result and the DNS bit it staged, empty until a commit ran, and each
 /// member's result as its lane effect recorded it (the same value its `lifecycle.module_settled` carries), empty until it took lanes.
-@MainActor
+@RuntimeActor
 final class RuntimeCommitFacts: Sendable {
     var commit: RuntimePlatformCommitResult?
     var dnsStaged: Bool?
@@ -86,7 +86,7 @@ struct RuntimeAdmittedStop: Sendable {
 }
 
 /// The runtime file's facts from the disable save one session DNS Stop attempted, nil until it ran one.
-@MainActor
+@RuntimeActor
 final class RuntimeStopFacts: Sendable {
     var dnsWrite: RuntimeConfigurationWorkflow.DNSStopWrite?
 
@@ -99,7 +99,7 @@ final class RuntimeStopFacts: Sendable {
 /// the module it touches, so a newer operation on one module stops this one's work on that module only. For a Start, `prepared` is the
 /// authorizing prepared Start: the workflow group in it is the control authority, and an identical Start that joins takes it over with
 /// `adopt` while the effect has not settled its members.
-@MainActor
+@RuntimeActor
 final class RuntimeLifecycleEffect {
     /// What an operation asks beyond its scope. Two operations coalesce only when this, their scope and their operation are equal, and a
     /// Start only when it also captured the same verified pair.
@@ -270,7 +270,7 @@ extension RuntimeHost {
     }
 
     /// Whether the effect still holds `module`'s lane. Once it does not, a newer Start or Stop of the module owns it, and the effect says so
-    /// with one `lifecycle.superseded` (twin of `AppState.isCurrent`).
+    /// with one `lifecycle.superseded`.
     func holdsLane(_ effect: RuntimeLifecycleEffect, _ module: ControlModule) -> Bool {
         let token = effect.token(module)
         guard token.isSuperseded else { return true }
@@ -431,7 +431,7 @@ extension RuntimeHost {
     }
 
     /// The members' physical start, in the order it always ran: the proxy listener and its surfaces (`applyProxySurfaces`), then the DNS
-    /// module (`startDNSModule`), then tunnels, each step on `platformWork` off the main actor (#47). Every suspension is followed by
+    /// module (`startDNSModule`), then tunnels, each step on `platformWork` off the owner (#47). Every suspension is followed by
     /// `continueStart`, and every manager step checks its module's token under the manager's lock (`LifecycleLane`). The members settle
     /// together once all completed; then a requested companion runs on its own DNS lane with its own closed result.
     private func runStartEffect(_ start: RuntimeLifecycleEffect) async throws -> RuntimeModuleStartOutcome {
@@ -471,8 +471,8 @@ extension RuntimeHost {
             // A stop issued while the listeners came up has already queued its clears; applying now would put the surfaces back after them.
             try continueStart(start)
             // The runtime input is the one the push just reported held. The platform flags are this start's verified intent.
+            // Marks the proxy's surfaces up itself, in the turn it decides its entry-file correction.
             try await applyProxySurfaces(start, config: heldRuntimeConfig, platform: platformConfig)
-            runtimeStarted = true
         }
         let config = heldRuntimeConfig
         let platform = platformConfig
@@ -588,7 +588,7 @@ extension RuntimeHost {
     /// The DNS module's physical start under `effect`'s DNS token, the explicit member's and the companion's alike: the capture of the
     /// prior DNS servers, the forwarder, then the system DNS pointed at it and the intercept files, once the forwarder and the transparent
     /// proxy they point clients at are both listening, then the health timer. A forwarder that does not come up gives the interfaces back
-    /// what was captured, as `AppState.startDNS` does, withdraws the intercept files and starts no health timer.
+    /// what was captured, withdraws the intercept files and starts no health timer.
     ///
     /// `stands` is the caller's authority over its verified pair: the group's DNS member and its strict input for an explicit Start, the
     /// companion's conditional permission and its parent's strict input for a companion (decisions 0036 and 0037). It is checked, with the
@@ -660,7 +660,7 @@ extension RuntimeHost {
         if let stop = current() { return stop }
         guard forwarderRunning else { return .failed }
         if platform.manageSystemDNS {
-            // Whether or not `apply` succeeded — see `AppState.startDNS`.
+            // Whether or not `apply` succeeded: a refused or failed apply is what the probe's relay restart exists to retry.
             startDNSHealthTimer(forwarderPort: forwarderPort)
         }
         return .running
@@ -815,15 +815,15 @@ extension RuntimeHost {
         let logger = self.logger
 
         // Each surface is cleared when its flag is on *or* when the journal
-        // says the surface is ours, as in `AppState.stopProxy`. The flag alone
+        // says the surface is ours. The flag alone
         // skipped the clear whenever the switch had gone off since the
         // surface was applied; the reload reconciles that flip now, so what
         // is left for the guard is the residue: a clear the machine refused,
         // a crash between the flip and the reload, a config file edited by
         // hand (#13). The ownership reads happen inside the block, after
         // whatever was queued ahead of it has landed.
-        let stopGeneration = splitDNSRepair.generation
-        let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Outcome? in
+        let stopPlace = splitDNSRepair.queue()
+        let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Observation? in
             systemProxy.serialized {
                 guard terminal || !token.isSuperseded else { return }
                 guard platform.manageSystemProxy || systemProxy.hasManagedState() else { return }
@@ -842,7 +842,8 @@ extension RuntimeHost {
                     logger.log(.warning, "Could not clear environment variables: \(error.localizedDescription)", category: .system)
                 }
             }
-            return resolvers.serialized { () -> SplitDNSEntryFileRepair.Outcome? in
+            // The outcome and its residue, read under the same lock against the input the clear used.
+            return resolvers.serialized { () -> SplitDNSEntryFileRepair.Observation? in
                 guard terminal || !token.isSuperseded else { return nil }
                 if platform.manageDNSResolvers {
                     do {
@@ -851,11 +852,13 @@ extension RuntimeHost {
                         logger.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
                         // Only an entry file left on disk is the repair's; an
                         // intercept file the clear could not remove is not.
-                        if resolvers.entryFilesPresent(config: config) || resolvers.unconfiguredRecordedFilesPresent(config: config) {
-                            return .failed(.remove, error)
+                        let residue = resolvers.unconfiguredRecordedFilesPresent(config: config)
+                        if resolvers.entryFilesPresent(config: config) || residue {
+                            return SplitDNSEntryFileRepair.Observation(outcome: .failed(.remove, error), residue: residue)
                         }
+                        return SplitDNSEntryFileRepair.Observation(outcome: .succeeded(.remove), residue: residue)
                     }
-                    return .succeeded(.remove)
+                    return SplitDNSEntryFileRepair.Observation.after(.succeeded(.remove), config: config, dnsManager: resolvers)
                 } else if resolvers.hasManagedState() {
                     // Switch off: only what the journal names as ours, never a file
                     // for a configured domain we did not write.
@@ -868,7 +871,7 @@ extension RuntimeHost {
                 return nil
             }
         }
-        recordSplitDNS(entryFiles, source: .stop, startedAt: stopGeneration)
+        await recordSplitDNS(entryFiles, source: .stop, startedAt: stopPlace)
         return terminal || holdsLane(effect, .proxy)
     }
 
@@ -970,9 +973,8 @@ extension RuntimeHost {
     /// may the caller release the root's authority. It returns and never exits; a caller that ends the process calls `terminalExit` after
     /// it, as `stopRuntime(exitAfterStop: true)` does. A second call joins the first.
     ///
-    /// It joins launch recovery first, and this is where the daemon parts from the app: `AppState.performTerminationCleanup` does not join
-    /// because `applicationWillTerminate` is synchronous. `SIGTERM` reaches this through a `Task`, so the join leaves the main actor free,
-    /// and the stop's clears never overlap recovery's.
+    /// It joins launch recovery first. Every caller reaches it asynchronously (the app's terminate-later Quit, the daemon's `SIGTERM`
+    /// through a `Task`), so the join leaves the owner free, and the stop's clears never overlap recovery's.
     ///
     /// `reservingFlushUntil` is the quit's one total deadline (`RuntimeQuitFlush`): it opens the reserved flush window for `flushing` until
     /// then, and the quit waits for the flushes it admits, or for the deadline, before it joins store work and confirms the flush of
@@ -1000,7 +1002,7 @@ extension RuntimeHost {
         let flush = deadline.map { RuntimeQuitFlush(until: $0, admitting: parts, workflow: workflow) }
         quitFlush = flush
         stoppedEffectsJoin?.finish(.superseded)
-        let quit = Task { @MainActor [self] in
+        let quit = Task { [self] in
             defer { pendingAdmissions -= 1 }
             await awaitLaunchRecovery()
             guard case .run(let stop) = beginLanes(Self.allModules, kind: .stop, operation: .runtimeStop,
@@ -1012,7 +1014,8 @@ extension RuntimeHost {
             await waitUntilIdle(Self.allModules)
             await flush?.closed()
             await workflow.waitUntilIdle()
-            await flushEvents()
+            // The logger's drain is cut to the quit's own deadline, so the quit gives it no fresh budget.
+            await flushEvents(loggerUntil: deadline)
             flush?.quitDidEnd()
             // The physical work is done: the composed control service ends its streams after what it already published.
             quitEnded = true

@@ -19,7 +19,7 @@ import ProxyKernel
 /// to end by `AppStateHarnessTests`.
 enum ListenerCommitScenarios {
 
-    @MainActor
+    @RuntimeActor
     static func settingsListenerCommit() async throws -> ScenarioResult {
         let name = "settings-listener-commit"
         let began = Date()

@@ -17,7 +17,6 @@ fileprivate extension PrivateEditorClient {
 /// The explicit reload as a framed command (decision 0032) over the actual host, service, in-memory transport, framed client and private
 /// editor client, on a `FakeMachine` and a scratch root. Waits end on the operation's own `operationFinished` frame, a held store read or a
 /// held machine call, within a failure deadline.
-@MainActor
 final class RuntimeHostReloadCommandTests: XCTestCase {
     private var harness: InteractiveHostHarness?
 
@@ -29,7 +28,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
 
     private let proxyAndDNS = PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true, manageSystemDNS: true)
 
-    @MainActor
+    @RuntimeActor
     private struct Composed {
         let host: RuntimeHost
         let harness: InteractiveHostHarness
@@ -40,7 +39,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
         var editor: PrivateEditorClient { PrivateEditorClient(transport: composition.transport) }
     }
 
-    private func compose(stateFiles: (any StateFileAccessing)? = nil) async throws -> Composed {
+    @RuntimeActor private func compose(stateFiles: (any StateFileAccessing)? = nil) async throws -> Composed {
         let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: false)
         self.harness = harness
         if let stateFiles { harness.stateFiles = stateFiles }
@@ -54,11 +53,11 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
         return Composed(host: host, harness: harness, composition: composition, client: client)
     }
 
-    private func deadline() -> RuntimeDeadline {
+    @RuntimeActor private func deadline() -> RuntimeDeadline {
         .after(.seconds(30), from: ContinuousClock.now)
     }
 
-    private func finished(_ operation: ControlOperationID, on stream: RuntimeSubscription) async throws -> ControlOperationOutcome {
+    @RuntimeActor private func finished(_ operation: ControlOperationID, on stream: RuntimeSubscription) async throws -> ControlOperationOutcome {
         for _ in 0..<64 {
             if case .operationFinished(let finished) = try await stream.next(deadline()), finished.operationID == operation {
                 return finished.outcome
@@ -68,13 +67,13 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
         throw RuntimeClientError.unexpectedReply
     }
 
-    private func submit(
+    @RuntimeActor private func submit(
         _ composed: Composed, _ command: ControlRuntimeCommand, requestID: ControlRequestID = ControlRequestID(rawValue: UUID())
     ) async throws -> ControlAdmission {
         try await composed.client.submit(command, requestID: requestID, expectedIncarnation: composed.host.incarnation, deadline: deadline())
     }
 
-    private func accepted(_ admission: ControlAdmission, file: StaticString = #filePath, line: UInt = #line) throws -> ControlOperationID {
+    @RuntimeActor private func accepted(_ admission: ControlAdmission, file: StaticString = #filePath, line: UInt = #line) throws -> ControlOperationID {
         guard case .accepted(let operation) = admission else {
             XCTFail("expected an accepted admission, got \(admission)", file: file, line: line)
             throw RuntimeClientError.unexpectedReply
@@ -83,18 +82,18 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
     }
 
     /// The reload result a completion carries, or nil for any other outcome.
-    private func reloaded(_ outcome: ControlOperationOutcome?) -> ControlReloadResult? {
+    @RuntimeActor private func reloaded(_ outcome: ControlOperationOutcome?) -> ControlReloadResult? {
         guard case .completed(let completion)? = outcome, completion.command == .reload, case .reload(let result) = completion.result else {
             return nil
         }
         return result
     }
 
-    private func reload(_ composed: Composed, on stream: RuntimeSubscription) async throws -> ControlReloadResult? {
+    @RuntimeActor private func reload(_ composed: Composed, on stream: RuntimeSubscription) async throws -> ControlReloadResult? {
         reloaded(try await finished(try accepted(try await submit(composed, .reload)), on: stream))
     }
 
-    private func observation(_ composed: Composed) async throws -> PrivateEditorObservation {
+    @RuntimeActor private func observation(_ composed: Composed) async throws -> PrivateEditorObservation {
         let answer = try await composed.editor.read(
             requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: composed.host.incarnation,
             budget: try ControlWireBudget(1_000), deadline: deadline()
@@ -107,7 +106,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
     }
 
     /// A save-only draft of `observed` with `profileName`, at the exact baselines that observation named.
-    private func save(
+    @RuntimeActor private func save(
         _ composed: Composed, from observed: PrivateEditorObservation, profileName: String, on stream: RuntimeSubscription
     ) async throws -> ControlConfigurationReceipt {
         var values = try PrivateConfigurationBridge.makeValues(from: observed)
@@ -127,7 +126,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
         return receipt
     }
 
-    private func editRuntime(_ composed: Composed, _ edit: (inout ProxyConfig) -> Void) throws -> Data {
+    @RuntimeActor private func editRuntime(_ composed: Composed, _ edit: (inout ProxyConfig) -> Void) throws -> Data {
         var config = try ProxyConfigPersistence.load(in: composed.environment, allowMissing: false)
         edit(&config)
         try ProxyConfigPersistence.save(config, in: composed.environment)
@@ -135,7 +134,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
     }
 
     /// A failure bound on real effects: polls an observed boundary, never decides by time.
-    private func eventually(_ condition: @MainActor () -> Bool) async throws -> Bool {
+    @RuntimeActor private func eventually(_ condition: @RuntimeActor () -> Bool) async throws -> Bool {
         for _ in 0..<2_000 where !condition() {
             try await Task.sleep(for: .milliseconds(5))
         }
@@ -147,7 +146,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
     /// Decision 0027 then 0032 through the actual clients. A draft observed at A is refused over an external B, and B is kept. The explicit
     /// reload adopts B, writes nothing and answers a reconcile attempted under its current admission. The dirty draft's original tokens are
     /// not refreshed by the reload, so its next save is still refused; only a fresh read takes B and the baselines that may save over it.
-    func testAReloadAdoptsAnExternalEditAndOnlyAFreshReadMaySaveOverIt() async throws {
+    @RuntimeActor func testAReloadAdoptsAnExternalEditAndOnlyAFreshReadMaySaveOverIt() async throws {
         let composed = try await compose()
         let stream = try await composed.client.subscribe(.live, deadline: deadline())
         defer { stream.cancel() }
@@ -181,7 +180,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
     /// Each answer through the client, with no write of its own. A malformed file is refused whole and left as it is. A permitted absent
     /// platform file is adopted and held uncommitted, and no default is written. A start-blocking edit is adopted for editing and held, and
     /// the applied view stays. A reload that finds the store's one slot taken by another is refused busy. After the quit none is admitted.
-    func testEachReloadAnswerThroughTheClientWritesNothing() async throws {
+    @RuntimeActor func testEachReloadAnswerThroughTheClientWritesNothing() async throws {
         let files = HeldStateFileRead()
         let composed = try await compose(stateFiles: files)
         let stream = try await composed.client.subscribe(.live, deadline: deadline())
@@ -229,7 +228,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
 
     /// The facade and the command run the one primitive: over the same inputs, each command answer is the facade's decision through the
     /// one mapping.
-    func testTheFacadeAndTheCommandAnswerAlike() async throws {
+    @RuntimeActor func testTheFacadeAndTheCommandAnswerAlike() async throws {
         let composed = try await compose()
         let stream = try await composed.client.subscribe(.live, deadline: deadline())
         defer { stream.cancel() }
@@ -251,7 +250,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
     /// The fence captures the generation in the admission turn and counts the reload pending from there, before its effect launches.
     /// A Stop admitted between the fence and the launch makes the observation stale: the store adopts it, nothing applies, and the answer
     /// says so. Manual hops hold the launch.
-    func testTheFenceCapturesItsGenerationBeforeTheEffectLaunches() async throws {
+    @RuntimeActor func testTheFenceCapturesItsGenerationBeforeTheEffectLaunches() async throws {
         let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: false)
         self.harness = harness
         let host = try await harness.makeHost()
@@ -290,7 +289,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
 
     /// A Stop, and then a saved Start, each admitted while the reload's read is parked supersede it: the store adopts the observation,
     /// and the host view stays. The Start finds the store's slot taken and fails without a capture.
-    func testAStopOrStartAdmittedDuringTheReadSupersedesTheReload() async throws {
+    @RuntimeActor func testAStopOrStartAdmittedDuringTheReadSupersedesTheReload() async throws {
         let files = HeldStateFileRead()
         let composed = try await compose(stateFiles: files)
         let stream = try await composed.client.subscribe(.live, deadline: deadline())
@@ -333,7 +332,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
 
     /// A Stop admitted while the reload's reconcile pass is held on its first machine call ends the attempt not current: the answer never
     /// claims the pass ran under a standing admission.
-    func testAStopDuringTheHeldPassEndsTheAttemptNotCurrent() async throws {
+    @RuntimeActor func testAStopDuringTheHeldPassEndsTheAttemptNotCurrent() async throws {
         let (reload, stop, composed) = try await duringHeldPass { _ in .stop(.proxy) }
         XCTAssertEqual(reloaded(reload), .adopted(.reconcileAttempted(currentAtEnd: false)))
         guard case .completed(let stopped) = stop else { return XCTFail("the Stop completes: \(stop)") }
@@ -342,7 +341,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
     }
 
     /// A saved Start admitted while the pass is held ends it not current too. The Start runs after the pass, from its own capture.
-    func testASavedStartDuringTheHeldPassEndsTheAttemptNotCurrent() async throws {
+    @RuntimeActor func testASavedStartDuringTheHeldPassEndsTheAttemptNotCurrent() async throws {
         let (reload, start, _) = try await duringHeldPass { composed in
             let snapshot = try await composed.client.readSnapshot(deadline: self.deadline())
             let modules = try XCTUnwrap(snapshot.stamp.modules)
@@ -356,7 +355,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
     /// An eligible reload C that adopts a newer accepted view while B's pass is held stops B before its next step (decision 0032): B
     /// answers not current, and B's flag action, the environment cleared, never runs. C runs from the baseline the machine holds and
     /// answers current; no intent moved.
-    func testANewerEligibleReloadDuringTheHeldPassStopsItsUnstartedFlagAction() async throws {
+    @RuntimeActor func testANewerEligibleReloadDuringTheHeldPassStopsItsUnstartedFlagAction() async throws {
         let (reload, newer, composed) = try await duringHeldPass(
             platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: false, manageSystemDNS: true),
             { composed in
@@ -374,7 +373,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
 
     /// An ineligible observation during B's pass replaces no accepted view: a start-blocking C is adopted by the store for editing and
     /// held, so B stays current and its flag action runs.
-    func testAHeldReloadDuringTheHeldPassLeavesItCurrent() async throws {
+    @RuntimeActor func testAHeldReloadDuringTheHeldPassLeavesItCurrent() async throws {
         let (reload, held, composed) = try await duringHeldPass(
             platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: false, manageSystemDNS: true),
             { composed in
@@ -390,16 +389,16 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
     }
 
     /// The reconciler's recorded decisions to clear the environment, each made before its action.
-    private func environmentClears(_ host: RuntimeHost) -> Int {
+    @RuntimeActor private func environmentClears(_ host: RuntimeHost) -> Int {
         host.orchestrator.eventLog.events.filter { $0.event == "config.platform_integration" && $0.detail == "clearEnvironment" }.count
     }
 
     /// A running host whose reload B adopts a bypass edit, with `platform` saved beside it when given, its pass held on its first
     /// platform-queue machine call while `intervening` is admitted. The hold is released once `heldUntil` holds; both settlements follow.
-    private func duringHeldPass(
+    @RuntimeActor private func duringHeldPass(
         platform: PlatformIntegrationConfig? = nil,
         _ intervening: (Composed) async throws -> ControlRuntimeCommand,
-        heldUntil: @escaping @MainActor (Composed) -> Bool = { _ in true }
+        heldUntil: @escaping @RuntimeActor (Composed) -> Bool = { _ in true }
     ) async throws -> (reload: ControlOperationOutcome, intervening: ControlOperationOutcome, composed: Composed) {
         let composed = try await compose()
         try await composed.host.startRuntime()
@@ -438,7 +437,7 @@ final class RuntimeHostReloadCommandTests: XCTestCase {
 
     /// A client that lost the admission reply looks the request up and reads the outcome; it never sends the reload again, so the store
     /// observed once.
-    func testALostAnswerIsRecoveredByLookupWithoutASecondReload() async throws {
+    @RuntimeActor func testALostAnswerIsRecoveredByLookupWithoutASecondReload() async throws {
         let composed = try await compose()
         let stream = try await composed.client.subscribe(.live, deadline: deadline())
         defer { stream.cancel() }

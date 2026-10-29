@@ -1,0 +1,27 @@
+{
+  "head": "b637ec152430c91e0000103c7f6a17ca8b131691",
+  "Swift": {
+    "run": 40706642051,
+    "job": 122880441310,
+    "conclusion": "success"
+  },
+  "slow_drain": {
+    "run": 40706642374,
+    "job": 122880443263,
+    "conclusion": "success"
+  },
+  "CodeQL": {
+    "summary": 122880738219,
+    "actions": 122880409793,
+    "python": 122880409321,
+    "conclusions": "success"
+  },
+  "all_annotations_read": true,
+  "annotations": [
+    "macOSarm64capacitynotices",
+    "Ubuntu26imagemigrationnotices",
+    "300changedfilesdiffwarning"
+  ],
+  "Devin": "skipped, not counted as review",
+  "scope": "Exact integration merge head before0.6 metadata follow-up; not the final metadata-head check."
+}

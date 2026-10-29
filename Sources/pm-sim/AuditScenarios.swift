@@ -3,9 +3,10 @@ import Foundation
 import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
+import ProxyKernel
 
 enum AuditScenarios {
-    @MainActor
+    @RuntimeActor
     static func proxiedResponseHopByHop(verbose: Bool) async throws -> ScenarioResult {
         let name = "audit-proxied-response-hop-by-hop"
         let start = Date()
@@ -56,7 +57,7 @@ enum AuditScenarios {
         )
     }
 
-    @MainActor
+    @RuntimeActor
     /// `Expect: 100-continue` answered by the proxy + response-trailer
     /// pass-through on the proxied (pooled streaming) path, end to end.
     static func expectContinueAndTrailers(verbose: Bool) async throws -> ScenarioResult {
@@ -123,7 +124,7 @@ enum AuditScenarios {
         )
     }
 
-    @MainActor
+    @RuntimeActor
     static func socks5NonZeroRSV(verbose: Bool) async throws -> ScenarioResult {
         let name = "audit-socks5-nonzero-rsv"
         let start = Date()

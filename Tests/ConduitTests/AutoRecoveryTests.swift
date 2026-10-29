@@ -6,7 +6,7 @@ import XCTest
 @testable import ProxyKernel
 
 final class AutoRecoveryTests: XCTestCase {
-    @MainActor func testRecoveryStopsAtFirstStepWhenHealthRecovers() async {
+    @RuntimeActor func testRecoveryStopsAtFirstStepWhenHealthRecovers() async {
         let logger = DiscardingLogSink()
         let service = MockRecoverableService()
         service.closeStalledShouldSucceed = true
@@ -21,7 +21,7 @@ final class AutoRecoveryTests: XCTestCase {
         XCTAssertEqual(service.reauthenticateCallCount, 0, "Should not escalate past first success")
     }
 
-    @MainActor func testRecoveryEscalatesWhenStepCompletesButHealthStillFails() async {
+    @RuntimeActor func testRecoveryEscalatesWhenStepCompletesButHealthStillFails() async {
         let logger = DiscardingLogSink()
         let service = MockRecoverableService()
         service.closeStalledShouldSucceed = true
@@ -44,7 +44,7 @@ final class AutoRecoveryTests: XCTestCase {
 
     /// #155: a VPN transition during the ladder makes its trigger stale. The
     /// ladder stops before the next step and does not declare exhaustion.
-    @MainActor func testALadderAVPNTransitionSupersedesStopsWithoutExhaustion() async {
+    @RuntimeActor func testALadderAVPNTransitionSupersedesStopsWithoutExhaustion() async {
         let events = EventRecorder()
         let service = MockRecoverableService()
         service.closeStalledShouldSucceed = true
@@ -65,7 +65,7 @@ final class AutoRecoveryTests: XCTestCase {
 
     /// A transition during the last step: neither its success nor its
     /// failure is accepted, and exhaustion is not declared.
-    @MainActor func testATransitionDuringTheLastStepAbandonsInsteadOfConcluding() async {
+    @RuntimeActor func testATransitionDuringTheLastStepAbandonsInsteadOfConcluding() async {
         for (healthy, recycleSucceeds) in [(true, true), (false, true), (false, false)] {
             let events = EventRecorder()
             let service = MockRecoverableService()
@@ -86,7 +86,7 @@ final class AutoRecoveryTests: XCTestCase {
         }
     }
 
-    @MainActor func testRecoveryReturnsFalseWhenAllStepsFail() async {
+    @RuntimeActor func testRecoveryReturnsFalseWhenAllStepsFail() async {
         let logger = DiscardingLogSink()
         let service = MockRecoverableService()
         let recovery = AutoRecovery(service: service, logger: logger)
@@ -98,7 +98,7 @@ final class AutoRecoveryTests: XCTestCase {
 
     /// #147: a connect timeout cannot be fixed by credentials, and exhaustion
     /// must not blame the password.
-    @MainActor func testUnreachableLadderSkipsReauthenticationAndDoesNotMentionPassword() async {
+    @RuntimeActor func testUnreachableLadderSkipsReauthenticationAndDoesNotMentionPassword() async {
         let logger = RecordingLogSink()
         let events = EventRecorder()
         let service = MockRecoverableService()
@@ -123,7 +123,7 @@ final class AutoRecoveryTests: XCTestCase {
         XCTAssertEqual(exhausted?.message.contains("no upstream proxy answered"), true)
     }
 
-    @MainActor func testCredentialFailureRunsReauthenticationAndKeepsPasswordHint() async {
+    @RuntimeActor func testCredentialFailureRunsReauthenticationAndKeepsPasswordHint() async {
         let logger = RecordingLogSink()
         let events = EventRecorder()
         let service = MockRecoverableService()
@@ -144,7 +144,7 @@ final class AutoRecoveryTests: XCTestCase {
 
     /// A ladder that starts unreachable re-authenticates once a step's
     /// health check reports something else: the latest failure decides.
-    @MainActor func testReauthenticationRunsWhenLatestFailureIsNoLongerUnreachable() async {
+    @RuntimeActor func testReauthenticationRunsWhenLatestFailureIsNoLongerUnreachable() async {
         let service = MockRecoverableService()
         service.closeStalledShouldSucceed = true
         service.reauthenticateShouldSucceed = true
@@ -162,7 +162,7 @@ final class AutoRecoveryTests: XCTestCase {
 
     /// An upstream that answered with a final 407 is reachable: the ladder
     /// re-authenticates and the exhaustion line keeps the password hint.
-    @MainActor func testAuthenticationRejectionRunsReauthenticationAndKeepsPasswordHint() async {
+    @RuntimeActor func testAuthenticationRejectionRunsReauthenticationAndKeepsPasswordHint() async {
         let logger = RecordingLogSink()
         let events = EventRecorder()
         let service = MockRecoverableService()
@@ -184,7 +184,7 @@ final class AutoRecoveryTests: XCTestCase {
 
     /// A refused trigger is decided before the first step: no side effect and no health
     /// check run, and the outcome is the skip, never exhaustion.
-    @MainActor func testConfigurationRefusedTriggerRunsNoStepAndIsNotExhausted() async {
+    @RuntimeActor func testConfigurationRefusedTriggerRunsNoStepAndIsNotExhausted() async {
         let events = EventRecorder()
         let service = MockRecoverableService()
         service.closeStalledShouldSucceed = true
@@ -207,7 +207,7 @@ final class AutoRecoveryTests: XCTestCase {
 
     /// A check that returns the refusal mid-ladder stops the ladder there: the step that
     /// ran is the last side effect, and no later step or check runs.
-    @MainActor func testConfigurationRefusalFromAStepCheckStopsTheLadder() async {
+    @RuntimeActor func testConfigurationRefusalFromAStepCheckStopsTheLadder() async {
         let events = EventRecorder()
         let service = MockRecoverableService()
         service.closeStalledShouldSucceed = true
@@ -248,7 +248,7 @@ final class AutoRecoveryTests: XCTestCase {
         XCTAssertEqual(AutoRecovery.exhaustion(for: nil).failure, "unknown")
     }
 
-    @MainActor func testRecoveryReturnsFalseWhenServiceIsNil() async {
+    @RuntimeActor func testRecoveryReturnsFalseWhenServiceIsNil() async {
         let logger = DiscardingLogSink()
         let recovery = AutoRecovery(service: nil, logger: logger)
 

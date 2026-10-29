@@ -44,7 +44,12 @@ all 41 checks on stable source `bfe8922152d7121489633b72d63c1e7163047f7c`: 3,692
 Swift tests (four skips), all 103 simulator records, perf, packaging, process
 regressions and boundary checks. Rebasing onto merged PR256 changes no source/test/script/workflow/resource bytes;
 [provenance](experiments/runtime-audit-workflow/rebase-provenance.json) records the
-same fingerprint. Exact-head hosted checks remain pending.
+same fingerprint. PR257 merged as `d7d47d4f3e918ed9c96ec3ec9ebfcc55da758813` after
+exact-head hosted Swift and CodeQL passed on
+`9de34e050b07fd1717eabac7f5132ac446b035e2`. Its three annotations were
+infrastructure notices. Independent subscription-backed Claude review was READY;
+optional Codex review was still running at merge, and Devin skipped, so neither
+provides completed review evidence.
 
 The preceding [native-client slice](https://github.com/srps/Conduit/pull/256) merged
 as `462dd4b41dc229bb39a55d0d4519efc30ab7d7b2` after exact-head Swift and CodeQL
@@ -54,8 +59,9 @@ Claude reviews supply the separate source-review evidence.
 
 ## Remaining scope
 
-The app has not adopted this host. The total app Quit wait is proposed separately
-in 0039; audit parity changes neither the selected Stop/Quit policy nor its total.
+At this checkpoint the app had not adopted the host. The subsequent AppState
+activation is under verification, and the owner selected ten seconds total for
+app Quit in 0039; audit parity changes neither the selected Stop/Quit policy nor its total.
 The AppState deletion, coherent production composition, RuntimeActor move and
 native/real-machine acceptance remain. No installed-machine audit or RAM bound
 is inferred from these fake/scratch checks.

@@ -1,0 +1,105 @@
+{
+  "normal-full": {
+    "sha256": "ffa12b0358184d6020c4a2a0d90e94f1e924032cc2f3112d8ae5dca91a005639",
+    "summary": [
+      "Executed 3770 tests, with 4 tests skipped and 0 failures (0 unexpected) in 285.508 (285.803) seconds",
+      "Test Suite 'All tests' passed at 2026-10-28 18:24:32.195.",
+      "Executed 3770 tests, with 4 tests skipped and 0 failures (0 unexpected) in 285.508 (285.810) seconds"
+    ]
+  },
+  "optimized-affected": {
+    "sha256": "c9c35c108af9f4d53f2b93a3667f16fed5f77fe532cfd11b1be7d91f1fc7a8dd",
+    "summary": [
+      "Executed 90 tests, with 0 failures (0 unexpected) in 0.911 (0.918) seconds",
+      "Test Suite 'Selected tests' passed at 2026-10-28 18:33:05.798.",
+      "Executed 90 tests, with 0 failures (0 unexpected) in 0.911 (0.931) seconds"
+    ]
+  },
+  "fresh-debug-1": {
+    "sha256": "87589240220e43b5fee5dcbf32b00c94aedd5fb785573cdbbc2deca99fbab0a3",
+    "summary": [
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.050 (0.050) seconds",
+      "Test Suite 'Selected tests' passed at 2026-10-28 18:33:05.929.",
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.050 (0.056) seconds"
+    ]
+  },
+  "fresh-debug-2": {
+    "sha256": "be38d4697e0ddc6cd0d7407ce0ea400d4d4a34ff8bdfaa2cb5d8ec3607b470ae",
+    "summary": [
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.029 (0.029) seconds",
+      "Test Suite 'Selected tests' passed at 2026-10-28 18:33:06.036.",
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.029 (0.036) seconds"
+    ]
+  },
+  "fresh-debug-3": {
+    "sha256": "5f865fbb1061ccd3c124ec07cdf3d7b0d3c47cc916f625dbe4a01d446c6b57aa",
+    "summary": [
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.023 (0.024) seconds",
+      "Test Suite 'Selected tests' passed at 2026-10-28 18:33:06.124.",
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.023 (0.030) seconds"
+    ]
+  },
+  "fresh-debug-4": {
+    "sha256": "a69d76cdbb6597dd81899eec1fc6a392a6ca248b43b3ff73583451ddfd8a30ff",
+    "summary": [
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.018 (0.019) seconds",
+      "Test Suite 'Selected tests' passed at 2026-10-28 18:33:06.230.",
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.018 (0.025) seconds"
+    ]
+  },
+  "fresh-debug-5": {
+    "sha256": "0722a2c66c2af39df5c50acfb8ff0f75c4fdace879ebaffbac16df70677adf2b",
+    "summary": [
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.022 (0.022) seconds",
+      "Test Suite 'Selected tests' passed at 2026-10-28 18:33:06.323.",
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.022 (0.028) seconds"
+    ]
+  },
+  "fresh-debug-6": {
+    "sha256": "b6f29b5d25ba6bcb20554cbc12c63ce94f46606b6b369d5169a6302a534e0b60",
+    "summary": [
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.027 (0.028) seconds",
+      "Test Suite 'Selected tests' passed at 2026-10-28 18:33:06.420.",
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.027 (0.034) seconds"
+    ]
+  },
+  "fresh-debug-7": {
+    "sha256": "2d1c32abf25455a3e916da57684bf2d0ba70b70323235c300e03a5661d840a4f",
+    "summary": [
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.021 (0.021) seconds",
+      "Test Suite 'Selected tests' passed at 2026-10-28 18:33:06.563.",
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.021 (0.027) seconds"
+    ]
+  },
+  "fresh-debug-8": {
+    "sha256": "0a56ef637459c46c545b95ac0ec97ed097a37bf14242789f4b1ed7ed54cd9c83",
+    "summary": [
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.033 (0.033) seconds",
+      "Test Suite 'Selected tests' passed at 2026-10-28 18:33:06.661.",
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.033 (0.039) seconds"
+    ]
+  },
+  "fresh-debug-9": {
+    "sha256": "f4ee8163b8f38d03b7a84e30536aaff3dd66a0cbf2af7f6b54c9ada89d8e0a81",
+    "summary": [
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.025 (0.025) seconds",
+      "Test Suite 'Selected tests' passed at 2026-10-28 18:33:06.800.",
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.025 (0.031) seconds"
+    ]
+  },
+  "fresh-debug-10": {
+    "sha256": "f3d81ac1264122bcda78ebc444058c49bb49396b8acd1753671f9f3d72abd5ed",
+    "summary": [
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.019 (0.019) seconds",
+      "Test Suite 'Selected tests' passed at 2026-10-28 18:33:06.888.",
+      "Executed 1 test, with 0 failures (0 unexpected) in 0.019 (0.025) seconds"
+    ]
+  },
+  "simulator-full": {
+    "sha256": "ad8a591041afc8ccad1909000369bf0e5c642f538080b03ff6f639f107c60a15",
+    "format": "SIM_NDJSON records parsed from the complete pm-sim all log",
+    "scenario_records": 103,
+    "passed_records": 103,
+    "failed_scenarios": []
+  }
+}

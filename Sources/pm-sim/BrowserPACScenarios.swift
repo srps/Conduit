@@ -9,7 +9,7 @@ import ProxyPAC
 /// is reachable off VPN, but only the corporate upstream can serve it after
 /// reconnect. No browser restart, host DNS or platform writes are involved.
 enum BrowserPACScenarios {
-    @MainActor
+    @RuntimeActor
     static func retainedPAC(verbose: Bool) async throws -> ScenarioResult {
         let started = Date()
         let group = MultiThreadedEventLoopGroup.singleton
@@ -106,7 +106,7 @@ enum BrowserPACScenarios {
                               notes: ["one retained evaluator across VPN reconnect; served PAC then checked after explicit config reloads", after, afterReload])
     }
 
-    @MainActor
+    @RuntimeActor
     private static func reloadAvailability(
         _ orchestrator: ProxyOrchestrator, evaluator: any PacEvaluator,
         target: URL, fetchScript: () async throws -> String

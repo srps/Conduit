@@ -91,7 +91,7 @@ extension ConfigurationWriteOutcome {
 ///
 /// The store does not mint an apply-authorizing revision from file bytes. Its per-file versions count its own verified content
 /// transitions and its observed changes. They are not intent generations, and they never wrap.
-@MainActor
+@RuntimeActor
 final class ConfigurationStore {
     /// What the store knows about one file. A nil baseline means there is no authoritative baseline, and it holds until a reload.
     private struct Record: Sendable {
@@ -570,7 +570,7 @@ final class ConfigurationStore {
             // its read-back runs to the end whatever the claim says, so its persistence facts are kept.
             guard claim.isCurrent() else { return .revoked }
             let outcome = session.replaceConfigurationFile(component, staged: bytes, expecting: baseline, access: access)
-            // The read-back equals the staged bytes, so the new baseline is the identity of those bytes, hashed off the MainActor.
+            // The read-back equals the staged bytes, so the new baseline is the identity of those bytes, hashed off the owner.
             if case .verifiedPersisted = outcome {
                 return .replaced(outcome, verifiedBaseline: ConfigurationFileBaseline(observing: .present(bytes)))
             }
@@ -682,7 +682,7 @@ final class ConfigurationStore {
 
     // MARK: - Adoption and authority
 
-    /// Adopts one load observation on the MainActor. A refusal keeps the values for display, and it holds no baseline for any file. A changed
+    /// Adopts one load observation on the owner. A refusal keeps the values for display, and it holds no baseline for any file. A changed
     /// baseline that needs a newer version is refused before anything is adopted.
     private func adopt(_ observed: ConfigurationLoadObservation) -> ConfigurationLoadOutcome {
         switch observed.outcome {

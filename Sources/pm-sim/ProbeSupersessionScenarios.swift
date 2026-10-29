@@ -36,14 +36,14 @@ enum ProbeSupersessionScenarios {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     private static func until(timeout: TimeInterval, _ condition: () -> Bool) async throws -> Bool {
         let deadline = ContinuousClock.now + .milliseconds(Int64(timeout * 1000))
         while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
         return condition()
     }
 
-    @MainActor
+    @RuntimeActor
     static func staleDisconnectProbe(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
@@ -74,7 +74,7 @@ enum ProbeSupersessionScenarios {
 
         // Disconnect: its probe sees the upstream unreachable and is held.
         probe.set(reachable: false, holdNext: true)
-        let disconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
+        let disconnect = Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
         guard try await until(timeout: 3, { probe.isParked }) else {
             throw ScenarioExecutionError(message: "the disconnect probe never ran")
         }
@@ -121,6 +121,7 @@ enum ProbeSupersessionScenarios {
         init(base: any LogSink, _ onListening: @escaping @Sendable () -> Void) { self.base = base; self.onListening = onListening }
         var minLevel: LogLevel { .debug }
         func flush(timeout: TimeInterval) -> Bool { base.flush(timeout: timeout) }
+        func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome { await base.drain(until: deadline) }
         func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
             base.log(level, message, category: category)
             if message.hasPrefix("Local proxy listening on"), !fired.withLockedValue({ let was = $0; $0 = true; return was }) {
@@ -133,7 +134,7 @@ enum ProbeSupersessionScenarios {
     /// while the listener binds, finds the listener not yet running. Startup
     /// decides again before it reports running, so the first CONNECT goes
     /// through the upstream instead of the off-VPN DIRECT verdict.
-    @MainActor
+    @RuntimeActor
     static func startupRederive(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let origin = FakeOrigin(group: group, behavior: .echo)
@@ -150,7 +151,7 @@ enum ProbeSupersessionScenarios {
         let logger = ListeningHook(base: ConsoleLogSink(minLevel: verbose ? .debug : .warning)) {
             guard let orchestrator = box.withLockedValue({ $0 }) else { return }
             probe.set(reachable: true)
-            Task { @MainActor in await orchestrator.handleVPNStateChange(.connected) }
+            Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.connected) }
         }
         let orchestrator = ProxyOrchestrator(config: config, logger: logger, authenticatorProvider: { _ in MockAuthenticator() },
                                              connectivityProbe: { await probe.probe($0) })

@@ -1,12 +1,16 @@
 # Actual runtime client profile probe
 
-A resource and latency probe of the **actual** shared host and native clients, at one measured control-service profile. It is not
-product code and does not select a profile. Every figure below comes from ONE run, **`actual-client-profile-OdAmdZ`** on
-`ef3e4df`. The figures are local observations on one machine: no latency here is a distribution and nothing is a shipping claim.
+The current probe drives RuntimeActor from a MainActor driver and compiles in Swift 6 mode. The [final f3abd5f run](runs/f3abd5f-runtime-actor/README.md) passes all 31 fresh trials and 481 checks on clean, stable production source/objects. The corrected pressure-only run qualifies its label erratum. Probe-only owner-held windows deliberately block one pool thread: run them without strict-pool mode; the runner does not enforce that exclusion.
 
-## Status
+The [focused c8547b7 run](runs/c8547b7-actor-focus/README.md), [prior lifetime run](runs/673e53a-lifetime/README.md), [diagnostic checkpoint](../../verification-runtime-diagnostics-2026-10-28.md) and [isolation preparation](../../verification-runtime-actor-preparation-2026-10-28.md) are historical checkpoints, not substitutes for the final-source evidence.
 
-**Passing current run.** All 31 runs (23 modes, with 3 trials each of the four live-A contention modes) exited 0: 481 checks
+The older `ef3e4df` measurements below remain historical. Their exact probe and
+runner are recoverable from the immutable Git links in that run's README;
+repeating thousands of unchanged source lines here adds no evidence.
+
+## Historical ef3e4df baseline
+
+**Passing recorded baseline (`ef3e4df`).** All 31 runs (23 modes, with 3 trials each of the four live-A contention modes) exited 0: 481 checks
 passed, none failed, nothing was inconclusive or pinned, and every scratch root was removed. Nothing was rerun to get a better
 figure, and the product was not edited.
 
@@ -34,7 +38,7 @@ or test process ran during it. The README hash in the metadata is of the text be
   compared here.
 
 The probe changed only its labels after `bwveLh` (see [the profile](#the-profile)). The [labels-only patch](runs/011f589-bwveLh/probe-labels.patch)
-reconstructs its probe from the current frozen `Probe.swift`; metadata records both hashes.
+reconstructs its probe from the immutable `ef3e4df`-run probe linked above; metadata records both hashes.
 
 ## What it drives
 
@@ -80,6 +84,28 @@ Each mode runs in a fresh process with its own scratch root, under a 300 s runne
 It fails the run if any of them changed. The tie between the objects and a build rests on the wrapper, which builds immediately
 before running.
 
+### Optional mode: `logger-held` (not in the default 31 runs)
+
+Run it explicitly: `python3 docs/experiments/actual-runtime-client-profile/run.py OUTPUT --repo "$PWD" --modes logger-held logger-held-nosampler`.
+That is three fresh trials of each.
+
+- **Logger.** The host is opened with a probe-local file logger, which writes the held root's own log file through the kernel's
+  `rotatingLogFile`. Every destination admission is judged by the authoritative app-log guard built from the held session
+  (`diagnosticDestinationGuard(for: .appLog, …, writerLeaseFile:)`). The probe's hold only delays an admission, with a 60 s safety bound
+  whose expiry fails the mode; it never admits anything itself.
+- **Run.** With the small fixture's loopback proxy running, the logger gets a fresh writer, and its open is held. The probe checks
+  that the hold was reached, then starts the host's flush. After the logger records the host's drain call, the probe measures
+  20 status reads and one proxy Stop (admission, completion, listener closed, fake system proxy cleared). It then checks that the drain
+  is still in flight.
+- **Records.**
+  - The drain's outcome and elapsed time, and the wait it asked for, which is the host's deliberate 2 s cap and is reported apart.
+  - The artifact confirmation, kept separate from the logger's outcome.
+  - After release, the time to drain, the exact writer counters (handed = written + pending, with 0 dropped and 0 failed), and the
+    file's bytes against the handed bytes.
+  - The typed `lifecycle.log_flush_unconfirmed source=host outcome=timed_out` fact, persisted exactly once.
+  - Stage memory, in the sampler terms used here. These are whole-probe figures, not app RAM.
+- **Exits.** The hold is released on every exit path, and the logger's descriptor is closed before the scratch root is removed.
+
 ## The profile
 
 The profile label is `CANDIDATE-4K-64K-10K-4M`. Every mode builds it through the actual `RuntimeServiceLimits` initializer.
@@ -95,7 +121,7 @@ The profile label is `CANDIDATE-4K-64K-10K-4M`. Every mode builds it through the
 | Latest snapshot; subscriber record | 65,233 B (the initializer's largest beside a 64 KiB reply); 1,024 B | derived; stated |
 | Collection revisions; proofs; row retention | 2 per kind; 4 per kind; 60 s | reviewed engineering values |
 | Retained-byte budget | 17,082,600 B, the initializer's own budget for these terms, found by bisection | derived |
-| Quit total in `client-quit-widest` | 30 s | **experimental caller budget only.** The Quit total is the owner's choice (proposed decision 0039) and is not selected here |
+| Quit total in the recorded `ef3e4df` `client-quit-widest` | 30 s | **historical experimental caller budget.** The [f3abd5f run](runs/f3abd5f-runtime-actor/README.md) uses the selected ten seconds (0039) and returns in 907.1 ms with fake effects |
 
 **Encoded reservations are not process memory.** The 17,082,600 B budget and the private custody terms (one transfer and one
 admitted input) are encoded-byte ceilings checked by the initializer, not preallocations or application-memory bounds. Actual

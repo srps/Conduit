@@ -52,7 +52,7 @@ enum DNSResolverScenarios {
     ///
     /// It used to keep the UDP port, warn, and serve UDP only, which a client
     /// retrying over TCP after a truncated answer reads as a dead resolver.
-    @MainActor
+    @RuntimeActor
     static func ephemeralPairRebind(verbose: Bool) async throws -> ScenarioResult {
         let name = "dnsEphemeralPairRebind"
         let start = Date()
@@ -151,7 +151,7 @@ enum DNSResolverScenarios {
         )
     }
 
-    @MainActor
+    @RuntimeActor
     static func dohBlockedStillAnswers(verbose: Bool) async throws -> ScenarioResult {
         let name = "dnsDoHBlockedStillAnswers"
         let start = Date()
@@ -254,7 +254,7 @@ enum DNSResolverScenarios {
     /// | C | the same external name again (cache hit)    | genuine answer; cache not poisoned|
     /// | D | the forgeries are reported                  | a "possible spoof" warning        |
     /// | E | the wire ID is the forwarder's, not the client's | random per query             |
-    @MainActor
+    @RuntimeActor
     static func upstreamSpoofRejected(verbose: Bool) async throws -> ScenarioResult {
         let name = "dnsUpstreamSpoofRejected"
         let start = Date()
@@ -480,6 +480,9 @@ private final class RecordingConsoleLogSink: LogSink, @unchecked Sendable {
     init(minLevel: LogLevel) {
         self.console = ConsoleLogSink(minLevel: minLevel)
     }
+
+    /// Retention is synchronous, so only the console can have lines pending.
+    func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome { await console.drain(until: deadline) }
 
     func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
         stored.withLockedValue { $0.append(Entry(level: level, message: message)) }

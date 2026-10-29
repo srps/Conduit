@@ -85,7 +85,7 @@ private func freeTCPPort() throws -> Int {
 
 /// One scratch root, its fakes and the one host built over it. `tearDown` stops, settles and flushes the host before the root goes.
 /// The control-owner tests build the same harness (`makeInteractiveHarness`).
-@MainActor
+@RuntimeActor
 final class InteractiveHostHarness {
         let session: StateRootSession
         let environment: RuntimeEnvironment
@@ -102,6 +102,8 @@ final class InteractiveHostHarness {
         var helperStatus: (any HelperLifecycleManaging)?
         /// The saved-password store; a credentials test shares it with the app-side writer it stands in for.
         var credentials: any SecretStore = InMemorySecretStore()
+        /// The host's logger; a test that holds the logger's own drain names an app log store over a held file.
+        var logger: any LogSink = DiscardingLogSink()
         private let directory: URL
         private(set) var host: RuntimeHost?
 
@@ -128,7 +130,7 @@ final class InteractiveHostHarness {
             let helperStatus = self.helperStatus.map { HoldingHelperStatus(base: $0, hold: hold) }
             let built = try await RuntimeHost.open(
                 stateSession: session,
-                logger: DiscardingLogSink(),
+                logger: logger,
                 startupAllowsMissing: true,
                 startedAt: Date(timeIntervalSince1970: 1_700_000_000),
                 terminalExit: { XCTFail("the runtime host ended the process") },
@@ -169,8 +171,15 @@ final class InteractiveHostHarness {
         }
 
         func tearDown() async {
-            hold.release()
+            hold.releaseAll()
+            XCTAssertFalse(hold.takenOnCooperativePool, "a held call was let through on the concurrency pool instead of held")
             if let host {
+                // A client Quit lets its caller go at its deadline while the host's Quit may still be finishing, and that work keeps
+                // its admission until it ends. Join it, bounded, so the settle below judges a host that has stopped working.
+                let joinUntil = ContinuousClock.now.advanced(by: .seconds(5))
+                while host.pendingAdmissions > 0, ContinuousClock.now < joinUntil {
+                    try? await Task.sleep(for: .milliseconds(1))
+                }
                 await host.stopRuntime()
                 let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
                 let report = await host.flushEvents()
@@ -204,16 +213,17 @@ final class InteractiveHostHarness {
 private typealias Harness = InteractiveHostHarness
 
 /// `makeHarness` for the other suites over the actual host.
-@MainActor
+@RuntimeActor
 func makeInteractiveHarness(
     platform: PlatformIntegrationConfig,
-    dnsForwarderEnabled: Bool
+    dnsForwarderEnabled: Bool,
+    tunnels: [TunnelDefinition] = []
 ) throws -> InteractiveHostHarness {
-    try makeHarness(platform: platform, dnsForwarderEnabled: dnsForwarderEnabled)
+    try makeHarness(platform: platform, dnsForwarderEnabled: dnsForwarderEnabled, tunnels: tunnels)
 }
 
 /// Ephemeral listeners, one split-DNS entry, and the switches a test names.
-@MainActor
+@RuntimeActor
 private func makeHarness(
     platform: PlatformIntegrationConfig,
     dnsForwarderEnabled: Bool,
@@ -281,7 +291,7 @@ private final class ParkedReadStateFiles: StateFileAccessing, @unchecked Sendabl
 
 /// Parks one physical effect in a kernel lifecycle's slot until `open()`, so the next start of that module queues behind it before its
 /// claim: a Start then waits inside the module's kernel start, with its earlier members already settled.
-@MainActor
+@RuntimeActor
 private final class SlotHold {
     private var parked: CheckedContinuation<Void, Never>?
     private var opened = false
@@ -352,7 +362,6 @@ private let proxyAndDNS = PlatformIntegrationConfig(manageSystemProxy: true, man
 
 /// The per-module lifecycle facade of the actual `RuntimeHost` (decisions 0031, 0035, 0036 and 0037), over a `FakeMachine` and a scratch
 /// root. Each test drives the package facade the daemon and `pm-sim` use, and reads the machine, the files and the typed events.
-@MainActor
 final class RuntimeHostInteractiveTests: XCTestCase {
     private var harness: Harness?
 
@@ -362,6 +371,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         try await super.tearDown()
     }
 
+    @RuntimeActor
     private func launch(
         platform: PlatformIntegrationConfig,
         dnsForwarderEnabled: Bool,
@@ -380,7 +390,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 
     /// A proxy Stop takes only the proxy's lane: the listener and its surfaces go, DNS and its system DNS stay, and so do the runtime's
     /// observers. A session DNS Stop then fences, restores system DNS and saves its disable through the runtime-only commit.
-    func testAProxyStopLeavesDNSRunningAndASessionDNSStopSavesItsDisable() async throws {
+    @RuntimeActor func testAProxyStopLeavesDNSRunningAndASessionDNSStopSavesItsDisable() async throws {
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true)
         try await host.startRuntime()
         XCTAssertTrue(harness.machine.service("Wi-Fi").routesThroughAProxy)
@@ -407,7 +417,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     }
 
     /// A tunnels Stop takes only the tunnels' lane; the proxy keeps its listener and its system proxy.
-    func testATunnelsStopLeavesTheProxyRunning() async throws {
+    @RuntimeActor func testATunnelsStopLeavesTheProxyRunning() async throws {
         let port = try freeTCPPort()
         let (host, harness) = try await launch(
             platform: PlatformIntegrationConfig(manageSystemProxy: true),
@@ -437,7 +447,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 
     /// A proxy Start's companion starts DNS that is configured on and unfenced, from the Start's verified pair, without writing DNS's
     /// intent or moving its revision.
-    func testAProxyStartsCompanionStartsConfiguredDNSWithoutWritingIntent() async throws {
+    @RuntimeActor func testAProxyStartsCompanionStartsConfiguredDNSWithoutWritingIntent() async throws {
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true)
         let before = host.moduleRevisions
         let saved = try Data(contentsOf: harness.environment.configFile)
@@ -453,7 +463,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     }
 
     /// Disabled, already running and fenced DNS are each a typed no-op, and none of them activates anything.
-    func testTheCompanionIsATypedNoOpForDisabledRunningOrFencedDNS() async throws {
+    @RuntimeActor func testTheCompanionIsATypedNoOpForDisabledRunningOrFencedDNS() async throws {
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: false)
         let disabled = try await host.startProxy(conditionalDNS: true)
         XCTAssertEqual(disabled.conditionalDNS, .notConfigured)
@@ -476,7 +486,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 
     /// A companion whose forwarder cannot bind reports its own failure: the proxy stays up, the system DNS it captured is restored, and
     /// DNS's configured intent and fence are left as they were, so a later explicit Start is not refused or replayed.
-    func testAFailedCompanionLeavesTheProxyUpAndRestoresSystemDNS() async throws {
+    @RuntimeActor func testAFailedCompanionLeavesTheProxyUpAndRestoresSystemDNS() async throws {
         let held = try HeldUDPPort()
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true, dnsForwarderPort: held.port)
         let outcome = try await host.startProxy(conditionalDNS: true)
@@ -511,7 +521,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     /// A DNS Stop admitted while the proxy Start applies its surfaces fences DNS at once; its own platform work queues behind the
     /// proxy's, so its disable lands after the proxy Start has completed from its verified pair. The completed proxy reports its fact,
     /// and the companion then finds the fence and starts nothing.
-    func testADNSStopWhileTheProxyStartAppliesFencesOnlyItsCompanion() async throws {
+    @RuntimeActor func testADNSStopWhileTheProxyStartAppliesFencesOnlyItsCompanion() async throws {
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true)
         harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
             name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
@@ -541,7 +551,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     /// Decision 0037's strict capture: a DNS Stop whose disable save lands while an authorized proxy Start is still before its bind
     /// replaces the runtime baseline the Start's receipt names, so the Start's remaining effects hold. It reports its typed supersession,
     /// leaves no listener and no surface, and the saved disable stays a fact.
-    func testADNSDisableSavedBeforeTheProxyBindsHoldsTheProxyStart() async throws {
+    @RuntimeActor func testADNSDisableSavedBeforeTheProxyBindsHoldsTheProxyStart() async throws {
         let fetch = HeldPACFetch()
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true, heldPAC: fetch)
         let start = Task { try await host.startProxy(conditionalDNS: true) }
@@ -575,7 +585,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     /// A proxy Stop that takes the proxy lane while the whole-host Start is held on its PAC fetch, after authorization, makes the proxy
     /// start throw. That exit ends the authority of every member not yet settled under the Start's own ticket: DNS and tunnels, which it
     /// never brought up, keep no grant from the aborted group, their prior permission and fence come back, and nothing listens.
-    func testAStartThatThrowsAfterAuthorizationLeavesNoGrantForItsUnsettledMembers() async throws {
+    @RuntimeActor func testAStartThatThrowsAfterAuthorizationLeavesNoGrantForItsUnsettledMembers() async throws {
         let fetch = HeldPACFetch()
         let (host, harness) = try await launch(
             platform: proxyAndDNS, dnsForwarderEnabled: true,
@@ -619,12 +629,13 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         })
         // No grant is left for a companion: a later proxy-only Start finds DNS unstarted and configured, and starts it itself.
         let next = try await host.startProxy(conditionalDNS: true)
+        XCTAssertEqual(next.modules.proxy, .started)
         XCTAssertEqual(next.conditionalDNS, .started)
     }
 
     /// The same whole-combined rule when the proxy Stop arrives while the whole-host Start's proxy surfaces are out on the platform queue:
     /// the Start is held whole, DNS and tunnels are never started and keep no grant, and the Stop's clears land after the apply.
-    func testAProxyStopWhileTheWholeHostStartAppliesHoldsItWhole() async throws {
+    @RuntimeActor func testAProxyStopWhileTheWholeHostStartAppliesHoldsItWhole() async throws {
         let (host, harness) = try await launch(
             platform: proxyAndDNS, dnsForwarderEnabled: true,
             tunnels: [TunnelDefinition(localPort: try freeTCPPort(), remoteHost: "127.0.0.1", remotePort: 9)]
@@ -662,7 +673,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     /// A whole-host Start whose DNS member failed alone, then waits inside its tunnel start, takes no
     /// identical Start as a joiner. The new Start runs its own lanes and its own DNS attempt, so DNS's result, fence and permission are that
     /// attempt's, not a cached failure beside a grant nothing settles, and no later companion can act on DNS.
-    func testAnIdenticalStartAfterAMemberFailedRunsItsOwnAttempt() async throws {
+    @RuntimeActor func testAnIdenticalStartAfterAMemberFailedRunsItsOwnAttempt() async throws {
         let heldDNS = try HeldUDPPort()
         let (host, harness) = try await launch(
             platform: proxyAndDNS, dnsForwarderEnabled: true, dnsForwarderPort: heldDNS.port,
@@ -716,7 +727,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     /// A reload that turns the forwarder off leaves a running forwarder up; the next Stop is what stops it. A facade Start that takes the
     /// lanes from that Stop while it restores system DNS finds DNS configured off and settles it `not_configured`. The DNS it owns is still
     /// listening, so it finishes the overtaken Stop's teardown under its own token: nothing listens behind that result.
-    func testAFacadeStartOverAStopInFlightFinishesTheTeardownOfDNSConfiguredOff() async throws {
+    @RuntimeActor func testAFacadeStartOverAStopInFlightFinishesTheTeardownOfDNSConfiguredOff() async throws {
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true)
         try await host.startRuntime()
         var edited = try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false)
@@ -750,7 +761,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     /// An ordinary facade Start with DNS configured off finds DNS down on an idle lane, so it inherits nothing: it starts nothing and clears
     /// nothing. A resolver the user pointed at 127.0.0.1 after launch recovery stays, though a clear with no journal record would read it
     /// as residue and reset it.
-    func testAFacadeStartWithDNSConfiguredOffLeavesAUserLoopbackResolverAlone() async throws {
+    @RuntimeActor func testAFacadeStartWithDNSConfiguredOffLeavesAUserLoopbackResolverAlone() async throws {
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: false)
         harness.machine.describe("Wi-Fi") { $0.dnsServers = ["127.0.0.1"] }
         try await host.startRuntime()
@@ -764,7 +775,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     /// A tunnels Stop whose kernel stop is admitted but queued behind a held effect still reads `running`. A tunnels Start that takes the
     /// lane from it owns a module in motion, so it renews the kernel's start instead of trusting that snapshot: once the slot opens, the
     /// superseded stop closes nothing and the listener is live.
-    func testATunnelsStartThatTakesOverAStopInFlightRenewsTheKernelStart() async throws {
+    @RuntimeActor func testATunnelsStartThatTakesOverAStopInFlightRenewsTheKernelStart() async throws {
         let port = try freeTCPPort()
         let (host, _) = try await launch(
             platform: PlatformIntegrationConfig(manageSystemProxy: true), dnsForwarderEnabled: false,
@@ -803,7 +814,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     /// A proxy Start of a different scope from the same pair, admitted while a whole-host Start is held on its PAC fetch before its bind,
     /// joins the kernel's start in flight and reports its real bind. The port is held, so that bind fails: the proxy Start reports the
     /// failure rather than `started`, applies no surface to a listener that never bound, and records the typed failure.
-    func testAProxyStartBesideAStartHeldOnItsPACReportsTheRealFailedBind() async throws {
+    @RuntimeActor func testAProxyStartBesideAStartHeldOnItsPACReportsTheRealFailedBind() async throws {
         let held = try HeldTCPListener()
         let fetch = HeldPACFetch()
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: false, localPort: held.port, heldPAC: fetch)
@@ -841,7 +852,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 
     /// The same joiner with a free configured port: while the joined start is held before its bind, it has neither returned nor applied a
     /// surface, and it returns `started` only once that start has published `running` on the configured port, which its surfaces name.
-    func testAProxyStartBesideAStartHeldOnItsPACReportsStartedOnlyAfterTheBind() async throws {
+    @RuntimeActor func testAProxyStartBesideAStartHeldOnItsPACReportsStartedOnlyAfterTheBind() async throws {
         let configured = try freeTCPPort()
         let fetch = HeldPACFetch()
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: false, localPort: configured, heldPAC: fetch)
@@ -878,7 +889,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 
     /// A Stop admitted while a proxy Start waits on the joined kernel start does not wait for the held PAC preparation: it completes while
     /// the fetch is still held, and still wins. Both Starts then report their supersession, and nothing listens or points anywhere.
-    func testAStopDuringAJoinedProxyStartCompletesWithoutWaitingForThePAC() async throws {
+    @RuntimeActor func testAStopDuringAJoinedProxyStartCompletesWithoutWaitingForThePAC() async throws {
         let fetch = HeldPACFetch()
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: false, heldPAC: fetch)
         let whole = Task { try await host.startRuntime() }
@@ -920,7 +931,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     /// The reverse of a Stop during a Start: a session DNS Stop is held while it restores system DNS, and an explicit DNS Start takes the
     /// lane from it. The Start owns a module in motion, so it runs the physical start rather than trusting the forwarder the Stop was
     /// taking away: it points system DNS back at the forwarder and restarts the health probe, after the Stop's restore.
-    func testAnExplicitDNSStartThatTakesOverAStopInFlightBringsDNSBackUp() async throws {
+    @RuntimeActor func testAnExplicitDNSStartThatTakesOverAStopInFlightBringsDNSBackUp() async throws {
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true)
         _ = try await host.startDNS()
         XCTAssertTrue(harness.machine.dnsRelayRunning)
@@ -951,7 +962,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     /// The same takeover through the whole-host facade: a facade Stop held in its DNS restore, then a facade Start. Every module is in
     /// motion, so each runs its physical start under the Start's tokens: the proxy surfaces, the forwarder with system DNS and its probe,
     /// and the tunnel listener are all live afterwards.
-    func testAFacadeStartThatTakesOverAFacadeStopInFlightLeavesEveryModuleLive() async throws {
+    @RuntimeActor func testAFacadeStartThatTakesOverAFacadeStopInFlightLeavesEveryModuleLive() async throws {
         let (host, harness) = try await launch(
             platform: proxyAndDNS, dnsForwarderEnabled: true,
             tunnels: [TunnelDefinition(localPort: try freeTCPPort(), remoteHost: "127.0.0.1", remotePort: 9)]
@@ -984,7 +995,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 
     /// A tunnels Start whose saved input names no enabled tunnel starts nothing and says so, and one whose every bind fails reports its
     /// failure and restores its prior fence: after a whole-host Stop every module stays fenced, so a reload still holds.
-    func testATunnelsStartReportsNothingConfiguredApartFromAFailedBind() async throws {
+    @RuntimeActor func testATunnelsStartReportsNothingConfiguredApartFromAFailedBind() async throws {
         let held = try HeldTCPListener()
         let (host, harness) = try await launch(
             platform: PlatformIntegrationConfig(manageSystemProxy: true),
@@ -1016,7 +1027,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     /// completed, is out capturing the prior DNS servers replaces that pair, so the companion holds before its next machine effect and
     /// tears down what it started: the completed proxy stays up, no system DNS points anywhere, and nothing is rebound to B. The next
     /// explicit Restart captures B.
-    func testAReloadThatReplacesThePairHoldsTheCompanionAndKeepsTheCompletedProxy() async throws {
+    @RuntimeActor func testAReloadThatReplacesThePairHoldsTheCompanionAndKeepsTheCompletedProxy() async throws {
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true)
         // The companion's first read of the machine's DNS servers, once the proxy is up.
         harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
@@ -1068,7 +1079,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 
     /// A request that names a revision a newer Stop moved is refused whole, in its admission turn: nothing is written, no intent changes,
     /// nothing starts, and the typed hold names the stale revision.
-    func testAStaleRevisionRefusesTheWholeRequestBeforeAnyWrite() async throws {
+    @RuntimeActor func testAStaleRevisionRefusesTheWholeRequestBeforeAnyWrite() async throws {
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true)
         let observed = host.moduleRevisions
         _ = await host.stopDNS()
@@ -1105,7 +1116,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 
     /// A reload that replaces an explicit DNS Start's captured pair while it applies holds it: DNS is torn down, its prior fence comes back,
     /// and no later companion can activate it.
-    func testAHeldExplicitDNSStartLeavesNoPermissionForALaterCompanion() async throws {
+    @RuntimeActor func testAHeldExplicitDNSStartLeavesNoPermissionForALaterCompanion() async throws {
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: false)
         _ = await host.stopDNS()
         XCTAssertEqual(host.workflow.dnsIntent.fenced, true)
@@ -1148,7 +1159,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 
     /// A session DNS Stop whose own save did not run owes its disable. A proxy Start admitted after it stages that same false in the
     /// shared write; once the write verifies the obligation ends and the fence stays. Through the actual workflow and store.
-    func testAVerifiedSharedWriteOfTheOwedDisableEndsTheObligationAndKeepsTheFence() async throws {
+    @RuntimeActor func testAVerifiedSharedWriteOfTheOwedDisableEndsTheObligationAndKeepsTheFence() async throws {
         let harness = try makeHarness(platform: proxyAndDNS, dnsForwarderEnabled: true)
         self.harness = harness
         let store = ConfigurationStore(session: harness.session, access: StateFileAccess.operatingSystem(),
@@ -1171,7 +1182,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 
     /// A session DNS Stop whose disable save finds the store's one slot taken writes nothing, reports the typed Stop hold, keeps its
     /// fence and stays owed; nothing retries it, and the next save once the slot is free verifies it. Through the actual workflow and store.
-    func testABusyStoreHoldsTheOwedDisableWithItsTypedStopCauseAndKeepsTheFence() async throws {
+    @RuntimeActor func testABusyStoreHoldsTheOwedDisableWithItsTypedStopCauseAndKeepsTheFence() async throws {
         let harness = try makeHarness(platform: proxyAndDNS, dnsForwarderEnabled: true)
         self.harness = harness
         let files = ParkedReadStateFiles()
@@ -1205,7 +1216,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 
     /// While an explicit DNS Start pending in DNS's slot carries a session Stop's owed disable, the save reports it owed and writes nothing;
     /// that Start's own verified enable then settles it. Through the actual workflow and store.
-    func testAnOwedDisableCarriedByAPendingDNSStartIsReportedOwedAndNotWritten() async throws {
+    @RuntimeActor func testAnOwedDisableCarriedByAPendingDNSStartIsReportedOwedAndNotWritten() async throws {
         let harness = try makeHarness(platform: proxyAndDNS, dnsForwarderEnabled: true)
         self.harness = harness
         let store = ConfigurationStore(session: harness.session, access: StateFileAccess.operatingSystem(),
@@ -1231,7 +1242,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     /// An explicit DNS Start admitted over that owed disable, then held at its preparation by the same busy slot and retired, gives the
     /// obligation back (decision 0015): the parked reload and a later one adopt no stale enable from the file, a facade Start still waits for
     /// the save, and the next save verifies it. Through the actual workflow and store.
-    func testAHeldExplicitDNSStartGivesBackTheDisableSaveItDisplaced() async throws {
+    @RuntimeActor func testAHeldExplicitDNSStartGivesBackTheDisableSaveItDisplaced() async throws {
         let harness = try makeHarness(platform: proxyAndDNS, dnsForwarderEnabled: true)
         self.harness = harness
         let files = ParkedReadStateFiles()
@@ -1270,7 +1281,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
     /// Through the actual workflow and store: a proxy request with its companion, prepared while another request's explicit DNS Start is
     /// still pending, commits the durable false, not that Start's unverified true. Once the DNS Start is retired, the proxy request is
     /// authorized and its companion is not allowed to activate anything.
-    func testAProxyRequestPreparedBesideAPendingDNSStartPersistsNoEnable() async throws {
+    @RuntimeActor func testAProxyRequestPreparedBesideAPendingDNSStartPersistsNoEnable() async throws {
         let harness = try makeHarness(platform: proxyAndDNS, dnsForwarderEnabled: false)
         self.harness = harness
         let store = ConfigurationStore(session: harness.session, access: StateFileAccess.operatingSystem(),
@@ -1317,7 +1328,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 
     /// The process quit latches before it awaits anything, persists no disable, keeps a disable an earlier session Stop still owes, and
     /// returns only once every lane and every store operation it found has ended.
-    func testQuitLatchesFirstKeepsAPredatingOwedSaveAndJoinsEveryLane() async throws {
+    @RuntimeActor func testQuitLatchesFirstKeepsAPredatingOwedSaveAndJoinsEveryLane() async throws {
         let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true)
         try await host.startRuntime()
         let saved = try Data(contentsOf: harness.environment.configFile)
@@ -1361,7 +1372,6 @@ final class RuntimeHostInteractiveTests: XCTestCase {
 /// companion and a menu Restart may do to the run state, the saved DNS intent and DNS's fence. It never calls the host's intent value
 /// or reads its transitions. Two families are explored: every sequential history of up to three commands, and every Start held at its
 /// first platform step with a Stop admitted during it. Each history runs on its own scratch root and host.
-@MainActor
 final class RuntimeModuleLifecycleModelTests: XCTestCase {
     private enum Command: String, CaseIterable {
         case proxyStart, restart, dnsStart, proxyStop, dnsStop, tunnelsStart, tunnelsStop
@@ -1428,6 +1438,7 @@ final class RuntimeModuleLifecycleModelTests: XCTestCase {
         case superseded
     }
 
+    @RuntimeActor
     private func run(_ command: Command, on host: RuntimeHost) async -> Expected {
         do {
             switch command {
@@ -1448,6 +1459,7 @@ final class RuntimeModuleLifecycleModelTests: XCTestCase {
     }
 
     /// The machine, the run state and the saved file agree with the reference.
+    @RuntimeActor
     private func compare(_ reference: Reference, _ host: RuntimeHost, _ harness: Harness, _ trace: String) {
         XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state == .running, reference.proxyUp, "\(trace): proxy run state")
         XCTAssertEqual(harness.machine.service("Wi-Fi").routesThroughAProxy, reference.proxyUp, "\(trace): system proxy")
@@ -1469,6 +1481,7 @@ final class RuntimeModuleLifecycleModelTests: XCTestCase {
     }
 
     /// Runs each history on its own root and host, comparing every result and the machine after every command. Returns the counts.
+    @RuntimeActor
     private func explore(_ histories: [[Command]], dnsSaved: Bool, withTunnel: Bool) async throws -> (histories: Int, transitions: Int) {
         var transitions = 0
         for history in histories {
@@ -1492,13 +1505,13 @@ final class RuntimeModuleLifecycleModelTests: XCTestCase {
 
     /// The third lane against the same host: every history of up to two of the seven commands, with one loopback tunnel configured, so a
     /// tunnels Start or Stop moves only the tunnel and a proxy or DNS command moves no tunnel.
-    func testTunnelHistoriesStayIsolatedFromTheOtherModules() async throws {
+    @RuntimeActor func testTunnelHistoriesStayIsolatedFromTheOtherModules() async throws {
         let counts = try await explore(Self.histories(over: Command.allCases, upTo: 2), dnsSaved: true, withTunnel: true)
         XCTAssertEqual(counts.histories, 7 + 49)
         XCTAssertEqual(counts.transitions, 7 + 98)
     }
 
-    func testSequentialModuleHistoriesAgreeWithTheReference() async throws {
+    @RuntimeActor func testSequentialModuleHistoriesAgreeWithTheReference() async throws {
         // DNS saved on: every history up to three commands. Saved off: up to two.
         let on = try await explore(Self.histories(over: Self.proxyAndDNSCommands, upTo: 3), dnsSaved: true, withTunnel: false)
         let off = try await explore(Self.histories(over: Self.proxyAndDNSCommands, upTo: 2), dnsSaved: false, withTunnel: false)
@@ -1510,7 +1523,7 @@ final class RuntimeModuleLifecycleModelTests: XCTestCase {
     /// selected rule written out: a Stop of the Start's own module takes its lane, so the Start is superseded and leaves nothing; a Stop
     /// of the other module leaves the Start's progress, its platform work queues behind the Start's, and a DNS Stop's fence only denies
     /// the companion.
-    func testAStopAdmittedWhileAStartAppliesAgreesWithTheReference() async throws {
+    @RuntimeActor func testAStopAdmittedWhileAStartAppliesAgreesWithTheReference() async throws {
         struct Case {
             let start: Command
             let stop: Command

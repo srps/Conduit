@@ -435,8 +435,8 @@ package final class TunnelForwarder: @unchecked Sendable {
             return .unavailable(reason: "Privileged helper not available")
         }
 
-        resolver.cleanupStale(activeHostnames: Set(hostnames))
-        let (succeeded, failed) = resolver.applyAll(hostnames: hostnames, listenIP: loopback)
+        await resolver.cleanupStale(activeHostnames: Set(hostnames))
+        let (succeeded, failed) = await resolver.applyAll(hostnames: hostnames, listenIP: loopback)
         managedHostnames = succeeded
 
         if failed.isEmpty {
@@ -450,7 +450,7 @@ package final class TunnelForwarder: @unchecked Sendable {
 
     private func teardownDNSOverride() async {
         if let resolver = resolverManager, !managedHostnames.isEmpty {
-            resolver.removeAll(hostnames: managedHostnames)
+            await resolver.removeAll(hostnames: managedHostnames)
         }
         managedHostnames.removeAll()
         await dnsResponder.stop()

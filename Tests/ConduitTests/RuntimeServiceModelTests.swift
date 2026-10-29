@@ -2,13 +2,13 @@
 import XCTest
 @testable import ConduitRuntime
 import ConduitShared
+import ProxyKernel
 
 /// Bounded models of the two lifetimes this slice owns. Each model drives the production types step by step, and after
 /// every step it compares the observable state with a separate reference written from the rules, not from the code.
 ///
 /// Exploration is exhaustive to a fixed depth, and it is then seeded (deterministic) for longer walks. The first
 /// mismatch found by the depth-ordered search is the shortest counterexample. A search that runs out of its budget fails.
-@MainActor
 final class RuntimeServiceModelTests: XCTestCase {
     /// The longest exhaustive depth, and the explored-sequence budget. A search over the budget fails the test.
     private let exhaustiveDepth = 4
@@ -16,7 +16,7 @@ final class RuntimeServiceModelTests: XCTestCase {
 
     // MARK: - Wait: gate, ticket, scheduling and the parked registration
 
-    func testWaitLifetimeAgreesWithTheReferenceExhaustivelyToTheDepth() throws {
+    @RuntimeActor func testWaitLifetimeAgreesWithTheReferenceExhaustivelyToTheDepth() async throws {
         var explored = 0
         for depth in 1...exhaustiveDepth {
             for sequence in allSequences(of: WaitAction.allCases, depth: depth) {
@@ -31,7 +31,7 @@ final class RuntimeServiceModelTests: XCTestCase {
         XCTAssertEqual(explored, 7_380)
     }
 
-    func testWaitLifetimeAgreesWithTheReferenceOnSeededLongWalks() throws {
+    @RuntimeActor func testWaitLifetimeAgreesWithTheReferenceOnSeededLongWalks() async throws {
         for seed in 1...150 {
             var generator = SplitMix64(state: UInt64(seed))
             let sequence = (0..<40).map { _ in WaitAction.allCases[Int(generator.next() % UInt64(WaitAction.allCases.count))] }
@@ -43,7 +43,7 @@ final class RuntimeServiceModelTests: XCTestCase {
 
     // MARK: - Work: admission, launches, supersession and quiescence
 
-    func testWorkLifetimeAgreesWithTheReferenceExhaustivelyToTheDepth() throws {
+    @RuntimeActor func testWorkLifetimeAgreesWithTheReferenceExhaustivelyToTheDepth() async throws {
         var explored = 0
         for depth in 1...exhaustiveDepth {
             for sequence in allSequences(of: WorkAction.alphabet, depth: depth) {
@@ -58,7 +58,7 @@ final class RuntimeServiceModelTests: XCTestCase {
         XCTAssertEqual(explored, 22_620)
     }
 
-    func testWorkLifetimeAgreesWithTheReferenceOnSeededLongWalks() throws {
+    @RuntimeActor func testWorkLifetimeAgreesWithTheReferenceOnSeededLongWalks() async throws {
         for seed in 1...150 {
             var generator = SplitMix64(state: UInt64(seed))
             let sequence = (0..<40).map { _ in WorkAction.alphabet[Int(generator.next() % UInt64(WorkAction.alphabet.count))] }
@@ -71,7 +71,7 @@ final class RuntimeServiceModelTests: XCTestCase {
     // MARK: - Sequence generation
 
     /// Every sequence of `depth` actions, in lexicographic order.
-    private func allSequences<Action>(of alphabet: [Action], depth: Int) -> [[Action]] {
+    @RuntimeActor private func allSequences<Action>(of alphabet: [Action], depth: Int) -> [[Action]] {
         var sequences: [[Action]] = [[]]
         for _ in 0..<depth {
             sequences = sequences.flatMap { prefix in alphabet.map { prefix + [$0] } }
@@ -82,7 +82,7 @@ final class RuntimeServiceModelTests: XCTestCase {
     // MARK: - Replays
 
     /// Replays one wait sequence on fresh production objects. It returns the first mismatch, or nil when every step agreed.
-    private func replayWait(_ actions: [WaitAction]) throws -> String? {
+    @RuntimeActor private func replayWait(_ actions: [WaitAction]) throws -> String? {
         let harness = try RuntimeServiceHarness()
         let lanes = RuntimeLaneCounter(limits: harness.limits)
         guard let ticket = lanes.reserve(.read, onQuiesced: nil) else { return "the lane refused its first reservation" }
@@ -171,7 +171,7 @@ final class RuntimeServiceModelTests: XCTestCase {
     }
 
     /// Replays one work sequence on a fresh service with one ordinary slot, so ordinary refusal is reachable.
-    private func replayWork(_ actions: [WorkAction]) throws -> String? {
+    @RuntimeActor private func replayWork(_ actions: [WorkAction]) throws -> String? {
         let harness = try RuntimeServiceHarness(aliases: 8, ordinaryPending: 1)
         harness.owner.answer = { _, _ in .admitted }
         var model = WorkReferenceModel(ordinaryCapacity: 1)
@@ -243,7 +243,7 @@ final class RuntimeServiceModelTests: XCTestCase {
     }
 
     /// The service's observable state, after one step, against the reference.
-    private func compareWork(_ harness: RuntimeServiceHarness, _ model: WorkReferenceModel, step: Int, action: WorkAction) -> String? {
+    @RuntimeActor private func compareWork(_ harness: RuntimeServiceHarness, _ model: WorkReferenceModel, step: Int, action: WorkAction) -> String? {
         for module in [ControlModule.dns, .proxy] {
             let observed = harness.core.stopSlotState(module)
             let expected = model.slots(of: module)

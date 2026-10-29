@@ -1,0 +1,7 @@
+{
+  "test_commit": "8cbb17cb606b001d95ec1b6dd2f0d7d7d28b2612",
+  "product_commit": "f3abd5f710ed683a2f73859e0429d6e5c807e9f9",
+  "verified_source_sha256": "3e79fd7dc652f57f4279b3afc92e32105d864413c4b23a46a0de93aeeb7cfbf7",
+  "production_module_diff": "",
+  "scope": "All41 completed before commit on the identical tested source tree; following commit records documentation and the separate Swift6 production probe."
+}

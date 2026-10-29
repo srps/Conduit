@@ -1,0 +1,10 @@
+{
+  "head": "d5ac37e49deeff1848797cf15702c59a07642ac0",
+  "review_base": "d5ac37e",
+  "snapshot_sha256": "bdfadee62a1669ff698fe5eb0f430625dd2d529598dff39296fc47994b07bc79",
+  "files": 790,
+  "author_manifest": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-dns-manifest.json",
+  "new_files_in_patch": [],
+  "patch_sha256": "4a644313f5fb83fc72f45e6b31dfb06c918539a4eabd43b3cd64e1b86b28d767",
+  "stable": true
+}

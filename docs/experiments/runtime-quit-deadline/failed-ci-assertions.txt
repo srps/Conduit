@@ -1,0 +1,15 @@
+2026-10-28T15:10:02.1433160Z Test Case '-[ConduitTests.RuntimeHostControlOwnerTests testTheClientQuitFlushesBothDeclaredSavesWhenItsSubscriptionIsRefused]' started.
+2026-10-28T15:10:02.1434970Z /Users/runner/work/Conduit/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:1447: error: -[ConduitTests.RuntimeHostControlOwnerTests testTheClientQuitFlushesBothDeclaredSavesWhenItsSubscriptionIsRefused] : failed - the Quit is read settled before the routine returns: unsettled(8198162B-2A82-4C1C-BB84-0F02A79CBE7E)
+2026-10-28T15:10:02.1436970Z Test Case '-[ConduitTests.RuntimeHostControlOwnerTests testTheClientQuitFlushesBothDeclaredSavesWhenItsSubscriptionIsRefused]' failed (4.124 seconds).
+
+2026-10-28T15:10:02.1434970Z /Users/runner/work/Conduit/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:1447: error: -[ConduitTests.RuntimeHostControlOwnerTests testTheClientQuitFlushesBothDeclaredSavesWhenItsSubscriptionIsRefused] : failed - the Quit is read settled before the routine returns: unsettled(8198162B-2A82-4C1C-BB84-0F02A79CBE7E)
+2026-10-28T15:10:02.1436970Z Test Case '-[ConduitTests.RuntimeHostControlOwnerTests testTheClientQuitFlushesBothDeclaredSavesWhenItsSubscriptionIsRefused]' failed (4.124 seconds).
+2026-10-28T15:10:02.1438020Z Test Case '-[ConduitTests.RuntimeHostControlOwnerTests testTheClientQuitFlushesItsDeclaredSaveWhenItsStreamEndsEarly]' started.
+
+2026-10-28T15:12:25.8022720Z Test Suite 'ConduitPackageTests.xctest' failed at 2026-10-28 15:12:25.636.
+2026-10-28T15:12:25.8023180Z 	 Executed 3768 tests, with 4 tests skipped and 1 failure (0 unexpected) in 426.907 (427.632) seconds
+2026-10-28T15:12:25.8023570Z Test Suite 'All tests' failed at 2026-10-28 15:12:25.637.
+
+2026-10-28T15:12:25.8023570Z Test Suite 'All tests' failed at 2026-10-28 15:12:25.637.
+2026-10-28T15:12:25.8023960Z 	 Executed 3768 tests, with 4 tests skipped and 1 failure (0 unexpected) in 426.907 (427.643) seconds
+2026-10-28T15:12:25.8024350Z es=1581 snapshotFrameBytes=1702 baselineFrameBytes=1807

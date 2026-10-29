@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import ProxyKernel
 
 /// How `RuntimeHost.settleStoppedEffects` ended. Only `.settled` says that the work the stopped host still ran, its
 /// credential warm-up and the observer deliveries admitted before the call with their cascades, finished, in the state
@@ -22,12 +23,12 @@ package enum StoppedEffectsSettlement: Equatable, Sendable {
     case reconcilePending
 }
 
-/// The one settle a host has in flight (capacity one), confined to the host's main actor.
+/// The one settle a host has in flight (capacity one), confined to the host's owner.
 ///
 /// Its caller waits on the first of three things: the join's own outcome, the caller's deadline, or a newer start or
 /// stop. The waiter resumes exactly once, because `finish` records its outcome before it resumes anyone and ignores
 /// later calls. The join is not this object's: the host runs it, and frees the slot when it ends.
-@MainActor
+@RuntimeActor
 final class StoppedEffectsJoin {
     /// The lifecycle, config and intent generations the settle observed. Any one moving means the host is no longer the one that was stopped,
     /// so the result is stale. All are read-only here.
@@ -46,7 +47,7 @@ final class StoppedEffectsJoin {
 
     /// Arms the caller's deadline. The deadline ends only the caller's wait, not the join.
     func armDeadline(_ deadline: ContinuousClock.Instant) {
-        timer = Task { @MainActor [weak self] in
+        timer = Task { [weak self] in
             do {
                 try await Task.sleep(until: deadline, clock: .continuous)
             } catch {

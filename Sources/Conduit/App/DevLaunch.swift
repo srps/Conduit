@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import AppKit
+import ConduitRuntime
 import Darwin
 import Foundation
 import PlatformMac
+import ProxyAuth
 import ProxyKernel
 import SwiftUI
 
@@ -27,11 +29,7 @@ extension AppState {
             DevLaunch.fail("dev mode is available in debug builds only")
             #endif
         }
-        return AppState(
-            stateSession: launch.stateSession,
-            commandRunner: CommandRunner.host,
-            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
-        )
+        return AppState(stateSession: launch.stateSession, composition: .production())
     }
 }
 
@@ -449,63 +447,92 @@ enum DevLaunch {
         let machine = FakeMachine(resolverDirectory: resolverDirectory)
         let vpn = FakeVPNStatusObserver()
         let loginItems = FakeLoginItems()
-        // The Settings surface's helper controls and the credential controls
-        // have seams of their own; without these two, "Install Helper" and
-        // "Clear Saved Credentials" in the dev instance would reach the
-        // installed helper and the login Keychain.
+        // The helper's status and install/uninstall, and the saved password, which the app writes and the host reads: without these the
+        // dev instance would reach the installed helper and the login Keychain.
         let helper = FakeHelperLifecycle()
         let secrets = InMemorySecretStore()
-        // "Check for Updates…" would otherwise start the updater inside this
-        // dev bundle, and installing would replace and relaunch it as the
-        // real app.
-        let updater = FakeUpdaterLauncher()
-        let state = AppState(
-            stateSession: stateSession,
-            privilegeClient: machine,
-            helperLifecycle: helper,
-            credentialStore: secrets,
-            kerberosTicketRecovery: FakeKerberosTicketRecovery(),
-            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            // The installed Conduit's relay may answer on the real port 53.
-            dnsResponds: FakeDNSProbe().responds(onPort:),
-            homeDirectory: home,
-            resolverDirectory: resolverDirectory.path,
-            loginItemManager: loginItems.manager,
-            vpnStatusMonitor: vpn,
-            // A configured PAC URL would otherwise be fetched from the network, through the curl fallback included.
-            pacEvaluator: FakePacEvaluator(),
-            networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in
-                FakeNetworkLocationStore(snapshot: NetworkLocationSnapshot(
-                    activeLocationID: "11111111-1111-1111-1111-111111111111",
-                    services: [LocationServiceSettings(
-                        locationID: "11111111-1111-1111-1111-111111111111",
-                        serviceID: "33333333-3333-3333-3333-333333333333",
-                        name: "Wi-Fi", enabled: true, proxies: [:], dns: [:]
-                    )]
-                ))
-            },
-            updaterLauncher: updater
+        let composition = devComposition(
+            machine: machine, vpn: vpn, loginItems: loginItems, helper: helper, secrets: secrets, home: home
         )
+        let state = AppState(stateSession: stateSession, composition: composition)
         if let section = options.section {
             state.selectedSection = section
         }
-        // The app's init started the observer, so the emit is delivered.
+        // The host starts its VPN observer when it opens, so the emit waits for the opening.
         if let vpnState = options.vpn {
-            vpn.connectedInterfaceName = options.vpnInterfaceName
-            vpn.emit(vpnState)
+            let interfaceName = options.vpnInterfaceName
+            Task { @MainActor in
+                await state.opening?.value
+                vpn.connectedInterfaceName = interfaceName
+                vpn.emit(vpnState)
+            }
         }
-        // Not the path: the log sanitizer redacts a long hex run, and a
-        // temporary directory has one. The log file sits in the directory.
-        // Names what is still real: notifications and network-path observation
-        // have no seams yet (see AGENTS.md).
+        // Not the path: the log sanitizer redacts a long hex run, and a temporary directory has one. Names what is still real.
         state.logStore.log(
             .notice,
-            "Dev mode: FakeMachine and scratch state. Helper, credentials, updater, login items, resolver, VPN and PAC fetching are fakes. Notifications and network-path observation are real.",
+            "Dev mode: FakeMachine and scratch state. Helper, credentials, Kerberos, updater, login items, resolver, VPN, network location and PAC fetching are fakes. Notifications, network-path and wake observation are real.",
             category: .system
         )
         session = Session(options: options, machine: machine, vpn: vpn, loginItems: loginItems, helper: helper, secrets: secrets)
         return state
+    }
+
+    /// Every collaborator of the dev composition, named: the host's machine effects over `FakeMachine`, and the app's administration
+    /// over fakes. Notifications, network-path and wake observation keep their real adapters, which only observe.
+    @MainActor
+    static func devComposition(
+        machine: FakeMachine,
+        vpn: FakeVPNStatusObserver,
+        loginItems: FakeLoginItems,
+        helper: FakeHelperLifecycle,
+        secrets: InMemorySecretStore,
+        home: URL
+    ) -> AppComposition {
+        // A configured PAC URL would otherwise be fetched from the network, through the curl fallback included.
+        let pac = FakePacEvaluator()
+        let location = FakeNetworkLocationStore(snapshot: NetworkLocationSnapshot(
+            activeLocationID: "11111111-1111-1111-1111-111111111111",
+            services: [LocationServiceSettings(
+                locationID: "11111111-1111-1111-1111-111111111111",
+                serviceID: "33333333-3333-3333-3333-333333333333",
+                name: "Wi-Fi", enabled: true, proxies: [:], dns: [:]
+            )]
+        ))
+        return AppComposition(
+            effects: RuntimeHostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: machine, helperStatus: helper) },
+                credentials: secrets,
+                kerberosTicketRecovery: FakeKerberosTicketRecovery(),
+                gss: .injected { DevRefusingGSS() },
+                pacEvaluator: pac,
+                portHolderProbe: FakeListenerPortHolderProbe(),
+                loopbackPortProbe: FakeLoopbackPortProbe().isServed(port:),
+                commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+                // The installed Conduit's relay may answer on the real port 53.
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                networkPath: NetworkMonitor(debounceInterval: NetworkMonitor.defaultDebounceInterval),
+                networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in location },
+                vpnStatusMonitor: { _, _ in vpn },
+                wake: WorkspaceSystemWakeObserver(),
+                homeDirectory: home,
+                resolverDirectory: machine.resolverDirectory.path,
+                stateFiles: StateFileAccess.operatingSystem()
+            ),
+            appLogGuard: .identity,
+            helperLifecycle: helper,
+            credentialStore: secrets,
+            loginItemManager: loginItems.manager,
+            pacEvaluator: pac,
+            // "Check for Updates…" would otherwise start the updater inside this dev bundle, and installing would replace it.
+            updaterLauncher: FakeUpdaterLauncher(),
+            updateReports: FakeUpdateReports(),
+            updaterAvailability: .available,
+            currentVersion: "dev",
+            launchOverrides: AppLaunchOverrides(),
+            timing: AppTiming(),
+            hostSchedules: AppHostSchedules()
+        )
     }
 
     /// Drops the session once its app state has been shut down, so the static
@@ -556,3 +583,16 @@ enum DevLaunch {
     }
     #endif
 }
+
+#if DEBUG
+/// The dev instance's Kerberos token source: it refuses every token, so no handshake reaches the system GSS stack or the user's tickets.
+private final class DevRefusingGSS: GSSTokenProvider, @unchecked Sendable {
+    struct Refused: Error {}
+
+    func generateToken(host: String, inputToken: Data?) throws -> Data? {
+        throw Refused()
+    }
+
+    func resetContext() {}
+}
+#endif

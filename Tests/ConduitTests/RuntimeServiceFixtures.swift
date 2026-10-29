@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 @testable import ConduitRuntime
 import ConduitShared
 @testable import ProxyKernel
@@ -134,7 +135,7 @@ enum RuntimeServiceFixtures {
     }
 
     /// The lookup of one operation under the fixture incarnation.
-    @MainActor
+    @RuntimeActor
     static func lookup(_ core: RuntimeServiceCore, _ operation: ControlOperationID) -> ControlOperationLookup {
         core.operationLookup(ControlOperationQuery(
             expectedIncarnation: incarnation(1),
@@ -143,7 +144,7 @@ enum RuntimeServiceFixtures {
     }
 
     /// The admission lookup of one request under the fixture incarnation.
-    @MainActor
+    @RuntimeActor
     static func lookupRequest(_ core: RuntimeServiceCore, _ id: Int) throws -> ControlRequestLookup {
         core.requestLookup(ControlRequestQuery(
             expectedIncarnation: incarnation(1),
@@ -254,6 +255,8 @@ final class ManualOwnerScheduling: RuntimeOwnerScheduling, @unchecked Sendable {
     private let lock = NSLock()
     private var queue: [RuntimeOwnerHop] = []
     private var hopsQueued = 0
+    /// The one driver suspended in `untilHopQueued`, if any.
+    private var waitingDriver: CheckedContinuation<Void, Never>?
 
     var pendingCount: Int {
         lock.withLock { queue.count }
@@ -264,16 +267,49 @@ final class ManualOwnerScheduling: RuntimeOwnerScheduling, @unchecked Sendable {
         lock.withLock { hopsQueued }
     }
 
+    /// Whether a driver is suspended waiting for the next hop.
+    var hasWaitingDriver: Bool {
+        lock.withLock { waitingDriver != nil }
+    }
+
     func hop(_ work: @escaping RuntimeOwnerHop) {
-        lock.withLock {
+        let driver = lock.withLock { () -> CheckedContinuation<Void, Never>? in
             hopsQueued += 1
             queue.append(work)
+            defer { waitingDriver = nil }
+            return waitingDriver
+        }
+        driver?.resume()
+    }
+
+    /// Lets a waiting driver look again without queuing a hop. The caller changes what the driver's `ended` reads first.
+    func wakeDriver() {
+        let driver = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            defer { waitingDriver = nil }
+            return waitingDriver
+        }
+        driver?.resume()
+    }
+
+    /// Suspends, on no thread, until a hop is queued or `ended` holds. Both are read in the same locked step that registers the wait,
+    /// so a hop or a `wakeDriver` that lands in between is never missed. Nothing polls meanwhile, so the off-owner work that will queue
+    /// the next hop has the pool. One driver waits at a time. `ended` runs under this queue's lock, so it must not read this queue.
+    @RuntimeActor
+    func untilHopQueued(or ended: () -> Bool) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let ready = lock.withLock { () -> Bool in
+                if !queue.isEmpty || ended() { return true }
+                precondition(waitingDriver == nil, "one driver waits for hops at a time")
+                waitingDriver = continuation
+                return false
+            }
+            if ready { continuation.resume() }
         }
     }
 
     /// Runs the oldest queued hop. It returns false when none is queued.
     @discardableResult
-    @MainActor
+    @RuntimeActor
     func runNext() -> Bool {
         let next = lock.withLock { () -> RuntimeOwnerHop? in
             queue.isEmpty ? nil : queue.removeFirst()
@@ -285,7 +321,7 @@ final class ManualOwnerScheduling: RuntimeOwnerScheduling, @unchecked Sendable {
 
     /// Runs queued hops until none is left, or until `limit` have run. It returns how many ran.
     @discardableResult
-    @MainActor
+    @RuntimeActor
     func drainAll(limit: Int = 10_000) -> Int {
         var ran = 0
         while ran < limit, runNext() {
@@ -297,7 +333,7 @@ final class ManualOwnerScheduling: RuntimeOwnerScheduling, @unchecked Sendable {
 
 /// A fake owner. It is the contract the service is proven against, not the actual host's fence. The owner keeps the
 /// commands it fenced, and it resolves each launch's command from them, as the real owner will.
-@MainActor
+@RuntimeActor
 final class FakeCommandOwner: ControlCommandOwner {
     let incarnation: ControlHostIncarnation
     /// The snapshot the owner reports. A test changes it, with the DNS hosts below, to move the owner to a new revision.
@@ -338,20 +374,26 @@ final class FakeCommandOwner: ControlCommandOwner {
         snapshotValue
     }
 
-    /// Replaces the projection for one test, to reach a mismatch or a failure the production projection cannot produce.
-    var projectionOverride: ((ControlCollectionKind, ControlRowBudget) -> ControlProjection)?
+    /// Replaces the projection for one test, to reach a mismatch or a failure the production projection cannot produce, or to hold the
+    /// capture flight's job where it suspends. It runs off the owner, as the job does.
+    var projectionOverride: (@Sendable (ControlCollectionKind, ControlRowBudget) async -> ControlProjection)?
+    /// Awaited off the owner by the default job before it projects its frozen value, so a test can hold the capture flight where it
+    /// suspends, on no thread.
+    var projectionGate: (@Sendable (ControlCollectionKind) async -> Void)?
 
-    /// The production bounded projection, over a kernel snapshot that holds this fake's hostnames. The fake adds no bound of its own.
-    func projectedRows(for kind: ControlCollectionKind, within budget: ControlRowBudget) -> ControlProjection {
+    /// The production bounded projection, over a kernel snapshot that holds this fake's hostnames, frozen in the asking turn as the host
+    /// freezes its own. The fake adds no bound of its own.
+    func rowSource(for kind: ControlCollectionKind) -> RuntimeRowSource {
         projectionCount += 1
         if let projectionOverride {
-            return projectionOverride(kind, budget)
+            return { budget in await projectionOverride(kind, budget) }
         }
-        return RuntimeSnapshotControlProjection.projectRows(
-            kind,
-            from: ProxyOrchestratorSnapshot(tunnelDNSOverrideStatus: .active(hostnames: dnsHostnames)),
-            within: budget
-        )
+        let frozen = ProxyOrchestratorSnapshot(tunnelDNSOverrideStatus: .active(hostnames: dnsHostnames))
+        let gate = projectionGate
+        return { budget in
+            await gate?(kind)
+            return RuntimeSnapshotControlProjection.projectRows(kind, from: frozen, within: budget)
+        }
     }
 
     func fence(
@@ -399,7 +441,7 @@ final class FakeCommandOwner: ControlCommandOwner {
 }
 
 /// The production service, with its fake owner and the manual clock and hops, built once for a test.
-@MainActor
+@RuntimeActor
 struct RuntimeServiceHarness {
     let limits: RuntimeServiceLimits
     let owner: FakeCommandOwner
@@ -446,11 +488,24 @@ struct RuntimeServiceHarness {
     func transport() -> RuntimeInMemoryTransport {
         RuntimeInMemoryTransport(core: core, limits: limits, timing: timing.timing, scheduling: scheduling)
     }
+
+    /// One page through the service alone, as its read-lane round reads it: a page waiting on the capture flight runs the flight's commit
+    /// hop, which the job queues from off the owner, then reads again resuming its wait. Bounded: a page still waiting is returned as is.
+    func page(_ request: ControlPageRequest) async -> RuntimePageSource {
+        var source = core.pageSource(request)
+        for _ in 0..<4 {
+            guard case .awaitingCapture(let wait) = source else { break }
+            _ = await awaitState { scheduling.pendingCount > 0 }
+            scheduling.drainAll()
+            source = core.pageSource(request, resuming: wait)
+        }
+        return source
+    }
 }
 
 /// Waits, bounded, until an observable state holds. It yields between checks and returns false after `limit` checks, so a
 /// test fails on the state it expected rather than on a timing guess. It never sleeps.
-@MainActor
+@RuntimeActor
 func awaitState(limit: Int = 10_000, _ condition: () -> Bool) async -> Bool {
     for _ in 0..<limit {
         if condition() {
@@ -461,15 +516,66 @@ func awaitState(limit: Int = 10_000, _ condition: () -> Bool) async -> Bool {
     return condition()
 }
 
-/// Runs one call that hops to the owner. It waits, bounded, until the call has queued its work, then runs the queued hops
-/// and returns the call's value.
-@MainActor
+/// A driven call still pending after its driver ran `hops` hops: a self-rescheduling chain fails the test instead of spinning.
+struct ManualDriveExhausted: Error {
+    let hops: Int
+}
+
+/// Starts one call on its own task. Its end is recorded, then a driver waiting in `untilHopQueued` is woken, so a call that ends
+/// without queuing another hop is seen at once.
+@RuntimeActor
+private func startDrivenCall<T: Sendable>(
+    _ scheduling: ManualOwnerScheduling,
+    _ body: @escaping @Sendable () async throws -> T
+) -> (call: Task<T, any Error>, ended: NIOLockedValueBox<Bool>) {
+    let ended = NIOLockedValueBox(false)
+    let call = Task { () async throws -> T in
+        defer {
+            ended.withLockedValue { $0 = true }
+            scheduling.wakeDriver()
+        }
+        return try await body()
+    }
+    return (call, ended)
+}
+
+/// Runs one call that hops to the owner. It waits, on no thread, until the call has queued its work or ended, then runs the queued hops
+/// and returns the call's value. It assumes an empty queue at the start and drains once: every hop the call needs is queued before it.
+@RuntimeActor
 func runCall<T: Sendable>(
     _ scheduling: ManualOwnerScheduling,
     _ body: @escaping @Sendable () async throws -> T
 ) async throws -> T {
-    let call = Task { try await body() }
-    _ = await awaitState { scheduling.pendingCount > 0 }
+    let (call, ended) = startDrivenCall(scheduling, body)
+    await scheduling.untilHopQueued { ended.withLockedValue { $0 } }
     scheduling.drainAll()
+    return try await call.value
+}
+
+/// `runCall` for a page that may wait on the capture flight: it keeps running the hops the call queues, the flight's commit hop from off the
+/// owner and the woken round included, until the call has ended. Between hops it waits on no thread, so a hop that comes late is still run,
+/// and the call's value is awaited only once the call has ended. Bounded by hops: a call still pending after `limit` of them is cancelled
+/// and fails as `ManualDriveExhausted`. A cancelled driver cancels its call, which ends without a hop.
+@RuntimeActor
+func runDrainingCall<T: Sendable>(
+    _ scheduling: ManualOwnerScheduling,
+    limit: Int = 10_000,
+    _ body: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    let (call, ended) = startDrivenCall(scheduling, body)
+    try await withTaskCancellationHandler {
+        var ran = 0
+        while true {
+            await scheduling.untilHopQueued { ended.withLockedValue { $0 } }
+            if ended.withLockedValue({ $0 }) { return }
+            guard ran < limit else {
+                call.cancel()
+                throw ManualDriveExhausted(hops: ran)
+            }
+            ran += scheduling.drainAll(limit: limit - ran)
+        }
+    } onCancel: {
+        call.cancel()
+    }
     return try await call.value
 }

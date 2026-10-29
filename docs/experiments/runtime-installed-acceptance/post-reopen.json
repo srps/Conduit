@@ -1,0 +1,13 @@
+{
+  "observed_utc": "2026-10-29T12:57:33.964945+00:00",
+  "state": "running",
+  "dns": "running",
+  "vpn": "connected",
+  "last_auth": "kerberos",
+  "binary_sha256": "a894b35af9ca03f9ca171b7c9e2a808fecfec70afa28dc88fcc4b2347fc4eb35",
+  "scope": "Post-R5 steady state; DNS direct listener public A query only; no split-domain acceptance claim.",
+  "dns_probe": {
+    "exit": 0,
+    "rcode": "NOERROR"
+  }
+}

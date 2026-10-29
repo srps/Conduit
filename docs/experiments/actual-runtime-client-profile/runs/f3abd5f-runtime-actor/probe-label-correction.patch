@@ -1,0 +1,43 @@
+--- a/docs/experiments/actual-runtime-client-profile/Probe.swift
++++ b/docs/experiments/actual-runtime-client-profile/Probe.swift
+@@ -2303,8 +2303,10 @@
+     state.finish()
+ }
+ 
+-/// Starts `holdOwner` and returns once the owner is held, so every exchange the caller sends afterwards meets a held owner. The caller
+-/// awaits the task for the hold's end, and reads `state.snapshot.finished` to show the hold still stood after it spawned its callers.
++/// Starts `holdOwner` and returns once the owner is held, so callers spawned afterwards start while the owner is held. The caller awaits
++/// the task for the hold's end, and reads `state.snapshot.finished` to show the hold still stood after it spawned its callers. That flag
++/// marks the spawn only; it does not prove each exchange reached the transport during the hold. The overlap is read from each mode's
++/// outputs (the lane-fill flags, the result labels), and a hold that ended before its case marks the run inconclusive.
+ @MainActor
+ func ownerHeld(microseconds: useconds_t) async throws -> (task: Task<Void, Never>, state: WorkerState) {
+     let state = WorkerState()
+@@ -2879,8 +2881,9 @@
+     afterLostRead["ownerHeldAfterCallerSpawned"] = readHoldStood
+     out.emit(afterLostRead)
+ 
+-    // (b) A read whose caller task is cancelled while the owner cannot claim: one 120 ms hold spans the send, the 20 ms wait and the
+-    // cancel, which the main actor issues while the owner is still held.
++    // (b) A read whose caller task is cancelled while the owner cannot claim: one 120 ms hold, started before the read is spawned; the
++    // main actor cancels after a 20 ms wait. `ownerHeldAfterCancel` marks only that the hold still stood at the cancel, not that the send
++    // happened inside it; the overlap is read from the result label, and a hold that ended first marks the run inconclusive.
+     let cancelHold = try await ownerHeld(microseconds: 120_000)
+     let cancelled = Task.detached { () -> String in
+         do {
+@@ -3874,10 +3877,13 @@
+     out.check(fifth != "frame.baseline", "pressure.subscriberLimitRefusesAFifth")
+ 
+     // Each collection read through the actual `RuntimeClient.readPage` on this real host. Its lists stay far inside the candidate's
+-    // bounds (the probe opens no proxy connection), so this shows the actual answers only, never a full capture. The service's over-bound answer (`retention_budget_exceeded` with the exact
++    // bounds: the probe sends no proxy request, and its one connection to the listener is the connect-only liveness check
++    // (`loopbackAccepts`) in the saved-start check above, closed before these pages without sending anything, so an active-connection
++    // total of 1 here would be that connect, not a collection witness. This shows the actual answers only, never a full capture. The service's over-bound answer (`retention_budget_exceeded` with the exact
+     // total) is NOT witnessed: these fixtures cannot exceed the row or byte bound without network dispatch or many sockets.
+     var pagesAnswered = true
+-    var pageRecord: [String: Any] = ["record": "real-host-pages", "connectionsOpenedByProbe": 0, "fullCaptureWitness": false,
++    var pageRecord: [String: Any] = ["record": "real-host-pages", "proxyRequestsSentByProbe": 0,
++                                     "connectOnlyLivenessCheckBeforePages": true, "fullCaptureWitness": false,
+                                      "overBoundWitness": "untested; real-host fixtures cannot exceed the bounds without network dispatch or many sockets"]
+     for collection in ControlCollectionKind.allCases {
+         let key = collection.rawValue

@@ -14,7 +14,7 @@ enum StrictHintSettleScenarios {
     /// Short, so the scenario can wait it out.
     private static let settleWindow: TimeInterval = 1.5
 
-    @MainActor
+    @RuntimeActor
     static func run(verbose: Bool) async throws -> ScenarioResult {
         let name = "strict-hint-vpn-settle"
         let group = MultiThreadedEventLoopGroup.singleton
@@ -142,8 +142,8 @@ enum StrictHintSettleScenarios {
     }
 
     /// Polls a condition; the deadline only keeps a regression from hanging pm-sim.
-    @MainActor
-    private static func waitUntil(_ condition: @MainActor () -> Bool) async throws {
+    @RuntimeActor
+    private static func waitUntil(_ condition: @RuntimeActor () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(10)
         while !condition(), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))

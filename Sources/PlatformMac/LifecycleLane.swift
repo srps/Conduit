@@ -25,7 +25,7 @@ import RuntimeEvents
 /// - **Quiescence.** `waitUntilIdle()` returns once nothing is in flight, so
 ///   the config reconciler can order its passes after the lifecycle's work
 ///   rather than beside it.
-@MainActor
+@RuntimeActor
 package final class LifecycleLane {
     package enum Kind: String, Sendable {
         case start

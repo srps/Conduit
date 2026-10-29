@@ -1,0 +1,57 @@
+{
+  "command": [
+    "xcrun",
+    "swift",
+    "test",
+    "--filter",
+    "PACPreviewTests|RuntimeObserverSettlementTests|RuntimeEditorSessionChainTests|AppStateHarnessTests.testAQuitAppIsReleasedAndLateObservationOrEditorWorkNeitherReachesItNorWrites"
+  ],
+  "checks": [
+    {
+      "trial": 1,
+      "exit": 0,
+      "seconds": 16.807,
+      "summaries": [
+        "\t Executed 17 tests, with 0 failures (0 unexpected) in 2.104 (2.108) seconds",
+        "\t Executed 17 tests, with 0 failures (0 unexpected) in 2.104 (2.115) seconds"
+      ]
+    },
+    {
+      "trial": 2,
+      "exit": 0,
+      "seconds": 4.612,
+      "summaries": [
+        "\t Executed 17 tests, with 0 failures (0 unexpected) in 1.996 (1.999) seconds",
+        "\t Executed 17 tests, with 0 failures (0 unexpected) in 1.996 (2.005) seconds"
+      ]
+    },
+    {
+      "trial": 3,
+      "exit": 0,
+      "seconds": 5.016,
+      "summaries": [
+        "\t Executed 17 tests, with 0 failures (0 unexpected) in 2.461 (2.464) seconds",
+        "\t Executed 17 tests, with 0 failures (0 unexpected) in 2.461 (2.470) seconds"
+      ]
+    },
+    {
+      "trial": 4,
+      "exit": 0,
+      "seconds": 4.904,
+      "summaries": [
+        "\t Executed 17 tests, with 0 failures (0 unexpected) in 2.087 (2.090) seconds",
+        "\t Executed 17 tests, with 0 failures (0 unexpected) in 2.087 (2.095) seconds"
+      ]
+    },
+    {
+      "trial": 5,
+      "exit": 0,
+      "seconds": 4.628,
+      "summaries": [
+        "\t Executed 17 tests, with 0 failures (0 unexpected) in 2.065 (2.068) seconds",
+        "\t Executed 17 tests, with 0 failures (0 unexpected) in 2.065 (2.074) seconds"
+      ]
+    }
+  ],
+  "scope": "Five fresh processes; stop at first failure, preserve every attempt."
+}

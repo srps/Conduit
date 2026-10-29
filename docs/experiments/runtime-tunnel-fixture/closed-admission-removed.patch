@@ -1,0 +1,11 @@
+--- r2/Tests/ConduitTests/TunnelForwarderTests.swift
++++ closed-admission-removed/Tests/ConduitTests/TunnelForwarderTests.swift
+@@ -941,7 +941,7 @@
+     /// Records a dial that runs `connect` once the dials are released, or returns nil when the record is full or joined.
+     func dial(_ connect: @escaping @Sendable () -> EventLoopFuture<Channel>) -> EventLoopFuture<Channel>? {
+         let dial: EventLoopFuture<Channel>? = record.withLockedValue { record in
+-            guard !record.closed, record.dials.count < Self.capacity else { return nil }
++            guard record.dials.count < Self.capacity else { return nil }
+             let dial = gate.futureResult.flatMap { connect() }
+             record.dials.append(dial)
+             return dial

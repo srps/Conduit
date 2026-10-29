@@ -106,6 +106,7 @@ package enum ControlLifecycleEvent: Codable, Sendable, Equatable {
     case terminationDrainExpired(deadlineMilliseconds: Int)
     case versionChanged(from: String, to: String)
     case moduleSettled(settlement: ControlLifecycleSettlement, group: Int)
+    case logFlushUnconfirmed(source: ControlLifecycleLogFlushSource, outcome: ControlLifecycleLogFlushOutcome)
 
     private enum WireType: String, Codable, CaseIterable {
         case superseded
@@ -113,15 +114,17 @@ package enum ControlLifecycleEvent: Codable, Sendable, Equatable {
         case terminationDrainExpired = "termination_drain_expired"
         case versionChanged = "version_changed"
         case moduleSettled = "module_settled"
+        case logFlushUnconfirmed = "log_flush_unconfirmed"
     }
 
-    /// The stable event names, spelled once here. The domain's `LifecycleEventName` pins the same five.
+    /// The stable event names, spelled once here. The domain's `LifecycleEventName` pins the same six.
     private enum EventName: String, CaseIterable {
         case superseded = "lifecycle.superseded"
         case coalesced = "lifecycle.coalesced"
         case terminationDrainExpired = "lifecycle.termination_drain_expired"
         case versionChanged = "lifecycle.version_changed"
         case moduleSettled = "lifecycle.module_settled"
+        case logFlushUnconfirmed = "lifecycle.log_flush_unconfirmed"
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -204,6 +207,7 @@ package enum ControlLifecycleEvent: Codable, Sendable, Equatable {
         case .terminationDrainExpired: EventName.terminationDrainExpired.rawValue
         case .versionChanged: EventName.versionChanged.rawValue
         case .moduleSettled: EventName.moduleSettled.rawValue
+        case .logFlushUnconfirmed: EventName.logFlushUnconfirmed.rawValue
         }
     }
 
@@ -220,6 +224,8 @@ package enum ControlLifecycleEvent: Codable, Sendable, Equatable {
             "from=\(from) to=\(to)"
         case .moduleSettled(let settlement, let group):
             "module=\(settlement.module.rawValue) source=\(settlement.source) outcome=\(settlement.outcome) group=\(group)"
+        case .logFlushUnconfirmed(let source, let outcome):
+            "source=\(source.rawValue) outcome=\(outcome.rawValue)"
         }
     }
 
@@ -277,6 +283,11 @@ package enum ControlLifecycleEvent: Codable, Sendable, Equatable {
                 )
             }
             self = .moduleSettled(settlement: settlement, group: group)
+        case .logFlushUnconfirmed:
+            self = .logFlushUnconfirmed(
+                source: try container.decode(ControlLifecycleLogFlushSource.self, forKey: .source),
+                outcome: try container.decode(ControlLifecycleLogFlushOutcome.self, forKey: .outcome)
+            )
         }
     }
 
@@ -335,8 +346,27 @@ package enum ControlLifecycleEvent: Codable, Sendable, Equatable {
             try container.encode(settlement.source, forKey: .source)
             try container.encode(settlement.outcome, forKey: .outcome)
             try container.encode(group, forKey: .group)
+        case .logFlushUnconfirmed(let source, let outcome):
+            try container.encode(WireType.logFlushUnconfirmed, forKey: .type)
+            try container.encode(source, forKey: .source)
+            try container.encode(outcome, forKey: .outcome)
         }
     }
+}
+
+/// Wire spelling of whose logger drain went unconfirmed: the domain's raw values, kept here as a separate closed set.
+package enum ControlLifecycleLogFlushSource: String, Codable, Sendable, Equatable, CaseIterable {
+    case host
+    case app
+}
+
+/// Wire spelling of how an unconfirmed logger drain ended. A separate closed set with no `drained`, so a reader refuses one.
+package enum ControlLifecycleLogFlushOutcome: String, Codable, Sendable, Equatable, CaseIterable {
+    case timedOut = "timed_out"
+    case busy
+    case skippedBudget = "skipped_budget"
+    case cancelled
+    case unavailable
 }
 
 /// Wire spelling of one module Start settlement: an explicit member with its result, or the conditional DNS companion with its own. The

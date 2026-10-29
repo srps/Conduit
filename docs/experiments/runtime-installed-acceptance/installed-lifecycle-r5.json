@@ -1,0 +1,411 @@
+{
+  "schema": 2,
+  "started_utc": "2026-10-29T12:53:51+00:00",
+  "finished_utc": "2026-10-29T12:54:53+00:00",
+  "exit_code": 0,
+  "bounds": {
+    "auth_wait_s": 15,
+    "command_output_max_bytes": 4194304,
+    "command_timeout_s": 10,
+    "curl_max_time_s": 20,
+    "events_tail_max_bytes": 8388608,
+    "journal_max_bytes": 1048576,
+    "max_locations": 64,
+    "max_network_records": 512,
+    "max_services": 256,
+    "poll_s": 0.2,
+    "preferences_max_bytes": 8388608,
+    "quit_target_s": 10,
+    "quit_wait_s": 20,
+    "reopen_wait_s": 60,
+    "settle_wait_s": 20,
+    "snapshot_max_bytes": 1048576,
+    "stop_start_wait_s": 120
+  },
+  "checks": [
+    {
+      "expected": "canonical bundle path, regular executable, exact SHA-256 and version",
+      "name": "preflight.installed_binary",
+      "observed": {
+        "bundle_path_canonical": true,
+        "sha256_matches": true,
+        "version_matches": true
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "exactly one Conduit process, at the installed path",
+      "name": "preflight.single_process",
+      "observed": {
+        "exact": 1,
+        "other_conduit": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "snapshot state running with a proxy port",
+      "name": "preflight.snapshot_running",
+      "observed": "running",
+      "status": "pass"
+    },
+    {
+      "expected": "lsof shows only the Conduit process listening on its proxy port",
+      "name": "preflight.listener_owned_by_process",
+      "observed": {
+        "listeners": 1,
+        "owned": true
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "proxy port accepts a TCP connection",
+      "name": "preflight.listener_accepts",
+      "observed": "none",
+      "status": "pass"
+    },
+    {
+      "expected": "every scoped systemProxy journal record names a linked, readable service whose saved managed fields equal the record's applied fields, and there is no legacy record; otherwise per-service restoration cannot be proved and the cycle does not begin",
+      "name": "preflight.system_proxy_reader_matches_journal_applied",
+      "observed": {
+        "journal": "loaded",
+        "legacy_records": 0,
+        "membership_missing": 0,
+        "os_differs_from_applied": 0,
+        "os_equals_applied": 8,
+        "os_unreadable": 0,
+        "protocol_absent": 0,
+        "record_undecodable": 0,
+        "records": 8,
+        "store": "ok"
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "fresh snapshot says stopped; same process",
+      "name": "stop.snapshot_stopped_same_process",
+      "observed": {
+        "return_to_stopped_s_including_reaction": 3.16
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "no non-marker records left on a proxy-owned surface within the settle bound",
+      "name": "stop.systemProxy_records_cleared",
+      "observed": 0,
+      "status": "pass"
+    },
+    {
+      "expected": "no non-marker records left on a proxy-owned surface within the settle bound",
+      "name": "stop.launchdEnvironment_records_cleared",
+      "observed": 0,
+      "status": "pass"
+    },
+    {
+      "expected": "no non-marker records left on a proxy-owned surface within the settle bound",
+      "name": "stop.resolverFile_records_cleared",
+      "observed": 0,
+      "status": "pass"
+    },
+    {
+      "expected": "each released record is back to the prior the starting journal captured, within the settle bound",
+      "name": "stop.resolverFile_restored_to_journal_prior",
+      "observed": {
+        "differs_only_in_trailing_whitespace": 0,
+        "not_restored": 0,
+        "restored": 7,
+        "skipped_invalid_scope": 0,
+        "skipped_unknown_prior": 0,
+        "still_recorded": 0,
+        "unreadable": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "each released record is back to the prior the starting journal captured, within the settle bound",
+      "name": "stop.launchdEnvironment_restored_to_journal_prior",
+      "observed": {
+        "not_restored": 0,
+        "restored": 6,
+        "skipped_invalid_scope": 0,
+        "skipped_unknown_prior": 0,
+        "skipped_untouched": 0,
+        "still_recorded": 0,
+        "unreadable": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "each released scoped identity's saved managed fields equal its reference prior within the settle bound: after Stop the prior captured at preflight; after Quit the prior Start's record tracked, or the preflight prior for identities Start did not record. An applied group left fails, another difference is external and attention, a retained record is pending, a Start prior rebased onto the preflight applied fields in any group is unproven, and unknown is unproven",
+      "name": "stop.system_proxy_fields_restored_to_captured_priors",
+      "observed": {
+        "applied_retained": 0,
+        "external_differs": 0,
+        "journal_unreadable": 0,
+        "membership_changed": 0,
+        "os_unreadable": 0,
+        "protocol_absent": 0,
+        "rebased_to_applied": 0,
+        "record_unknown": 0,
+        "restored": 8,
+        "still_recorded": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "after the settle, no enabled global route to Conduit's local PAC port or proxy port; a route that is exactly a captured prior an enabled active-location service still holds, with every captured identity restored, is attention (preexisting_prior_preserved); exactly the prior of a reference rebased onto applied fields (rebased_prior_held) takes a fail or pending per-service verdict, else is unproven; an introduced_by_applied or unattributed route fails; unknown is unproven",
+      "name": "stop.system_proxy_route_to_conduit_ownership",
+      "observed": {
+        "origin": "preexisting_prior_preserved",
+        "pac_routes": 1,
+        "proxy_routes": 0
+      },
+      "status": "attention"
+    },
+    {
+      "expected": "no Conduit marker lines left in shell profiles (read after the settle)",
+      "name": "stop.shell_marker_blocks_removed",
+      "observed": {
+        "marker_lines": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "config/platform/preferences bytes equal the start of this run (no user edits expected); a change is reported, its cause is not determined",
+      "name": "stop.config_files_unchanged",
+      "observed": {
+        "config": "unchanged",
+        "platform": "unchanged",
+        "preferences": "unchanged"
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "proxy port refuses connections and lsof lists no listener",
+      "name": "stop.listener_closed",
+      "observed": {
+        "connect": "ECONNREFUSED",
+        "lsof_listeners": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "fresh running snapshot, accepting listener, same process",
+      "name": "start.running_listening_same_process",
+      "observed": {
+        "return_to_running_s_including_reaction": 3.22
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "lsof shows only the same Conduit process listening",
+      "name": "start.listener_owned_by_process",
+      "observed": {
+        "listeners": 1,
+        "owned": true
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "config/platform/preferences bytes equal the start of this run (no user edits expected); a change is reported, its cause is not determined",
+      "name": "start.config_files_unchanged",
+      "observed": {
+        "config": "unchanged",
+        "platform": "unchanged",
+        "preferences": "unchanged"
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "process exits within 20s of Return, never forced",
+      "name": "quit.process_exited",
+      "observed": {
+        "return_to_exit_upper_bound_s_including_reaction": 1.91
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "upper bound <= 10s proves the product quit took at most that; a larger bound includes the owner's reaction and is not a product failure",
+      "name": "quit.within_10s_upper_bound",
+      "observed": 1.91,
+      "status": "pass"
+    },
+    {
+      "expected": "no non-marker records left on a proxy-owned surface within the settle bound",
+      "name": "after_quit.systemProxy_records_cleared",
+      "observed": 0,
+      "status": "pass"
+    },
+    {
+      "expected": "no non-marker records left on a proxy-owned surface within the settle bound",
+      "name": "after_quit.launchdEnvironment_records_cleared",
+      "observed": 0,
+      "status": "pass"
+    },
+    {
+      "expected": "no non-marker records left on a proxy-owned surface within the settle bound",
+      "name": "after_quit.resolverFile_records_cleared",
+      "observed": 0,
+      "status": "pass"
+    },
+    {
+      "expected": "each released record is back to the prior the starting journal captured, within the settle bound",
+      "name": "after_quit.resolverFile_restored_to_journal_prior",
+      "observed": {
+        "differs_only_in_trailing_whitespace": 0,
+        "not_restored": 0,
+        "restored": 7,
+        "skipped_invalid_scope": 0,
+        "skipped_unknown_prior": 0,
+        "still_recorded": 0,
+        "unreadable": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "each released record is back to the prior the starting journal captured, within the settle bound",
+      "name": "after_quit.launchdEnvironment_restored_to_journal_prior",
+      "observed": {
+        "not_restored": 0,
+        "restored": 6,
+        "skipped_invalid_scope": 0,
+        "skipped_unknown_prior": 0,
+        "skipped_untouched": 0,
+        "still_recorded": 0,
+        "unreadable": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "each released scoped identity's saved managed fields equal its reference prior within the settle bound: after Stop the prior captured at preflight; after Quit the prior Start's record tracked, or the preflight prior for identities Start did not record. An applied group left fails, another difference is external and attention, a retained record is pending, a Start prior rebased onto the preflight applied fields in any group is unproven, and unknown is unproven",
+      "name": "after_quit.system_proxy_fields_restored_to_captured_priors",
+      "observed": {
+        "applied_retained": 0,
+        "external_differs": 0,
+        "journal_unreadable": 0,
+        "membership_changed": 0,
+        "os_unreadable": 0,
+        "protocol_absent": 0,
+        "rebased_to_applied": 0,
+        "record_unknown": 0,
+        "restored": 8,
+        "still_recorded": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "after the settle, no enabled global route to Conduit's local PAC port or proxy port; a route that is exactly a captured prior an enabled active-location service still holds, with every captured identity restored, is attention (preexisting_prior_preserved); exactly the prior of a reference rebased onto applied fields (rebased_prior_held) takes a fail or pending per-service verdict, else is unproven; an introduced_by_applied or unattributed route fails; unknown is unproven",
+      "name": "after_quit.system_proxy_route_to_conduit_ownership",
+      "observed": {
+        "origin": "none",
+        "pac_routes": 0,
+        "proxy_routes": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "no Conduit marker lines left in shell profiles (read after the settle)",
+      "name": "after_quit.shell_marker_blocks_removed",
+      "observed": {
+        "marker_lines": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "config/platform/preferences bytes equal the start of this run (no user edits expected); a change is reported, its cause is not determined",
+      "name": "after_quit.config_files_unchanged",
+      "observed": {
+        "config": "unchanged",
+        "platform": "unchanged",
+        "preferences": "unchanged"
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "proxy port refuses connections and lsof lists no listener",
+      "name": "after_quit.listener_closed",
+      "observed": {
+        "connect": "ECONNREFUSED",
+        "lsof_listeners": 0
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "binary verified, no Conduit process, no pending platform tool",
+      "name": "reopen.reopen_gate",
+      "observed": null,
+      "status": "pass"
+    },
+    {
+      "expected": "one exact process, fresh running snapshot, accepting listener; the time includes any wait before the proxy was started and is not startup latency",
+      "name": "reopen.reopened",
+      "observed": {
+        "open_to_serving_s": 13.79
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "HEAD to the public HTTPS test host through the local proxy answers 2xx/3xx; a local TLS trust failure is attention, not a proxy failure",
+      "name": "reopen.explicit_https_head",
+      "observed": {
+        "connect_code": "200",
+        "curl_exit": 0,
+        "http_code": "200",
+        "seconds": 1.215306,
+        "trust_env_retained": 2
+      },
+      "status": "pass"
+    },
+    {
+      "expected": "lastAuthOutcome kerberos, as at installed startup",
+      "name": "reopen.last_auth_outcome",
+      "observed": "kerberos",
+      "status": "pass"
+    },
+    {
+      "expected": "at least one auth.kerberos_succeeded since the relaunch",
+      "name": "reopen.kerberos_success_events",
+      "observed": 2,
+      "status": "pass"
+    },
+    {
+      "expected": "events read ok, at least one succeeded and no failed privileged-helper request since the relaunch",
+      "name": "reopen.helper_requests_succeeded",
+      "observed": {
+        "events_file": "ok",
+        "failed": 0,
+        "succeeded": 21
+      },
+      "status": "pass"
+    }
+  ],
+  "owner_attestations": {
+    "connections_shows_live_rows": "yes"
+  },
+  "skipped": [
+    {
+      "name": "quit.product_only_duration",
+      "reason": "no quit-start event is emitted in a readable form, so only the Return-to-exit upper bound is reported"
+    }
+  ],
+  "limits": [
+    "System proxy per service: preflight keeps in memory the prior and applied managed fields (the nine NetworkSettingsKind.proxies keys) of every systemProxy journal record scoped to a stable location and service identity, and requires the saved preferences.plist (the store SystemNetworkLocationStore reads; read-only, bounded, twice around each journal read) to hold exactly each record's applied fields, or the cycle does not begin. After Stop each released identity is compared with the prior captured at preflight; after Quit with the prior Start's record tracked, or the preflight prior for identities Start did not record. A Start prior that any restore group rebased onto the preflight applied fields is unproven; a route that is its prior is rebased_prior_held, unproven unless the per-service check fails or is pending, never attention and never blamed on Conduit's apply. Exact equality is restored; a restore group still holding the applied generation fails; any other difference is attention, an external value restoration preserves by design whose writer is not attributed; a retained record is pending; unreadable values, changed membership or an absent protocol are unproven. Untracked services, which policy preserves as the user's, are not judged. Values follow the product's projection and request validation except the bypass-entry grammar. Identities and field sets are reported only as HMACs under a per-run key that is never written.",
+    "System proxy route: the active, global scutil --proxy settings are checked for an enabled route to Conduit's own listeners (loopback PAC URL at its local PAC port, loopback HTTP/HTTPS proxy at its proxy port); routes elsewhere are not judged. Its ownership is classified from the exact endpoint (full PAC URL, or host and port, each enabled): exactly a captured prior that an enabled service of the current active location holds now, with every captured identity restored, is attention (preexisting route preserved); one matching only an applied generation, or nothing, fails; unknown is unproven. A global view a runtime publisher such as a VPN client supplies is not attributed beyond that exact match. Global reads converge within the same settle bound as the per-service comparison, since the saved commit can precede configd's global view. An explicitly empty scutil dictionary counts as no route. scutil's exact no-configuration message counts only when a second read-only query of the global proxy key answers exactly that the key does not exist; any other answer, and blank, truncated or unrecognized output, stays unproven. system_proxy_read gives the read status, shape and absence_check of those reads, never their values; the enable flags come from a separate read.",
+    "Start's first running snapshot precedes its platform work, so the Start journal trace waits up to the settle bound for the proxy member's lifecycle.module_settled; if that is not observed as started, the Quit per-service comparison cannot pass.",
+    "Resolver files and launchd variables are compared only against priors the starting journal recorded; anything the journal did not record is not judged.",
+    "Quit timing runs from the owner's Return press to the observed process exit, so it includes the owner's reaction time. It is an upper bound on the product's quit, not a measurement of it.",
+    "Relaunch open_to_serving_s runs from `open -n` to the first fresh running snapshot with an accepting listener. It includes any time before the proxy was started, by the owner or otherwise, and is not a measurement of startup latency.",
+    "Connections rows are the owner's attestation, not tool evidence.",
+    "Startup warnings (client read ECONNRESET, one PAC not_loaded) are not judged by this run."
+  ],
+  "errors": [],
+  "report_sha256": "a25866752cced92333098d90ad01f4b262d2af32c88cb822187ad81430aebfd4",
+  "verifier_sha256": "e8405532a98359e4e816e2bd90499eb7f45aa60ce1a3e4c8f7d903a1e25139c4",
+  "executable_sha256": "a894b35af9ca03f9ca171b7c9e2a808fecfec70afa28dc88fcc4b2347fc4eb35",
+  "source_commit": "97a5b43a0d8d7504b760b4b05aece3a8f66f5914",
+  "branch_head": "8a036fe9b4ef67e7a2a49cc67247c420146a18c8",
+  "scope": "Installed locally certificate-signed 0.6.0 candidate, not release-certificate package; exact per-service physical restoration for eight journal-scoped services. No general cleanup guarantee for untracked services. Relaunch requires owner Start and is not automatic-start latency.",
+  "review_qualification": {
+    "after_quit_global_route": "Unproven: the selected read is an empty dictionary, but a later read in the same phase has PAC enabled with endpoint unrecorded. Do not claim no global own-route. Raw check counts/outcomes remain unchanged.",
+    "physical_restoration": "Accepted: all8 tracked managed fields match the captured priors afterStop andQuit; no appliedretained/externaldiff/rebased/unknown. Existing policy preserves untracked priors, even an own-looking PAC."
+  }
+}

@@ -1,0 +1,7 @@
+# Optimized model-test compatibility correction
+
+Hosted Swift 6.3.3 rejected the preferences model's nested mutable captures on e120a5c, even after the annotation-only a9d28b2 attempt. The standard full test suite passed in both hosted workflows, and the complete Swift workflow passed; the optimized Release gate failed before packaging. The retained error excerpt records all three captures. Local Swift 6.4 passing does not establish older-compiler compatibility.
+
+The correction removes the two capturing nested helpers. A private, non-isolated PreferencesModel value stores the same six model fields and adopts external state through explicit value parameters. Independent review checks the exact starting values, transition order, eight seeds, draw order, operations, traces, outcome ladder, file/value/version assertions and three witness assertions. All remain equivalent. No production source, test hook, timing budget or architecture policy changes.
+
+The source patch and snapshot hashes, author report and independent review are retained here. All 41 local workflow checks pass on stable relevant source (3,770 tests, four existing skips, 103 scenarios); the optimized local build and all 33 ConfigurationStoreTests also pass. The tested tree is committed as 2e0f4d5; source-commit-link.json proves its relevant-source fingerprint matches the complete workflow. An exact-head hosted optimized pass is required. The compiler-mechanism explanation in the author report is an inference, not an established compiler diagnosis.

@@ -1,0 +1,93 @@
+{
+  "lane": "diagnostic prerequisite (logger off MainActor, logger drain, app Quit tail, typed lifecycle.log_flush_unconfirmed)",
+  "root": "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit",
+  "base_commit": "0aa744a (parent-reported; not re-read by the implementer, no Git run)",
+  "source_state": "FROZEN after the green run below; no further Source edits by the implementer",
+  "verification": {
+    "wrapper": "bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-actor-prep.sh",
+    "green_run": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-LNZR7Y",
+    "exit": 0,
+    "tests": "539 executed, 0 failures (focused filter)",
+    "sims": {
+      "runtime-host-effects": "PASS (sim.log), including the new held-logger rows",
+      "relay-reassert-after-stop": "PASS",
+      "bounded-writers": "PASS (writer-sim.log): held app log admitted 4096 of 4106, dropped 10 exactly, timed_out then busy, all 4096 written after release, closed write dropped, no reopen"
+    },
+    "checks": ["check-kernel-imports.py", "check-event-catalogue.py", "check-decisions.py --require-history", "git diff --check"],
+    "earlier_runs": {
+      "runtime-actor-prep-focused-MTFiV0": "build failed: AppLogGuardEffect not Sendable; RecordWriterStatistics has no initializer outside ProxyKernel (fixed by a store-private Folded counter, no kernel widening)",
+      "runtime-actor-prep-focused-F7zYDP": "exit 0, 529 tests: first checkpoint (kernel, store, host, typed, app tail tests)",
+      "runtime-actor-prep-focused-UjDjZn": "test build failed: async call inside an XCTAssert autoclosure in RuntimeHostControlOwnerTests (fixed)"
+    },
+    "not_run_by_implementer": [
+      "full41 / full workflow (parent)",
+      "scripts/test-event-catalogue.py (not in the wrapper; it pins no typed-name set; parent full run)",
+      "shipping resource/latency measurement (release acceptance)"
+    ]
+  },
+  "files": {
+    "ProxyKernel": [
+      "Sources/ProxyKernel/Abstractions/LogSink.swift: drain(until:) requirement, default .unavailable; threading doc",
+      "Sources/ProxyKernel/Support/StandardLogSinks.swift: ConsoleLogSink.write(line:) and drain forward to the existing shared bounded writer; Discarding/Recording drain .drained",
+      "Sources/ProxyKernel/Support/RotatingLogFile.swift: RotatingByteWriter gains flush(timeout:) -> Bool, drain(until:), statistics (flush() convenience kept); RotatingLogFile bounded admission under RecordWriterLimits defaults, one scheduled drain on its existing queue, DispatchGroup + one RecordDrainWaiter (default single timer slot), written/dropped/failed/flushTimeouts, terminal close latched before queue.sync, writes admitted before the latch still written, no reopen after close",
+      "Sources/ProxyKernel/Support/DiagnosticFlush.swift: DiagnosticFlushReport.logger (default .unavailable, outside allConfirmed); LifecycleLogFlushOutcome(RecordDrainOutcome) failable, nil for drained"
+    ],
+    "RuntimeEvents": [
+      "Sources/RuntimeEvents/LifecycleEvents.swift: lifecycle.log_flush_unconfirmed, LifecycleLogFlushSource {host, app}, LifecycleLogFlushOutcome {timed_out, busy, skipped_budget, cancelled, unavailable}, codec (closed sets enforced). RuntimeEventPayload unchanged (derives its inventory)"
+    ],
+    "ConduitShared": [
+      "Sources/ConduitShared/ControlRuntimeEventTyped.swift: ControlLifecycleEvent.logFlushUnconfirmed with separate ControlLifecycleLogFlushSource/Outcome; WireType, EventName, codec",
+      "Sources/ConduitShared/ControlRuntimeSizing.swift: no-text case"
+    ],
+    "ProxyControlBridge": ["Sources/ProxyControlBridge/RuntimeEventControlProjection.swift: exhaustive mapping, per-field switches"],
+    "ConduitRuntime": [
+      "Sources/ConduitRuntime/RuntimeHost.swift: flushEvents(loggerUntil:) awaits logger.drain until min(now + writerWait, cap), .skippedBudget with no wait past the cap, typed host event via recordLifecycle (event first, derived line), blocking logger.flush removed; writeReadyFile status captured and encoded on the owner, physical write on platformWork, awaited before snapshot submission",
+      "Sources/ConduitRuntime/RuntimeHostLifecycle.swift: quit passes its deadline as the logger cap"
+    ],
+    "Conduit": [
+      "Sources/Conduit/App/AppLogStore.swift: one LogEntry and one formatted line per emission; physical outputs (file admission under the store lock, shared bounded stderr writer, os_log) on the emitting thread; UI history: inline on main after the hand-off, off main one locked hand-off bounded and trimmed like the ring (maxEntries/trimSlack) with at most one scheduled drain and one entries mutation per batch; toggle closes the current writer with no lock held, then folds written/dropped/failed and swaps under the lock; statistics = folded + current file + console with store-owned flushTimeouts; drain tries file then console under one absolute deadline, returns the first unconfirmed outcome, counts each timed_out once; flush(timeout:) and flushFileLog(timeout:) honest and counted",
+      "Sources/Conduit/App/AppState.swift: store guard = composition.appLogGuard.wrap(authoritative diagnosticDestinationGuard); quit task runs drainQuitLog(until: same deadline) after every return; past the deadline skipped_budget without waiting; typed app event then one derived line",
+      "Sources/Conduit/App/AppComposition.swift: internal AppLogGuardEffect (Sendable, .identity); production names .identity",
+      "Sources/Conduit/App/DevLaunch.swift: dev names .identity"
+    ],
+    "pm-sim": [
+      "Sources/pm-sim/BoundedWriterScenarios.swift: held app log row",
+      "Sources/pm-sim/RuntimeHostEffectsScenarios.swift: workflow host over a sim-local logger wrapping the kernel file writer; held drain timed_out, passed cap skipped_budget, released drained, both typed facts persisted, artifacts still confirmed",
+      "Sources/pm-sim/ProbeSupersessionScenarios.swift, Sources/pm-sim/DNSResolverScenarios.swift: wrappers forward drain"
+    ],
+    "tests": [
+      "Tests/ConduitTests/LoggingTests.swift: parked-main burst, off-main/main ordering, timeout across a toggle counted once with no counter regression, unknown sink unavailable vs stock sinks; testFileLoggingCreatesFile sleep replaced by an asserted drain (same file assertion)",
+      "Tests/ConduitTests/RotatingLogFileProtectionTests.swift: exact overflow + timed_out/busy/drained + honest sync flush; skipped_budget past deadline; close writes admitted, then drops and never reopens; OrderingLogger drain",
+      "Tests/ConduitTests/DiagnosticDrainPhaseTests.swift: logger outcome apart from allConfirmed",
+      "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift: framed status read and Stop admission answered while the host logger drain is held; report.logger timed_out; typed host event; Stop settles",
+      "Tests/ConduitTests/RuntimeHostInteractiveTests.swift: harness logger field (default Discarding, unchanged behaviour)",
+      "Tests/ConduitTests/DaemonRuntimeHostTests.swift: ready file holds the readiness status and lands no later than the snapshot",
+      "Tests/ConduitTests/AppStateHarnessTests.swift: HoldingAppLogGuard (delegates to the authoritative guard), appLogHold released before teardown's close; held tail (host timed_out, app busy, Quit completed inside its 4 s budget, held lines reach the file, 0 dropped); expired 1 s Quit (app skipped_budget, host cut to the deadline, finished < 1.9 s)",
+      "Tests/ConduitTests/AppStateActivationParityTests.swift: snapshot privacy read moved after the Quit, required read, same token absence; helper doc duplicate trimmed",
+      "Tests/ConduitTests/RuntimeEventTypedTests.swift, ControlRuntimeEventProjectionTests.swift, RuntimeClientCodecTests.swift: goldens, inventory 6, round trips, wire sets, malformed drained/unknown source refused, newer type informational",
+      "Tests/ConduitTests/ConnectivityProbeSupersessionTests.swift, VPNTunnelMigrationTests.swift: test sinks drain .drained"
+    ],
+    "delegated_inventory": [
+      "scripts/check-event-catalogue.py: TYPED_NAMES + lifecycle.log_flush_unconfirmed",
+      "docs/events.md: typed payload row and count (six), catalogue row for lifecycle.log_flush_unconfirmed, observability.writer_loss console description"
+    ]
+  },
+  "implementation_choices": [
+    "Store timeout count: +1 per underlying timed_out the store's drain or flush observes (file busy + console timed_out still counts one); writers' own flushTimeouts are excluded from the store sum",
+    "A line reaching a writer after its close latched is counted droppedRecords; nothing pending is folded (queue empty once close returns)",
+    "Off-main UI hand-off: bounded by maxEntries with the ring's own amortised trim (maxEntries + trimSlack); evictions counted in historyEvicted (internal), not record loss",
+    "LogSink.flush(timeout:) default (true) left as it was; only drain defaults to unavailable",
+    "The app tail's busy after a host timed_out is expected and reported; nothing retries"
+  ],
+  "honest_scope": [
+    "A drain outcome is a fact about queues only; neither typed event nor its derived line is claimed persisted, and nothing waits after them",
+    "Close on a Settings toggle still blocks the main turn until the writer's admitted writes end, as before",
+    "The app-level tests use the internal composition wrapper over the authoritative guard; no public, live-host or test-only production hook",
+    "No new queue, executor, capacity, dependency, registry, public access or TODO; package additions are the planned LogSink.drain, ConsoleLogSink.write(line:), RotatingByteWriter members and the typed/wire values. No actor retag"
+  ],
+  "parent_owned": [
+    "Git, full41/full workflow, other docs and decision evidence",
+    "docs/design-runtime-host-contract.md LifecycleEvent listing (~line 479) now lacks .logFlushUnconfirmed",
+    "Shipping resource/latency measurement"
+  ]
+}

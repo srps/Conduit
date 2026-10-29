@@ -1,0 +1,42 @@
+{
+  "runtime-quit-cap-focused.log": {
+    "sha256": "f9e4bca879dfa524996c30e92b8baac834c734ace940b4308aad50bcc9cc7e6c",
+    "bytes": 40725
+  },
+  "runtime-quit-cap-restored-strict.log": {
+    "sha256": "123e2260ed9259ec812eac41ce631fe0ae5ed27cbf973b5150532dd1a4c5c403",
+    "bytes": 8562
+  },
+  "runtime-quit-cap-targeted-verification/scoped-strict.log": {
+    "sha256": "c4ebdb4eb63bb7b2b84cf7d2d753959cb2519b36d628489cdedc7f22eabd7b73",
+    "bytes": 1553
+  },
+  "runtime-quit-cap-targeted-verification/restored-sim.log": {
+    "sha256": "983e17048359ae3cc234a3f9bbcf4b09b6337a568cb6d91ebbe0bd1328171dc8",
+    "bytes": 26445
+  },
+  "runtime-quit-cap-targeted-verification/optimized-build-tests.log": {
+    "sha256": "3ea0c0b8e4f5d2e2c59b5108bd11aa08d6f9765a068e6be31aa693206d8ae6b6",
+    "bytes": 13574
+  },
+  "runtime-quit-cap-targeted-verification/optimized-targeted.log": {
+    "sha256": "21b2373139788012278069f59120364afc3a7cac435a68e8b42d87f90d5db841",
+    "bytes": 48249
+  },
+  "runtime-quit-cap-controls/without-host-cap.log": {
+    "sha256": "f7721cc5a21743db84e1b953862364b9f4e5a38036d81962cdc3d7b9c622b4aa",
+    "bytes": 2249
+  },
+  "runtime-quit-cap-controls/without-host-cap-sim.log": {
+    "sha256": "00b644ad090153beec0b09effe5d9f4b39c5b66dffaa94f9619354b687a3b769",
+    "bytes": 26453
+  },
+  "runtime-quit-cap-controls/without-phase-cap.log": {
+    "sha256": "a1241259c80a3761526c2f4b13dec2bb6ea9281a45d441fc6a662a78c895e757",
+    "bytes": 2316
+  },
+  "ci-d038-swift-full.log": {
+    "sha256": "6938a57dfcf74ff0074ee849735f7f1857211a35bf180444e848376c21e74799",
+    "bytes": 13887393
+  }
+}

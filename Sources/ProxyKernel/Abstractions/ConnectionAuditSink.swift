@@ -19,7 +19,7 @@ import Foundation
 ///
 /// `record(_:)` MUST be safe to call from any thread / event loop. The
 /// kernel emits records from the NIO event loops (HTTP/CONNECT close
-/// callbacks) and from `MainActor` (e.g. when the orchestrator
+/// callbacks) and from `RuntimeActor` (e.g. when the orchestrator
 /// short-circuits a connection it never opened a channel for).
 package protocol ConnectionAuditSink: Sendable {
     /// Queue the supplied audit record for emission. Returns immediately;

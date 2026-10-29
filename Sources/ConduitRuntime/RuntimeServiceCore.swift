@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import ConduitShared
 import Foundation
+import ProxyKernel
 
 /// The logical state of one operation. `settled` is a marker only: the outcome itself lives in the bounded outcome table
 /// and the control log, so no outcome is held twice.
@@ -109,6 +110,9 @@ enum RuntimePageSource {
     case invalidOffset
     /// The read failed internally. Nothing was stored, and the reply is a closed failure, not a refusal of the caller's request.
     case internalFailure
+    /// The current revision is being captured off the owner, by the one shared flight. The round parks on `wait` and reads again, resuming
+    /// it, once the flight ends.
+    case awaitingCapture(RuntimeCaptureWait)
 }
 
 /// The runtime service facade. It composes three owned parts and holds the observation state directly:
@@ -119,10 +123,10 @@ enum RuntimePageSource {
 ///   `dropQueuedStop`.
 /// - the observation log, subscribers, parked waits and collection captures.
 ///
-/// Every method runs in the owner's turn on the main actor, so one turn sees one consistent state. The owner keeps the
+/// Every method runs in the owner's turn on `RuntimeActor`, so one turn sees one consistent state. The owner keeps the
 /// single authority over intent and lifecycle, and it decides every Stop, including a coalescing one. The service never
 /// decides what a command does.
-@MainActor
+@RuntimeActor
 final class RuntimeServiceCore {
     private let owner: any ControlCommandOwner
     private let limits: RuntimeServiceLimits
@@ -155,6 +159,10 @@ final class RuntimeServiceCore {
     private var subscriptions: RuntimeSubscriptionTable
     /// The one latest safe snapshot, shared by every subscriber and read.
     private var snapshotSlot: RuntimeSnapshotSlot
+    /// The one capture projecting off the owner now, across all kinds, or nil.
+    private var captureFlight: RuntimeCaptureFlight?
+    /// Set in the shutdown turn: no capture flight starts after it, and the one in progress, if any, never commits.
+    private var captureClosed = false
 
     /// `positionSeed` starts the observation position counter, and `snapshotGenerationSeed` starts the snapshot generation counter.
     /// Both exist for tests of exhaustion.
@@ -461,7 +469,13 @@ final class RuntimeServiceCore {
     /// it; its outcome is answered by lookup. A subscription opened later receives its baseline and the same end. Sticky: nothing reopens.
     func hostDidShutDown() {
         ingress.close()
+        // Capture closes in the same turn: the flight in progress, if any, is dropped, so its late completion commits nothing, and its
+        // waits read again at once, where retained rows still serve and a capture is refused.
+        captureClosed = true
+        let flightWakes = captureFlight?.end(own: .retry) ?? []
+        captureFlight = nil
         wakeWaiters()
+        for wake in flightWakes { wake() }
     }
 
     /// Whether a subscriber with nothing left to read ends with `hostShutdown`: the ingress is closed and empty, and no admitted operation is
@@ -506,7 +520,32 @@ final class RuntimeServiceCore {
     /// - `changedIncarnation` or `internalFailure`, for a request this host is not answering or a failed read.
     ///
     /// The retention is best effort. No lease is promised, so a retained revision can be evicted by a later capture.
-    func pageSource(_ request: ControlPageRequest) -> RuntimePageSource {
+    ///
+    /// A current revision with no live rows is captured by the one shared flight, off the owner: the page waits on it, and its round reads
+    /// again with `resuming` once the flight ends. A page that waited on its own kind's capture is then answered exactly as a request with a
+    /// cursor at that capture's revision is, so a superseded revision is served as stale with the current one named; a closed refusal or
+    /// failure of the flight is answered once; any other end reads again from the start.
+    func pageSource(_ request: ControlPageRequest, resuming wait: RuntimeCaptureWait? = nil) -> RuntimePageSource {
+        var cursorRevision = request.cursor?.revision
+        if let wait {
+            switch wait.resolution {
+            case nil:
+                // Still waiting on the flight in progress, so the round parks again. A wait no flight holds reads again.
+                if captureFlight?.contains(wait) == true { return .awaitingCapture(wait) }
+            case .revision(let revision):
+                cursorRevision = revision
+            case .refused(let reason, let knownTotal):
+                return .unavailable(reason, knownTotal: knownTotal)
+            case .failed:
+                return .internalFailure
+            case .retry:
+                break
+            }
+        }
+        return pageSource(request, cursor: cursorRevision)
+    }
+
+    private func pageSource(_ request: ControlPageRequest, cursor cursorRevision: ControlCollectionRevision?) -> RuntimePageSource {
         guard request.expectedIncarnation == incarnation else { return .changedIncarnation }
         // An owner that cannot project its state has reported why itself, so the read fails closed with no fault of the service's.
         guard let snapshot = owner.snapshot() else { return .internalFailure }
@@ -530,7 +569,7 @@ final class RuntimeServiceCore {
                 deliver(.revisionTotalChanged)
                 return .internalFailure
             }
-            switch collections.decision(kind: kind, cursor: request.cursor?.revision, current: current, at: timing.now()) {
+            switch collections.decision(kind: kind, cursor: cursorRevision, current: current, at: timing.now()) {
             case .current(let rows, let total):
                 guard offset <= total.rawValue else { return .invalidOffset }
                 return .rows(revision: current, rows: rows, offset: offset, status: .current)
@@ -545,53 +584,99 @@ final class RuntimeServiceCore {
             case .needsCapture:
                 // The current total is known from the snapshot, so an offset past it is refused before any capture or projection.
                 guard offset <= reference.totalCount.rawValue else { return .invalidOffset }
-                return captureCurrent(kind, revision: current, total: reference.totalCount, offset: offset)
+                return awaitCapture(kind, revision: current, total: reference.totalCount)
             }
         }
     }
 
-    /// Captures the current revision within the row and byte bounds, in this owner turn. The snapshot's exact total is checked first, so
-    /// a total past the row bound is refused before the owner projects any row. The owner's rows must then match the kind and the total
-    /// of the same turn. Capacity and owner-data refusals precede mutation; an internal ledger fault has no unchanged-state guarantee.
-    private func captureCurrent(
-        _ kind: ControlCollectionKind,
-        revision: ControlCollectionRevision,
-        total: ControlCount,
-        offset: Int
-    ) -> RuntimePageSource {
+    /// Waits on the one shared capture flight for the current revision, starting it when none runs. The snapshot's exact total is checked
+    /// first, so a total past the row bound is refused before the owner freezes or projects anything. After shutdown nothing is captured:
+    /// the current revision is refused as not captured, with the exact total its reference names. A page of the flight's kind joins it and
+    /// is answered with that flight's revision; a page of another kind waits for it to end and then reads again.
+    private func awaitCapture(_ kind: ControlCollectionKind, revision: ControlCollectionRevision, total: ControlCount) -> RuntimePageSource {
+        guard !captureClosed else { return .unavailable(.notCaptured, knownTotal: total) }
         guard total.rawValue <= limits.collectionRowCapacity else {
             return .unavailable(.retentionBudgetExceeded, knownTotal: total)
         }
+        let wait = RuntimeCaptureWait(kind: kind)
+        if let flight = captureFlight {
+            // Each wait belongs to one read-lane round, so a flight holds no more waits than the read lane has slots.
+            precondition(flight.waits.count < limits.readLaneCapacity, "a capture flight holds one wait per read-lane round")
+            flight.add(wait)
+            return .awaitingCapture(wait)
+        }
+        let flight = RuntimeCaptureFlight(kind: kind, revision: revision, total: total, startedAt: timing.now())
+        flight.add(wait)
+        captureFlight = flight
+        // The input is frozen in this turn, the one whose snapshot named `revision` and `total`.
+        let job = owner.rowSource(for: kind)
         let budget = ControlRowBudget(maxRows: limits.collectionRowCapacity, maxBytes: limits.collectionByteCapacity)
-        switch owner.projectedRows(for: kind, within: budget) {
+        let scheduling = self.scheduling
+        // Detached, so the projection runs on the concurrency pool and not on the owner. The job holds the frozen value and this service
+        // weakly; its completion hops back to commit only if this flight is still the one in progress.
+        Task.detached(priority: .utility) { [weak self] in
+            let projection = await job(budget)
+            guard self != nil else { return }
+            scheduling.hop { [weak self] in self?.finishCapture(flight, projection) }
+        }
+        return .awaitingCapture(wait)
+    }
+
+    /// Commits one flight's projection in one owner turn, then wakes its waits once the state is complete. A flight that is no longer the
+    /// one in progress (dropped at shutdown) commits nothing. The owner's rows must match the kind and the total its start turn named.
+    /// Capacity and owner-data refusals precede mutation; an internal ledger fault has no unchanged-state guarantee.
+    private func finishCapture(_ flight: RuntimeCaptureFlight, _ projection: ControlProjection) {
+        guard captureFlight === flight else { return }
+        captureFlight = nil
+        let own: RuntimeCaptureResolution
+        switch projection {
         case .rows(let rows, let encodedBytes):
-            switch collections.capture(kind, revision: revision, total: total, rows: rows, encodedBytes: encodedBytes, at: timing.now()) {
+            switch collections.capture(
+                flight.kind, revision: flight.revision, total: flight.total, rows: rows, encodedBytes: encodedBytes,
+                capturedAt: flight.startedAt, at: timing.now()
+            ) {
             case .stored:
-                return .rows(revision: revision, rows: rows, offset: offset, status: .current)
+                own = .revision(flight.revision)
             case .overBudget:
-                return .unavailable(.retentionBudgetExceeded, knownTotal: total)
+                own = .refused(.retentionBudgetExceeded, knownTotal: flight.total)
             case .countOrKindMismatch:
-                // The owner's rows and the snapshot's exact count disagree within one turn. That is the owner's invariant, so nothing
-                // is stored or served, and the fault is reported after this turn's state is complete.
+                // The owner's rows and the exact count its start turn named disagree. That is the owner's invariant, so nothing is stored
+                // or served, and the fault is reported after the ledger's state is complete.
                 deliver(.projectionCountMismatch)
-                return .internalFailure
+                own = .failed
             case .invariantFailure:
                 // The ledger's own accounting is broken. It is the service's bug, not a capacity answer, so nothing is stored or served.
                 deliver(.collectionAccountingMismatch)
-                return .internalFailure
+                own = .failed
             }
         case .overBudget:
-            return .unavailable(.retentionBudgetExceeded, knownTotal: total)
+            own = .refused(.retentionBudgetExceeded, knownTotal: flight.total)
         case .internalFailure:
             deliver(.projectionNotEncodable)
-            return .internalFailure
+            own = .failed
         }
+        for wake in flight.end(own: own) { wake() }
+    }
+
+    /// Sets the parked round's wake on its capture wait. A wait the flight in progress no longer holds is not parked, and its round reads
+    /// again at once.
+    func parkCaptureWait(_ wait: RuntimeCaptureWait, wake: @escaping @Sendable () -> Void) -> RuntimeParkResult {
+        guard let flight = captureFlight, flight.park(wait, wake: wake) else { return .subscriberGone }
+        return .parked
+    }
+
+    /// Removes a capture wait whose round ended first, by its token, from the flight in progress. A token of a flight that already ended
+    /// changes nothing, and never touches a newer flight's waits.
+    func releaseCaptureWait(_ token: RuntimeWaiterToken) {
+        captureFlight?.release(token)
     }
 
     // MARK: - Introspection for tests and the scenario
 
     var openSubscriberCount: Int { subscriptions.count }
     var parkedWaiterCount: Int { subscriptions.parkedCount }
+    /// The waits the capture flight in progress holds, or nil when no flight runs.
+    var captureFlightWaitCount: Int? { captureFlight?.waits.count }
     /// The snapshot slot's private generation, and whether it can no longer advance.
     var snapshotGeneration: Int { snapshotSlot.generation }
     var isSnapshotSlotExhausted: Bool { snapshotSlot.exhausted }

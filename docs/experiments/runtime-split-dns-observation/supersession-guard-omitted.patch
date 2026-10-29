@@ -1,0 +1,11 @@
+--- r2/Sources/PlatformMac/SplitDNSEntryFileRepair.swift
++++ supersession-guard-omitted/Sources/PlatformMac/SplitDNSEntryFileRepair.swift
+@@ -164,7 +164,7 @@
+         residue: Bool = false,
+         report: (RuntimeEvent, LogLevel) -> Void
+     ) {
+-        if let startedAt, startedAt < generation {
++        if let startedAt, false {
+             report(
+                 RuntimeEvent(
+                     kind: .config,

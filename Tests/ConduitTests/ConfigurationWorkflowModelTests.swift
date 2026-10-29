@@ -25,7 +25,6 @@ import XCTest
 /// Scope: store I/O and returned apply eligibility, including the absent sidecar's source read. Not modeled: the real host's apply, launch
 /// recovery, legacy sidecar preservation, a changed source (covered by `ConfigurationStoreSourceTests` and the store models), and the
 /// preferences commit. The reference does not reuse production transition code.
-@MainActor
 final class ConfigurationWorkflowModelTests: XCTestCase {
     // MARK: - Trace vocabulary
 
@@ -109,7 +108,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
 
     /// Walks one prepare operation under the declared admissions. It applies the admissions at their points and evaluates each claim where
     /// the store does, so the points it returns are the ones a real run must reach.
-    private func walkPrepare(
+    @RuntimeActor private func walkPrepare(
         _ scenario: Scenario,
         faults: (platform: Fault, runtime: Fault),
         from initial: State,
@@ -153,7 +152,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
     /// is written: its claim is checked before its first call, and its read-back classifies the fault. An absent sidecar's job first reads
     /// the runtime file it takes its values from, so its claim is checked after that read. No trace edits the runtime file before the
     /// sidecar's write, so the read always matches.
-    private func runFile(
+    @RuntimeActor private func runFile(
         _ file: ConfigurationComponent,
         fault: Fault,
         scenario: Scenario,
@@ -189,7 +188,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         }
     }
 
-    private func finish(_ expected: inout Expected, walk: Walker) -> Expected {
+    @RuntimeActor private func finish(_ expected: inout Expected, walk: Walker) -> Expected {
         expected.points = walk.points
         if expected.preparation != .superseded {
             let verified = expected.runtime?.isVerified == true && expected.platform?.isVerified == true
@@ -339,7 +338,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
 
     private static let externalBytes = Data("external edit".utf8)
 
-    private func initialState(_ scenario: Scenario) -> State {
+    @RuntimeActor private func initialState(_ scenario: Scenario) -> State {
         var state = State()
         switch scenario {
         case .absent: state.stored = ConfigurationSlots(runtime: .absent, platform: .absent, preferences: .absent)
@@ -350,7 +349,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
     }
 
     /// The files a scenario starts with. Bytes come from the production stagers, so the model never copies a parser or a writer.
-    private func seeds(_ scenario: Scenario, _ session: StateRootSession) throws -> [String: Data] {
+    @RuntimeActor private func seeds(_ scenario: Scenario, _ session: StateRootSession) throws -> [String: Data] {
         var files: [String: Data] = [:]
         var runtime = GenericDefaults.shared.makeConfig()
         if scenario == .invalidRuntime { runtime.proxy.port = 70_000 }
@@ -363,7 +362,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         return files
     }
 
-    private func script(_ fault: Fault) -> FakeStateFileAccess.WriteScript {
+    @RuntimeActor private func script(_ fault: Fault) -> FakeStateFileAccess.WriteScript {
         switch fault {
         case .none: FakeStateFileAccess.WriteScript(landing: .lands)
         case .failsBeforeLanding: FakeStateFileAccess.WriteScript(landing: .failsBeforeLanding(errno: 5))
@@ -374,7 +373,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
 
     /// The fault pairs a scenario explores. Only a platform write and a runtime write can fault. A scenario with one write explores the
     /// platform's faults alone.
-    private func faultPairs(_ scenario: Scenario) -> [(Fault, Fault)] {
+    @RuntimeActor private func faultPairs(_ scenario: Scenario) -> [(Fault, Fault)] {
         var pairs: [(Fault, Fault)] = []
         for platform in Fault.allCases {
             switch scenario {
@@ -402,7 +401,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
 
     /// Reload is a read of three files. A newer intent at any point makes it stale, so it applies nothing and adopts no preferences. A Stop
     /// before the capture holds the apply without staleness, and a missing or refused input holds it too.
-    private func walkReload(_ scenario: Scenario, admissions: [Admission]) -> ReloadExpected {
+    @RuntimeActor private func walkReload(_ scenario: Scenario, admissions: [Admission]) -> ReloadExpected {
         var walk = Walker(admissions: admissions, generation: 0)
         walk.at(.beforeOperation)
         let captured = walk.generation
@@ -436,7 +435,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         let workflow: RuntimeConfigurationWorkflow
     }
 
-    private func harness(_ root: ModelRoot, _ scenario: Scenario) throws -> Harness {
+    @RuntimeActor private func harness(_ root: ModelRoot, _ scenario: Scenario) throws -> Harness {
         let gate = Gate()
         let files = ModelFiles(files: try seeds(scenario, root.session), gate: gate)
         let queue = PlatformWork(label: "test.workflow-model")
@@ -452,7 +451,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
     }
 
     /// Waits, bounded, until the in-flight operation has begun on the MainActor. It yields, and never sleeps.
-    private func awaitInFlight(_ workflow: RuntimeConfigurationWorkflow) async -> Bool {
+    @RuntimeActor private func awaitInFlight(_ workflow: RuntimeConfigurationWorkflow) async -> Bool {
         for _ in 0..<200 {
             if !workflow.isIdle { return true }
             await Task.yield()
@@ -462,7 +461,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
 
     /// A newer Start admitted while its slot is busy must hold as `storeBusy` with no capture and no I/O (decision 0037). Its ticket is
     /// the admission the trace declared.
-    private func busyRefusal(_ h: Harness, _ ticket: RuntimeConfigurationWorkflow.StartTicket) async -> String? {
+    @RuntimeActor private func busyRefusal(_ h: Harness, _ ticket: RuntimeConfigurationWorkflow.StartTicket) async -> String? {
         let before = h.files.inner.observations.count
         let outcome = await h.workflow.prepareStart(ticket)
         let held = ConfigurationWorkflowEvent.held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .storeBusy))
@@ -475,11 +474,11 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
 
     /// Applies the admissions at their points while `operation` runs. It returns the operation's value and the first problem found. Every
     /// path releases the gate and awaits the operation and its blocker before it returns, so no failure holds the root.
-    private func gated<T: Sendable>(
+    @RuntimeActor private func gated<T: Sendable>(
         _ h: Harness,
         admissions: [Admission],
         busyChecks: Bool,
-        operation: @escaping @MainActor () async -> T
+        operation: @escaping @RuntimeActor () async -> T
     ) async -> (value: T?, problem: String?) {
         let pending = admissions.filter { $0.point != .beforeOperation }
         h.gate.arm(Set(pending.map(\.point)))
@@ -544,12 +543,12 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         return (value, problem)
     }
 
-    private func component(of path: String, _ session: StateRootSession) -> ConfigurationComponent? {
+    @RuntimeActor private func component(of path: String, _ session: StateRootSession) -> ConfigurationComponent? {
         ConfigurationComponent.allCases.first { session.configurationFile(for: $0).path == path }
     }
 
     /// The physical calls the fake observed, mapped to the component each one named.
-    private func observedCalls(_ h: Harness) -> [Call] {
+    @RuntimeActor private func observedCalls(_ h: Harness) -> [Call] {
         h.files.inner.observations.compactMap { (observation) -> Call? in
             switch observation {
             case .read(let path, _):
@@ -560,7 +559,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         }
     }
 
-    private func storedMatches(_ file: ConfigurationComponent, _ stored: Stored, _ h: Harness) -> Bool {
+    @RuntimeActor private func storedMatches(_ file: ConfigurationComponent, _ stored: Stored, _ h: Harness) -> Bool {
         let bytes = h.files.inner.storedBytes(at: h.session.configurationFile(for: file).path)
         switch stored {
         case .absent: return bytes == nil
@@ -569,7 +568,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         }
     }
 
-    private func kind(_ preparation: RuntimeConfigurationWorkflow.StartPreparation) -> Preparation {
+    @RuntimeActor private func kind(_ preparation: RuntimeConfigurationWorkflow.StartPreparation) -> Preparation {
         switch preparation {
         case .ready: .ready
         case .held: .held
@@ -577,14 +576,14 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         }
     }
 
-    private func committedEvents(_ events: [ConfigurationWorkflowEvent]) -> [ConfigurationWorkflowEvent] {
+    @RuntimeActor private func committedEvents(_ events: [ConfigurationWorkflowEvent]) -> [ConfigurationWorkflowEvent] {
         events.filter { event in
             if case .committed = event { return true }
             return false
         }
     }
 
-    private func comparePrepare(
+    @RuntimeActor private func comparePrepare(
         _ label: String,
         _ outcome: RuntimeConfigurationWorkflow.StartOutcome,
         _ opened: RuntimeConfigurationWorkflow.Opened,
@@ -620,7 +619,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         return nil
     }
 
-    private func describe(_ trace: Trace) -> String {
+    @RuntimeActor private func describe(_ trace: Trace) -> String {
         let history = trace.admissions.map { "\($0.point)\($0.start ? "+start" : "+stop")" }.joined(separator: ", ")
         let mode = trace.reload ? "reload" : "prepare"
         return "\(mode) \(trace.scenario) faults=\(trace.platformFault)/\(trace.runtimeFault) admissions=[\(history)]"
@@ -628,7 +627,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
 
     // MARK: - Runs
 
-    private func runPrepare(_ trace: Trace, _ root: ModelRoot) async -> String? {
+    @RuntimeActor private func runPrepare(_ trace: Trace, _ root: ModelRoot) async -> String? {
         let label = describe(trace)
         let h: Harness
         do {
@@ -687,7 +686,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         return nil
     }
 
-    private func bumpPrepare(_ trace: Trace, _ expected: Expected, latched: Bool) {
+    @RuntimeActor private func bumpPrepare(_ trace: Trace, _ expected: Expected, latched: Bool) {
         counts["prepare.\(expected.preparation)", default: 0] += 1
         counts["depth.\(trace.admissions.count)", default: 0] += 1
         if case .persisted = expected.platform, expected.runtime == .notAttempted(.superseded) {
@@ -705,7 +704,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         if latched { counts["unknown.holdsNextStart", default: 0] += 1 }
     }
 
-    private func runReload(_ trace: Trace, _ root: ModelRoot) async -> String? {
+    @RuntimeActor private func runReload(_ trace: Trace, _ root: ModelRoot) async -> String? {
         let label = describe(trace)
         let h: Harness
         do {
@@ -782,7 +781,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         }
     }
 
-    private func run(_ trace: Trace, _ root: ModelRoot) async -> String? {
+    @RuntimeActor private func run(_ trace: Trace, _ root: ModelRoot) async -> String? {
         trace.reload ? await runReload(trace, root) : await runPrepare(trace, root)
     }
 
@@ -790,7 +789,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
 
     /// Breadth-first over the admission alphabet: each prefix is emitted, then extended at every point the reference reaches, at or after
     /// its last admission, with a Stop and a Start. Depth is bounded by `maxDepth`.
-    private func enumerate(
+    @RuntimeActor private func enumerate(
         maxDepth: Int,
         points: ([Admission]) -> [Point],
         emit: ([Admission]) -> Void
@@ -816,7 +815,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         }
     }
 
-    private func enumerateAll() -> [Trace] {
+    @RuntimeActor private func enumerateAll() -> [Trace] {
         var traces: [Trace] = []
         for scenario in Scenario.allCases {
             for (platform, runtime) in faultPairs(scenario) {
@@ -851,7 +850,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         }
     }
 
-    private func seededTrace(_ rng: inout Seeded) -> Trace {
+    @RuntimeActor private func seededTrace(_ rng: inout Seeded) -> Trace {
         let drawn = Scenario.allCases[rng.below(Scenario.allCases.count)]
         let reload = rng.below(3) == 0
         let scenario = reload && drawn == .platformAbsent ? Scenario.canonical : drawn
@@ -919,7 +918,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
     // MARK: - Tests
 
     /// Every explored trace matches the reference, and the matrix reaches each required behavior. The fixed-seed walk runs after it.
-    func testBoundedExplorationMatchesTheReferenceModel() async throws {
+    @RuntimeActor func testBoundedExplorationMatchesTheReferenceModel() async throws {
         let root = try ModelRoot()
         let traces = enumerateAll()
         XCTAssertFalse(frontierOverflowed, "a breadth-first frontier exceeded \(Self.frontierBudget) prefixes, so the matrix would be truncated")

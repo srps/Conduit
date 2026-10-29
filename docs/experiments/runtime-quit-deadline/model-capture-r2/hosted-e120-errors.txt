@@ -1,0 +1,9 @@
+2026-10-28T17:16:07.9749570Z /Users/runner/work/Conduit/Conduit/Tests/ConduitTests/ConfigurationStoreTests.swift:1261:21: error: sending 'external' risks causing data races [#SendingRisksDataRace]
+2026-10-28T17:16:07.9753170Z      |                     |- error: sending 'external' risks causing data races [#SendingRisksDataRace]
+2026-10-28T17:16:07.9754430Z      |                     `- note: task-isolated 'external' is captured by a global actor 'RuntimeActor'-isolated closure. global actor 'RuntimeActor'-isolated uses in closure may race against later nonisolated uses
+2026-10-28T17:16:07.9756660Z /Users/runner/work/Conduit/Conduit/Tests/ConduitTests/ConfigurationStoreTests.swift:1261:39: error: sending 'runtimeVariant' risks causing data races [#SendingRisksDataRace]
+2026-10-28T17:16:07.9759740Z      |                                       |- error: sending 'runtimeVariant' risks causing data races [#SendingRisksDataRace]
+2026-10-28T17:16:07.9760800Z      |                                       `- note: task-isolated 'runtimeVariant' is captured by a global actor 'RuntimeActor'-isolated closure. global actor 'RuntimeActor'-isolated uses in closure may race against later nonisolated uses
+2026-10-28T17:16:07.9763040Z /Users/runner/work/Conduit/Conduit/Tests/ConduitTests/ConfigurationStoreTests.swift:1261:61: error: sending 'externalShows' risks causing data races [#SendingRisksDataRace]
+2026-10-28T17:16:07.9765870Z      |                                                             |- error: sending 'externalShows' risks causing data races [#SendingRisksDataRace]
+2026-10-28T17:16:07.9767320Z      |                                                             `- note: task-isolated 'externalShows' is captured by a global actor 'RuntimeActor'-isolated closure. global actor 'RuntimeActor'-isolated uses in closure may race against later nonisolated uses

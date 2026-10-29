@@ -6,20 +6,20 @@ import NIOPosix
 import XCTest
 @testable import ProxyKernel
 
-@MainActor
 final class VPNReconnectRoutingTests: XCTestCase {
-    func testReconnectRevokesDirectRoutingBeforeAwaitingProbe() async throws {
+    @RuntimeActor func testReconnectRevokesDirectRoutingBeforeAwaitingProbe() async throws {
         try await checkReconnect(hasUpstreams: true, reachable: true)
     }
 
-    func testFailedReconnectProbeKeepsStrictUpstreamRouting() async throws {
+    @RuntimeActor func testFailedReconnectProbeKeepsStrictUpstreamRouting() async throws {
         try await checkReconnect(hasUpstreams: true, reachable: false)
     }
 
-    func testNoUpstreamsStillAllowsDirectRouting() async throws {
+    @RuntimeActor func testNoUpstreamsStillAllowsDirectRouting() async throws {
         try await checkReconnect(hasUpstreams: false, reachable: false)
     }
 
+    @RuntimeActor
     private func checkReconnect(hasUpstreams: Bool, reachable: Bool) async throws {
         let entered = expectation(description: "reconnect probe entered")
         let loop = MultiThreadedEventLoopGroup.singleton.next()

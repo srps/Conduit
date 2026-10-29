@@ -1,0 +1,48 @@
+{
+  "observed": "2026-10-29T09:06:38.237292+00:00",
+  "head": "8a036fe9b4ef67e7a2a49cc67247c420146a18c8",
+  "Swift": {
+    "run": 40843183666,
+    "job": 123344247895,
+    "conclusion": "success"
+  },
+  "Release": {
+    "run": 40843183722,
+    "job": 123344248291,
+    "conclusion": "success",
+    "standard": "3771 tests,4 skipped,0 failures",
+    "optimized_build_and_PAC": "success",
+    "ZIP_DMG_and_packaged_app_verification": "success",
+    "package_identity": "ad-hoc PR package",
+    "draft_release": "correctly skipped; tag only"
+  },
+  "SlowDrain": {
+    "run": 40843183693,
+    "job": 123344248759,
+    "conclusion": "success"
+  },
+  "CodeQL": {
+    "summary": 123344467133,
+    "python": 123344233720,
+    "actions": 123344233508,
+    "conclusion": "success"
+  },
+  "annotations": "All read: macOS capacity and Ubuntu image notices; CodeQL 300-file diff warning, not complete independent security review. Devin review skipped because trial expired.",
+  "release_log": {
+    "job": 123344248291,
+    "log_sha256": "3fc55e11fb99d998a610bd317b9fcb5a8430827d0d00e63425551ce4094a571a",
+    "log_bytes": 1862739,
+    "summary_lines": [
+      "2026-10-29T08:42:10.5930270Z Test Suite 'CFPACEvaluatorTests' passed at 2026-10-29 08:42:10.234.",
+      "2026-10-29T08:42:59.0487660Z Test Suite 'PACPreviewTests' passed at 2026-10-29 08:42:57.987.",
+      "2026-10-29T08:48:15.5379370Z \t Executed 3771 tests, with 4 tests skipped and 0 failures (0 unexpected) in 475.586 (476.355) seconds",
+      "2026-10-29T08:48:15.5381060Z \t Executed 3771 tests, with 4 tests skipped and 0 failures (0 unexpected) in 475.586 (476.369) seconds",
+      "2026-10-29T08:48:15.5626000Z grep -q \"Test Suite 'PACPreviewTests' passed\" \"$test_log\"",
+      "2026-10-29T08:48:15.5626350Z grep -q \"Test Suite 'CFPACEvaluatorTests' passed\" \"$test_log\"",
+      "2026-10-29T08:58:19.1372940Z Test Suite 'CFPACEvaluatorTests' passed at 2026-10-29 08:58:19.137.",
+      "2026-10-29T08:58:19.4478500Z Test Suite 'PACPreviewTests' passed at 2026-10-29 08:58:19.448."
+    ],
+    "scope": "Complete successful Release PR job; package is ad-hoc, draft publication step skipped; no release-certificate artifact or installed acceptance."
+  },
+  "scope": "Exact final hosted head; does not establish local installed runtime acceptance or release-certificate packaging/publication."
+}

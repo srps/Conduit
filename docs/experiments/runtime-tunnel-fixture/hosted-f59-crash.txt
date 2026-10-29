@@ -1,0 +1,24 @@
+2026-10-28T17:48:47.1420330Z Test Case '-[ConduitTests.ProtocolDetectorTests testRejectNonRedis]' started.
+2026-10-28T17:48:47.1420940Z Test Case '-[ConduitTests.ProtocolDetectorTests testRejectNonRedis]' passed (0.000 seconds).
+2026-10-28T17:48:47.1421520Z Test Case '-[ConduitTests.ProtocolDetectorTests testRejectNonTLS]' started.
+2026-10-28T17:48:47.1422020Z Test Case '-[ConduitTests.ProtocolDetectorTests testRejectNonTLS]' passed (0.000 seconds).
+2026-10-28T17:48:47.1422570Z Test Case '-[ConduitTests.ProtocolDetectorTests testTooFewBytes]' started.
+2026-10-28T17:48:47.1423100Z Test Case '-[ConduitTests.ProtocolDetectorTests testTooFewBytes]' passed (0.000 seconds).
+2026-10-28T17:48:47.1424250Z Test Case '-[ConduitTests.ProtocolDetectorTests testUnknownProtocol]' started.
+2026-10-28T17:48:47.1424860Z Test Case '-[ConduitTests.ProtocolDetectorTests testUnknownProtocol]' passed (0.000 seconds).
+2026-10-28T17:48:47.1425410Z Test Suite 'ProtocolDetectorTests' passed at 2026-10-28 17:48:46.654.
+2026-10-28T17:48:47.1425860Z 	 Executed 24 tests, with 0 failures (0 unexpected) in 0.008 (0.012) seconds
+2026-10-28T17:48:47.1426440Z Test Suite 'ProxiedTunnelTests' started at 2026-10-28 17:48:46.654.
+2026-10-28T17:48:47.1427050Z Test Case '-[ConduitTests.ProxiedTunnelTests testEffectiveTunnelListenHostAlwaysLoopback]' started.
+2026-10-28T17:48:47.1427810Z Test Case '-[ConduitTests.ProxiedTunnelTests testEffectiveTunnelListenHostAlwaysLoopback]' passed (0.002 seconds).
+2026-10-28T17:48:47.1428660Z Test Case '-[ConduitTests.ProxiedTunnelTests testMongoDBThroughProxiedTunnel]' started.
+2026-10-28T17:48:47.1429410Z Test Case '-[ConduitTests.ProxiedTunnelTests testMongoDBThroughProxiedTunnel]' passed (0.015 seconds).
+2026-10-28T17:48:47.1430190Z Test Case '-[ConduitTests.ProxiedTunnelTests testProtocolDetectionOnTunnelData]' started.
+2026-10-28T17:48:47.1430940Z ERROR: Cannot schedule tasks on an EventLoop that has already shut down. This will be upgraded to a forced crash in future SwiftNIO versions.
+2026-10-28T17:48:47.1431800Z ERROR: Cannot schedule tasks on an EventLoop that has already shut down. This will be upgraded to a forced crash in future SwiftNIO versions.
+2026-10-28T17:48:47.1432660Z NIOPosix/HappyEyeballs.swift:224: Fatal error: leaking promise created at (file: "NIOPosix/HappyEyeballs.swift", line: 224)
+2026-10-28T17:48:47.1435260Z ◇ Test run started.
+2026-10-28T17:48:47.1523170Z ↳ Testing Library Version: 1902
+2026-10-28T17:48:47.1530020Z ↳ Target Platform: arm64e-apple-macos14.0
+2026-10-28T17:48:47.1531050Z ✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+2026-10-28T17:48:47.1725360Z ##[error]Process completed with exit code 1.

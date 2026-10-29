@@ -25,7 +25,7 @@ enum SecurityScenarios {
         func setCredentials(_ credentials: ProxyCredentials, for upstream: UpstreamProxy) throws {}
     }
 
-    @MainActor
+    @RuntimeActor
     static func boundaries(verbose: Bool) async throws -> ScenarioResult {
         let start = Date()
         let trusted = UpstreamProxy(name: "trusted", host: "proxy.example.test", port: 8080, priority: 0)

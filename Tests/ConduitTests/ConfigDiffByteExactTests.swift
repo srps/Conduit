@@ -24,7 +24,7 @@ final class ConfigDiffByteExactTests: XCTestCase {
         Field(path: "auth.workstation", set: { $0.auth.workstation = $1 }, changed: \.authChanged),
     ]
 
-    private static func pacURL(_ word: String) -> String { "https://pac.example.test/\(word).pac" }
+    nonisolated private static func pacURL(_ word: String) -> String { "https://pac.example.test/\(word).pac" }
 
     func testARespellingAloneChangesTheSectionThatSendsIt() {
         Respelled.assertRespelling(Respelled.composed, Respelled.decomposed)
@@ -75,7 +75,7 @@ final class ConfigDiffByteExactTests: XCTestCase {
 
     // MARK: The orchestrator's apply
 
-    private func makeOrchestrator(pac: LastFetchPACEvaluator, configure: (inout ProxyConfig) -> Void = { _ in }) -> ProxyOrchestrator {
+    @RuntimeActor private func makeOrchestrator(pac: LastFetchPACEvaluator, configure: (inout ProxyConfig) -> Void = { _ in }) -> ProxyOrchestrator {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.upstreams = []
@@ -85,12 +85,12 @@ final class ConfigDiffByteExactTests: XCTestCase {
         return ProxyOrchestrator(config: config, logger: DiscardingLogSink(), pacEvaluator: pac)
     }
 
-    private func didEmit(_ name: String, _ orchestrator: ProxyOrchestrator) -> Bool {
+    @RuntimeActor private func didEmit(_ name: String, _ orchestrator: ProxyOrchestrator) -> Bool {
         orchestrator.eventLog.events.contains { $0.event == name }
     }
 
     /// A save that only respells the PAC URL: the orchestrator holds the new bytes and fetches them.
-    func testTheOrchestratorTakesARespelledPACURLAndFetchesIt() async {
+    @RuntimeActor func testTheOrchestratorTakesARespelledPACURLAndFetchesIt() async {
         let pac = LastFetchPACEvaluator()
         let orchestrator = makeOrchestrator(pac: pac)
         await orchestrator.refreshPACRouting(force: true)
@@ -108,7 +108,7 @@ final class ConfigDiffByteExactTests: XCTestCase {
 
     /// The same respelling with an unrelated edit: the bytes arrive, and the PAC is fetched from them now, not when the refresh
     /// interval next runs out.
-    func testARespelledPACURLBesideAnUnrelatedEditIsFetchedAtOnce() async {
+    @RuntimeActor func testARespelledPACURLBesideAnUnrelatedEditIsFetchedAtOnce() async {
         let pac = LastFetchPACEvaluator()
         let orchestrator = makeOrchestrator(pac: pac)
         await orchestrator.refreshPACRouting(force: true)
@@ -127,7 +127,7 @@ final class ConfigDiffByteExactTests: XCTestCase {
 
     /// The profile name is part of the Keychain account the credential manager reads through the orchestrator's config. It has no
     /// section of its own, so the respelling must not be dropped as "nothing changed".
-    func testTheOrchestratorTakesARespelledProfileName() async {
+    @RuntimeActor func testTheOrchestratorTakesARespelledProfileName() async {
         let pac = LastFetchPACEvaluator()
         let orchestrator = makeOrchestrator(pac: pac) { $0.profileName = "Office \(Respelled.composed)" }
 

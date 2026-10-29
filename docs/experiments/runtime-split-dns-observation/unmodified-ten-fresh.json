@@ -1,0 +1,65 @@
+{
+  "scope": "Unmodified existing local6.4 Debug objects; focused diagnostic repetitions, not hosted6.3.3 evidence or a fix.",
+  "trials": [
+    {
+      "trial": 1,
+      "exit": 0,
+      "seconds": 1.04,
+      "one_test_executed": true
+    },
+    {
+      "trial": 2,
+      "exit": 0,
+      "seconds": 0.21,
+      "one_test_executed": true
+    },
+    {
+      "trial": 3,
+      "exit": 0,
+      "seconds": 0.15,
+      "one_test_executed": true
+    },
+    {
+      "trial": 4,
+      "exit": 0,
+      "seconds": 0.19,
+      "one_test_executed": true
+    },
+    {
+      "trial": 5,
+      "exit": 0,
+      "seconds": 0.21,
+      "one_test_executed": true
+    },
+    {
+      "trial": 6,
+      "exit": 0,
+      "seconds": 0.26,
+      "one_test_executed": true
+    },
+    {
+      "trial": 7,
+      "exit": 0,
+      "seconds": 0.2,
+      "one_test_executed": true
+    },
+    {
+      "trial": 8,
+      "exit": 0,
+      "seconds": 0.15,
+      "one_test_executed": true
+    },
+    {
+      "trial": 9,
+      "exit": 0,
+      "seconds": 0.14,
+      "one_test_executed": true
+    },
+    {
+      "trial": 10,
+      "exit": 0,
+      "seconds": 0.15,
+      "one_test_executed": true
+    }
+  ]
+}

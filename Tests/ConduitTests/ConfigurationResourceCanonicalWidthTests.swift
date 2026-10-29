@@ -121,7 +121,8 @@ final class ConfigurationResourceCanonicalWidthTests: XCTestCase {
     }
 
     /// The bypass ceiling and the app's validation agree at the boundary: the same exact list passes both, and one
-    /// more byte fails both. `ProxyBypassSyntax` still measures with `JSONEncoder`, so this pins the two together.
+    /// more byte fails both. `ProxyBypassSyntax` counts the canonical width without encoding the list; the equivalence
+    /// tests above compare that count with an actual `JSONEncoder`.
     func testAppBypassValidationAgreesWithTheCanonicalCeiling() {
         let full = String(repeating: "a", count: 253)
         let exact = Array(repeating: full, count: 31) + [String(repeating: "a", count: 252)]

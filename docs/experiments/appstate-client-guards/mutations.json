@@ -1,0 +1,88 @@
+[
+  {
+    "file": "Sources/Conduit/App/RuntimeEditorLedger.swift",
+    "filter": "AppStateEditorModelTests.testEvery",
+    "mutations": [
+      {
+        "label": "G1-restore-lost-authority",
+        "old": "if baselines[file] != nil { baselines[file] = write.baseline }",
+        "new": "baselines[file] = write.baseline"
+      },
+      {
+        "label": "G3-drop-own-explainable-mismatch",
+        "old": "if ownWorkMayMove(file) || chained.contains(where: { $0.file == file }) {",
+        "new": "if false {"
+      },
+      {
+        "label": "G5-keep-conflicting-or-unknown-authority",
+        "old": "case .conflict, .unknown:\n            drop(file)\n            return false",
+        "new": "case .conflict, .unknown:\n            return false"
+      },
+      {
+        "label": "G13-keep-unexplained-mismatch",
+        "old": "} else if !ownWorkMayMove(file), !chained.contains(where: { $0.file == file }) {\n                drop(file)\n            }",
+        "new": "} else if !ownWorkMayMove(file), !chained.contains(where: { $0.file == file }) {\n                _ = file\n            }"
+      },
+      {
+        "label": "G14-keep-stranded-chain",
+        "old": "for file in Set(chained.map(\\.file)) where !ownWorkMayMove(file) {\n            drop(file)\n        }",
+        "new": "for file in Set(chained.map(\\.file)) where !ownWorkMayMove(file) {\n            _ = file\n        }"
+      }
+    ]
+  },
+  {
+    "file": "Sources/Conduit/App/RuntimeEditorLedger.swift",
+    "filter": "AppStateEditorModelTests.testEvery",
+    "mutations": [
+      {
+        "label": "not-admitted-stranded-state",
+        "old": "active = nil\n        reconcile()\n    }\n\n    /// The operation in flight was admitted",
+        "new": "active = nil\n    }\n\n    /// The operation in flight was admitted"
+      }
+    ]
+  },
+  {
+    "file": "Sources/Conduit/App/RuntimeEditorSession.swift",
+    "filter": "RuntimeEditorSessionChainTests",
+    "mutations": [
+      {
+        "label": "G21-no-post-settle-resubmit",
+        "old": "report(.settled(submission, outcome))\n            resubmitAnExplainedMismatch()",
+        "new": "report(.settled(submission, outcome))"
+      }
+    ]
+  },
+  {
+    "file": "Sources/Conduit/App/RuntimeObserver.swift",
+    "filter": "RuntimeObserverSettlementTests.testAnOperationTheHostReportsPendingIsWaitedForPastTheRelookupBound",
+    "mutations": [
+      {
+        "label": "pending-counted-as-failed-lookup",
+        "old": "case .pending?:\n                    failedInARow = 0",
+        "new": "case .pending?:\n                    failedInARow += 1"
+      }
+    ]
+  },
+  {
+    "file": "Sources/Conduit/App/RuntimeEditorLedger.swift",
+    "filter": "AppStateEditorModelTests.testTheQuitsFinalSavePreconditionNeverOutranksAVerifiedReceiptOrRestoresAuthority",
+    "mutations": [
+      {
+        "label": "quit-drops-frozen-precondition",
+        "old": "runtime: after.baselines.runtime ?? baselines.runtime,",
+        "new": "runtime: after.baselines.runtime,"
+      }
+    ]
+  },
+  {
+    "file": "Sources/Conduit/App/AppState.swift",
+    "filter": "AppStateActivationParityTests.testTypingBackToTheCommittedPortRebindsNothingAndADNSToggleHoldsNoLaterPause",
+    "mutations": [
+      {
+        "label": "dns-bit-does-not-follow-host",
+        "old": "private func followHostOwnedIntent() {",
+        "new": "private func followHostOwnedIntent() {\n        return"
+      }
+    ]
+  }
+]

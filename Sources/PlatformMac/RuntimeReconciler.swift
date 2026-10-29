@@ -14,7 +14,7 @@ package enum RuntimeConfigApplication: Equatable {
 
 /// The side of a runtime host (`AppState`, `RuntimeHost`) a reconcile pass talks to. A protocol rather than a set of closures so the tests
 /// can stand in a recording host, and so the reconciler can hold it weakly: it is owned by the host it calls back.
-@MainActor
+@RuntimeActor
 package protocol RuntimeReconcilerHost: AnyObject {
     /// Pushes a config edit into the running subsystems. Suspends, which is the whole reason passes are serialised. The result is the
     /// runtime input the call leaves held; the pass records it, and never reads the orchestrator afterwards.
@@ -27,16 +27,24 @@ package protocol RuntimeReconcilerHost: AnyObject {
     func awaitLifecycleIdle() async
     /// Re-applies the surfaces whose *contents* the config edit changed — resolver files, the system proxy, the environment block — using
     /// nothing but what the pass carries. Called only when the config changed; a flag-only save skips it. Async so a host can run the
-    /// `networksetup` and `launchctl` writes off the main actor.
+    /// `networksetup` and `launchctl` writes off the owner.
     func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) async
     /// A platform decision, called before its side effect so the event stream carries the decision whether or not the side effect lands.
     func recordPlatformDecision(_ action: PlatformIntegrationReconciler.Action)
-    /// Runs one flag action through the manager the start and stop paths use. `previousPlatform` is the flags it moves from, so a host can
-    /// say whether a switch turned on or only the mode changed. Returns whether it landed.
+    /// Runs one flag action of a pass through the manager the start and stop paths use. `previousPlatform` is the flags it moves from, so a
+    /// host can say whether a switch turned on or only the mode changed. Returns whether it landed. Async so a host can queue the blocking
+    /// manager calls off this actor; it queues them in the turn it is called, which is the turn the pass checked its admission.
     func perform(
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
         previousConfig: ProxyConfig,
+        platform: PlatformIntegrationConfig,
+        previousPlatform: PlatformIntegrationConfig
+    ) async -> Bool
+    /// Runs an action that needs no runtime (`PlatformIntegrationReconciler.immediateActions`) before the save's pass is queued, so a quit
+    /// right after the save keeps it. Synchronous: the host answers it with no blocking effect. Returns whether it landed.
+    func performImmediate(
+        _ action: PlatformIntegrationReconciler.Action,
         platform: PlatformIntegrationConfig,
         previousPlatform: PlatformIntegrationConfig
     ) -> Bool
@@ -47,7 +55,7 @@ package protocol RuntimeReconcilerHost: AnyObject {
 /// Each platform flag advances only when its action lands, while config-driven surface work remains owed until re-applied.
 /// A flag action supersedes a content re-apply for the same surface, avoiding duplicate writes and admin prompts.
 /// Admission is checked between effects. Stop waits only for an effect already running, since queued passes may await its lane.
-@MainActor
+@RuntimeActor
 package final class RuntimeReconciler {
     package struct RuntimeState: Equatable {
         package var proxyIsUp: Bool
@@ -97,9 +105,9 @@ package final class RuntimeReconciler {
     package private(set) var requestedPlatformConfig: PlatformIntegrationConfig {
         didSet { platformRequest.set(requestedPlatformConfig) }
     }
-    /// `requestedPlatformConfig`, readable from the platform queue. A flag action runs on the main actor, not on that queue, so platform work
-    /// queued before a save can run after the save's clear: work that must not act on a switch a later save moved checks this under its
-    /// manager's lock (#194).
+    /// `requestedPlatformConfig`, readable from the platform queue. A save moves it at once, but its flag actions are queued only when its
+    /// pass runs, so platform work queued before a save can run after the save asked to clear: work that must not act on a switch a later
+    /// save moved checks this under its manager's lock (#194).
     package nonisolated let platformRequest: PlatformRequestFence
 
     package weak var host: (any RuntimeReconcilerHost)?
@@ -110,7 +118,7 @@ package final class RuntimeReconciler {
         let config: ProxyConfig
         let platformConfig: PlatformIntegrationConfig
         /// The caller's admission, checked synchronously before each step that acts. Nil admits every step.
-        let isCurrent: (@MainActor () -> Bool)?
+        let isCurrent: (@RuntimeActor () -> Bool)?
     }
 
     /// The config-driven surfaces a pushed input changed and no admitted pass has re-applied yet. One record: a later push widens `old` to
@@ -124,12 +132,13 @@ package final class RuntimeReconciler {
     private var worker: Task<Void, Never>?
     /// The newest request the worker has not taken yet.
     private var pending: PassRequest?
-    /// The effect now running, if any: the orchestrator push or the config-driven re-apply. Quiescence waits for this one handle and for
-    /// nothing queued, since a queued pass may itself wait for a lifecycle lane the caller holds.
+    /// The effect now running, if any: the orchestrator push, the config-driven re-apply, or one flag action with its host settlement.
+    /// Quiescence waits for this one handle and for nothing queued, since a queued pass may itself wait for a lifecycle lane the caller
+    /// holds.
     private var activeEffect: Task<Void, Never>?
     /// The admission the last request was recorded under. `retryRequest` runs under this one and no other, so a retry never outlives the
     /// authority the request had.
-    private var requestedAdmission: (@MainActor () -> Bool)?
+    private var requestedAdmission: (@RuntimeActor () -> Bool)?
     private var surfacesOwed: OwedSurfaces?
 
     /// Waits for the effect already running, if one is. It does not wait for queued passes, which may be waiting on the lane the caller
@@ -202,7 +211,7 @@ package final class RuntimeReconciler {
         guard !actions.isEmpty else { return }
         requestedPlatformConfig.launchAtLogin = newPlatform.launchAtLogin
         for action in actions {
-            run(action, config: lastReconciledConfig, previousConfig: lastReconciledConfig, from: oldPlatform, to: newPlatform)
+            runImmediate(action, from: oldPlatform, to: newPlatform)
         }
     }
 
@@ -212,7 +221,7 @@ package final class RuntimeReconciler {
     package func reconcile(
         config new: ProxyConfig,
         platformConfig newPlatform: PlatformIntegrationConfig,
-        isCurrent: (@MainActor () -> Bool)? = nil
+        isCurrent: (@RuntimeActor () -> Bool)? = nil
     ) {
         guard isCurrent?() ?? true else { return }
         requestedConfig = new
@@ -222,7 +231,7 @@ package final class RuntimeReconciler {
         // See `PlatformIntegrationReconciler.immediateActions`.
         let immediatePlatform = lastReconciledPlatformConfig
         for action in PlatformIntegrationReconciler.immediateActions(old: immediatePlatform, new: newPlatform) {
-            run(action, config: new, previousConfig: lastReconciledConfig, from: immediatePlatform, to: newPlatform)
+            runImmediate(action, from: immediatePlatform, to: newPlatform)
         }
 
         // Nothing waits when no pass is running and the machine already holds the save: no runtime input is behind, no surface is owed,
@@ -230,7 +239,7 @@ package final class RuntimeReconciler {
         guard worker != nil || surfacesOwed != nil || lags(config: new, platformConfig: newPlatform) else { return }
         pending = PassRequest(config: new, platformConfig: newPlatform, isCurrent: isCurrent)
         guard worker == nil else { return }
-        worker = Task { @MainActor in await self.work() }
+        worker = Task { await self.work() }
     }
 
     /// Takes the pending request and runs it, then whatever arrived meanwhile, until none is left. The worker is released in the same turn
@@ -296,8 +305,11 @@ package final class RuntimeReconciler {
         }
         for action in platformActions {
             guard admitted() else { return }
-            run(action, config: new, previousConfig: old, from: oldPlatform, to: newPlatform)
+            await runFlagEffect { await self.run(action, config: new, previousConfig: old, from: oldPlatform, to: newPlatform, host: host) }
         }
+        // An action suspends while its work is out. One that landed was recorded at the value this pass carried; a lapsed admission records
+        // nothing more.
+        guard admitted() else { return }
         // Complete: a flag group no action named this pass already holds the save's value, or the runtime is down and the start path owns
         // the surface from here. A named group was settled by its own action, and a failed one stays unreconciled for the next save.
         for group in FlagGroup.allCases where !platformActions.contains(where: { FlagGroup($0) == group }) {
@@ -307,27 +319,50 @@ package final class RuntimeReconciler {
 
     /// Runs one effect and holds its handle while it runs, so quiescence can wait on it. The handle is the only effect state there is: one
     /// effect runs at a time, because only the worker starts one.
-    private func runEffect(_ body: @escaping @MainActor () async -> Void) async {
-        let effect = Task { @MainActor in await body() }
+    private func runEffect(_ body: @escaping @RuntimeActor () async -> Void) async {
+        let effect = Task { await body() }
         activeEffect = effect
         await effect.value
         activeEffect = nil
     }
 
+    /// A flag action as the one effect running. Unlike `runEffect`, `body` begins in this turn, so the host queues the action's platform
+    /// work in the turn the pass checked its admission; the handle only marks when the action ends, which is what quiescence waits for.
+    private func runFlagEffect(_ body: @RuntimeActor () async -> Void) async {
+        // Finish-only: nothing is ever yielded, and the buffer holds none.
+        let (ended, end) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(0))
+        activeEffect = Task { for await _ in ended {} }
+        await body()
+        end.finish()
+        activeEffect = nil
+    }
+
     /// Event first, side effect second: a flag flip is a config decision, and log lines are derived from events, not the other way round.
-    @discardableResult
+    /// A landed action is recorded at the value its pass carried, whatever was requested while it was out.
     private func run(
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
         previousConfig: ProxyConfig,
         from oldPlatform: PlatformIntegrationConfig,
-        to newPlatform: PlatformIntegrationConfig
-    ) -> Bool {
-        guard let host else { return false }
+        to newPlatform: PlatformIntegrationConfig,
+        host: any RuntimeReconcilerHost
+    ) async {
         host.recordPlatformDecision(action)
-        let landed = host.perform(action, config: config, previousConfig: previousConfig, platform: newPlatform, previousPlatform: oldPlatform)
+        let landed = await host.perform(
+            action, config: config, previousConfig: previousConfig, platform: newPlatform, previousPlatform: oldPlatform
+        )
         if landed { adopt(action, from: newPlatform) }
-        return landed
+    }
+
+    /// An immediate action, before any pass: the event, then the host's synchronous answer.
+    private func runImmediate(
+        _ action: PlatformIntegrationReconciler.Action,
+        from oldPlatform: PlatformIntegrationConfig,
+        to newPlatform: PlatformIntegrationConfig
+    ) {
+        guard let host else { return }
+        host.recordPlatformDecision(action)
+        if host.performImmediate(action, platform: newPlatform, previousPlatform: oldPlatform) { adopt(action, from: newPlatform) }
     }
 
     /// Records one flag action as reconciled, at the value it carried, once it landed. A failed action records nothing, so the next pass

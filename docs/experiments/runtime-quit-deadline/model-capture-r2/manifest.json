@@ -1,0 +1,7 @@
+{
+  "baseline": "e120a5c62fd9203691d0e6994d50e1b9df94bb3c",
+  "files_sha256": {
+    "Tests/ConduitTests/ConfigurationStoreTests.swift": "8ddd2871204834e318ba5af555a63ca528b3c59199eedc6108691006cd2f4c98"
+  },
+  "patch_sha256": "e7436bbf89c9142017f3d1e59ec6cdddf30b1d92fbfcad09a8fe0897e00f1c05"
+}

@@ -9,7 +9,6 @@ import ProxyControlBridge
 /// A bounded two-client authority model over the actual private codec, transport, service and store.
 /// Its oracle knows only a value, a version, the saved DNS bit and each client's observed version; no production authority helper is
 /// reused. Client A may also send the menu's saved DNS Start through the framed client and rebase its own draft from that receipt.
-@MainActor
 final class RuntimePrivateEditorAuthorityModelTests: XCTestCase {
     private enum Action: String, CaseIterable {
         case readA, readB, saveA, saveB, reuseA, reuseB, startA
@@ -66,9 +65,9 @@ final class RuntimePrivateEditorAuthorityModelTests: XCTestCase {
     }
 
     private enum Mismatch: Error { case unexpectedAnswer }
-    private func deadline() -> RuntimeDeadline { .after(.seconds(30), from: ContinuousClock.now) }
+    @RuntimeActor private func deadline() -> RuntimeDeadline { .after(.seconds(30), from: ContinuousClock.now) }
 
-    func testAllThreeStepTwoClientAuthorityHistories() async throws {
+    @RuntimeActor func testAllThreeStepTwoClientAuthorityHistories() async throws {
         var transitions = 0
         let actions: [Action] = [.readA, .readB, .saveA, .saveB, .reuseA, .reuseB]
         // Reuse is eligible only after a submission: 88 legal depth-three histories, with no placeholder no-op steps.
@@ -92,7 +91,7 @@ final class RuntimePrivateEditorAuthorityModelTests: XCTestCase {
 
     /// Every depth-three history of reads, saves and client A's saved DNS Start (decision 0037): 125 histories. A's own later save lands
     /// only when its draft sat at the Start's prior; B's draft never moves on A's receipt, so it conflicts once the enable moved the version.
-    func testAllThreeStepHistoriesWithTheMenusSavedStartAndItsOwnSave() async throws {
+    @RuntimeActor func testAllThreeStepHistoriesWithTheMenusSavedStartAndItsOwnSave() async throws {
         let actions: [Action] = [.readA, .readB, .saveA, .saveB, .startA]
         var histories = 0
         for first in actions {
@@ -107,7 +106,7 @@ final class RuntimePrivateEditorAuthorityModelTests: XCTestCase {
         print("PRIVATE-AUTHORITY-MODEL saved-start histories=\(histories) transitions=\(histories * 3) depth=3 clients=2")
     }
 
-    private func run(_ history: [Action]) async throws {
+    @RuntimeActor private func run(_ history: [Action]) async throws {
         let harness = try makeInteractiveHarness(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: false)
         do {
             let host = try await harness.makeHost()

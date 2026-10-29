@@ -1,4 +1,4 @@
-// Actual Conduit client/host resource probe. NOT product code, NOT a shipping profile, NOT a benchmark product.
+// Actual Conduit client/host resource probe. Not product code or a benchmark product. Host modes consume the shipping profile.
 // It links the existing Release objects with `-package-name conduit` and drives the actual `RuntimeHost.open` facade over
 // explicit fakes (the `pm-sim` runtime-host-effects composition) and an owned scratch state root, then the actual in-memory
 // framed client and private editor client from `RuntimeHost.makeInMemoryControlClient`. No production adapter default,
@@ -9,12 +9,17 @@
 // small, realistic-valid-64, realistic-valid-128, validator-widest, escape-maximum, padded-8mib, repeat, contention,
 // contention-encode, contention-store, held, cancel, client-quit-widest (the actual `RuntimeClientQuit.quit` routine), codec-bounds,
 // profile-sizing (no host: the candidate's constructor terms, rows and snapshot), pressure-candidate (one bounded pressure run at the
-// candidate profile); any mode with `-nosampler` runs without the memory sampler.
+// candidate profile), logger-held (optional, not in the runner's default list: the host's logger drain held at its file's open);
+// any mode with `-nosampler` runs without the memory sampler.
 //
 // Every host mode runs at ONE measured CANDIDATE profile (`CandidateProfile`), built through the actual `RuntimeServiceLimits`
 // initializer from codec measurements. It is an experiment profile, not a shipping default; only its collection caps are selected
 // (decision 0038).
 // Usage: probe <mode>[-nosampler] <scratch-dir>. The scratch directory is removed only after every release proof agrees.
+//
+// Isolation (decision 0031): the host, its service and the owner hops run on `RuntimeActor`. The probe's driver stays on the main
+// actor, as the app's client does, and reaches the host only by awaited owner calls; the clients cross by their own transport. The
+// cancel and pressure-candidate windows hold `RuntimeActor` itself through `holdOwner`, a probe-only, bounded, self-ending job.
 //
 // `GenericDefaults.shared` is initialized by the actual store decode (`ProxyConfig.init(from:)`), which reads `NSUserName()`
 // and the host name read-only; every fixture sets every value explicitly, so no default reaches a fixture, and nothing is printed.
@@ -27,6 +32,7 @@ import PlatformMac
 import ProxyAuth
 import ProxyControlBridge
 import ProxyKernel
+import RuntimeEvents
 
 // MARK: - Output
 
@@ -369,7 +375,7 @@ final class CountingStateFiles: StateFileAccessing, @unchecked Sendable {
 }
 
 /// The helper-status fake, wrapped so a phase can hold the preflight pass's read-only helper read. The host reads it on a global queue
-/// (`RuntimeHostPreflight`), so a hold never blocks the main actor. This is the fake `HelperLifecycleManaging` seam, not the installed helper.
+/// (`RuntimeHostPreflight`), so a hold never blocks the owner (`RuntimeActor`). This is the fake `HelperLifecycleManaging` seam, not the installed helper.
 final class GatedHelperLifecycle: HelperLifecycleManaging, @unchecked Sendable {
     let base = FakeHelperLifecycle()
     let gate = Gate()
@@ -432,6 +438,150 @@ struct Fakes: @unchecked Sendable {
             resolverDirectory: fakes.machine.resolverDirectory.path,
             stateFiles: fakes.files
         )
+    }
+}
+
+/// The host logger's file destination in `logger-held`: every admission is judged by the authoritative app-log guard the app builds
+/// from the held root (`diagnosticDestinationGuard(for: .appLog, …, writerLeaseFile:)`), after an optional hold. Armed, the next
+/// destination admission waits until `release()`, bounded by `safetySeconds`; an expiry is recorded and fails the mode. The opened
+/// descriptor is judged by the authoritative guard alone. The hold adds a wait only; it never admits what the guard refuses.
+final class HeldLogDestination: RecordFileDestinationGuarding, @unchecked Sendable {
+    static let safetySeconds: TimeInterval = 60
+    private let authoritative: any RecordFileDestinationGuarding
+    private let condition = NSCondition()
+    private var armed = false
+    private var holding = false
+    private var reached = 0
+    private var expired = false
+
+    init(authoritative: any RecordFileDestinationGuarding) { self.authoritative = authoritative }
+
+    func arm() { condition.withLock { armed = true } }
+
+    func release() {
+        condition.withLock {
+            armed = false
+            condition.broadcast()
+        }
+    }
+
+    var isHolding: Bool { condition.withLock { holding } }
+    var reachedCount: Int { condition.withLock { reached } }
+    var safetyExpired: Bool { condition.withLock { expired } }
+
+    func admit(destination: URL) throws {
+        condition.withLock {
+            guard armed else { return }
+            reached += 1
+            holding = true
+            let limit = Date().addingTimeInterval(Self.safetySeconds)
+            while armed {
+                if !condition.wait(until: limit) {
+                    expired = true
+                    armed = false
+                }
+            }
+            holding = false
+        }
+        try authoritative.admit(destination: destination)
+    }
+
+    func admit(openedDescriptor descriptor: Int32, destination: URL) throws {
+        try authoritative.admit(openedDescriptor: descriptor, destination: destination)
+    }
+}
+
+/// The probe-local host logger in `logger-held`: one formatted line per call, admitted to the kernel's own app-log file writer
+/// (`rotatingLogFile`), as the app's store admits it. `freshWriter()` closes the current writer and starts another, whose open is the
+/// one the destination can hold. It counts the lines and bytes handed to the current writer, and records each host drain call.
+final class ProbeFileLogger: LogSink, @unchecked Sendable {
+    let destination: HeldLogDestination
+    private let url: URL
+    /// The gate's own event log, for a refusal of this destination; the probe checks it stays empty.
+    let gateEvents = RuntimeEventLog(capacity: 16)
+    private let gate: RecordFileDestinationGate
+    private let lock = NSLock()
+    private var writer: any RotatingByteWriter
+    private var handedLines = 0
+    private var handedBytes = 0
+    private var drainCalls = 0
+    private var drainInFlight = false
+    private var lastDrain: (outcome: RecordDrainOutcome, requestedMS: Double, elapsedMS: Double)?
+    private var drainEntered: ContinuousClock.Instant?
+
+    init(url: URL, destination: HeldLogDestination) {
+        self.url = url
+        self.destination = destination
+        gate = RecordFileDestinationGate(sink: .appLog, eventLog: gateEvents, logger: DiscardingLogSink())
+        writer = rotatingLogFile(url: url, destinationGuard: destination, gate: gate, eventLog: gateEvents, logger: DiscardingLogSink())
+    }
+
+    /// The app's default buffered and stderr level.
+    var minLevel: LogLevel { .notice }
+
+    func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
+        let line = Data((LogEntry(level: level, category: category, message: message).formatted() + "\n").utf8)
+        lock.withLock {
+            handedLines += 1
+            handedBytes += line.count
+            writer.write(line)
+        }
+    }
+
+    var statistics: RecordWriterStatistics { lock.withLock { writer }.statistics }
+
+    @discardableResult func flush(timeout: TimeInterval) -> Bool { lock.withLock { writer }.flush(timeout: timeout) }
+
+    func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome {
+        let entered = ContinuousClock.now
+        let current = lock.withLock { () -> any RotatingByteWriter in
+            drainCalls += 1
+            drainInFlight = true
+            drainEntered = entered
+            return writer
+        }
+        let outcome = await current.drain(until: deadline)
+        let elapsed = elapsedMS(since: entered)
+        lock.withLock {
+            drainInFlight = false
+            lastDrain = (outcome, milliseconds(entered.duration(to: deadline)), elapsed)
+        }
+        return outcome
+    }
+
+    /// Closes the current writer with no lock held, and starts a fresh one. Returns the closed writer's counters and handed totals.
+    func freshWriter() -> (statistics: RecordWriterStatistics, lines: Int, bytes: Int) {
+        let closing = lock.withLock { writer }
+        closing.close()
+        let next = rotatingLogFile(url: url, destinationGuard: destination, gate: gate, eventLog: gateEvents, logger: DiscardingLogSink())
+        return lock.withLock {
+            let result = (closing.statistics, handedLines, handedBytes)
+            writer = next
+            handedLines = 0
+            handedBytes = 0
+            return result
+        }
+    }
+
+    func closeWriter() { lock.withLock { writer }.close() }
+
+    var handed: (lines: Int, bytes: Int) { lock.withLock { (handedLines, handedBytes) } }
+    /// The writer's counters and the handed totals read together. A line is handed and admitted under this lock, and the writer moves a
+    /// record from pending to written in one step, so handed = written + pending + dropped + failed holds in this one reading.
+    var consistentCounters: (statistics: RecordWriterStatistics, lines: Int, bytes: Int) {
+        lock.withLock { (writer.statistics, handedLines, handedBytes) }
+    }
+    var drains: (calls: Int, inFlight: Bool, entered: ContinuousClock.Instant?) { lock.withLock { (drainCalls, drainInFlight, drainEntered) } }
+    var lastDrainRecord: (outcome: RecordDrainOutcome, requestedMS: Double, elapsedMS: Double)? { lock.withLock { lastDrain } }
+
+    /// Exact writer counters and handed totals, for a stage record.
+    var counters: [String: Any] {
+        let statistics = self.statistics
+        let (lines, bytes) = handed
+        return ["writerPendingRecords": statistics.pendingRecords, "writerPendingBytes": statistics.pendingBytes,
+                "writerWrittenRecords": statistics.writtenRecords, "writerDroppedRecords": statistics.droppedRecords,
+                "writerFailedRecords": statistics.failedRecords, "writerFlushTimeouts": statistics.flushTimeouts,
+                "handedLines": lines, "handedBytes": bytes]
     }
 }
 
@@ -1443,6 +1593,8 @@ struct CandidateBuild {
 
 // MARK: - Host run
 
+/// The probe's driver, on the main actor as the app's client is. The host is `RuntimeActor`-isolated: every host call here is an
+/// awaited owner call, and nothing of the probe's own bookkeeping runs on the owner.
 @MainActor
 final class HostRun {
     let out: Output
@@ -1456,6 +1608,9 @@ final class HostRun {
     weak var weakHost: RuntimeHost?
     var clients: RuntimeInMemoryClients?
     var incarnation: ControlHostIncarnation?
+    /// `logger-held` only: the probe-local file logger the host was opened with. Its hold is released, and its writer closed, on every
+    /// exit through `release()` (and before the error path's shutdown).
+    var fileLogger: ProbeFileLogger?
 
     init(out: Output, stages: StageRecorder, scratch: URL) throws {
         self.out = out
@@ -1480,22 +1635,23 @@ final class HostRun {
         }
     }
 
-    func open() async throws {
+    /// `logger` is the host's logger; every mode but `logger-held` keeps the default.
+    func open(logger: any LogSink = DiscardingLogSink()) async throws {
         guard let session else { throw ProbeError("noSession") }
         let opened = try await RuntimeHost.open(
-            stateSession: session, logger: DiscardingLogSink(), startupAllowsMissing: false,
+            stateSession: session, logger: logger, startupAllowsMissing: false,
             startedAt: Date(timeIntervalSince1970: 1_700_000_000), terminalExit: {}, effects: fakes.effects()
         )
         host = opened
         weakHost = opened
     }
 
-    func compose(limits: RuntimeServiceLimits) throws {
+    func compose(limits: RuntimeServiceLimits) async throws {
         guard let host else { throw ProbeError("noHost") }
-        clients = try host.makeInMemoryControlClient(
-            limits: limits, clientFrameLimits: try ControlFrameLimits(maxFrameBytes: CandidateProfile.maxReplyBytes),
-            wireBudgetCap: .seconds(30)
-        )
+        let profile = try RuntimeServiceProfile.inProcessApp()
+        // Keep independent codec sizing: a changed shipping term must not silently replace the measured candidate.
+        guard profile.limits == limits else { throw ProbeError("shippingProfileMismatch") }
+        clients = try await host.makeInMemoryControlClient(profile: profile)
     }
 
     var control: any RuntimeClient { clients!.control }
@@ -1592,6 +1748,8 @@ final class HostRun {
     /// deallocation observed, the session dropped and the lease proven closed by a fresh acquisition; the scratch root is removed
     /// only when every proof agrees. Anything unconfirmed is pinned until process exit and reported.
     func release() async -> Bool {
+        // A held logger is released first, whatever happened, so no later flush or removal waits on it.
+        fileLogger?.destination.release()
         guard host != nil else {
             out.check(false, "release.hostPresent")
             return false
@@ -1667,6 +1825,11 @@ final class HostRun {
             out.emit(["record": "pinned", "reason": "host or lease not released; host kept until process exit; scratch kept"])
             return false
         }
+        if let fileLogger {
+            // Its descriptor is closed before the root's directory goes; the hold must have ended by release, never by its safety bound.
+            fileLogger.closeWriter()
+            out.check(!fileLogger.destination.safetyExpired, "release.loggerHoldEndedByRelease")
+        }
         do {
             try FileManager.default.removeItem(at: scratch)
             out.check(true, "release.scratchRemoved")
@@ -1736,7 +1899,6 @@ func privateRequestFrameBytes(
 
 // MARK: - Modes
 
-@MainActor
 func emitProfile(_ out: Output) -> CandidateBuild? {
     let build: CandidateBuild
     do {
@@ -1828,7 +1990,7 @@ func runFlow(_ run: HostRun, limits: RuntimeServiceLimits, fixture: Fixture) asy
     try await run.open()
     stages.stage("host-opened", ["openMS": elapsedMS(since: start)].merging(run.fakes.files.counters) { $1 })
 
-    try run.compose(limits: limits)
+    try await run.compose(limits: limits)
     let (snapshot, snapshotMS) = try await run.readSnapshot()
     run.incarnation = snapshot.stamp.incarnation
     stages.stage("clients-composed", ["firstSnapshotMS": snapshotMS])
@@ -2035,7 +2197,7 @@ func runLifetime(_ run: HostRun, limits: RuntimeServiceLimits, depth: Int) async
     try AppPreferencesPersistence.save(makeSmallPreferences(), in: run.environment)
     try await run.open()
     if depth >= 1 {
-        try run.compose(limits: limits)
+        try await run.compose(limits: limits)
         run.incarnation = try await run.readSnapshot().0.stamp.incarnation
     }
     var observed: PrivateEditorObservation?
@@ -2131,6 +2293,34 @@ final class WorkerState: @unchecked Sendable {
     }
 }
 
+/// PROBE-ONLY owner hold: one `RuntimeActor` job that sleeps `microseconds` and returns, so no owner round can claim until it ends.
+/// It is bounded and self-ending, and it blocks one cooperative-pool thread for that time, which is why these modes are excluded from
+/// a strict-pool run. The product never blocks its owner. `state` is in flight from the job's first step and finished at its last.
+@RuntimeActor
+func holdOwner(microseconds: useconds_t, state: WorkerState) {
+    state.set(inFlight: true)
+    usleep(microseconds)
+    state.finish()
+}
+
+/// Starts `holdOwner` and returns once the owner is held, so callers spawned afterwards start while the owner is held. The caller awaits
+/// the task for the hold's end, and reads `state.snapshot.finished` to show the hold still stood after it spawned its callers. That flag
+/// marks the spawn only; it does not prove each exchange reached the transport during the hold. The overlap is read from each mode's
+/// outputs (the lane-fill flags, the result labels), and a hold that ended before its case marks the run inconclusive.
+@MainActor
+func ownerHeld(microseconds: useconds_t) async throws -> (task: Task<Void, Never>, state: WorkerState) {
+    let state = WorkerState()
+    let task = Task.detached { await holdOwner(microseconds: microseconds, state: state) }
+    guard try await waitUntil(seconds: 5, { state.snapshot.inFlight }) else { throw ProbeError("ownerHoldNotEntered") }
+    return (task, state)
+}
+
+/// The host's runtime proxy fact, read in one owner turn; only the Bool crosses back.
+@RuntimeActor
+func hostProxyIsUp(_ host: RuntimeHost) -> Bool {
+    host.runtimeState().proxyIsUp
+}
+
 /// Large private work: alternating reads and frozen save-only updates of the escape maximum (about 7.4 MB per frame).
 func largePrivateWork(
     _ editor: PrivateEditorClient, control: any RuntimeClient, incarnation: ControlHostIncarnation, config: ProxyConfig,
@@ -2171,15 +2361,21 @@ extension HostRun {
         return try await openRunning(limits: limits, config: makeValidMaximumConfig(port: port, auditPrefix: scratch.path + "/audit"))
     }
 
-    /// Opens the actual host over `config`, composes the clients and Starts the proxy through a private update.
-    func openRunning(limits: RuntimeServiceLimits, config: ProxyConfig) async throws -> (config: ProxyConfig, port: Int) {
+    /// Opens the actual host over `config`, composes the clients and Starts the proxy through a private update. `logger`, when given,
+    /// builds the host's logger from the held session; otherwise the host logs to `DiscardingLogSink`.
+    func openRunning(limits: RuntimeServiceLimits, config: ProxyConfig,
+                     logger: ((StateRootSession) -> any LogSink)? = nil) async throws -> (config: ProxyConfig, port: Int) {
         let port = config.proxy.port
         try acquire()
         try ProxyConfigPersistence.save(config, in: environment)
         try PlatformConfigPersistence.save(makePlatform(), in: environment)
         try AppPreferencesPersistence.save(makeSmallPreferences(), in: environment)
-        try await open()
-        try compose(limits: limits)
+        if let logger, let session {
+            try await open(logger: logger(session))
+        } else {
+            try await open()
+        }
+        try await compose(limits: limits)
         incarnation = try await readSnapshot().0.stamp.incarnation
         let observed = try await read().0
         let start = ContinuousClock.now
@@ -2522,8 +2718,116 @@ func runHeld(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
     try await run.plainQuit()
 }
 
-/// cancel: lost waits and a cancelled caller, with the actual main actor held so the owner round cannot claim; then physical
-/// cleanup is evidenced by when the composition's one private transfer accepts the next exchange.
+/// logger-held: the host's own logger drain, held at its file's open. The host logs through the probe-local file logger, which writes the
+/// held root's own log file under the authoritative app-log guard. With the small fixture's real loopback listener running, the logger
+/// gets a fresh writer and the next line's open is held (positive witness). The host's flush is then started; once the logger records the
+/// host's drain call, status and one proxy Stop are measured while that drain is still in flight. The drain ends at the host's own bounded
+/// wait: that wait is deliberate and is reported apart, never as overhead. Released, every handed line is written with nothing dropped,
+/// the typed host fact reaches the owned events file, and the artifact confirmation is checked on its own.
+@MainActor
+func runLoggerHeld(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
+    let out = run.out
+    let environment = run.environment
+    let port = try reserveLoopbackPort()
+    var made: ProbeFileLogger?
+    _ = try await run.openRunning(limits: limits, config: makeSmallConfig(port: port)) { session in
+        let logger = ProbeFileLogger(url: environment.logFile, destination: HeldLogDestination(
+            authoritative: diagnosticDestinationGuard(for: .appLog, in: environment, writerLeaseFile: session.writerLeaseFile)
+        ))
+        made = logger
+        return logger
+    }
+    guard let logger = made else { throw ProbeError("noFileLogger") }
+    run.fileLogger = logger
+    let (running, _) = try await run.readSnapshot()
+    out.check(running.proxyState == .running && loopbackAccepts(port), "logger.listenerAccepts")
+    try await run.statusSamples(20, condition: "logger-idle")
+    run.stages.stage("logger-running", logger.counters)
+
+    // The hold: a fresh writer, whose open the next line reaches and waits in.
+    logger.destination.arm()
+    let first = logger.freshWriter()
+    out.emit(["record": "logger-first-writer", "writtenRecords": first.statistics.writtenRecords,
+              "droppedRecords": first.statistics.droppedRecords, "failedRecords": first.statistics.failedRecords,
+              "pendingRecords": first.statistics.pendingRecords, "handedLines": first.lines, "handedBytes": first.bytes])
+    out.check(first.statistics.writtenRecords == UInt64(first.lines) && first.statistics.pendingRecords == 0
+              && first.statistics.droppedRecords == 0 && first.statistics.failedRecords == 0, "logger.firstWriterWroteEveryLine")
+    logger.log(.notice, "probe logger hold witness")
+    let reached = try await waitUntil(seconds: 5) { logger.destination.isHolding }
+    out.check(reached && logger.destination.reachedCount == 1, "logger.holdReached")
+    run.stages.stage("logger-held-reached", logger.counters)
+
+    // The host's own flush: nothing in its artifacts is held; its logger drain is.
+    guard let host = run.host else { throw ProbeError("noHost") }
+    let flushStart = ContinuousClock.now
+    let flush = Task { @RuntimeActor in await host.flushEvents() }
+    let entered = try await waitUntil(seconds: 10) { logger.drains.calls >= 1 }
+    out.check(entered, "logger.hostDrainEntered")
+    let artifactPhaseMS = logger.drains.entered.map { milliseconds(flushStart.duration(to: $0)) } ?? -1
+    try await run.statusSamples(20, condition: "logger-drain-held")
+    let stop = try await run.measuredStop(.proxy, condition: "logger-drain-held")
+    let listenerClosed = !loopbackAccepts(port)
+    let cleared = !run.fakes.machine.service("Wi-Fi").webProxy.enabled
+    let (afterStop, _) = try await run.readSnapshot()
+    let stillHeld = logger.drains.inFlight && logger.destination.isHolding
+    out.emit(["record": "logger-held-stop", "outcome": outcomeLabel(stop), "listenerClosed": listenerClosed, "systemProxyCleared": cleared,
+              "snapshotStopped": afterStop.proxyState != .running, "drainStillInFlightAfterMeasurements": stillHeld])
+    out.check(outcomeLabel(stop) == "completed.stop" && listenerClosed && cleared && afterStop.proxyState != .running,
+              "logger.stopPhysicallyCompleteWhileHeld")
+    out.check(stillHeld, "logger.measuredInsideTheHeldDrain")
+    run.stages.stage("logger-drain-held", logger.counters)
+
+    let report = await flush.value
+    let flushTotalMS = elapsedMS(since: flushStart)
+    let drain = logger.lastDrainRecord
+    out.emit(["record": "logger-held-drain", "drainOutcome": drain?.outcome.rawValue ?? "none", "requestedWaitMS": drain?.requestedMS ?? -1,
+              "drainElapsedMS": drain?.elapsedMS ?? -1, "drainWaitIsDeliberate": true, "artifactPhaseMS": artifactPhaseMS,
+              "flushTotalMS": flushTotalMS, "reportLogger": report.logger.rawValue, "artifactsAllConfirmed": report.allConfirmed])
+    out.check(report.logger == .timedOut && drain?.outcome == .timedOut, "logger.drainEndedAtItsBoundedWait")
+    out.check(report.allConfirmed, "logger.artifactConfirmationApart")
+    run.stages.stage("logger-drain-ended", logger.counters)
+
+    // Release: the held open proceeds and the writer drains what it admitted.
+    let releaseStart = ContinuousClock.now
+    logger.destination.release()
+    let flushed = logger.flush(timeout: 10)
+    let releaseToDrainedMS = elapsedMS(since: releaseStart)
+    let (statistics, lines, bytes) = logger.consistentCounters
+    var fileBytes = -1
+    do {
+        fileBytes = try FileManager.default.attributesOfItem(atPath: environment.logFile.path)[.size] as? Int ?? -1
+    } catch {
+        out.emit(["record": "error", "error": "probe.logFileUnreadable"])
+    }
+    let admittedBytes = first.bytes + bytes
+    out.emit(["record": "logger-release", "flushed": flushed, "releaseToDrainedMS": releaseToDrainedMS, "fileBytes": fileBytes,
+              "handedBytesBothWriters": admittedBytes, "pendingBytes": statistics.pendingBytes,
+              "gateRefusals": logger.gateEvents.events.count, "holdSafetyExpired": logger.destination.safetyExpired])
+    out.check(flushed && statistics.droppedRecords == 0 && statistics.failedRecords == 0
+              && statistics.writtenRecords + UInt64(statistics.pendingRecords) == UInt64(lines), "logger.everyHandedLineWrittenOrPending")
+    out.check(fileBytes <= admittedBytes && fileBytes >= admittedBytes - statistics.pendingBytes, "logger.fileHoldsTheWrittenBytes")
+    out.check(logger.gateEvents.events.isEmpty, "logger.authoritativeGuardAdmitted")
+    run.stages.stage("logger-released", logger.counters)
+
+    // The next host flush drains the logger, and persists the typed fact the held drain recorded.
+    let confirm = await host.flushEvents()
+    out.check(confirm.logger == .drained && confirm.allConfirmed, "logger.nextHostDrainDrained")
+    let decoder = CanonicalJSON.decoder()
+    let rows = try String(contentsOf: environment.eventsFile, encoding: .utf8).split(separator: "\n")
+    let expected = RuntimeEventPayload.lifecycle(.logFlushUnconfirmed(LifecycleLogFlushUnconfirmed(source: .host, outcome: .timedOut)))
+    var facts = 0
+    for row in rows {
+        if try decoder.decode(RuntimeEvent.self, from: Data(row.utf8)).typed == expected { facts += 1 }
+    }
+    out.emit(["record": "logger-typed-fact", "hostTimedOutFacts": facts, "eventRows": rows.count])
+    out.check(facts == 1, "logger.typedHostFactPersistedOnce")
+    run.stages.stage("logger-done", logger.counters)
+    try await run.plainQuit()
+}
+
+/// cancel: lost waits and a cancelled caller, with the owner (`RuntimeActor`) held by the probe-only `holdOwner` so the owner round
+/// cannot claim; then physical cleanup is evidenced by when the composition's one private transfer accepts the next exchange. Each
+/// hold is entered before its caller is spawned, and each record says whether it still stood after the spawn (or the cancel).
 @MainActor
 func runCancel(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
     let out = run.out
@@ -2559,35 +2863,45 @@ func runCancel(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
     }
 
     // (a) A read whose deadline ends while the owner cannot claim.
+    let readHold = try await ownerHeld(microseconds: 150_000)
     let lostRead = Task.detached { () -> String in
         do {
             _ = try await privateObservation(editor, incarnation: incarnation, deadline: .after(.milliseconds(20), from: .now))
             return "observation"
         } catch { return errorLabel(error) }
     }
-    usleep(150_000)
+    let readHoldStood = !readHold.state.snapshot.finished
+    await readHold.task.value
     let lostReadResult = await lostRead.value
     var afterLostRead = try await transferReleaseBounds()
     afterLostRead["record"] = "cancel"
-    afterLostRead["case"] = "read-deadline-main-held"
+    afterLostRead["case"] = "read-deadline-owner-held"
     afterLostRead["result"] = lostReadResult
+    afterLostRead["ownerHold"] = "RuntimeActor probe-only 150 ms"
+    afterLostRead["ownerHeldAfterCallerSpawned"] = readHoldStood
     out.emit(afterLostRead)
 
-    // (b) A read whose caller task is cancelled while the owner cannot claim.
+    // (b) A read whose caller task is cancelled while the owner cannot claim: one 120 ms hold, started before the read is spawned; the
+    // main actor cancels after a 20 ms wait. `ownerHeldAfterCancel` marks only that the hold still stood at the cancel, not that the send
+    // happened inside it; the overlap is read from the result label, and a hold that ended first marks the run inconclusive.
+    let cancelHold = try await ownerHeld(microseconds: 120_000)
     let cancelled = Task.detached { () -> String in
         do {
             _ = try await privateObservation(editor, incarnation: incarnation, deadline: .after(.seconds(30), from: .now))
             return "observation"
         } catch { return errorLabel(error) }
     }
-    usleep(20_000)
+    try await Task.sleep(for: .milliseconds(20))
     cancelled.cancel()
-    usleep(100_000)
+    let cancelHoldStood = !cancelHold.state.snapshot.finished
+    await cancelHold.task.value
     let cancelledResult = await cancelled.value
     var afterCancel = try await transferReleaseBounds()
     afterCancel["record"] = "cancel"
-    afterCancel["case"] = "read-cancelled-main-held"
+    afterCancel["case"] = "read-cancelled-owner-held"
     afterCancel["result"] = cancelledResult
+    afterCancel["ownerHold"] = "RuntimeActor probe-only 120 ms"
+    afterCancel["ownerHeldAfterCancel"] = cancelHoldStood
     out.emit(afterCancel)
 
     // (c) An update whose deadline ends while the owner cannot claim; recovered by request lookup, never resent.
@@ -2595,6 +2909,7 @@ func runCancel(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
     var edited = config
     edited.logging.verbose = true
     let requestID = ControlRequestID(rawValue: UUID())
+    let updateHold = try await ownerHeld(microseconds: 150_000)
     let lostUpdate = Task.detached { () -> String in
         do {
             let admission = try await privateSubmit(editor, incarnation: incarnation, config: edited, platform: platform,
@@ -2603,7 +2918,8 @@ func runCancel(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
             return admissionLabel(admission)
         } catch { return errorLabel(error) }
     }
-    usleep(150_000)
+    let updateHoldStood = !updateHold.state.snapshot.finished
+    await updateHold.task.value
     let lostUpdateResult = await lostUpdate.value
     var afterUpdate = try await transferReleaseBounds()
     let lookup = try await control.lookupAdmission(of: requestID, expectedIncarnation: incarnation, deadline: run.deadline())
@@ -2616,13 +2932,17 @@ func runCancel(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
         lookupLabel = "unknown.\(reason.rawValue)"
     }
     afterUpdate["record"] = "cancel"
-    afterUpdate["case"] = "update-deadline-main-held"
+    afterUpdate["case"] = "update-deadline-owner-held"
     afterUpdate["result"] = lostUpdateResult
     afterUpdate["lookup"] = lookupLabel
     afterUpdate["recoveredOutcome"] = recovered
+    afterUpdate["ownerHold"] = "RuntimeActor probe-only 150 ms"
+    afterUpdate["ownerHeldAfterCallerSpawned"] = updateHoldStood
     out.emit(afterUpdate)
     let accepted = [afterLostRead, afterCancel, afterUpdate].allSatisfy { ($0["acceptedAttemptEndMS"] as? Double ?? -1) >= 0 }
     out.check(accepted, "cancel.transferAcceptedAgainAfterEachLostWait")
+    // A hold that ended before its caller was spawned (or its cancel issued) did not witness an owner that could not claim.
+    if !(readHoldStood && cancelHoldStood && updateHoldStood) { out.inconclusive("cancel.ownerHoldEndedBeforeItsCase") }
     // A fresh update after the lost one is admitted: the frozen-input slot was released.
     let fresh = try await run.read().0
     let start = ContinuousClock.now
@@ -2754,7 +3074,7 @@ func runClientQuit(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
             budget: try ControlWireBudget(60_000), preferencesBaseline: baselines.preferences
         )
     }
-    let total: Duration = .seconds(30)
+    let total: Duration = .seconds(10) // Decision 0039: one total, also pinned by the app composition tests.
     let quitStart = ContinuousClock.now
     var quitting: Task<RuntimeClientQuitResult, Never>? = Task.detached {
         await RuntimeClientQuit.quit(
@@ -2840,7 +3160,8 @@ func runClientQuit(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
     // Physical cleanup, read from the fakes and the loopback port, not from the routine's answer.
     let listenerClosed = !loopbackAccepts(port)
     let systemProxyCleared = !run.fakes.machine.service("Wi-Fi").webProxy.enabled
-    let hostProxyDown = run.host?.runtimeState().proxyIsUp == false
+    var hostProxyDown = false
+    if let host = run.host { hostProxyDown = await hostProxyIsUp(host) == false }
     routine["listenerClosed"] = listenerClosed
     routine["systemProxyCleared"] = systemProxyCleared
     routine["hostRuntimeProxyDown"] = hostProxyDown
@@ -2878,7 +3199,6 @@ func runClientQuit(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
 /// codec-bounds: no host. The actual codecs over the widest metadata the types admit, as separate counts from the measured
 /// frames (whose versions are small store versions, not `UInt64.max`); then every final ordinary request, every settled outcome and
 /// every other reply and stream frame at its widest, each checked against the candidate's caps by the codec.
-@MainActor
 func runCodecBounds(_ out: Output, build: CandidateBuild) throws {
     let namespace = PrivateBaselineNamespace(rawValue: syntheticUUID(92, 1))
     let incarnation = ControlHostIncarnation(rawValue: syntheticUUID(91, 1))
@@ -3160,7 +3480,6 @@ func packConnectionRows(_ rows: [ControlConnectionRow], cap: Int) throws
 /// profile-sizing: the candidate's constructor-bound terms, the widest snapshot and its baseline frame, every collection row kind, the
 /// constructor's encoded custody budget for several row bounds, and 1,024-row pages. Nothing here is allocated at those budgets: they are
 /// encoded-byte reservations the initializer computes, not RSS.
-@MainActor
 func runProfileSizing(_ out: Output, build: CandidateBuild) throws {
     let replyCap = CandidateProfile.maxReplyBytes
     let terms = build.terms
@@ -3471,7 +3790,7 @@ func waitUntil(seconds: Int, _ condition: () -> Bool) async throws -> Bool {
 /// The validator-widest configuration is Started by the saved-value Start; four subscribers fill the stream lane; one wide private update
 /// holds the admitted input in its runtime-file replacement (`StateFileAccessing`); one preflight pass holds its read-only helper read
 /// (the fake `HelperLifecycleManaging` seam); preflight joiners fill the ordinary pending capacity until the service refuses one; a
-/// main-held window fills the ordinary and read lanes while a Stop is sent. Status and a proxy Stop are measured under every hold. The
+/// window with the owner held (`holdOwner`, probe-only) fills the ordinary and read lanes while a Stop is sent. Status and a proxy Stop are measured under every hold. The
 /// holds are then released one at a time, quiescence is checked by fresh commands, the busy helper read and the login-item save are
 /// exercised, and the host quits by the hand-composed Quit (not `RuntimeClientQuit`). Every subscriber must have received actual runtime
 /// events, at least one of a typed lifecycle or configuration-workflow family, from those real actions (the probe injects none), and
@@ -3502,7 +3821,7 @@ func runPressure(_ run: HostRun, build: CandidateBuild) async throws {
     try PlatformConfigPersistence.save(platform, in: run.environment)
     try AppPreferencesPersistence.save(makeSmallPreferences(), in: run.environment)
     try await run.open()
-    try run.compose(limits: build.limits)
+    try await run.compose(limits: build.limits)
     let (opened, _) = try await run.readSnapshot()
     run.incarnation = opened.stamp.incarnation
     guard let incarnation = run.incarnation, let modules = opened.stamp.modules else { throw ProbeError("noModuleRevisions") }
@@ -3558,10 +3877,13 @@ func runPressure(_ run: HostRun, build: CandidateBuild) async throws {
     out.check(fifth != "frame.baseline", "pressure.subscriberLimitRefusesAFifth")
 
     // Each collection read through the actual `RuntimeClient.readPage` on this real host. Its lists stay far inside the candidate's
-    // bounds, so this shows the actual answers only. The service's over-bound answer (`retention_budget_exceeded` with the exact
+    // bounds: the probe sends no proxy request, and its one connection to the listener is the connect-only liveness check
+    // (`loopbackAccepts`) in the saved-start check above, closed before these pages without sending anything, so an active-connection
+    // total of 1 here would be that connect, not a collection witness. This shows the actual answers only, never a full capture. The service's over-bound answer (`retention_budget_exceeded` with the exact
     // total) is NOT witnessed: these fixtures cannot exceed the row or byte bound without network dispatch or many sockets.
     var pagesAnswered = true
-    var pageRecord: [String: Any] = ["record": "real-host-pages",
+    var pageRecord: [String: Any] = ["record": "real-host-pages", "proxyRequestsSentByProbe": 0,
+                                     "connectOnlyLivenessCheckBeforePages": true, "fullCaptureWitness": false,
                                      "overBoundWitness": "untested; real-host fixtures cannot exceed the bounds without network dispatch or many sockets"]
     for collection in ControlCollectionKind.allCases {
         let key = collection.rawValue
@@ -3646,9 +3968,11 @@ func runPressure(_ run: HostRun, build: CandidateBuild) async throws {
     out.emit(["record": "pressure-private", "readDuringHold": readDuringHold, "secondUpdateDuringHold": updateDuringHold])
     stages.stage("pressure-private-tried", ["probeHeld": "fixture,prior-draft,subscriber-tallies"])
 
-    // The lane window: the main thread sleeps, so the owner cannot claim and each exchange keeps its lane reservation. Twice each lane's
-    // capacity of reads and ordinary commands is sent, then one Stop. The Stop's own lane must not refuse it.
+    // The lane window: `RuntimeActor` is held by the probe-only `holdOwner`, so the owner cannot claim and each exchange keeps its lane
+    // reservation. Twice each lane's capacity of reads and ordinary commands is sent, then one Stop. The Stop's own lane must not refuse it.
+    // The hold is entered before any exchange is spawned; the main actor stays free throughout.
     let lanes = LaneTally()
+    let laneHold = try await ownerHeld(microseconds: 100_000)
     var burst: [Task<Void, Never>] = []
     for _ in 0..<(2 * CandidateProfile.laneCapacity) {
         burst.append(Task.detached {
@@ -3672,11 +3996,13 @@ func runPressure(_ run: HostRun, build: CandidateBuild) async throws {
                                                            expectedIncarnation: incarnation, deadline: .after(.seconds(10), from: .now)))
         } catch { return errorLabel(error) }
     }
-    usleep(100_000)
+    let laneHoldStood = !laneHold.state.snapshot.finished
+    await laneHold.task.value
     for task in burst { await task.value }
     let stopLabel = await stopInWindow.value
     let counts = lanes.all
-    var laneRecord: [String: Any] = ["record": "lane-window", "method": "main thread slept 100 ms; owner could not claim",
+    var laneRecord: [String: Any] = ["record": "lane-window", "method": "RuntimeActor held 100 ms by a probe-only job; owner could not claim",
+                                     "ownerHeldAfterCallersSpawned": laneHoldStood,
                                      "laneCapacityEach": CandidateProfile.laneCapacity, "requestsPerLane": 2 * CandidateProfile.laneCapacity,
                                      "stopInWindow": stopLabel,
                                      "readLaneFillObserved": counts["read:client.notSent.transportBusy", default: 0] > 0,
@@ -3684,6 +4010,7 @@ func runPressure(_ run: HostRun, build: CandidateBuild) async throws {
     for (key, count) in counts { laneRecord["count " + key] = count }
     out.emit(laneRecord)
     out.check(stopLabel == "accepted" || stopLabel == "joined", "pressure.stopNotRefusedWhileOrdinaryAndReadLanesFull")
+    if !laneHoldStood { out.inconclusive("pressure.ownerHoldEndedBeforeCallersSpawned") }
     stages.stage("pressure-lane-window", ["probeHeld": "fixture,prior-draft,subscriber-tallies"])
 
     // A proxy Stop while the private input, the helper read, the pending capacity and the stream lane are all held.
@@ -3816,7 +4143,7 @@ func runPressure(_ run: HostRun, build: CandidateBuild) async throws {
 }
 
 let latencyModes = ["contention", "contention-encode", "contention-store", "held", "cancel", "client-quit-widest", "codec-bounds",
-                    "profile-sizing", "pressure-candidate"]
+                    "profile-sizing", "pressure-candidate", "logger-held"]
 
 let flowModes = ["small", "realistic-valid-64", "realistic-valid-128", "validator-widest", "escape-maximum", "padded-8mib", "repeat"]
 
@@ -3880,7 +4207,9 @@ struct ProbeMain {
         stages.stage("baseline")
         out.emit(["record": "measurement-method", "samplerEnabled": sampling, "samplerIntervalMS": 1,
                   "samplerTakesMallocZoneLocks": sampling, "outcomePollIntervalMS": 1, "workerOutcomePollIntervalMS": 2,
-                  "statusSampleIntervalMS": 2, "clientAndHostShareOneProcess": true, "profile": CandidateProfile.label])
+                  "statusSampleIntervalMS": 2, "clientAndHostShareOneProcess": true, "profile": CandidateProfile.label,
+                  "ownerIsolation": "RuntimeActor", "driverIsolation": "MainActor",
+                  "ownerHeldWindows": "cancel and pressure-candidate lane window only; probe-only bounded RuntimeActor hold"])
         guard let build = emitProfile(out) else {
             finish(out, released: false)
         }
@@ -3920,6 +4249,8 @@ struct ProbeMain {
                     try await runClientQuit(run, limits: limits)
                 } else if mode == "pressure-candidate" {
                     try await runPressure(run, build: build)
+                } else if mode == "logger-held" {
+                    try await runLoggerHeld(run, limits: limits)
                 } else {
                     try await runFlow(run, limits: limits, fixture: try makeFixture(mode, scratch: scratch))
                 }
@@ -3927,6 +4258,8 @@ struct ProbeMain {
                 out.emit(["record": "error", "error": errorLabel(error)])
                 out.check(false, "mode.completed")
                 if run.host != nil {
+                    // A held logger is released first, so the shutdown's own flush does not wait on it.
+                    run.fileLogger?.destination.release()
                     // Join the host's work before anything is released: a quit, then the release proofs.
                     await run.host?.shutdown()
                 }

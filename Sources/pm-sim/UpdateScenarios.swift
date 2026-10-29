@@ -75,7 +75,7 @@ enum UpdateScenarios {
         let began = Date()
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("pm-sim-update-\(UUID().uuidString)", isDirectory: true)
-        ScenarioCleanup.register {
+        await ScenarioCleanup.register {
             do {
                 try FileManager.default.removeItem(at: directory)
             } catch CocoaError.fileNoSuchFile {

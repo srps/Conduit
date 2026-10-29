@@ -265,8 +265,9 @@ extension ConfigurationWorkflowRefusal {
 }
 
 extension ConfigurationWorkflowWrite {
-    /// The closed outcome and the closed cause that explains it. Never a raw error.
-    var detail: String {
+    /// The closed outcome and the closed cause that explains it. Never a raw error. The one spelling of a file's write: the app's Settings
+    /// notices about the same write use it too.
+    package var detail: String {
         switch self {
         case .persisted(let reportedError): "outcome=persisted reported_error=\(reportedError)"
         case .unchanged: "outcome=unchanged"

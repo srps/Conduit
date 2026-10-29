@@ -270,9 +270,10 @@ package struct RuntimeServiceLimits: Sendable, Equatable {
               let perOperation = Self.checkedSum([operationRecord, maxRequestBytes]),
               let operationBytes = Self.checkedProduct(operations, perOperation),
               // The collections term has three encoded-byte parts. Every retained row set is counted once, in the retained total. The
-              // metadata of every proof the bounds allow is charged. One per-capture bound is charged as staging: the owner builds a new
-              // capture before the ledger releases older rows, so a capture and the retained rows can coexist in one owner turn. This is
-              // an encoded-byte bound on that transient, not a claim about RSS, encoder scratch, or optimizer lifetimes.
+              // metadata of every proof the bounds allow is charged. One per-capture bound is charged as staging: the one shared capture
+              // flight builds a new capture off the owner before the ledger releases older rows, so that capture and the retained rows can
+              // coexist for the flight's life. One flight across all kinds keeps it to one capture. This is an encoded-byte bound on that
+              // transient, not a claim about RSS, the flight's frozen snapshot, encoder scratch, or optimizer lifetimes.
               let proofSlots = Self.checkedProduct(collectionKinds, collectionProofCapacityPerKind),
               let proofTotal = Self.checkedProduct(proofSlots, proofBytes),
               let collectionTotal = Self.checkedSum([collectionRetainedByteCapacity, proofTotal, collectionByteCapacity]),

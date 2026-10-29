@@ -432,10 +432,9 @@ final class DiscardingConnectionAuditSinkTests: XCTestCase {
 /// reproduce the "open then close" lifecycle the wire-level paths
 /// produce, and assert the orchestrator's audit funnel found the
 /// closing connection's metadata and produced a faithful record.
-@MainActor
 final class ProxyOrchestratorAuditEmissionTests: XCTestCase {
 
-    func testConnectionCloseEmitsAuditRecord() async throws {
+    @RuntimeActor func testConnectionCloseEmitsAuditRecord() async throws {
         let auditSink = RecordingConnectionAuditSink()
         let orchestrator = ProxyOrchestrator(
             config: ProxyConfig.testFixture(),
@@ -475,7 +474,7 @@ final class ProxyOrchestratorAuditEmissionTests: XCTestCase {
         XCTAssertEqual(r.outcome, .success)
     }
 
-    func testCloseForUnknownConnectionEmitsNoRecord() {
+    @RuntimeActor func testCloseForUnknownConnectionEmitsNoRecord() async {
         let auditSink = RecordingConnectionAuditSink()
         let orchestrator = ProxyOrchestrator(
             config: ProxyConfig.testFixture(),
@@ -489,7 +488,7 @@ final class ProxyOrchestratorAuditEmissionTests: XCTestCase {
                       "Unknown-ID close must not synthesize a placeholder audit record")
     }
 
-    func testAuditUsesPerConnectionAuthMethodNotGlobalLastOutcome() async throws {
+    @RuntimeActor func testAuditUsesPerConnectionAuthMethodNotGlobalLastOutcome() async throws {
         let auditSink = RecordingConnectionAuditSink()
         let orchestrator = ProxyOrchestrator(
             config: ProxyConfig.testFixture(),
@@ -516,7 +515,7 @@ final class ProxyOrchestratorAuditEmissionTests: XCTestCase {
         XCTAssertEqual(auditSink.records().first?.authMethod, "Negotiate")
     }
 
-    func testHTTPSPortSurfacesAsHTTPSScheme() {
+    @RuntimeActor func testHTTPSPortSurfacesAsHTTPSScheme() async {
         let auditSink = RecordingConnectionAuditSink()
         let orchestrator = ProxyOrchestrator(
             config: ProxyConfig.testFixture(),
@@ -538,7 +537,7 @@ final class ProxyOrchestratorAuditEmissionTests: XCTestCase {
                        "HTTPS-port destination on a non-tunnel connection should surface as scheme=.https")
     }
 
-    func testSchemeDetectionUsesPortSuffixNotSubstring() {
+    @RuntimeActor func testSchemeDetectionUsesPortSuffixNotSubstring() async {
         // `info.destination.contains(":443")`
         // misclassified `:4431` as HTTPS and missed `:8443` as HTTP.
         // The fix uses `hasSuffix(":443")`. Pin the corner cases here.
@@ -592,7 +591,7 @@ final class ProxyOrchestratorAuditEmissionTests: XCTestCase {
                        ":443 (standard) must surface as HTTPS")
     }
 
-    func testPlainHTTPMethodSurfacesAsHTTPScheme() {
+    @RuntimeActor func testPlainHTTPMethodSurfacesAsHTTPScheme() async {
         let auditSink = RecordingConnectionAuditSink()
         let orchestrator = ProxyOrchestrator(
             config: ProxyConfig.testFixture(),
@@ -613,7 +612,7 @@ final class ProxyOrchestratorAuditEmissionTests: XCTestCase {
         XCTAssertEqual(auditSink.records().first?.scheme, .http)
     }
 
-    func testSOCKS5MethodClassifiedAsSOCKS5Scheme() {
+    @RuntimeActor func testSOCKS5MethodClassifiedAsSOCKS5Scheme() async {
         let auditSink = RecordingConnectionAuditSink()
         let orchestrator = ProxyOrchestrator(
             config: ProxyConfig.testFixture(),
@@ -635,7 +634,7 @@ final class ProxyOrchestratorAuditEmissionTests: XCTestCase {
                        "SOCKS5 method must surface as scheme=.socks5, not .connect")
     }
 
-    func testDefaultAuditSinkIsDiscarding() {
+    @RuntimeActor func testDefaultAuditSinkIsDiscarding() async {
         // No `auditSink:` in init → DiscardingConnectionAuditSink → no
         // crash, no records produced (proven by simply not blowing up).
         let orchestrator = ProxyOrchestrator(

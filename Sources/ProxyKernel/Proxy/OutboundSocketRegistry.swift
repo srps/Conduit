@@ -175,8 +175,8 @@ package final class OutboundSocketRegistry: @unchecked Sendable {
 
     /// Every tracked socket whose path is gone, or with `addressesOnly`
     /// whose local address is gone; nothing is closed yet. Checks every
-    /// socket against the machine, so callers run it off the main actor and
-    /// the event loops.
+    /// socket against the machine, so callers run it off the owner, the
+    /// concurrency pool and the event loops.
     package func findStranded(addressesOnly: Bool = false) -> Stranded {
         let tracked = lock.withLock { entries.map { (key: $0.key, entry: $0.value) } }
         var checked: [(key: ObjectIdentifier, entry: Entry)] = []

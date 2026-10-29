@@ -8,11 +8,14 @@ with its [verification checkpoint](verification-runtime-workflow-2026-10-26.md).
 Actual host/client integration is merged in PR254; the
 [native-client completion](verification-runtime-native-client-2026-10-27.md)
 records saved commands, helper/credential/wake integration, actual event delivery
-and shutdown, plus explicit reload and DNS health. AppState activation remains open. Reply/stream frames are selected
-at 64 KiB in 0030. The measured candidate profile remains experimental; select its
-remaining values after complete actual-host integration checks. Claude Code
-and Codex source-review findings are recorded below; Claude used the owner's
-claude.ai subscription.
+and shutdown, plus explicit reload and DNS health. The single AppState activation
+is implemented on the current branch and undergoing verification; it is not merged
+or released. The app composes one shared host and uses framed ordinary/private
+clients; its replaced lifecycle, reconciler and direct file-writer paths are removed.
+Ordinary frames use the selected 64 KiB cap (0030), collections use the selected
+4 MiB capture / 8 MiB host-retained profile (0038), and total app Quit uses ten
+seconds (0039). The [whole-owner checkpoint](verification-runtime-actor-activation-2026-10-28.md) records subsequent RuntimeActor and native Dev checks; resource fairness is accepted; the test-maintenance workflow passes; hosted and applicable real-machine acceptance remain due. Claude Code and Codex source-review findings are recorded below;
+Claude used the owner's claude.ai subscription.
 
 ## Selected activation sequence
 
@@ -44,12 +47,12 @@ current isolation during convergence; moving the whole control cluster to
 RuntimeActor remains its own selected later step. Do not install an interim build
 or replace the serving app to test either option.
 
-## Why the current boundaries matter
+## Pre-activation boundaries that shaped the cut
 
-- AppState and RuntimeHost each construct an orchestrator today, in their separate
+- Before this cut, AppState and RuntimeHost each constructed an orchestrator in their separate
   app/daemon compositions. Adopting the host must result in **one instance in the
   app**, rather than instantiating both existing compositions together.
-- AppState proxy startup calls its DNS lifecycle and split-DNS repair. Kernel
+- The replaced AppState proxy startup called its DNS lifecycle and split-DNS repair. Kernel
   proxy startup itself does not start DNS. Kernel DNS startup/stop also owns the
   intercept listener, which must move with DNS.
 - DNS managers participate in recovery, retries/reapply and Quit cleanup. Their
@@ -74,7 +77,8 @@ One semantic store/workflow remains in ConduitRuntime, sibling to RuntimeHost.
 StateRootSession already retains its private lease. Adoption uses a narrow
 component-scoped replacement seam delegating to the existing verified physical
 primitive. That seam is now consumed by the store; its raw-plan/raw-lease
-constructor is removed. The shared host now consumes that store/workflow; AppState adoption remains open.
+constructor is removed. The shared host consumes that store/workflow. The current AppState activation
+uses that same owner; its full and native acceptance remain open.
 The lease stays private and no registry is added.
 The host consumes the exact verified immutable input. AppState keeps editor drafts,
 presentation, notifications and app administration.
@@ -86,8 +90,8 @@ internal driver, if selected, owns only its named remaining effects and has
 explicit deletion gates; it cannot become another intent or persistence owner.
 
 The selected save-before-apply, mixed-apply hold and Stop/Quit policies remain
-unchanged. Implementing them changes current AppState behavior: DNS enable today
-applies before its save. That ordering must change with explicit parity/policy
+unchanged. Implementing them changes current AppState behavior: the replaced DNS enable path
+applied before its save. That ordering must change with explicit parity/policy
 tests; this is not a wholly behavior-preserving activation.
 Stop fences before saving; Quit drains under one total budget without persisting
 a disable merely to exit. Started physical writes retain authority until they
@@ -198,4 +202,9 @@ harness/dev compositions and their instructions in the same switch.
 
 Compatibility differences are explicit: asynchronous Quit; host diagnostic files
 in the app state root; and launch overrides persisted before use rather than on a
-later unrelated save. No new schema or helper/v1 protocol break is required.
+later unrelated save. The selected frozen-input rule also becomes reachable
+from the app: enabling DNS while a proxy Start is applying can supersede that
+unfinished Start, clear its partial resources and require an explicit Start
+again. Report the typed input-replacement cause; never silently rebind or retry.
+The compatibility clarification and pending witness are recorded in 0037.
+No new schema or helper/v1 protocol break is required.

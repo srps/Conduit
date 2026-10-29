@@ -1,0 +1,111 @@
+{
+  "configuration": "production Release objects, fake effects, same-process actual host/client",
+  "logger_trials": [
+    {
+      "trial": "logger-held-nosampler-t1",
+      "statusP50MS": 0.243458,
+      "statusMaxMS": 0.266333,
+      "stopAdmissionMS": 0.266458,
+      "stopCompletionMS": 4.601334,
+      "drainElapsedMS": 2115.752542,
+      "requestedWaitMS": 1999.994834,
+      "loggerOutcome": "timed_out",
+      "artifactsAllConfirmed": true
+    },
+    {
+      "trial": "logger-held-nosampler-t2",
+      "statusP50MS": 0.327,
+      "statusMaxMS": 0.534333,
+      "stopAdmissionMS": 0.332084,
+      "stopCompletionMS": 7.573666,
+      "drainElapsedMS": 2093.851792,
+      "requestedWaitMS": 1999.995167,
+      "loggerOutcome": "timed_out",
+      "artifactsAllConfirmed": true
+    },
+    {
+      "trial": "logger-held-nosampler-t3",
+      "statusP50MS": 0.232083,
+      "statusMaxMS": 0.272625,
+      "stopAdmissionMS": 0.290333,
+      "stopCompletionMS": 2.557625,
+      "drainElapsedMS": 2056.632291,
+      "requestedWaitMS": 1999.996458,
+      "loggerOutcome": "timed_out",
+      "artifactsAllConfirmed": true
+    },
+    {
+      "trial": "logger-held-t1",
+      "statusP50MS": 0.262833,
+      "statusMaxMS": 0.3385,
+      "stopAdmissionMS": 0.730916,
+      "stopCompletionMS": 2.978041,
+      "drainElapsedMS": 2028.098167,
+      "requestedWaitMS": 1999.9945,
+      "loggerOutcome": "timed_out",
+      "artifactsAllConfirmed": true
+    },
+    {
+      "trial": "logger-held-t2",
+      "statusP50MS": 0.227625,
+      "statusMaxMS": 0.264542,
+      "stopAdmissionMS": 0.2505,
+      "stopCompletionMS": 4.585208,
+      "drainElapsedMS": 2067.128125,
+      "requestedWaitMS": 1999.996584,
+      "loggerOutcome": "timed_out",
+      "artifactsAllConfirmed": true
+    },
+    {
+      "trial": "logger-held-t3",
+      "statusP50MS": 0.262917,
+      "statusMaxMS": 0.307375,
+      "stopAdmissionMS": 0.275792,
+      "stopCompletionMS": 2.578959,
+      "drainElapsedMS": 2115.633,
+      "requestedWaitMS": 1999.995375,
+      "loggerOutcome": "timed_out",
+      "artifactsAllConfirmed": true
+    }
+  ],
+  "pre_actor_capacity_pressure_trials": [
+    {
+      "trial": 1,
+      "statusP50MS": 0.402792,
+      "statusMaxMS": 0.458625,
+      "stopAdmissionMS": 1.208375,
+      "stopCompletionMS": 5.738292,
+      "activeConnectionRows": 0,
+      "heldStore": true,
+      "heldHelper": true
+    },
+    {
+      "trial": 2,
+      "statusP50MS": 0.399541,
+      "statusMaxMS": 0.465958,
+      "stopAdmissionMS": 1.312583,
+      "stopCompletionMS": 5.446667,
+      "activeConnectionRows": 0,
+      "heldStore": true,
+      "heldHelper": true
+    },
+    {
+      "trial": 3,
+      "statusP50MS": 0.399875,
+      "statusMaxMS": 0.477417,
+      "stopAdmissionMS": 1.69325,
+      "stopCompletionMS": 5.626792,
+      "activeConnectionRows": 0,
+      "heldStore": true,
+      "heldHelper": true
+    }
+  ],
+  "limits": [
+    "Probe-local logger is not AppLogStore; no UI handoff, console or os_log cost measured",
+    "Pressure mode has zero active connection rows and is not full-list capture evidence",
+    "Requested drain wait is2000ms; scheduling overshoot is reported, no hard real-time bound",
+    "Memory records are whole-probe observations, not app steady RAM or capacities",
+    "No historical regression/improvement comparison; after-actor pairing remains due",
+    "Native AppKit/helper/machine validation remains pending"
+  ]
+}

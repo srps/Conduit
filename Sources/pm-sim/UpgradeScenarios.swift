@@ -2,6 +2,7 @@
 import Foundation
 import NIOCore
 import NIOPosix
+import ProxyKernel
 
 /// WebSocket-style HTTP/1.1 Upgrade relayed by the proxy.
 ///
@@ -14,7 +15,7 @@ enum UpgradeScenarios {
     /// Exercise the production CONNECT splice with bytes already held by the
     /// HTTP decoder. A type mismatch crashes this isolated harness; byte loss,
     /// corruption, or a refused handshake throws and makes pm-sim exit nonzero.
-    @MainActor
+    @RuntimeActor
     static func connectEarlyData(direct: Bool, verbose: Bool) async throws -> ScenarioResult {
         let start = Date()
         let harness = SimHarness(verbose: verbose)
@@ -55,7 +56,7 @@ enum UpgradeScenarios {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     static func websocketUpgrade(verbose: Bool) async throws -> ScenarioResult {
         let name = "websocket-upgrade"
         let start = Date()

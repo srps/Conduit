@@ -1,0 +1,104 @@
+{
+  "task": "RuntimeActor prerequisite phase1c: kernel TCP relay commands off the owner, through the host's own PlatformWork, with the reassert inside the DNS module's physical slot",
+  "worktree": "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit",
+  "base": "98af3cdc0cdadc8420a245677072436a67017065 (DNS 1b r2 committed 5321612 + parent AppState PR66a docs; relevant-source fingerprint 06d02d0acb7f57eee64cf1cc1e92cb14d6c2a5eb69789ffda037ad0f1d7ab143, all41 EXIT 0)",
+  "plan": "/private/tmp/conduit-runtime-stage1-20261024/runtime-opus-actor-migration-plan-complete.md (amendment: Correction 2) plus the accepted 1c refinements: framed host witness in RuntimeHostControlOwnerTests, exact queue placement, unused PlatformWork.waitUntilIdle(timeout:) deletion",
+  "status": "FOCUSED GREEN (attempt 3, vtZUXa). Source frozen. Parent's all41, independent review and guard witnesses still required.",
+  "isolation": "control cluster still MainActor; no actor retag; no diagnostics/logger work; no kernel queue, no concrete helper type in the kernel, no new protocol, PlatformWork API, delivery, store, registry, dependency, public/package widening or policy. No Git, network, API, helper, installed-app or primary-state touch.",
+
+  "design": {
+    "seam": "ProxyOrchestrator.init: the privilegeClient: PrivilegeClient? parameter is replaced, at the same position, by relayCommand: (@Sendable (PrivilegedBatchStep) async throws -> Void)? = nil, in the connectivityProbe style. The orchestrator's privilege client was used only by the relay. Nil (pm-proxy, which never passed a client, and agent runs) keeps the unchanged 'TCP relay unavailable: no privileged helper configured.' info path; nothing is sent.",
+    "composition": "RuntimeHost.init builds its PlatformWork (same label io.github.srps.Conduit.daemon.platform-work) as a local before the orchestrator and assigns the existing platformWork property, now an init-assigned let. The closure is platformWork.run { Result { try auditedPrivilegeClient.execute(step.operation, values: step.values) } }.get(): the same audited client and the same execute(_:values:) call as before, so auth.privilege_request audit events are unchanged, on the same FIFO as the lifecycle surface blocks. Kernel imports unchanged.",
+    "async_relay": "startTCPRelay/stopTCPRelay are async. Each advances tcpRelayGeneration in its deciding turn, before the command is sent, and applies tcpRelayActive and its log line on completion. Log text and levels unchanged; stop still clears the flag only on success.",
+    "lifecycle_callers": "startTransparentProxy (three sites) and stopTransparentProxy await them. Both run only inside dnsLifecycle effects (runDNSStart, closeDNSListeners from stopDNS/restartDNS), so PhysicalLifecycle orders the relay commands, not when they were queued.",
+    "reassert": "The tick (and each test entry point) takes a RelayReassertFence in its own turn: the relay generation and the DNS epoch. It begins only while dnsLifecycle.admitsRunning and no reassert is in flight. The probe runs outside the slot as before (utility queue for the tick/off-main path, inline for the test entry), so a slow connect never holds a stop's teardown. The reissue then runs as runInfallibleEffect(dnsLifecycle, epoch: fence.epoch). Inside it the generation is checked again: a restart keeps its epoch but its teardown moves the generation. A false from the slot, or a moved generation, emits the existing tcp_relay.reassert_superseded with the unchanged detail (host=, target=, relay_active=). tcp_relay.reasserted and tcp_relay.unresponsive are unchanged.",
+    "one_in_flight": "transparentRelayReassertInFlight: set when a reassert begins, cleared when its task or entry point ends. A tick taken meanwhile begins nothing (beginTransparentRelayReassert returns nil), so the slot holds at most one reassert waiting beside the lifecycle effects. Each command stays bounded by the existing helper transaction budget; the AppleScript fallback refuses relay commands, so no authentication prompt starts.",
+    "test_entry_points": "reassertTransparentRelay(), reassertTransparentRelay(host:targetPort:) (inline probe, test-only) and reassertTransparentRelayOffMain(host:targetPort:) are async; beginTransparentRelayReassert returns Task<Void, Never>?. Names and package access unchanged.",
+    "dead_code_removed": [
+      "ProxyOrchestrator.performTerminationCleanup(): no production caller at the tip; its only reference was BoundedRecordWriterTests. With it went its blocking auditSink.flush(timeout: 2), its unconditional relay stop, and its observability.audit_flush_timeout emission (the only producer).",
+      "ProxyOrchestrator.stopSnapshotCoalesceTimer(): its only caller was performTerminationCleanup. The stale doc references at the old :355, :400 and :3334 are corrected.",
+      "PlatformWork.waitUntilIdle(timeout:): zero production and test callers (verified in r2 and in RootA). Deleted with its termination-cleanup doc. The stale 'Both hosts are main-actor types' sentence now says main-actor code; 'The hosts rely on that' now says the runtime host."
+    ]
+  },
+
+  "files_changed": {
+    "production": [
+      "Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift: seam, async relay, reassert fence/slot/in-flight, dead-code removal, doc corrections",
+      "Sources/ConduitRuntime/RuntimeHost.swift: composition only (PlatformWork local and the relay closure; the platformWork property becomes init-assigned)",
+      "Sources/PlatformMac/PlatformWork.swift: unused waitUntilIdle(timeout:) and its comment removed; stale two-host sentences corrected"
+    ],
+    "pm_sim": [
+      "Sources/pm-sim/RelayReassertScenarios.swift: fixture closure over its own PlatformWork; DNS started first; async calls; the existing HeldProbe generalized into one HeldStep gate (probe and relay command) that records the queue a call ran on and parks only on the expected one; new held-start-against-a-DNS-stop rows. The four original assertions are kept."
+    ],
+    "tests": [
+      "Tests/ConduitTests/HeldCall.swift: arm(onQueueLabeled:otherQueues:_:) with OtherQueues .ignored (default, existing behavior, preflight exclusion kept for all 64 existing arm sites) or .recorded (a matching call on any other queue is taken, its label recorded, and let through, never held); new reachedOnArmedQueue and reachedQueueLabel",
+      "Tests/ConduitTests/RelayLifecycleTests.swift: 7 call sites repaired via one fixture closure over a test PlatformWork; DNS started first where a running slot is needed; all prior assertions kept; testALiveRelayIsLeftAlone now starts DNS so it cannot pass vacuously; BlockingRelayProbe's release now frees every held probe; new testADNSStopAdmittedWhileAReassertsStartIsHeldWaitsForItAndEndsTheRelayStopped and testATickWhileAReassertIsInFlightBeginsNothing",
+      "Tests/ConduitTests/BoundedRecordWriterTests.swift: testTerminationDrainsAlreadyAcceptedAuditRecords retargeted as testTheExitFlushDrainsAlreadyAcceptedAuditRecords over the consumed DiagnosticFlush.run (host flushEvents and pm-proxy). Keeps pendingRecords == 0 and the decoded id, target, outcome and timestamp; adds report.audit == .drained; no orchestrator, no @MainActor",
+      "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift: new testAHeldTransparentRelayStartIsOnThePlatformQueueAndAStopEndsTheRelayAfterIt (actual framed composition)"
+    ],
+    "docs": [
+      "docs/events.md: removed the observability.audit_flush_timeout row (its last producer is deleted; the catalogue is now 229 names); tcp_relay.reassert_superseded now also names a DNS stop admitted before the reissue reached the DNS module's slot. No other docs or ADRs."
+    ],
+    "callsite_repairs_outside_listed_files": "none needed",
+    "not_touched": "RuntimeHostEffectsScenarios.swift (not in this slice's ownership, so HeldSetenv was not generalized; the relay gate extends RelayReassertScenarios' own HeldProbe instead); Sources/PlatformMac/AGENTS.md (parent); every other file. Parent's edits preserved.",
+    "hashes": "not computed: the only Bash allowed is the fixed wrapper. Parent to fingerprint the frozen Source."
+  },
+
+  "tests_added": {
+    "RuntimeHostControlOwnerTests.testAHeldTransparentRelayStartIsOnThePlatformQueueAndAStopEndsTheRelayAfterIt": "compose(dnsForwarderEnabled: true, beforeOpen:) saves transparentProxyEnabled, IP 127.0.0.1, port 0 and one enabled rule. Arms start-tcp-relay on the exact host label io.github.srps.Conduit.daemon.platform-work with otherQueues: .recorded, then submits the framed .start(.dns, ifModuleRevision:). Bounded waitUntilReached(within: 10 s). Asserts reached; not on main; reachedOnArmedQueue (the message names the actual label). While held: the framed snapshot answers, a framed .stop(.dns) is accepted, and no stopTCPRelay has run. After release, both settlements are collected in one bounded loop: the Stop completed .stop; the first relay command is a start and the last is the single stop; DNS not running; transparent bindings nil. The harness teardown releases the hold on every path.",
+    "RelayLifecycleTests.testADNSStopAdmittedWhileAReassertsStartIsHeldWaitsForItAndEndsTheRelayStopped": "DNS up. The reassert's start is held on the fixture queue (.recorded). Asserts reached and placement, then admits stopDNS and waits (bounded) until dnsLifecycle.admitsRunning is false. Gives a beside-the-slot teardown up to 500 ms to show, then asserts DNS still running and nothing sent. After release: commands exactly [startTCPRelay, stopTCPRelay], DNS stopped, one tcp_relay.reasserted.",
+    "RelayLifecycleTests.testATickWhileAReassertIsInFlightBeginsNothing": "DNS up, relay raised. The first tick's probe is held; a second tick returns nil; after release, commands are [startTCPRelay, startTCPRelay] with two reasserted events; once it ended, a further tick begins again.",
+    "pm-sim relay-reassert-after-stop": "Added rows: the DNS module is up; the second probe is out when the stop lands; a reassert's relay start is held on the platform queue; a DNS stop admitted while it is held tears down after it; the stop's teardown stops the relay the reassert raised; DNS ends stopped. The note records the queue label the held start ran on."
+  },
+
+  "verification": {
+    "wrapper": "bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-actor-prep.sh (parent-extended filter: + RelayLifecycleTests, BoundedRecordWriterTests, DNSInterceptReadinessTests; + pm-sim relay-reassert-after-stop to relay-sim.log)",
+    "test_first_method": "The seam changes the orchestrator init, so the new tests cannot compile against the base. Attempts 1-2 ran a behavior-preserving seam baseline. The host closure called the audited client inline, with no platformWork. The reassert kept the base's generation-only fence, with no slot epoch, no admitsRunning guard and no in-flight flag (beginRelayReassert always returned a fence; endRelayReassert was empty). The dead-code removal, docs row, HeldCall enhancement and every test were already in. Attempt 3 added only the production offload, slot, epoch and flag.",
+    "attempts": [
+      {
+        "n": 1,
+        "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-GUd4bR",
+        "production": "seam baseline",
+        "result": "exit 1 at swift test: product build passed; test-target compile failed",
+        "classification": "FIXTURE compile error, not evidence: RuntimeHostControlOwnerTests.swift:1755 'async' call in an autoclosure (await inside XCTUnwrap). Hoisted into 'let observed'. No assertion changed."
+      },
+      {
+        "n": 2,
+        "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-mZz0zx",
+        "production": "seam baseline",
+        "result": "exit 1 at swift test: 293 tests, 4 failures, build and compile clean; later wrapper steps not reached (set -e), so the pm-sim relay baseline did not run",
+        "valid_semantic_failures": [
+          "RuntimeHostControlOwnerTests.swift:1765 XCTAssertTrue failed: 'the relay start is held on the host's platform queue, not com.apple.root.user-initiated-qos.cooperative'. Preconditions passed: reached (:1763) and not on main (:1764). The inline closure ran on the generic executor, was recorded and let through by .recorded, and failed the placement assertion with no timeout.",
+          "RelayLifecycleTests.swift:163 XCTAssertEqual failed: (\"stopped\") is not equal to (\"running\"): 'the Stop's teardown waits for the reassert's effect'. Preconditions passed: the start was reached and held on the fixture's armed queue; the Stop was admitted.",
+          "RelayLifecycleTests.swift:169 XCTAssertEqual failed: [startTCPRelay] is not equal to [startTCPRelay, stopTCPRelay]. Without the slot the teardown found no relay up, skipped the stop, and the relay the start then raised stayed running after DNS stopped: the hazard the slot closes.",
+          "RelayLifecycleTests.swift:190 XCTAssertNil failed: a second tick began while the first reassert's probe was out. Preconditions passed: the first tick began and its probe was held. The command count and reasserted count still passed: the generation fence already supersedes the duplicate, so the flag's job is to bound waiting reasserts, not to prevent a double start."
+        ],
+        "everything_else": "BoundedRecordWriterTests 9/9 (the retarget), DNSInterceptReadinessTests 8/8 (nil-closure path), all prior RelayLifecycleTests and every other suite passed"
+      },
+      {
+        "n": 3,
+        "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-vtZUXa",
+        "production": "phase1c final",
+        "result": "exit 0; 'Focused actor-prerequisite verification passed; parent full workflow still required.'",
+        "tests": "293 tests, 0 failures: BoundedRecordWriterTests 9, ConfigReapplyRetryTests 10, DNSInterceptReadinessTests 8, DNSResolverReconciliationTests 4, DaemonRuntimeHostTests 95, RelayLifecycleTests 13, RuntimeHostControlOwnerTests 65, RuntimeHostInteractiveTests 29, RuntimePhysicalOrderingTests 15, RuntimeReconcilerTests 23, SplitDNSEntryFileRepairTests 15, SplitDNSVPNGateTests 7",
+        "pm_sim_runtime_host_effects": "PASS, 148 [pass], 0 [FAIL] (unchanged from r2)",
+        "pm_sim_relay_reassert_after_stop": "PASS, 10/10 [pass]; note 'held relay start ran on: io.github.srps.Conduit.pm-sim.relay-platform-work'",
+        "imports": "Kernel import/Process fence passed (109 Swift files, 1 object files; 5 RuntimeEvents files limited to Foundation)",
+        "catalogue": "PASS: 229 event names, and nothing more (observability.audit_flush_timeout removed with its producer)",
+        "decisions": "PASS",
+        "git_diff_check": "clean",
+        "warnings_in_changed_files": "none found in the logs"
+      }
+    ],
+    "not_run_here": "all41, AppState parity suites, TSan, CI, independent review; the pm-sim relay rows were not run against the seam baseline (the wrapper stops at the failing test step)"
+  },
+
+  "risks_and_remaining": [
+    "Relay commands now wait behind any queued PlatformWork (accepted consequence): a transparent-proxy bind can start later than before. Nothing on a PlatformWork block waits on the orchestrator, so no deadlock.",
+    "No blind relay stop at quit, as in the base (the old AppState termination path that issued it was already gone): a relay a crashed earlier run left in the helper is not stopped by a quit; TCPRelayPlan replaces it at the next DNS start.",
+    "A reassert never begins while the DNS module's latest operation is a stop (dnsLifecycle.admitsRunning false). The timer only runs while a transparent proxy is published, so this changes nothing in production.",
+    "The two slot witnesses (kernel test and pm-sim row) give a beside-the-slot teardown up to 500 ms to show before asserting it did not run. That is a bounded negative check: on the correct code it costs that wait. The decisive assertion, the final relay state, is deterministic.",
+    "HeldCall .recorded leaves a released semaphore permit when the call was let through; no witness re-arms afterwards. The full actor-aware HeldCall generalization is still later work.",
+    "Phase 2 (actor retag) and diagnostics (1d) are untouched."
+  ]
+}

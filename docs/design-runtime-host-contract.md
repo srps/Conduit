@@ -347,6 +347,12 @@ ability to inspect records. Do not silently replace the connection view with a
 sample. Stage 1 must inventory every RuntimePresentationAdapter field and every
 AppState-only read used by views/preflight against the replacement contract.
 
+The shared host now freezes one value snapshot, collection revision and exact total in the same owner turn. Its internal `rowSource(for:)` returns a pure Sendable job; sorting, row mapping and byte measurement run off RuntimeActor. One shared capture flight across all kinds uses the existing capture staging charge. Pages park through the existing transport wait/cleanup path, within the existing read-lane capacity. Completion commits on the owner with the capture-start instant. No configuration-store mode, registry, new wire value or second projection path is involved.
+
+A first page that waited for its capture is answered as an ordinary request for that capture's revision. It is current when that revision remains current, otherwise explicitly stale, expired or not captured. Reusing the cursor path avoids a second decision table and prevents endless recapture of a superseded first page. Shutdown wakes parked readers immediately, prevents new captures and rejects late results; retained rows can still be read. A needed post-shutdown capture reports not-captured with the exact total when the current reference supplies it.
+
+The selected 8 MiB is retained encoded rows; the existing separate staging term allows one capture of up to 4 MiB. Object/string storage is outside those encoded accounts. A frozen whole snapshot can keep older copy-on-write storage of any snapshot collection, including an unselected larger one, alive across mutations until its job ends; there is no whole-value RAM bound. Parked pages use read slots, so exhausted slots can make another status read busy; Stop retains its own lane. A complete current list can remain unavailable under churn faster than capture plus paging. Neither a latency guarantee nor new refresh policy is selected by this implementation. The [activation checkpoint](verification-runtime-actor-activation-2026-10-28.md) records source review, causal tests and measurements.
+
 ```swift
 package enum ControlRuntimeFrame: Codable, Sendable {
     case baseline(ControlBaseline)
@@ -454,14 +460,15 @@ explanation, never a durable command log or authority for cleanup/recovery. This
 does not weaken authoritative platform-journal write-before-mutation requirements.
 No new durable telemetry spool/exporter is part of this program.
 
-Current-source inventory matters here: AppLogStore writes stderr on MainActor
-and creates a Task per off-main log; RotatingLogFile already performs append I/O
-on its serial queue, but that pending queue has no byte/item budget and flush/
-close synchronously drain it. Do not misdiagnose the file append as synchronous.
-As each sink crosses the new boundary, verify bounded pending work, slow-stderr/
-file behavior and a shutdown drain budget; surface rotation failures rather than
-silently discarding them. This is an affected-path obligation, not a new telemetry
-platform prerequisite for behavior-preserving extraction.
+The diagnostic prerequisite now keeps physical output independent of MainActor,
+with one bounded UI-history handoff and the existing bounded console writer.
+RotatingLogFile admits bounded bytes/items on its existing serial queue and
+supports deadline-based asynchronous drains. The host and app Quit tail share
+one total deadline; unconfirmed logger output has a typed lifecycle event and
+is separate from artifact confirmation. Close-on-toggle still synchronously
+finishes admitted writes, as before. This candidate remains under full-workflow
+and independent review; shipping resource and native acceptance are separate.
+No telemetry spool, replacement writer registry or second output path is added.
 
 ## Typed events, without an untyped producer escape hatch
 
@@ -478,12 +485,16 @@ package enum LifecycleEvent: Codable, Sendable, Equatable {
     case coalesced(LifecycleCoalesced)
     case terminationDrainExpired(LifecycleTerminationDrainExpired)
     case versionChanged(LifecycleVersionChanged)
+    case moduleSettled(LifecycleModuleSettled)
+    case logFlushUnconfirmed(LifecycleLogFlushUnconfirmed)
 }
 ```
 
 The implemented family is in [`LifecycleEvents.swift`](../Sources/RuntimeEvents/LifecycleEvents.swift),
 with its wire layout and bounds in [`events.md`](./events.md#typed-lifecycle-payloads). It types
-all four `lifecycle.*` names in the foundation. The other families stay legacy.
+all six current `lifecycle.*` names. Configuration/workflow and the other typed
+families are inventoried in the event catalogue; unmigrated producers retain
+the checked legacy envelope.
 
 Credentials, cookies, authorization headers and SecretBytes never enter Codable
 event values. Diagnostic text/targets use deliberately sanitized representations;
@@ -844,12 +855,9 @@ for their affected slices, not blockers to independent work:
 | Persistence precision — selected | Keep schema2 and refuse inexact saves; fix safe whole-unit conversions ([0023](decisions/0023-exact-schema-two-persistence.md)) | Exact staging/read-back mechanisms are implemented; client adoption and real-machine acceptance remain separate. No schema3 migration or silent normalization |
 | Listener handoff on failed platform repoint | Prefer bind-new, verify-ready, repoint, then retire-old, with bounded old-listener retention on repoint failure; review feasibility and retirement budget | Otherwise explicitly report the service interruption/mismatched endpoint; saving intent alone does not prevent it |
 | Follow-up release scope | Keep full control-owner isolation in the 0.6 core; decide the bounded #194 applied-state slice, with full scheduler/leases separately scoped | Selected module/isolation shape does not silently expand the remaining release scope |
-| Resource and shutdown limits | Ordinary reply/stream frames are selected at 64 KiB; private editor replies and remaining service/shutdown budgets need measured selection, including helper calls and manager locks | Provisional numbers above are review inputs, not validated shipping defaults |
+| Resource and shutdown limits — selected profile; final acceptance open | Ordinary replies/streams: 64 KiB (0030); private editor requests/replies: 8 MiB (0019/0034); whole collection capture/retention: 4/8 MiB (0038); app Quit: one ten-second total (0039). `RuntimeServiceProfile.inProcessApp()` supplies the reviewed finite service terms | Current composition and fake-effect measurements are recorded; whole-owner fairness, native termination and applicable real-helper timing remain acceptance gates. Encoded byte custody is not app RAM |
 
-Concrete limit values and the full command/field inventory require stage-1 sizing
-and compatibility fixtures before those APIs are considered settled. The stage-1
-measurements so far are in the [inventory](./runtime-client-stage1-inventory.md);
-they select no limit. Any owner
+The [stage-1 inventory](./runtime-client-stage1-inventory.md) records the earlier sizing and compatibility analysis; it does not override the subsequently accepted limits above. Current profile and measurement evidence are linked from decisions 0030, 0034, 0038 and 0039. New fields still require bounded sizing and compatibility checks. Any owner
 choice that refines an accepted decision receives a new ADR or the appropriate
 implementation/evidence update when that choice is approved; no accepted record is rewritten
 into a different decision.

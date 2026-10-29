@@ -2,6 +2,7 @@
 import Foundation
 import NIOCore
 import NIOPosix
+import ProxyKernel
 
 struct ScenarioResult: Sendable {
     var name: String
@@ -26,7 +27,7 @@ struct ScenarioResult: Sendable {
 enum Scenarios {
     // MARK: - Baseline: single bursty stream
 
-    @MainActor
+    @RuntimeActor
     static func baselineBurst(verbose: Bool) async throws -> ScenarioResult {
         let name = "baselineBurst"
         let harness = SimHarness(verbose: verbose)
@@ -73,7 +74,7 @@ enum Scenarios {
 
     // MARK: - Multi-concurrent bursty streams (high throughput, concurrency)
 
-    @MainActor
+    @RuntimeActor
     static func multiConcurrent(clientCount: Int, durationSeconds: Int, verbose: Bool) async throws -> ScenarioResult {
         let name = "multiConcurrent(n=\(clientCount))"
         let harness = SimHarness(verbose: verbose)
@@ -155,7 +156,7 @@ enum Scenarios {
 
     // MARK: - Connection flood: deliberate inbound pressure
 
-    @MainActor
+    @RuntimeActor
     static func connectionFlood(verbose: Bool) async throws -> ScenarioResult {
         let name = "connectionFlood(inbound-limit)"
         let inboundLimit = 8
@@ -260,7 +261,7 @@ enum Scenarios {
 
     // MARK: - Auth storm: pending handshake bound
 
-    @MainActor
+    @RuntimeActor
     static func authStorm(verbose: Bool) async throws -> ScenarioResult {
         let name = "authStorm(pending-handshake-bound)"
         let clientCount = 24
@@ -344,7 +345,7 @@ enum Scenarios {
 
     // MARK: - Silent-then-burst: confirms tunnel survives long quiet periods
 
-    @MainActor
+    @RuntimeActor
     static func silentThenBurst(silentForMs: Int, burstBytes: Int, verbose: Bool) async throws -> ScenarioResult {
         let name = "silentThenBurst(silent=\(silentForMs)ms)"
         let harness = SimHarness(verbose: verbose)
@@ -396,7 +397,7 @@ enum Scenarios {
 
     // MARK: - AE5F6815 reproducer: fast origin flood + slow client + mid-stream close
 
-    @MainActor
+    @RuntimeActor
     static func floodSlowDrain(verbose: Bool) async throws -> ScenarioResult {
         let name = "floodSlowDrain(AE5F6815 repro)"
         let harness = SimHarness(verbose: verbose)
@@ -463,7 +464,7 @@ enum Scenarios {
 
     // MARK: - High throughput single stream
 
-    @MainActor
+    @RuntimeActor
     static func highThroughput(durationSeconds: Int, verbose: Bool) async throws -> ScenarioResult {
         let name = "highThroughput(single)"
         let harness = SimHarness(verbose: verbose)

@@ -1,0 +1,392 @@
+{
+  "head": "8a036fe9b4ef67e7a2a49cc67247c420146a18c8",
+  "source_sha256": "713e7e961b214810b2b2d0f5178fce08ed333078bcd8488507fb8153d4afd139",
+  "final_source_sha256": "713e7e961b214810b2b2d0f5178fce08ed333078bcd8488507fb8153d4afd139",
+  "stable": true,
+  "checks": [
+    {
+      "name": "build",
+      "command": [
+        "xcrun",
+        "swift",
+        "build",
+        "-v"
+      ],
+      "exit": 0,
+      "seconds": 5.49
+    },
+    {
+      "name": "dns-ephemeral-pair-rebind",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "dns-ephemeral-pair-rebind"
+      ],
+      "exit": 0,
+      "seconds": 0.72
+    },
+    {
+      "name": "check-kernel-imports",
+      "command": [
+        "python3",
+        "scripts/check-kernel-imports.py"
+      ],
+      "exit": 0,
+      "seconds": 9.43
+    },
+    {
+      "name": "test-kernel-imports",
+      "command": [
+        "python3",
+        "scripts/test-kernel-imports.py"
+      ],
+      "exit": 0,
+      "seconds": 14.36
+    },
+    {
+      "name": "check-third-party-notices",
+      "command": [
+        "python3",
+        "scripts/check-third-party-notices.py"
+      ],
+      "exit": 0,
+      "seconds": 0.19
+    },
+    {
+      "name": "test-third-party-notices",
+      "command": [
+        "python3",
+        "scripts/test-third-party-notices.py"
+      ],
+      "exit": 0,
+      "seconds": 0.67
+    },
+    {
+      "name": "check-event-catalogue",
+      "command": [
+        "python3",
+        "scripts/check-event-catalogue.py"
+      ],
+      "exit": 0,
+      "seconds": 0.99
+    },
+    {
+      "name": "test-event-catalogue",
+      "command": [
+        "python3",
+        "scripts/test-event-catalogue.py"
+      ],
+      "exit": 0,
+      "seconds": 89.41
+    },
+    {
+      "name": "check-decisions",
+      "command": [
+        "python3",
+        "scripts/check-decisions.py",
+        "--require-history"
+      ],
+      "exit": 0,
+      "seconds": 0.62
+    },
+    {
+      "name": "test-decisions",
+      "command": [
+        "python3",
+        "scripts/test-decisions.py"
+      ],
+      "exit": 0,
+      "seconds": 4.72
+    },
+    {
+      "name": "swift-tests",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "-v"
+      ],
+      "exit": 0,
+      "seconds": 292.99
+    },
+    {
+      "name": "app-entry",
+      "command": [
+        "python3",
+        "scripts/test-app-entry.py"
+      ],
+      "exit": 0,
+      "seconds": 17.09
+    },
+    {
+      "name": "kerberos-workers",
+      "command": [
+        "python3",
+        "scripts/test-kerberos-worker.py",
+        "<checkout>/.build/out/Products/Debug/Conduit",
+        "<checkout>/.build/out/Products/Debug/ConduitDaemon"
+      ],
+      "exit": 0,
+      "seconds": 1.79
+    },
+    {
+      "name": "test-install-helper-args",
+      "command": [
+        "bash",
+        "scripts/test-install-helper-args.sh"
+      ],
+      "exit": 0,
+      "seconds": 0.89
+    },
+    {
+      "name": "test-create-signing-identity",
+      "command": [
+        "bash",
+        "scripts/test-create-signing-identity.sh"
+      ],
+      "exit": 0,
+      "seconds": 1.26
+    },
+    {
+      "name": "test-create-release-identity",
+      "command": [
+        "bash",
+        "scripts/test-create-release-identity.sh"
+      ],
+      "exit": 0,
+      "seconds": 11.26
+    },
+    {
+      "name": "dev-bundle-regressions",
+      "command": [
+        "bash",
+        "scripts/test-dev-bundle.sh"
+      ],
+      "exit": 0,
+      "seconds": 3.31
+    },
+    {
+      "name": "updater-e2e",
+      "command": [
+        "zsh",
+        "scripts/test-updater-e2e.sh"
+      ],
+      "exit": 0,
+      "seconds": 30.24
+    },
+    {
+      "name": "updater-e2e-signed",
+      "command": [
+        "zsh",
+        "scripts/test-updater-e2e.sh",
+        "--signed"
+      ],
+      "exit": 0,
+      "seconds": 27.32
+    },
+    {
+      "name": "appcast-notes",
+      "command": [
+        "python3",
+        "scripts/test-appcast-notes.py"
+      ],
+      "exit": 0,
+      "seconds": 0.12
+    },
+    {
+      "name": "observable-target-redaction",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "observable-target-redaction"
+      ],
+      "exit": 0,
+      "seconds": 0.13
+    },
+    {
+      "name": "security-boundaries",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "security-boundaries"
+      ],
+      "exit": 0,
+      "seconds": 0.13
+    },
+    {
+      "name": "gateway-probe-blocklist",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "gateway-probe-blocklist"
+      ],
+      "exit": 0,
+      "seconds": 0.07
+    },
+    {
+      "name": "connect-early-direct",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "connect-early-direct"
+      ],
+      "exit": 0,
+      "seconds": 0.05
+    },
+    {
+      "name": "connect-early-upstream",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "connect-early-upstream"
+      ],
+      "exit": 0,
+      "seconds": 0.04
+    },
+    {
+      "name": "server-first-connect",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "server-first-connect"
+      ],
+      "exit": 0,
+      "seconds": 0.04
+    },
+    {
+      "name": "server-first-socks5",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "server-first-socks5"
+      ],
+      "exit": 0,
+      "seconds": 0.04
+    },
+    {
+      "name": "target-redaction",
+      "command": [
+        "python3",
+        "scripts/test-observable-target-redaction.py",
+        "<checkout>/.build/out/Products/Debug/pm-proxy"
+      ],
+      "exit": 0,
+      "seconds": 0.88
+    },
+    {
+      "name": "security-boundaries-script",
+      "command": [
+        "python3",
+        "scripts/test-security-boundaries.py",
+        "<checkout>/.build/out/Products/Debug/pm-proxy"
+      ],
+      "exit": 0,
+      "seconds": 1.63
+    },
+    {
+      "name": "perf-gate",
+      "command": [
+        "bash",
+        "scripts/perf-gate.sh"
+      ],
+      "exit": 0,
+      "seconds": 15.62
+    },
+    {
+      "name": "sim-outcomes",
+      "command": [
+        "python3",
+        "scripts/test-sim-outcomes.py",
+        "<checkout>/.build/out/Products/Debug/pm-sim"
+      ],
+      "exit": 0,
+      "seconds": 6.37
+    },
+    {
+      "name": "pm-sim-all",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "all"
+      ],
+      "exit": 0,
+      "seconds": 158.36
+    },
+    {
+      "name": "http-wire-target",
+      "command": [
+        "python3",
+        "scripts/test-http-wire-target.py",
+        "<checkout>/.build/out/Products/Debug/pm-proxy"
+      ],
+      "exit": 0,
+      "seconds": 4.28
+    },
+    {
+      "name": "forced-proxy-precedence",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "forced-proxy-precedence"
+      ],
+      "exit": 0,
+      "seconds": 0.07
+    },
+    {
+      "name": "pac-unsupported-only",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "pac-unsupported-only"
+      ],
+      "exit": 0,
+      "seconds": 0.13
+    },
+    {
+      "name": "strict-direct-reachable",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "strict-direct-reachable"
+      ],
+      "exit": 0,
+      "seconds": 0.07
+    },
+    {
+      "name": "shared-inbound-budget",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "shared-inbound-budget"
+      ],
+      "exit": 0,
+      "seconds": 2.73
+    },
+    {
+      "name": "pac-fetch-bounds",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "pac-fetch-bounds"
+      ],
+      "exit": 0,
+      "seconds": 0.13
+    },
+    {
+      "name": "bounded-writers",
+      "command": [
+        "<checkout>/.build/out/Products/Debug/pm-sim",
+        "bounded-writers"
+      ],
+      "exit": 0,
+      "seconds": 0.66
+    },
+    {
+      "name": "dns-shutdown",
+      "command": [
+        "python3",
+        "scripts/test-dns-shutdown.py",
+        "<checkout>/.build/out/Products/Debug/pm-dns"
+      ],
+      "exit": 0,
+      "seconds": 0.66
+    },
+    {
+      "name": "status-stream",
+      "command": [
+        "python3",
+        "scripts/test-status-stream.py",
+        "<checkout>/.build/out/Products/Debug/pm-proxy"
+      ],
+      "exit": 0,
+      "seconds": 1.79
+    }
+  ],
+  "scope": "Local full workflow on exact unchanged production Source plus two recovery-policy regression tests; local compiler6.4; final-head hosted6.3.3 remains separate."
+}

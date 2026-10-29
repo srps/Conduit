@@ -1,0 +1,10 @@
+{
+  "source_commit": "97a5b43a0d8d7504b760b4b05aece3a8f66f5914",
+  "gate_report_head": "6cb3657ffb1873837f53d83392b90719909881d5",
+  "gate_source_sha256": "d212ee550a2919caa55f28d79af3f1586f27e46edd273338ae1d95b86b26c197",
+  "committed_relevant_source_sha256": "d212ee550a2919caa55f28d79af3f1586f27e46edd273338ae1d95b86b26c197",
+  "matching": true,
+  "production_file": "Sources/PlatformMac/SplitDNSEntryFileRepair.swift",
+  "production_non_doc_lines_identical_to_6cb": true,
+  "candidate_requires_mechanical_rebuild": true
+}

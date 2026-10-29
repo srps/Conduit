@@ -19,7 +19,7 @@ import ProxyKernel
 enum ExchangeFailureScenarios {
     private struct Failure: Error { let message: String }
 
-    @MainActor
+    @RuntimeActor
     static func run(verbose: Bool) async throws -> ScenarioResult {
         let name = "upstream-exchange-failure"
         let group = MultiThreadedEventLoopGroup.singleton
@@ -114,8 +114,8 @@ enum ExchangeFailureScenarios {
     }
 
     /// Polls a condition; the deadline only keeps a regression from hanging pm-sim.
-    @MainActor
-    private static func waitUntil(_ condition: @MainActor () -> Bool) async throws {
+    @RuntimeActor
+    private static func waitUntil(_ condition: @RuntimeActor () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while !condition(), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))

@@ -73,6 +73,27 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testFreshJournalPreservesUserConduitLookingPACAndRemovesOnlyIntroducedFields() throws {
+        try withRecovery { store, journal, recovery, _ in
+            var config = ProxyConfig()
+            config.localPACEnabled = true
+            let url = "http://127.0.0.1:63145/proxy.pac"
+            XCTAssertTrue(SystemProxyManager.LocalListenerFingerprint(config: config).matchesPACURL(url))
+            let userPAC: [String: NetworkSettingValue] = ["ProxyAutoConfigEnable": .number(1), "ProxyAutoConfigURLString": .text(url)]
+            store.edit { $0.services[0].proxies = userPAC }
+            let original = try store.snapshot()
+            XCTAssertEqual(recovery.recover(kind: .proxies, config: config, listenerIsLive: false), .nothingToDo(.nothingRecorded))
+            XCTAssertEqual(try store.snapshot(), original)
+            for mode in [SystemProxyMode.manual, .pac] {
+                try recovery.apply(kind: .proxies, desired: SystemProxyManager.locationFields(config: config, mode: mode, localPACURL: url), config: config)
+                XCTAssertNotEqual(try store.snapshot().services[0].proxies, userPAC, "\(mode)")
+                try recovery.clear(kind: .proxies, config: config)
+                XCTAssertEqual(try store.snapshot().services, original.services, "\(mode)")
+                XCTAssertFalse(journal.hasRecords(for: .systemProxy), "\(mode)")
+            }
+        }
+    }
+
     func testCorruptJournalClearsRecognizedResidueWithoutReplacingEvidence() throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("location-corrupt-\(UUID()).json")
         defer { try? FileManager.default.removeItem(at: file) }
@@ -621,6 +642,34 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             XCTAssertEqual(try store.snapshot().services[0].dns, localDNS)
             try recovery.clear(kind: .dns, config: ProxyConfig())
             XCTAssertEqual(try store.snapshot().services[0].dns, ["ServerAddresses": .list(["192.0.2.10"])])
+        }
+    }
+
+    func testReapplyAfterExternalBypassEditKeepsOriginalPACPriorRatherThanAppliedPAC() throws {
+        try withRecovery { store, journal, recovery, events in
+            var config = ProxyConfig()
+            config.localPACEnabled = true
+            let url = "http://127.0.0.1:63145/proxy.pac"
+            let corporatePAC: [String: NetworkSettingValue] = [
+                "ProxyAutoConfigEnable": .number(1), "ProxyAutoConfigURLString": .text("http://corporate.example/proxy.pac")
+            ]
+            store.edit { $0.services[0].proxies = corporatePAC }
+            let desired = SystemProxyManager.locationFields(config: config, mode: .pac, localPACURL: url)
+            try recovery.apply(kind: .proxies, desired: desired, config: config)
+            let externalBypass = NetworkSettingValue.list(["external.example"])
+            store.edit { $0.services[0].proxies["ExceptionsList"] = externalBypass }
+            try recovery.apply(kind: .proxies, desired: desired, config: config)
+            XCTAssertTrue(events.events.contains { $0.event == "platform.location_restore" })
+            var expectedPrior = corporatePAC
+            expectedPrior["ExceptionsList"] = externalBypass
+            let record = try XCTUnwrap(journal.records(for: .systemProxy).first)
+            let prior = try XCTUnwrap(record.priorValue?["networkSettings"])
+            XCTAssertEqual(try CanonicalJSON.decoder().decode([String: NetworkSettingValue].self, from: Data(prior.utf8)), expectedPrior)
+            XCTAssertEqual(try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
+            XCTAssertEqual(try store.snapshot().services[0].proxies["ExceptionsList"], externalBypass)
+            try recovery.clear(kind: .proxies, config: config)
+            XCTAssertEqual(try store.snapshot().services[0].proxies, expectedPrior)
+            XCTAssertFalse(journal.hasRecords(for: .systemProxy))
         }
     }
 

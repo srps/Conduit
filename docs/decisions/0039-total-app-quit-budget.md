@@ -1,9 +1,9 @@
 # 0039: Bound the in-process app's complete Quit wait to ten seconds
 
 - Date: 2026-10-27
-- Decision: proposed
-- Implementation: planned
-- Validation: pending
+- Decision: accepted (owner, 2026-10-27, #186: selected “10 seconds total (Recommended)”)
+- Implementation: implemented
+- Validation: passed
 - Supersedes: none
 - Superseded by: none
 
@@ -14,15 +14,15 @@ success, without selecting its shipping duration. The legacy app has a five-seco
 platform-drain allowance followed by other work; that is not a five-second total.
 The new client already accepts an explicit total for the entire caller wait.
 
-The latest resource run completed the actual client Quit routine in about one
-second with fake effects and the widest final save. Its 30-second caller budget
-was an experimental value, not a production selection. That run found a separate
-diagnostic guard race and is not complete profile acceptance. Real helper and
-machine teardown timing remains unvalidated.
+The corrected-source resource run completed all 31 trials and the actual client
+Quit routine in about one second with fake effects and the widest final save.
+Its 30-second caller budget was experimental. The owner subsequently selected
+ten seconds total in #186. Real helper and machine teardown timing remains
+unvalidated.
 
 ## Decision
 
-Proposed: use ten seconds total for the in-process app's Quit, counted once when
+Use ten seconds total for the in-process app's Quit, counted once when
 it begins. Fence immediately, then spend only that remaining time on final frozen
 saves, operation observation and cleanup confirmation. Return earlier when the
 Quit settles. No app-owned final work starts under a fresh budget afterwards.
@@ -67,9 +67,60 @@ wait; machine cleanup validation remains separate from fake timing.
 The existing [client Quit routine](../../Sources/ConduitShared/PrivateConfiguration/RuntimeClientQuit.swift)
 and [host flush window](../../Sources/ConduitRuntime/RuntimeQuitFlush.swift) accept
 one explicit total and distinguish deadline outcome from physical quiescence.
-Shipping composition has not selected ten seconds yet. This record is a proposal.
+[`AppTiming.quitTotal`](../../Sources/Conduit/App/AppComposition.swift) now supplies
+ten seconds to the app's one Quit path. [`AppState`](../../Sources/Conduit/App/AppState.swift)
+fences synchronously and freezes final intent once; [`ConduitAppDelegate`](../../Sources/Conduit/App/AppDelegate.swift)
+uses AppKit terminate-later and replies after the bounded client routine returns.
+[`RuntimeServiceShippingProfileTests`](../../Tests/ConduitTests/RuntimeServiceShippingProfileTests.swift)
+pins the selected value, and [`AppStateHarnessTests`](../../Tests/ConduitTests/AppStateHarnessTests.swift)
+cover repeated Quit, expiry, late opening, final save order and refusal. The
+focused activation checkpoint passes 295 tests (two existing skips). The
+[complete workflow and fresh selected-total run](../verification-appstate-activation-2026-10-28.md)
+pass: the widest actual client Quit routine uses ten seconds total and returns
+in 974.47 ms with fake effects, verified final saves and confirmed cleanup. Native
+acceptance remains pending because UI inspection is blocked by the locked Mac. The historical
+thirty-second probe does not establish the shipping composition.
+
+
+The [diagnostic prerequisite](../verification-runtime-diagnostics-2026-10-28.md)
+adds the app's final log drain under that same deadline. Actual AppState harness
+tests hold the protected log destination: a four-second injected budget returns
+in about 2.26 seconds with an honest host timeout/app busy outcome; a one-second
+budget returns in about 1.03 seconds with skipped-budget tail work. These are
+fake-effect correctness observations, not shipping real-helper timing. The host
+can retain diagnostic custody after logical caller expiry; it grants no fresh
+app wait and exit may cut unconfirmed output short.
+
+Does not prove: native AppKit termination timing, real-helper teardown latency,
+or release readiness. Those checks remain separate from focused fake-effect tests.
+
+### Installed-candidate validation — 2026-10-29
+
+Validation: on the owner's installed 0.6.0 candidate (locally signed, real helper,
+VPN connected), the owner's normal Quit while the proxy ran exited without being
+forced. The exit came at most 1.91 s after the
+owner pressed Return, inside the ten-second total; that upper bound includes the
+owner's reaction. Per-service cleanup was confirmed; whether a global route to
+Conduit remained after Quit is unproven (see the verification). All eight
+journal-scoped per-service proxy field sets matched the priors Start tracked, resolver files and launchd
+variables were restored, and the listener was closed. The final snapshot shows
+every service stopped, and the journal holds no surface records. Results and
+limits are in the [installed verification](../verification-runtime-installed-2026-10-29.md).
+This is one normal-path Quit. It does not exercise expiry, a slow or stuck
+helper, or a product-only duration, because no readable quit-start event exists.
 
 ## Open questions
 
-Owner selection of ten versus thirty seconds before the affected production
-composition is implemented; complete corrected-source resource and native checks.
+Verify the selected-total actual-client probe and native AppKit path on the
+frozen activation. Real-machine cleanup timing remains due.
+
+Validation checkpoint — 2026-10-28: [native isolated Dev checks](../verification-runtime-actor-activation-2026-10-28.md) save a focused final numeric edit while the proxy is running, exit and show it on relaunch. UI-tool elapsed is not a precise worst-case deadline measurement. Real helper/machine timing remains due, so validation stays pending.
+
+
+### Artifact-phase deadline correction (2026-10-28)
+
+The [correction checkpoint](../verification-runtime-quit-deadline-2026-10-28.md) records 66c411d implementing this existing policy: the logger cap now also clips the one artifact phase. Ordinary nil-cap flushes keep six seconds; started physical writes retain authority until completion or process exit. The prior implementation and reviews clipped only the logger despite stronger checkpoint wording. Causal unit, actual-host and simulator guards fail when propagation/clamping is removed and pass when restored. The selected total and wire policy are unchanged.
+
+The final local workflow passes all 41 checks (3,770 tests / four skips / 103 scenarios), focused/optimized guards and seven production Release trials/162 checks. An earlier unconfirmed ordinary simulator flush remains recorded without a proven cause; diagnostic-only bounded evidence was added, with all assertions and budgets intact. Final hosted and real-machine validation remain pending.
+
+Status 2026-10-29: the normal-path installed Quit is recorded under Implementation evidence, and validation is passed for that scope. The "remains due" and "pending" lines above are historical. Expiry under a slow or stuck helper is still not observed on a real machine; revisit as Consequences describes.

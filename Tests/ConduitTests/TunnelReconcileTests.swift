@@ -5,7 +5,7 @@ import XCTest
 
 final class TunnelReconcileTests: XCTestCase {
 
-    @MainActor
+    @RuntimeActor
     func testReconcileAddsNewTunnel() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.proxy.port = 0
@@ -29,7 +29,7 @@ final class TunnelReconcileTests: XCTestCase {
         await orchestrator.stopProxy()
     }
 
-    @MainActor
+    @RuntimeActor
     func testReconcileRemovesTunnel() async throws {
         let def1 = TunnelDefinition(localPort: 0, remoteHost: "db1.example.com", remotePort: 5432, proxied: false, label: "DB1")
         let def2 = TunnelDefinition(localPort: 0, remoteHost: "db2.example.com", remotePort: 3306, proxied: false, label: "DB2")
@@ -52,7 +52,7 @@ final class TunnelReconcileTests: XCTestCase {
         await orchestrator.stopProxy()
     }
 
-    @MainActor
+    @RuntimeActor
     func testReconcileRejectsInvalidDefinitionAndPreservesExistingBindings() async throws {
         // Reconcile must reject invalid edits at the boundary the same way `startTunnels`
         // does — but unlike a cold-start failure, the *currently bound* listener stays up
@@ -99,7 +99,7 @@ final class TunnelReconcileTests: XCTestCase {
         await orchestrator.stopProxy()
     }
 
-    @MainActor
+    @RuntimeActor
     func testReconcileKeepsUnchangedTunnel() async throws {
         let def = TunnelDefinition(localPort: 0, remoteHost: "db.example.com", remotePort: 5432, proxied: false, label: "DB")
         var config = GenericDefaults.shared.makeConfig()

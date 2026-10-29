@@ -2,6 +2,7 @@
 import XCTest
 @testable import ConduitRuntime
 import ConduitShared
+import ProxyKernel
 
 /// What one pull delivers, in the terms the replay model and the production log are compared on.
 enum ReplayDelivery: Equatable {
@@ -184,7 +185,6 @@ struct ReplaySplitMix64 {
 /// two, a 250-byte outcome bound and chunks of two, so eviction, skip, loss and mid-catch-up expiry are reached within a short sequence. An
 /// ordinary outcome is 100 bytes, so its count decides eviction, and an oversize outcome is 300 bytes, which the bound skips. Each step
 /// compares the delivery of every pull, the open reader's start, the retained window and the outcome window.
-@MainActor
 final class RuntimeServiceReplayModelTests: XCTestCase {
     private static let ringCapacity = 3
     private static let controlCapacity = 2
@@ -196,7 +196,7 @@ final class RuntimeServiceReplayModelTests: XCTestCase {
         .event, .loss, .operation, .oversizeOperation, .openLive, .openReplay, .pull(0), .pull(1),
     ]
 
-    private func limits() throws -> RuntimeServiceLimits {
+    @RuntimeActor private func limits() throws -> RuntimeServiceLimits {
         try RuntimeServiceFixtures.limits(
             ringCapacity: Self.ringCapacity,
             controlLogCapacity: Self.controlCapacity,
@@ -212,7 +212,7 @@ final class RuntimeServiceReplayModelTests: XCTestCase {
 
     /// The production open: a live reader, or a replay from the oldest retained position that the production log refuses to a live
     /// reader when a loss or an evicted outcome is in the range. It uses only the log's own primitives.
-    private func productionOpen(_ log: RuntimeObservationLog, replay: Bool) -> RuntimeSubscriberCursor {
+    @RuntimeActor private func productionOpen(_ log: RuntimeObservationLog, replay: Bool) -> RuntimeSubscriberCursor {
         let live = RuntimeSubscriberCursor(
             nextEvent: log.liveStart,
             replayThrough: nil,
@@ -233,7 +233,7 @@ final class RuntimeServiceReplayModelTests: XCTestCase {
     }
 
     /// One production pull, reduced to the model's delivery vocabulary. A frame's cursor is committed only here, as the winning gate would.
-    private func productionPull(
+    @RuntimeActor private func productionPull(
         _ log: RuntimeObservationLog,
         _ reader: inout ProductionReader?,
         sequences: [ControlOperationID: Int]
@@ -261,7 +261,7 @@ final class RuntimeServiceReplayModelTests: XCTestCase {
     }
 
     /// Runs one sequence on the production log and on the model. It returns the first disagreement, named with its step, or nil.
-    private func disagreement(_ sequence: [ReplayAction]) throws -> String? {
+    @RuntimeActor private func disagreement(_ sequence: [ReplayAction]) throws -> String? {
         let limits = try limits()
         var log = RuntimeObservationLog(limits: limits)
         var model = ReplayReferenceModel(ringCapacity: Self.ringCapacity, controlCapacity: Self.controlCapacity, chunk: Self.chunk)
@@ -315,7 +315,7 @@ final class RuntimeServiceReplayModelTests: XCTestCase {
         return nil
     }
 
-    func testTheReplayRulesAgreeWithTheModelOnEveryBoundedSequence() throws {
+    @RuntimeActor func testTheReplayRulesAgreeWithTheModelOnEveryBoundedSequence() async throws {
         var sequences: [[ReplayAction]] = []
         var frontier: [[ReplayAction]] = [[]]
         for _ in 1...5 {
@@ -330,7 +330,7 @@ final class RuntimeServiceReplayModelTests: XCTestCase {
         }
     }
 
-    func testTheReplayRulesAgreeWithTheModelOnSeededLongWalks() throws {
+    @RuntimeActor func testTheReplayRulesAgreeWithTheModelOnSeededLongWalks() async throws {
         for seed in UInt64(1)...200 {
             var generator = ReplaySplitMix64(seed: seed)
             let walk = (0..<40).map { _ in
@@ -343,7 +343,7 @@ final class RuntimeServiceReplayModelTests: XCTestCase {
     }
 
     /// The witness for the caller's frame: an outcome that does not fit ends the reader as a resync, and the cursor does not move.
-    func testAnOutcomeThatDoesNotFitEndsTheReaderWithoutConsumingIt() throws {
+    @RuntimeActor func testAnOutcomeThatDoesNotFitEndsTheReaderWithoutConsumingIt() async throws {
         var log = RuntimeObservationLog(limits: try limits())
         log.appendControl(ControlOperationFinished(operationID: RuntimeServiceFixtures.operation(1), outcome: .failed(.internalFailure)), bytes: 100)
         let start = RuntimeSubscriberCursor(nextEvent: 1, replayThrough: nil, nextControl: 1, seenSnapshotGeneration: 0, lastWasSnapshot: false)

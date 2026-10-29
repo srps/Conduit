@@ -2,6 +2,7 @@
 import XCTest
 @testable import ConduitRuntime
 import ConduitShared
+import ProxyKernel
 
 /// Stop and status admission under fake-owner pressure, through the production transport. The owner is stalled: its hops are queued and
 /// not run until the test drains them. Parked stream pulls are real subscriptions, so each one holds a stream-lane reservation for as long
@@ -9,7 +10,6 @@ import ConduitShared
 /// invariants only: a Stop is admitted under the ordinary flood and under full stream pressure, a status read is answered from its own lane,
 /// and a pull beyond the stream lane is refused as busy without ending its stream. No latency threshold is asserted, and nothing here is a
 /// resource or RSS claim.
-@MainActor
 final class RuntimeServicePressureMetricsTests: XCTestCase {
     private let frameLimits = try! ControlFrameLimits(maxFrameBytes: 64 * 1024)
 
@@ -38,7 +38,7 @@ final class RuntimeServicePressureMetricsTests: XCTestCase {
         }
     }
 
-    private func encoded(_ id: Int, _ call: ControlRuntimeCall) throws -> Data {
+    @RuntimeActor private func encoded(_ id: Int, _ call: ControlRuntimeCall) throws -> Data {
         try ControlRuntimeCodec.encodeFrame(
             ControlRuntimeMessage(
                 correlation: RuntimeServiceFixtures.requestID(id),
@@ -49,7 +49,7 @@ final class RuntimeServicePressureMetricsTests: XCTestCase {
     }
 
     /// One caller call through the production transport, tallied when it resolves.
-    private func launch(
+    @RuntimeActor private func launch(
         _ transport: RuntimeInMemoryTransport,
         _ request: Data,
         deadline: RuntimeDeadline,
@@ -67,7 +67,7 @@ final class RuntimeServicePressureMetricsTests: XCTestCase {
     }
 
     /// Opens one live subscription through the production transport, and consumes its buffered baseline.
-    private func openStream(_ harness: RuntimeServiceHarness, _ transport: RuntimeInMemoryTransport, id: Int) async throws -> ControlRuntimeStream {
+    @RuntimeActor private func openStream(_ harness: RuntimeServiceHarness, _ transport: RuntimeInMemoryTransport, id: Int) async throws -> ControlRuntimeStream {
         let frame = try ControlRuntimeCodec.encodeFrame(
             ControlRuntimeMessage(
                 correlation: RuntimeServiceFixtures.requestID(id),
@@ -86,7 +86,7 @@ final class RuntimeServicePressureMetricsTests: XCTestCase {
 
     /// Parks one pull on each of `count` subscriptions. Each parked pull holds one stream-lane reservation, as a live stream does. The
     /// pulls are queued first, so the test drains them once and then waits until every reservation is held.
-    private func parkStreamPulls(
+    @RuntimeActor private func parkStreamPulls(
         _ harness: RuntimeServiceHarness,
         _ transport: RuntimeInMemoryTransport,
         count: Int
@@ -109,7 +109,7 @@ final class RuntimeServicePressureMetricsTests: XCTestCase {
 
     /// Measures one row: the stream lane is either empty or full of parked pulls, then an ordinary flood, one Stop per module and status
     /// reads run through the production transport. Each stage waits for the observable state it expects, with a bounded wait.
-    private func measure(_ label: String, streamPressure: Bool) async throws -> PressureRow {
+    @RuntimeActor private func measure(_ label: String, streamPressure: Bool) async throws -> PressureRow {
         let harness = try RuntimeServiceHarness(subscribers: 3)
         let transport = harness.transport()
         let deadline = RuntimeDeadline.after(.seconds(60), from: harness.timing.now)
@@ -170,7 +170,7 @@ final class RuntimeServicePressureMetricsTests: XCTestCase {
 
     /// Stop admission and status answers with an ordinary flood alone, and with the stream lane full of parked pulls. Full stream pressure
     /// does not change either answer, so the stream lane is independent of the read lane, the ordinary lane and each module's stop.
-    func testStopAndStatusAnswersAreTheSameWithAFullStreamLane() async throws {
+    @RuntimeActor func testStopAndStatusAnswersAreTheSameWithAFullStreamLane() async throws {
         let flood = try await measure("ordinary-flood", streamPressure: false)
         let streams = try await measure("ordinary-flood+stream-lane-full", streamPressure: true)
         XCTAssertEqual(flood.stopAnswered, streams.stopAnswered, "Stop is independent of stream pressure")
@@ -179,12 +179,15 @@ final class RuntimeServicePressureMetricsTests: XCTestCase {
 
     /// A pull beyond the stream lane is refused as `transportBusy`, which consumes nothing and ends no stream. The other subscriptions keep
     /// their parked pulls, and the refused subscription stays open.
-    func testAPullBeyondTheStreamLaneIsBusyAndNonTerminal() async throws {
+    @RuntimeActor func testAPullBeyondTheStreamLaneIsBusyAndNonTerminal() async throws {
         let harness = try RuntimeServiceHarness(subscribers: 3)
         let transport = harness.transport()
         _ = try await parkStreamPulls(harness, transport, count: harness.limits.streamLaneCapacity)
         let extra = try await openStream(harness, transport, id: 700)
         let deadline = RuntimeDeadline.after(.seconds(60), from: harness.timing.now)
+        guard transport.lanes.inFlight(.stream) == harness.limits.streamLaneCapacity else {
+            return XCTFail("the stream lane is full of parked pulls before the extra pull")
+        }
         do {
             _ = try await extra.next(deadline)
             XCTFail("a pull beyond the stream lane must be refused")
@@ -197,7 +200,7 @@ final class RuntimeServicePressureMetricsTests: XCTestCase {
 
     /// The retained window and the held snapshot stay bounded under an event flood and a snapshot flood, and a Stop is admitted during both.
     /// The ingress holds its own bound, so a flood with no drain becomes one loss marker, and the window moves only by its ring bound.
-    func testAnEventAndSnapshotFloodKeepsTheRetainedStateBoundedAndAStopAdmitted() throws {
+    @RuntimeActor func testAnEventAndSnapshotFloodKeepsTheRetainedStateBoundedAndAStopAdmitted() async throws {
         let harness = try RuntimeServiceHarness()
         for _ in 0..<40 {
             harness.core.ingest(ControlRuntimeEvent(timestamp: Date(timeIntervalSince1970: 1), kind: "proxy", event: "test.event"))

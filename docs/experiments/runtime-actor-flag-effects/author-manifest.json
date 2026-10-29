@@ -1,0 +1,154 @@
+{
+  "task": "RuntimeActor prerequisite phase1a: reconciler flag actions off the owner",
+  "worktree": "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit",
+  "branch": "codex/runtime-actor-prep",
+  "base": "0b5c533c16c7a6e8580a4073b209df3730b61908",
+  "base_note": "originally cc300192ee97788b5464e77ede7df1848d967465. Parent cherry-picked the RootB lifetime fix 673e53ab as 0b5c533c while Source was frozen; it does not overlap this diff.",
+  "status": "FINAL: focused wrapper green on 0b5c533c (attempt 3); Source frozen. Pre-verify review findings 1-4 resolved (runtime-opus-actor-flags-preverify-review.md; independent recheck runtime-opus-actor-flags-r2-review.md). Parent still runs all41, CI, docs and the final immutable-diff review.",
+  "isolation": "the whole control cluster is still MainActor; no RuntimeActor retag; no lifecycle, store, Stop or Quit policy change; phase1b not started",
+
+  "files_changed": {
+    "count": 7,
+    "production": [
+      {
+        "file": "Sources/PlatformMac/RuntimeReconciler.swift",
+        "what": [
+          "RuntimeReconcilerHost.perform is async -> Bool; new synchronous performImmediate for immediateActions",
+          "runFlagEffect: the action starts in the turn the pass checked its admission; the effect handle is a finish-only AsyncStream (.bufferingNewest(0)), so quiesceEffects waits for the action and its settlement",
+          "run is async; runImmediate added",
+          "admitted() is checked again after the action loop, before groups no action named are recorded",
+          "activeEffect and platformRequest doc comments updated"
+        ]
+      },
+      {
+        "file": "Sources/ConduitRuntime/RuntimeHost.swift",
+        "what": [
+          "async perform: every flag action captures its inputs in the deciding turn and runs one platformWork.run block on host.platformWork, then settles on the owner",
+          "performImmediate (setLaunchAtLogin returns true, no effect)",
+          "applySystemProxySwitch and applyEnvironmentSwitch are async and report failures with the proxy token captured at decision",
+          "resolver outcomes are recorded with startedAt; applyResolverEntries runs the gate correction",
+          "resolver check-then-act runs under DNSManager.serialized",
+          "applySystemDNS arms the timer unconditionally after its block, as before 1a",
+          "file-private attemptFlagStep helper"
+        ]
+      }
+    ],
+    "pm_sim": [
+      {
+        "file": "Sources/pm-sim/RuntimeHostEffectsScenarios.swift",
+        "what": [
+          "exerciseHeldFlagAction appended last in the chain; root release also requires it quiesced",
+          "a bounded private HeldSetenv is threaded through the existing effects() commandRunner",
+          "the pinned-host selection was rewritten from a '??' chain to a list (see type_checker_failures)"
+        ]
+      },
+      {
+        "file": "Sources/pm-sim/SettingsRetryScenarios.swift",
+        "what": "authorized compile repair, signature only: perform is async; performImmediate returns true"
+      }
+    ],
+    "tests": [
+      {
+        "file": "Tests/ConduitTests/RuntimeReconcilerTests.swift",
+        "what": "RecordingHost: async perform with a hold, plus performImmediate; new testQuiescenceWaitsForAHeldFlagActionAndALapsedAdmissionRecordsOnlyWhatLanded"
+      },
+      {
+        "file": "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift",
+        "what": "compose(platform:) parameter; new testAHeldFlagActionLeavesTheOwnerFreeAndAStopAdmittedMeanwhileClearsAfterIt (framed config-revision assertion)"
+      },
+      {
+        "file": "Tests/ConduitTests/DaemonRuntimeHostTests.swift",
+        "what": "new testADNSStopDuringAHeldSystemDNSSwitchOnLeavesNoHealthTimer and testAVPNDropWhileAResolverSwitchOnIsQueuedLeavesNoEntryFile"
+      }
+    ]
+  },
+
+  "design": {
+    "same_turn_enqueue": "The pass checks admitted(); runFlagEffect calls the body inline; run records the decision; host.perform captures its inputs and calls the nonisolated(nonsending) PlatformWork.run, which enqueues on the host's serial queue. All of this happens before the first suspension, so the order on the FIFO is the order of the decisions.",
+    "quiescence": "Stop's tearDown awaits quiesceEffects() before it reads the baseline or queues any clear. The flag effect's handle ends only after the host's settlement and the reconciler's adopt have run.",
+    "landed_facts": "A completion records only its own group, at the value its pass carried. It promotes no whole or stale baseline and never writes requested*. Once the admission lapses, no group that no action named is recorded. Parent and reviewer both confirmed this is correct under existing policy; no owner decision is needed.",
+    "results_preserved": "clears land when nothing throws and the journal shows no managed state; a partial environment apply lands and reports its shortfall; system DNS lands when saved && applied; failures go to ConfigReapplyRetry with the token of the run they were decided under",
+    "timer_guard_removed": "The token guard is gone. Every operation that supersedes the DNS lane runs tearDown, which quiesces and then calls stopDNSHealthTimer(), so the guard could not be observed and would have masked a broken quiesce ordering. The DNS witness pins that ordering.",
+    "setLaunchAtLogin": "unchanged immediate no-effect answer; #194 stays deferred"
+  },
+
+  "type_checker_failures": [
+    {
+      "attempt": 1,
+      "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-SbXhsR",
+      "error": "Sources/pm-sim/RuntimeHostEffectsScenarios.swift:159:17: error: the compiler is unable to type-check this expression in reasonable time",
+      "expression": "unconfirmedHost = flagged.pinnedHost ?? audited.pinnedHost ?? woken.pinnedHost ?? modules.pinnedHost ?? captured.pinnedHost ?? respelling.pinnedHost ?? source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost",
+      "cause": "the new flagged link made it an 11-term chain; the base had 10 terms",
+      "only_error": true
+    },
+    {
+      "attempt": 2,
+      "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-uKbMAs",
+      "error": "the same single error at the same line",
+      "note": "Started by mistake before I had read attempt 1's logs. It ran on the same unchanged Source, after attempt 1 had ended, so the two runs did not overlap."
+    }
+  ],
+
+  "list_rewrite_semantics": {
+    "new_code": "let exercises = [flagged, audited, woken, modules, captured, respelling, source, lifecycle, workflow, shutdown]; unconfirmedHost = exercises.lazy.compactMap(\\.pinnedHost).first",
+    "same_order": "The list order is the chain order, left to right. lazy.compactMap(...).first returns the first non-nil pinnedHost in that order and stops there, as '??' did.",
+    "nothing_runs_early": "All ten values are Shutdown values computed before this else-branch, and the expression reads only their pinnedHost properties. Building the list copies those finished values; it invokes no exercise, cleanup, flush or release. The '??' short-circuit only skipped further pure property reads.",
+    "gating_unchanged": "Each exercise still runs only when every earlier one quiesced. An exercise that did not run keeps its pinnedHost: nil placeholder.",
+    "release_unchanged": "Root release still requires all ten quiesced. Otherwise the else-branch pins the chosen host, keeps the root and scratch directory, and fails 'the shutdown is confirmed'. The per-exercise stop, settle and flush are untouched.",
+    "first_failure_choice": "Because of the gating, at most one exercise can be unconfirmed and pinned: the first one that failed to quiesce, after which none runs. The list and the chain pick that same host."
+  },
+
+  "verification": {
+    "wrapper": "bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-actor-prep.sh",
+    "attempts": [
+      { "n": 1, "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-SbXhsR", "result": "exit 1 at build (type_checker_failures[0])" },
+      { "n": 2, "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-uKbMAs", "result": "exit 1 at build (type_checker_failures[1])" },
+      {
+        "n": 3,
+        "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-0nZy7V",
+        "change_before": "only the list rewrite above",
+        "result": "exit 0; final line 'Focused actor-prerequisite verification passed; parent full workflow still required.' (with set -euo pipefail, every step ran and passed, including git diff --check)",
+        "artifacts": ["build.log", "tests.log", "sim.log", "imports.log", "catalogue.log", "decisions.log"],
+        "build": "build.log: 'Build complete! (6,54 sec)', no errors; no warnings in the changed files (the warnings in the test build are older ones in the AppState test files)",
+        "tests": {
+          "total": "Selected tests: 231 tests, 0 failures (0 unexpected), 84.658 s",
+          "per_suite": {
+            "ConfigReapplyRetryTests": "10 tests, 0 failures",
+            "DaemonRuntimeHostTests": "91 tests, 0 failures",
+            "RuntimeHostControlOwnerTests": "63 tests, 0 failures",
+            "RuntimeHostInteractiveTests": "29 tests, 0 failures",
+            "RuntimePhysicalOrderingTests": "15 tests, 0 failures",
+            "RuntimeReconcilerTests": "23 tests, 0 failures"
+          },
+          "new_tests_passed": [
+            "RuntimeReconcilerTests.testQuiescenceWaitsForAHeldFlagActionAndALapsedAdmissionRecordsOnlyWhatLanded",
+            "RuntimeHostControlOwnerTests.testAHeldFlagActionLeavesTheOwnerFreeAndAStopAdmittedMeanwhileClearsAfterIt",
+            "DaemonRuntimeHostTests.testADNSStopDuringAHeldSystemDNSSwitchOnLeavesNoHealthTimer",
+            "DaemonRuntimeHostTests.testAVPNDropWhileAResolverSwitchOnIsQueuedLeavesNoEntryFile"
+          ]
+        },
+        "pm_sim": {
+          "scenario": "runtime-host-effects",
+          "outcome": "PASS",
+          "assertions": "145 [pass], 0 [fail]",
+          "held_flag_exercise": "13 of 13 checks pass (sim.log lines 136-148), followed by lease closure, no lease close failure and scratch removal",
+          "note": "environment writes by the held apply: 6; hold timed out: false",
+          "wall_time": "9.91 s"
+        },
+        "imports": "Kernel import/Process fence passed (109 Swift files, 1 object files; 5 RuntimeEvents files limited to Foundation)",
+        "catalogue": "PASS: docs/events.md catalogues all 230 event names in product sources, and nothing more",
+        "decisions": "PASS: decision records, index and supersession links are consistent"
+      }
+    ],
+    "result": "focused green (attempt 3). Source has not changed since; no further runs without a new reason."
+  },
+
+  "remaining_gaps": [
+    "Phase1b (not started): VPN-transition entry-file reconcile, the recordSplitDNS residue read, settleResolverSwitchBaseline, the split-DNS retry and the config-change DNSResolverReconciliation still run inline on the owner. The applyResolverEntries gate correction reuses the inline reconcileEntryFiles, as applyProxySurfaces already does.",
+    "Known, not claimed fixed: an inline VPN-transition entry-file write on main can block the main thread on the DNSManager lock while a flag (or lifecycle) resolver block holds it. It goes away when 1b moves that path onto PlatformWork. No test holds both at once, because the release would have to run on the blocked main thread.",
+    "Push and re-apply still start one turn after their admission check (Task-based runEffect, unchanged).",
+    "reconcileImmediateActions has no caller in the tree (pre-existing).",
+    "HeldCall generalisation (1e) not done.",
+    "Docs and decision evidence: parent."
+  ]
+}

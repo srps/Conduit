@@ -29,12 +29,12 @@ Libraries (`Package.swift` is the authority; `docs/architecture.md` has the grap
 - `RuntimeEvents`: Foundation-only typed domain event values; no commands, transport or runtime ownership. The kernel carries their envelope and ProxyControlBridge maps separate wire values.
 - `ProxyAuth`: NTLM and Kerberos/Negotiate authenticators and the auth factory. `ProxyPAC`: CFNetwork-backed PAC evaluation.
 - `PlatformMac`: every machine side effect, the lifecycle policy both hosts share, and the fakes they run against.
-- `ConduitRuntime`: the shared `RuntimeHost` (decision 0013), run by `ConduitDaemon`. `AppState` does not depend on it yet; its own `ConduitRuntime/AGENTS.md` carries the twin rule.
+- `ConduitRuntime`: the shared `RuntimeHost` (decision 0031), composed by the app and `ConduitDaemon`. It owns the runtime, configuration store/workflow and lifecycle effects; the app uses its framed clients.
 - `ConduitShared`: the helper IPC contract, the daemon control protocol and the domain-name grammar. `ProxyControlBridge` maps kernel snapshots to control-protocol types.
 
 Executables:
 
-- `Conduit` (app) runs its own runtime host, a twin of `RuntimeHost` in `ConduitRuntime`, until it adopts that target. `ConduitDaemon` is the daemon entry point that runs `RuntimeHost`. `ConduitHelper` is the privileged LaunchDaemon.
+- `Conduit` (app) composes one `RuntimeHost` through `AppComposition`; `AppState` owns editor drafts and UI policy over its clients. `ConduitDaemon` is the daemon entry point that runs `RuntimeHost`. `ConduitHelper` is the privileged LaunchDaemon.
 - `ConduitUpdater` is the nested self-updater, the only target that links Sparkle (#111).
 - Tools: `pm-proxy` (headless proxy), `pm-sim` (fault-injection scenarios), `pm-dns`, `pm-tunnel`, `pmctl` (daemon control client), and the `pm-*-check` diagnostics.
 

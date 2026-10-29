@@ -1,0 +1,8 @@
+{
+  "base": "f3abd5f710ed683a2f73859e0429d6e5c807e9f9",
+  "product_module_trees_unchanged": true,
+  "file": "Tests/ConduitTests/RuntimeActorFairnessTests.swift",
+  "sha256": "c509cbd6a817eb88d064fd9fc155eb4d05fe84c66b99dc38f9d2b3f406e87ed6",
+  "patch_sha256": "362e10fcb6f0a92bf96ddcf235d1ba50e3f17b639a7bc1fe8aca5847297b6603",
+  "author_manifest": "ci-compat-fairness-tests-manifest.json"
+}

@@ -41,7 +41,7 @@ private final class ProbeHold: @unchecked Sendable {
 }
 
 enum RecoveryLadderScenarios {
-    @MainActor
+    @RuntimeActor
     private static func until(timeout: TimeInterval, _ condition: () -> Bool) async throws -> Bool {
         let deadline = ContinuousClock.now + .milliseconds(Int64(timeout * 1000))
         while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
@@ -56,7 +56,7 @@ enum RecoveryLadderScenarios {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     static func unreachableLadder(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         // A port that was just bound and released: connects to it are refused.
@@ -123,7 +123,7 @@ enum RecoveryLadderScenarios {
     /// stands down, reading the cause from before the disconnect; then the
     /// disconnect's probe routes DIRECT. The disconnect's verdict must own
     /// the status: `.running`, not the `.degraded` the ladder left.
-    @MainActor
+    @RuntimeActor
     static func ladderSupersededByDisconnect(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let dead = FakeUpstreamProxy(group: group, originHost: "127.0.0.1", originPort: 9, requireAuth: false)
@@ -160,7 +160,7 @@ enum RecoveryLadderScenarios {
         let ladderHeld = try await until(timeout: 15) { ladderProbe.isHolding }
         let recovering = orchestrator.snapshot.runtimeStatus.state == .recovering
         disconnected.withLockedValue { $0 = true }
-        let disconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
+        let disconnect = Task { @RuntimeActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
         let disconnectHeld = try await until(timeout: 5) { disconnectProbe.isHolding }
         // The ladder's probe returns first and stands down.
         ladderProbe.release()

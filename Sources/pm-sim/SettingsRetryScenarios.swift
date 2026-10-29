@@ -20,7 +20,7 @@ import ProxyKernel
 enum SettingsRetryScenarios {
 
     /// `AppState`'s reconcile hooks, reduced to the system proxy.
-    @MainActor
+    @RuntimeActor
     private final class Host: RuntimeReconcilerHost {
         let manager: SystemProxyManager
         let events = RuntimeEventLog(capacity: 64)
@@ -53,7 +53,7 @@ enum SettingsRetryScenarios {
             previousConfig: ProxyConfig,
             platform: PlatformIntegrationConfig,
             previousPlatform: PlatformIntegrationConfig
-        ) -> Bool {
+        ) async -> Bool {
             do {
                 switch action {
                 case .applySystemProxy:
@@ -75,12 +75,21 @@ enum SettingsRetryScenarios {
             }
         }
 
+        /// The login item is not this scenario's surface.
+        func performImmediate(
+            _ action: PlatformIntegrationReconciler.Action,
+            platform: PlatformIntegrationConfig,
+            previousPlatform: PlatformIntegrationConfig
+        ) -> Bool {
+            true
+        }
+
         func count(_ event: String) -> Int {
             events.events.filter { $0.event == event }.count
         }
     }
 
-    @MainActor
+    @RuntimeActor
     static func retryRequest() async throws -> ScenarioResult {
         let name = "settings-retry-request"
         let began = Date()

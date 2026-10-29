@@ -28,7 +28,7 @@ enum KerberosScenarios {
         func resetContext() {}
     }
 
-    @MainActor
+    @RuntimeActor
     static func serviceTicketUnavailable(verbose: Bool) async throws -> ScenarioResult {
         let name = "kerberos-service-ticket"
         let start = Date()
@@ -119,7 +119,7 @@ enum KerberosScenarios {
     /// event and one NOTICE line carrying the GSS codes; the next one after
     /// the interval reports `suppressed=99`. Once the ticket can be had, the
     /// next handshake uses Kerberos.
-    @MainActor
+    @RuntimeActor
     static func fallbackFlood() async throws -> ScenarioResult {
         let name = "kerberos-fallback-flood"
         let start = Date()
@@ -152,7 +152,7 @@ enum KerberosScenarios {
             burstUsedNTLM = try handshake().hasPrefix("NTLM ") && burstUsedNTLM
             clock.advance(0.5)
         }
-        await Task { @MainActor in }.value
+        await Task { @RuntimeActor in }.value
         func fallbackEvents() -> [RuntimeEvent] {
             orchestrator.eventLog.events.filter { $0.event == "auth.kerberos_fallback_ntlm" }
         }
@@ -167,7 +167,7 @@ enum KerberosScenarios {
 
         clock.advance(60)
         _ = try handshake()
-        await Task { @MainActor in }.value
+        await Task { @RuntimeActor in }.value
         let repeatDetail = fallbackEvents().last?.detail ?? ""
         let repeatLine = fallbackLines().last ?? ""
 

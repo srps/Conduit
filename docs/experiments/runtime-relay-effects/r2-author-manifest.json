@@ -1,0 +1,107 @@
+{
+  "task": "RuntimeActor prerequisite phase1c r2: relay production unchanged from r1; test-only correction of an unsynchronized events-file read that failed parent's full swift-tests",
+  "worktree": "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit",
+  "base": "RootA HEAD 791e314 (parent roadmap-only commit) with the frozen relay r1 diff and parent's PlatformMac AGENTS descriptive edit",
+  "supersedes_manifest": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-relay-manifest.json (r1; preserved, not edited). r1 snapshot /private/tmp/conduit-runtime-stage1-20261024/runtime-actor-relay-review-r1 preserved.",
+  "status": "FOCUSED GREEN (wQ7SU4). Source frozen. Parent's all41 and re-review still required.",
+  "production": "UNCHANGED from relay r1. No Source file was edited in r2: ProxyOrchestrator.swift, RuntimeHost.swift, PlatformWork.swift, RelayReassertScenarios.swift and docs/events.md are exactly as in r1. The r1 manifest's design, tests and limitations stand.",
+
+  "full_failure": {
+    "run": "parent relay full workflow, EXIT 1, stable 968b14741424157ee66ccfc9dd3661727389c35b91981e7a816234f7dee77daa; all41 ran, only swift-tests failed",
+    "log": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-relay-full-gates/swift-tests.log",
+    "assertion": "AppStateActivationParityTests.swift:473 testCommittingAListenHostLeavesTheDNSForwarderOnLoopback: XCTAssertEqual(hostEvents(harness, \"config.proxy_restart\").count, 1) failed, 0 != 1. The proxyHost == \"::1\" settle and the DNS assertions passed.",
+    "facts_in_log": [
+      "swift-tests.log:1224 03:43:38.175 'Config reload: proxy listener config changed, restarting proxy' is ProxyOrchestrator.swift:804, the line right after emitEvent(.config, \"config.proxy_restart\") at :803, so the event was in the host's in-memory event log",
+      ":1225 .175 'Local proxy stopped (scope: allButDedicated)'; :1226 .176 'Local proxy listening on ::1:53010'; :1227 the assertion failure",
+      "receipt sequence before it: runtime not_attempted baseline_mismatch, platform held_behind_runtime, then runtime persisted, platform unchanged (normal: the DNS Start's own write moved the baseline)"
+    ],
+    "cause": "Test-side, source-level. hostEvents filters harness.hostEventsText, a disk read of environment.eventsFile (AppStateHarnessTests.swift:130-132). The host writes that file through RuntimeEventFileWriter, a BoundedRecordWriter on its own utility queue (RuntimeHost.swift:424-433), after the in-memory append. The test's settle observed the framed snapshot's bindings, a different path. Nothing in the test waited for the writer, so under full-suite load the file was read before the record was written. Production restarted the listener and emitted the event. Not a relay-1c regression: this path has no transparent proxy and no relay commands.",
+    "why_not_polling": "Polling the file for the asserted event (as :900 did) or sleeping (:902, :724) only widens the window. The negative file checks in the same file could pass vacuously. AppState deliberately keeps no host reference (AppState.swift:264), so a direct drain would cross the app/host boundary; no host reference or test hook was added."
+  },
+
+  "correction": {
+    "causal_boundary": "The app's own Quit (beginQuit/finishQuit). admitQuit runs await flushEvents(), which awaits the events writer's drain through DiagnosticFlush.run, and only then flush?.quitDidEnd() (RuntimeHostLifecycle.swift:1017-1018). RuntimeQuitFlush.settled() is true only through quitDidEnd before the deadline (RuntimeQuitFlush.swift:85-99), and the quit operation reports completed(.quit) only when settled() is true (RuntimeHostControlOwner.swift:287). An event recorded before the Quit was admitted has therefore left the writer's queue when finishQuit() returns .settled(.completed).",
+    "honest_scope": "A completed Quit is logical quiescence, not proof that every diagnostic writer confirmed its records: DiagnosticFlush caps each wait at 2 s, and a drained queue includes records the writer failed. The post-drain file assertions still catch an actual loss, a failed write or an unconfirmed drain, since the file is then short.",
+    "helper": "One private helper, quitJoiningHostDiagnostics(_:file:line:) -> Bool, beside hostEvents in AppStateActivationParityTests.swift. It asserts beginQuit() is the first quit and that finishQuit()?.quit is .settled(.completed). Its doc states the scope above. hostEvents' doc now says it is a disk read and names the helper. The harness teardown's own quit joins (beginQuit returns false).",
+    "rule": "Runtime, listener, machine, ledger and saved-config assertions stay before the Quit, because the Quit tears the modules down. Exact event counts and negative event checks go after it. No event poll, no sleep, no weakened assertion, no host reference."
+  },
+
+  "assertion_parity": [
+    {
+      "test": "testCommittingAListenHostLeavesTheDNSForwarderOnLoopback (the full failure)",
+      "before_quit": "settle proxyHost == \"::1\"; dnsRunState == .running; dnsHost == \"127.0.0.1\"; dnsPort unchanged (previously after the event reads; same values, still before any teardown)",
+      "after_quit": "config.proxy_restart count == 1; config.dns_restart empty",
+      "removed": "nothing",
+      "meaning": "unchanged; the negative DNS check is no longer vacuous; the exact count also catches a double restart"
+    },
+    {
+      "test": "testTheDNSCommandsOwnWritesChainSoTheNextSaveNeedsNoReload (old :556)",
+      "before_quit": "every ledger, saved-config and dnsRunState == .stopped assertion, unchanged",
+      "after_quit": "events file has no config.dns_restart",
+      "removed": "nothing",
+      "meaning": "unchanged: only a config reload's restartDNS emits config.dns_restart, never the Quit"
+    },
+    {
+      "test": "testTypingBackToTheCommittedPortRebindsNothingAndADNSToggleHoldsNoLaterPause (old :724/:725)",
+      "before_quit": "no config.autosave_held in the app log; proxyPort == port (previously after the event read)",
+      "after_quit": "config.proxy_restart empty ('nothing rebound')",
+      "removed": "the 100 ms sleep at old :724",
+      "meaning": "unchanged. Each pause save's own receipt (!hasUnsavedEdit, settled in the loop) arrives after that save's runtime apply, inside which a rebind records its event, so the sleep only covered disk-write lag. A comment says so."
+    },
+    {
+      "test": "testAPersistedUnholdableDurationOpensAndEveryStartRefusesItBeforeAnyEffect (old :751)",
+      "before_quit": "the existing 100 ms sleep (old :745, not in scope, kept) and every runtime/machine assertion, unchanged",
+      "after_quit": "events file does not contain 10000000000",
+      "removed": "nothing",
+      "meaning": "unchanged, and stricter: the check now also covers the Quit's own events"
+    },
+    {
+      "test": "testAListenerEditWhileRunningWaitsForItsCommitAndRebindsOnce (old :900-:903)",
+      "before_quit": "settle proxyPort == next; settle the receipt cleaned the draft; savedConfig.localPort == next, unchanged",
+      "after_quit": "config.proxy_restart count == 1 ('one rebind')",
+      "removed": "the event-file poll settle at old :900 and the 100 ms sleep at old :902",
+      "meaning": "unchanged: the rebind and any duplicate are recorded within the commit's apply, before its receipt"
+    },
+    {
+      "test": "testAnUpdatesCredentialReachesNoHostDiagnostic (old :914/:915)",
+      "before_quit": "awaitPendingSave; snapshot file has no TOKEN-HOST-7; config file contains pac.example.test, unchanged",
+      "after_quit": "events file contains config.workflow (the non-vacuity witness, previously polled) and does not contain TOKEN-HOST-7",
+      "removed": "the event-file poll settle at old :914 (now an assertion after the drain)",
+      "meaning": "unchanged and causal"
+    }
+  ],
+  "left_as_is": [
+    "old :136 hostEventsText count in the settings-flood test: an upper-bound check inside its own loop, not in the authorized list",
+    "the snapshot-file read in testAnUpdatesCredentialReachesNoHostDiagnostic: same class (an asynchronous diagnostic artifact, ?? \"\" can make it vacuous), but not an event read and not authorized. Left at its position, documented here for parent.",
+    "every other 100 ms Task.sleep in the file, at current lines :544, :661, :763, :821, :851, :892 and :1039, and all credential-test timing: not in scope, untouched"
+  ],
+
+  "files_changed_r2": {
+    "tests": ["Tests/ConduitTests/AppStateActivationParityTests.swift (only)"],
+    "production": "none",
+    "docs": "none",
+    "hashes": "not computed: only the fixed wrapper is allowed; parent to fingerprint the frozen Source"
+  },
+
+  "verification": {
+    "wrapper": "bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-actor-prep.sh (parent-extended filter now includes AppStateActivationParityTests)",
+    "earlier_attempts": "relay r1 attempts: GUd4bR (test-target compile error, fixture), mZz0zx (valid seam-baseline semantic failures), vtZUXa (focused green); see the r1 manifest",
+    "r2_attempt": {
+      "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-wQ7SU4",
+      "result": "exit 0; 'Focused actor-prerequisite verification passed; parent full workflow still required.'",
+      "tests": "327 tests, 0 failures: AppStateActivationParityTests 34 (all six corrected tests passed: listen-host 0.058 s, DNS commands chain 4.241 s, typing back 3.016 s, unholdable duration 0.165 s, listener edit 0.060 s, credential 0.027 s), BoundedRecordWriterTests 9, ConfigReapplyRetryTests 10, DNSInterceptReadinessTests 8, DNSResolverReconciliationTests 4, DaemonRuntimeHostTests 95, RelayLifecycleTests 13, RuntimeHostControlOwnerTests 65, RuntimeHostInteractiveTests 29, RuntimePhysicalOrderingTests 15, RuntimeReconcilerTests 23, SplitDNSEntryFileRepairTests 15, SplitDNSVPNGateTests 7",
+      "pm_sim": "runtime-host-effects PASS 148 [pass]; relay-reassert-after-stop PASS 10 [pass]",
+      "imports": "Kernel import/Process fence passed (109 Swift files, 1 object files; 5 RuntimeEvents files limited to Foundation)",
+      "catalogue": "PASS: 229 event names, and nothing more",
+      "decisions": "PASS",
+      "git_diff_check": "clean"
+    },
+    "not_run_here": "all41, re-review"
+  },
+
+  "risks_and_remaining": [
+    "A Quit whose events drain timed out still reports completed; the post-drain assertions then fail, a genuine finding, not a fixture flake.",
+    "Other unsynchronized diagnostic-artifact reads remain in the suite (the snapshot read above, old :136); left for a later, parity-checked change.",
+    "Relay r1 limitations unchanged: relay commands can wait behind queued PlatformWork; no blind relay stop at quit, as in the base."
+  ]
+}

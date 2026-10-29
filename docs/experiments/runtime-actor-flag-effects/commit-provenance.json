@@ -1,0 +1,7 @@
+{
+  "commit": "4696a6232cad126d2b810cebf5e7692d7a106e93",
+  "relevant_source_sha256": "105f6b8f15e0f37f32519566fcc467c1c5aaf56d7056a284157760a3c6e57b37",
+  "files": 758,
+  "matches_full_workflow": true,
+  "scope": "Sources, Tests, scripts, .github, Resources, Package.swift, Package.resolved, bundle-app.sh, VERSION; sorted path NUL bytes then file bytes"
+}

@@ -1,0 +1,108 @@
+{
+  "task": "RuntimeActor prerequisite phase1b r2: split-DNS gate/file effects and residue reads off the owner, plus the two production corrections from the Opus r1 review",
+  "worktree": "/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit",
+  "base": "d5ac37e (parent docs-only, after 8a75aba)",
+  "supersedes_manifest": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-dns-review-r1/author-test-migration.json (r1; immutable, not edited). r1 stable source e665eba7933a6f0e1524a69651defad108152b041bd31c8150eebc07552b8bab passed parent's all41 and 103 sim records; it stayed unaccepted on the two findings closed here.",
+  "review": "/private/tmp/conduit-runtime-stage1-20261024/runtime-opus-dns-r1-review.md",
+  "status": "FOCUSED GREEN (r2 attempt 4, v8xHqV). Source frozen. Parent's full workflow (all41), independent re-review, guard witnesses and docs still required.",
+  "isolation": "control cluster still MainActor; no actor retag; no new queue, PlatformWork API, delivery, store, registry, dependency, public/package access, policy or event name. No Git, network, API, helper, installed-app or primary-state touch.",
+
+  "phase1b_complete": {
+    "summary": "Every entry-file operation follows one pattern. Decide and take splitDNSRepair.queue() in the owner turn, then platformWork.run in that same turn. Inside the block, the operation and its residue read (Observation.after) run in one resolvers.serialized scope against the operation's own config. The owner then records with await recordSplitDNS(observation, source:, startedAt: place). Gate-driven work (VPN transitions and the two post-write corrections) goes through reconcileEntryFiles(config:runtimeStarted:). No blocking manager or file read is left on the owner.",
+    "r1_design_carried_unchanged": "Every r1 design point in author-test-migration.json 'design' stands: same-turn enqueue at every site; runtimeStarted = true in the continueStart turn; Stop freshness by queue place (startedAt < generation); a refused removal is kept; recordInterceptRefresh(failed:place:); files before orchestrator; legacy compositions (SplitDNSVPNGate.reconcileEntryFiles, SplitDNSEntryFileRepair.retry, record's optional startedAt) kept for pm-sim and the unit tests.",
+    "r2_corrections": "below"
+  },
+
+  "findings_closed": {
+    "1_start_residue_before_its_sweep": {
+      "status": "CLOSED",
+      "defect_in_r1": "applyProxySurfaces read Observation.after before the refreshInterceptFiles sweep in the same resolvers.serialized scope. A recorded file for a disabled intercept rule counted as residue although the start's sweep (clearInterceptFiles, forCleanup: true) removed it, so a pending repair the start fixed stayed pending, and markResolverSwitchLanded waited for a later retry.",
+      "fix": "RuntimeHost.swift applyProxySurfaces: the Observation.after read moved to after the sweep's do/catch, still inside the same resolvers.serialized scope (same lock, same block, same queue place). This matches the config-change block, which already reads residue after its refresh."
+    },
+    "2_drop_and_reconnect_during_start_block": {
+      "status": "CLOSED",
+      "defect_in_r1": "Sequence: the start's block captures vpnConnected = true; a drop, handled with runtimeStarted false, queues a .remove behind the start's apply; the reconnect, still with runtimeStarted false, decides .nothing; the tail compares the net gate state (wanted == captured) and does not correct. Result: tunnel up, runtime started, no entry file, and no failure recorded for a retry. Reachable while observers already run during a proxy start (DNS module up, or a restart).",
+      "fix": "RuntimeHost.swift applyProxySurfaces: gateReportSeen = splitDNSGateOrder.applied is captured in the same turn as vpnConnected. The tail corrects when splitDNSGate.entriesWanted != vpnConnected || (splitDNSGate.entriesWanted && splitDNSGateOrder.applied != gateReportSeen). It uses the existing VPN report sequence (VPNObservationOrder.applied); no new state. The added case only queues an idempotent apply through reconcileEntryFiles(config:runtimeStarted: true), decided and queued in the runtimeStarted = true turn, so same-turn enqueue, Stop freshness and runtimeStarted placement are unchanged. The switch-on tail is unchanged: runtimeStarted is already true there, so a reconnect during its block applies itself."
+    }
+  },
+
+  "cheap_fixes": {
+    "recordSplitDNS_startedAt_required": "RuntimeHost.recordSplitDNS(_:source:startedAt:) takes startedAt: Int (was Int? = nil). All seven call sites (start, VPN transition, retry, config change, switch-on, switch-off, stop) already passed a place; no test or pm-sim call omitted it. SplitDNSEntryFileRepair.record keeps its optional parameter for the legacy retry() composition.",
+    "SplitDNSEntryFileRepair_record_doc": "removed 'or the generation a caller read when it queued'; now 'the operation's place (queue()), taken in the turn it was queued'. The sentence that an unplaced outcome takes the next place stays: it is still true for the legacy composition.",
+    "DNSManager_lock_doc_preflight_correction": "DNSManager.swift operations-lock comment: the claim that the activation preflight is a reader on another queue that the lock protects is removed. It contradicted serialized's own doc: the reads (isApplied, isCleared, hasManagedState, entryFilesPresent) take no lock, and ActivationPreflight.swift:85-86 calls them without one. The comment now names launch recovery's own job (recoverLegacyOwnership) and direct callers of the type as what still overlaps the host's PlatformWork queue.",
+    "r1_manifest_statement_corrected": "r1 risks_and_remaining said 'Readers on other queues (the activation preflight) still take the DNSManager lock'. That is wrong. Correct statement: the activation preflight reads DNSManager state from a global queue without its lock; nothing on the owner calls DNSManager after 1b; launch recovery calls it from its own job.",
+    "pm_sim_nonvacuous_drop_order": "RuntimeHostEffectsScenarios.swift reloadAndStopWhileHeld: new witness dropLandedBeforeStopRestore and check 'once released, the drop's removal lands before the Stop's system proxy restore'. A command baseline is taken before the drop. After the release and both operations finish, it requires a removeDNS for corp.example and a system-proxy write (the Stop's restore batch, recorded step by step), with the removal first. The existing in-hold check stays; alone it would pass for a drop that queued nothing."
+  },
+
+  "files_changed_r2": {
+    "production": [
+      "Sources/ConduitRuntime/RuntimeHost.swift: applyProxySurfaces (residue after sweep; gateReportSeen and the tail condition); recordSplitDNS startedAt required",
+      "Sources/PlatformMac/SplitDNSEntryFileRepair.swift: record doc comment only",
+      "Sources/PlatformMac/DNSManager.swift: lock doc comment only"
+    ],
+    "tests": [
+      "Tests/ConduitTests/DaemonRuntimeHostTests.swift: testADropAndReconnectDuringAStartsHeldBlockLeaveTheEntryFile, testAStartsInterceptSweepSettlesARepairWhoseOnlyResidueItRemoved"
+    ],
+    "pm_sim": [
+      "Sources/pm-sim/RuntimeHostEffectsScenarios.swift: dropLandedBeforeStopRestore witness and check"
+    ],
+    "not_touched": "RuntimeHostLifecycle.swift, SplitDNSVPNGate.swift, every other file; parent's uncommitted docs/events/checkpoint/archive edits are preserved, none edited",
+    "hashes": "not computed: the only Bash call allowed in this session was the fixed wrapper. Parent to fingerprint the frozen Source."
+  },
+
+  "tests_added": {
+    "DaemonRuntimeHostTests.testADropAndReconnectDuringAStartsHeldBlockLeaveTheEntryFile": "Real observers: launch with the DNS forwarder enabled, host.startDNS() runs startObservers. Positive report: emit .connected, then gate.lastVPNState == .connected, with runtimeStarted false and no entry file. The proxy start (startProxy(conditionalDNS: false)) is held on its block's -listallnetworkservices, off main. While held: the drop is taken (entriesWanted false), the reconnect is taken (lastVPNState == .connected), runtimeStarted is still false, and no entry-file command ran. After release: entry-file commands exactly [applyDNS, removeDNS, applyDNS], the entry file is present, no split_dns_failed, nothing pending.",
+    "DaemonRuntimeHostTests.testAStartsInterceptSweepSettlesARepairWhoseOnlyResidueItRemoved": "Config with a disabled intercept rule *.intercept.test. Start (entry file present); the Stop's removal of corp.example is refused (failingDomains), so pending is remove/stop. Clear the refusal and plant intercept.test through the host's dnsManager.applyInterceptFiles with the rule enabled (journal-recorded, as a killed earlier run leaves it). Preconditions asserted: the file is present, the journal names it, unconfiguredRecordedFilesPresent is true. Start again: the file and its journal record are gone, nothing is pending, and exactly one split_dns_repaired with prefix 'operation=apply by=start '."
+  },
+
+  "verification": {
+    "wrapper": "bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-actor-prep.sh (unchanged)",
+    "attempts": [
+      {
+        "n": 1,
+        "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-467rOz",
+        "production": "exact r1; only the two new tests added",
+        "result": "exit 1 at swift test: 262 tests, 4 failures, build and compile clean",
+        "flap_test": "VALID test-first witness. DaemonRuntimeHostTests.swift:3769 XCTAssertEqual [applyDNS, removeDNS] != [applyDNS, removeDNS, applyDNS]; :3771 XCTAssertNotNil failed (no entry file for the tunnel that is up). Every precondition (observer report, drop and reconnect taken while held, runtimeStarted false, nothing ran ahead) passed.",
+        "residue_test": "INVALID as a regression witness: FIXTURE failure, not old-code evidence. Line numbers are from that run's file, before the fixture edit shifted them. :3793 pending nil (expected remove), then :3812 repaired 'operation=remove by=stop failed=apply attempts=1'. The first start's refused apply left no file, so the Stop's removal did not reach the helper and the Stop settled the repair. The fixture was corrected (start succeeds first; only the Stop's removal is refused). No assertion was weakened."
+      },
+      {
+        "n": 2,
+        "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-sb1zk7",
+        "production": "exact r1; tests with the corrected residue fixture",
+        "result": "exit 1 at swift test: 262 tests, 5 failures, build and compile clean",
+        "flap_test": "VALID, unchanged: :3769 and :3771 as in attempt 1.",
+        "residue_test": "VALID test-first witness. Every precondition passed: pending remove/stop before the start; the planted file present; the journal names it; residue true. After the start, the sweep did remove the file and its record (:3809/:3810 passed), yet :3811 pending is still Pending(remove, stop, attempts 1); :3813 split_dns_repaired count 0 != 1; :3814 no 'operation=apply by=start' event. This is the r1 behaviour the review described."
+      },
+      {
+        "n": 3,
+        "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-JTRfxu",
+        "production": "r2 fixes applied",
+        "result": "exit 1 at pm-sim: build clean; 262 tests, 0 failures (both new tests pass); pm-sim runtime-host-effects FAIL on the new check only",
+        "cause": "Check defect, not production: the check matched .clearSystemProxy, but a Stop restores the system proxy with a batch of setters (SystemProxyManager privilegedBatch); .clearSystemProxy is only the loginwindow fallback. With no match the witness stayed false. The positive check 'the Stop clears the system proxy' passed in the same run. Fixed by matching any system-proxy write after the drop's baseline."
+      },
+      {
+        "n": 4,
+        "dir": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-prep-focused-v8xHqV",
+        "production": "r2 final",
+        "result": "exit 0; 'Focused actor-prerequisite verification passed; parent full workflow still required.'",
+        "tests": "262 tests, 0 failures: ConfigReapplyRetryTests 10, DNSResolverReconciliationTests 4, DaemonRuntimeHostTests 95 (93 + 2 new, both pass), RuntimeHostControlOwnerTests 64, RuntimeHostInteractiveTests 29, RuntimePhysicalOrderingTests 15, RuntimeReconcilerTests 23, SplitDNSEntryFileRepairTests 15, SplitDNSVPNGateTests 7",
+        "pm_sim": "runtime-host-effects PASS, 148 [pass], 0 [FAIL] (147 r1 + the new drop-order check)",
+        "imports": "Kernel import/Process fence passed (109 Swift files, 1 object files; 5 RuntimeEvents files limited to Foundation)",
+        "catalogue": "PASS (230 event names; no new name)",
+        "decisions": "PASS",
+        "git_diff_check": "clean"
+      }
+    ],
+    "not_run_here": "all41, AppState parity suites, TSan, CI, independent re-review: parent-owned"
+  },
+
+  "risks_and_remaining": [
+    "Head-of-line latency (accepted, unmeasured): the orchestrator's VPN handling waits behind unrelated queued platformWork, because the entry files must land first. The owner stays free.",
+    "Redundant correction writes (accepted): both post-write corrections can queue an idempotent apply the VPN handler's own work would also cover. r2 widens the start tail by one case: any gate report taken while the block was out, with entries wanted, now costs one extra idempotent apply even when it did not flip the gate (for example connected to reasserting).",
+    "Intercept-refresh places leave harmless gaps in queue order, which newer= counts.",
+    "Residue is read against the operation's own config, not the host's accepted view at record time; at start it is now read after the start's intercept sweep.",
+    "Protection against priority-ordered resumption is verified by construction only, until the RuntimeActor retag.",
+    "The activation preflight reads DNSManager state from a global queue without its lock (unchanged since before 1b; documented at DNSManager.serialized)."
+  ]
+}

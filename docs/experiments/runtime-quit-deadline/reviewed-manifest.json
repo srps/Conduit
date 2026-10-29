@@ -1,0 +1,11 @@
+{
+  "base": "d038381fb63b8845d42e1aa65a47379415380fd1",
+  "files_sha256": {
+    "Sources/ProxyKernel/Support/DiagnosticFlush.swift": "50d456a3259513f5399347b9be33fa97cea42b78d52d04296c8b2e5b4b50b817",
+    "Sources/ConduitRuntime/RuntimeHost.swift": "32899ac91d52881d4880ee61b84a8e65e9f90ee241c4e42a747ceb7830461f3e",
+    "Sources/pm-sim/RuntimeHostEffectsScenarios.swift": "f2f3512d8aa62332b252764251c51edb1830259047990070606e354995539648",
+    "Tests/ConduitTests/ConfigurationStoreTests.swift": "5221b8d76cbc3ed4417c6e0be4992916b0a993f8d8058fa8d61091746eb5a77b",
+    "Tests/ConduitTests/DiagnosticDrainPhaseTests.swift": "f6c26c7fb7f9b6007f7b2340a99b5abc31f9ff84d2a3eaeda6bdc46d4bda436a",
+    "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift": "3e8b7c0f9b70c4760e7c04d43c5400da64a091500be37354f40a42daa9455066"
+  }
+}

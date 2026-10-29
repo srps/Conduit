@@ -2,8 +2,8 @@
 import SwiftUI
 import ProxyKernel
 
-/// The Connections section: every active request, most recent first, capped
-/// at the mirror's own limit.
+/// The Connections section: every active request, most recent first, capped at a display limit. The count is the snapshot's exact one;
+/// the rows are read page by page while this section is shown.
 struct ConnectionsView: View {
     @EnvironmentObject private var runtime: RuntimePresentationAdapter
 
@@ -12,7 +12,7 @@ struct ConnectionsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("\(runtime.activeConnections.count) active")
+                Text("\(runtime.activeConnectionCount) active")
                     .font(.headline)
                     .monospacedDigit()
                 let tunnels = runtime.activeConnections.filter(\.tunnel).count
@@ -24,10 +24,17 @@ struct ConnectionsView: View {
                 Spacer()
             }
 
-            if runtime.activeConnections.isEmpty {
-                Text("No active requests right now.")
+            if let note = rowsNote {
+                Text(note)
                     .foregroundStyle(.secondary)
                     .font(.subheadline)
+            }
+            if runtime.activeConnections.isEmpty {
+                if rowsNote == nil {
+                    Text("No active requests right now.")
+                        .foregroundStyle(.secondary)
+                        .font(.subheadline)
+                }
                 Spacer()
             } else {
                 ScrollView {
@@ -58,6 +65,19 @@ struct ConnectionsView: View {
                     }
                 }
             }
+        }
+        .onAppear { runtime.showing(.activeConnections, true) }
+        .onDisappear { runtime.showing(.activeConnections, false) }
+    }
+
+    /// Why the rows below are not the current list, when they are not. A list the runtime cannot capture whole is unavailable, and its
+    /// connections are still served.
+    private var rowsNote: String? {
+        switch runtime.rows(.activeConnections) {
+        case .current: nil
+        case .notRead: runtime.activeConnectionCount > 0 ? "Reading the list…" : nil
+        case .stale: "Updating the list…"
+        case .unavailable: "The list is too large to show; all \(runtime.activeConnectionCount) connections are still being served."
         }
     }
 }

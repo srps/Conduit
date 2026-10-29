@@ -1,0 +1,7 @@
+2026-10-28T18:50:26.6451510Z Test Case '-[ConduitTests.DaemonRuntimeHostTests testAVPNDropDuringAHeldSplitDNSRetryQueuesItsRemovalBehindIt]' passed (0.039 seconds).
+2026-10-28T18:50:26.6452420Z Test Case '-[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending]' started.
+2026-10-28T18:50:26.6454320Z /Users/runner/work/Conduit/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3699: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertFalse failed - outcomes are recorded in the order they were queued
+2026-10-28T18:50:26.6456520Z /Users/runner/work/Conduit/Conduit/Tests/ConduitTests/DaemonRuntimeHostTests.swift:3702: error: -[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending] : XCTAssertEqual failed: ("["operation=remove source=vpn_transition attempt=1"]") is not equal to ("["operation=remove source=vpn_transition attempt=1", "operation=remove source=vpn_transition attempt=2"]")
+2026-10-28T18:50:26.6458500Z Test Case '-[ConduitTests.DaemonRuntimeHostTests testAVPNDropsRefusedRemovalQueuedBehindAResolverSwitchOnStaysPending]' failed (1.382 seconds).
+2026-10-28T18:50:26.6459330Z Test Case '-[ConduitTests.DaemonRuntimeHostTests testAVPNDropWhileTheStartAppliesLeavesNoEntryFile]' started.
+2026-10-28T18:50:26.6460140Z Test Case '-[ConduitTests.DaemonRuntimeHostTests testAVPNDropWhileTheStartAppliesLeavesNoEntryFile]' passed (0.043 seconds).

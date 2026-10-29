@@ -89,14 +89,14 @@ enum HealthRestartScenarios {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     private static func until(timeout: TimeInterval, _ condition: () -> Bool) async throws -> Bool {
         let deadline = ContinuousClock.now + .milliseconds(Int64(timeout * 1000))
         while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
         return condition()
     }
 
-    @MainActor
+    @RuntimeActor
     static func staleCheckAfterRestart(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let upstream = HeldHTTPUpstream(group: group)

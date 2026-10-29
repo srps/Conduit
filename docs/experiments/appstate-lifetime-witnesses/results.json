@@ -1,0 +1,233 @@
+{
+  "executions": [
+    {
+      "group": "observer",
+      "restored": true,
+      "ledger_sha256": "57bb814139558b8c86f5f371d184aa4bf92d8d222bde5457f4a37187b5ac8054",
+      "error": null,
+      "checks": [
+        {
+          "label": "baseline",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "RuntimeObserverSettlementTests.testAFrameReturnedAfterStopReachesNeitherThePresentationNorTheCallbacks|RuntimeObserverSettlementTests.testAPageReadFailedAfterStopIsNotReportedAndOneFailedBeforeItIs"
+          ],
+          "exit": 0,
+          "seconds": 8.01,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 4
+        },
+        {
+          "label": "post-stop-frame-delivery",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "RuntimeObserverSettlementTests.testAFrameReturnedAfterStopReachesNeitherThePresentationNorTheCallbacks|RuntimeObserverSettlementTests.testAPageReadFailedAfterStopIsNotReportedAndOneFailedBeforeItIs"
+          ],
+          "exit": 1,
+          "seconds": 9.461,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeObserverSettlementTests.swift:342: error: -[ConduitTests.RuntimeObserverSettlementTests testAFrameReturnedAfterStopReachesNeitherThePresentationNorTheCallbacks] : XCTAssertEqual failed: (\"2\") is not equal to (\"1\") - nothing was handed on after the stop: snapshot(ConduitShared.ControlRuntimeSnapshot(stamp: ConduitShared.ControlRuntimeStamp(incarnation: 127CBCDC-5263-4D73-A81D-533CED0994E4, presentationRevision: ConduitShared.ControlOrdinal<ConduitShared.ControlPresentationRevisionDomain>(rawValue: 0), configRevision: ConduitShared.ControlOrdinal<ConduitShared.ControlConfigRevisionDomain>(rawValue: 0), lifecycleRevision: ConduitShared.ControlOrdinal<ConduitShared.ControlLifecycleRevisionDomain>(rawValue: 0), modules: Optional(ConduitShared.ControlModuleRevisions(proxy: ConduitShared.ControlOrdinal<ConduitShared.ControlLifecycleRevisionDomain>(rawValue: 0), dns: ConduitShared.ControlOrdinal<ConduitShared.ControlLifecycleRevisionDomain>(rawValue: 0), tunnels: ConduitShared.ControlOrdinal<ConduitShared.ControlLifecycleRevisionDomain>(rawValue: 0)))), profileName: \"\", proxyState: ConduitShared.ControlProxyState.stopped, activeUpstream: nil, healthSummary: \"Idle\", proxyError: nil, dnsRunState: ConduitShared.ControlModuleRunState.stopped, dnsError: nil, tunnelsRunState: ConduitShared.ControlModuleRunState.stopped, tunnelsError: nil, directModeCause: ConduitShared.ControlDirectModeCause.none, vpnState: ConduitShared.ControlVPNState.unknown, vpnInterfaceName: nil, bindings: ConduitShared.ControlRuntimeBindings(proxy: nil, socks: nil, localPAC: nil, dns: nil, transparentProxy: nil), lastAuthOutcome: nil, lastAuthOutcomeAt: nil, lastAuthFallbackReason: nil, metrics: ConduitShared.ControlRuntimeMetrics(requestsHandled: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), failedRequests: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), successfulRecoveries: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), openConnections: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), inboundConnections: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), uptimeStartedAt: nil, lastFailure: nil), dnsQueryCount: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), dnsDoHFallbackCount: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), dnsCacheHitCount: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), tunnelActiveCount: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), tunnelSessionCount: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), tunnelDNSOverride: ConduitShared.ControlTunnelDNSSummary(kind: ConduitShared.ControlTunnelDNSKind.notNeeded, unavailableReason: nil, hosts: ConduitShared.ControlCollectionReference(kind: ConduitShared.ControlCollectionKind.tunnelDNSHosts, totalCount: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), state: ConduitShared.ControlCollectionState.available(ConduitShared.ControlOrdinal<ConduitShared.ControlCollectionRevisionDomain>(rawValue: 1)))), vpnFlap: ConduitShared.ControlVPNFlapMetrics(count: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), totalDurationSeconds: ConduitShared.ControlChecked<ConduitShared.ControlNonNegativeNumberRule>(rawValue: 0.0), lastFlapAt: nil, streamsPreserved: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0)), collections: ConduitShared.ControlRuntimeCollections(activeConnections: ConduitShared.ControlCollectionReference(kind: ConduitShared.ControlCollectionKind.activeConnections, totalCount: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), state: ConduitShared.ControlCollectionState.available(ConduitShared.ControlOrdinal<ConduitShared.ControlCollectionRevisionDomain>(rawValue: 1))), upstreamHealth: ConduitShared.ControlCollectionReference(kind: ConduitShared.ControlCollectionKind.upstreamHealth, totalCount: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), state: ConduitShared.ControlCollectionState.available(ConduitShared.ControlOrdinal<ConduitShared.ControlCollectionRevisionDomain>(rawValue: 1))), tunnelBindings: ConduitShared.ControlCollectionReference(kind: ConduitShared.ControlCollectionKind.tunnelBindings, totalCount: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), state: ConduitShared.ControlCollectionState.available(ConduitShared.ControlOrdinal<ConduitShared.ControlCollectionRevisionDomain>(rawValue: 1))), tunnelDNSHosts: ConduitShared.ControlCollectionReference(kind: ConduitShared.ControlCollectionKind.tunnelDNSHosts, totalCount: ConduitShared.ControlChecked<ConduitShared.ControlCountRule>(rawValue: 0), state: ConduitShared.ControlCollectionState.available(ConduitShared.ControlOrdinal<ConduitShared.ControlCollectionRevisionDomain>(rawValue: 1)))), appliedState: ConduitShared.ControlAppliedState.unavailable(ConduitShared.ControlAppliedStateUnavailableReason.pendingAppliedStateSlice), displayNotices: []))",
+          "test_case_log_markers": 4
+        },
+        {
+          "label": "post-stop-page-error",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "RuntimeObserverSettlementTests.testAFrameReturnedAfterStopReachesNeitherThePresentationNorTheCallbacks|RuntimeObserverSettlementTests.testAPageReadFailedAfterStopIsNotReportedAndOneFailedBeforeItIs"
+          ],
+          "exit": 1,
+          "seconds": 8.109,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeObserverSettlementTests.swift:372: error: -[ConduitTests.RuntimeObserverSettlementTests testAPageReadFailedAfterStopIsNotReportedAndOneFailedBeforeItIs] : XCTAssertEqual failed: (\"1\") is not equal to (\"0\") - a read failed after the stop is not reported",
+          "test_case_log_markers": 4
+        },
+        {
+          "label": "restored",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "RuntimeObserverSettlementTests.testAFrameReturnedAfterStopReachesNeitherThePresentationNorTheCallbacks|RuntimeObserverSettlementTests.testAPageReadFailedAfterStopIsNotReportedAndOneFailedBeforeItIs"
+          ],
+          "exit": 0,
+          "seconds": 6.594,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 4
+        }
+      ]
+    },
+    {
+      "group": "owner-cycle",
+      "restored": true,
+      "ledger_sha256": "f19453e145526af1313f1e014ca6c0db4e73a9887c2d882e472898894c155d51",
+      "error": null,
+      "checks": [
+        {
+          "label": "baseline",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateHarnessTests.testAQuitAppIsReleasedAndLateObservationOrEditorWorkNeitherReachesItNorWrites"
+          ],
+          "exit": 0,
+          "seconds": 2.556,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        },
+        {
+          "label": "strong-ui-owner-cycle",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateHarnessTests.testAQuitAppIsReleasedAndLateObservationOrEditorWorkNeitherReachesItNorWrites"
+          ],
+          "exit": 1,
+          "seconds": 18.033,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/AppStateHarnessTests.swift:509: error: -[ConduitTests.AppStateHarnessTests testAQuitAppIsReleasedAndLateObservationOrEditorWorkNeitherReachesItNorWrites] : XCTAssertTrue failed - timed out waiting until nothing keeps the app after its quit",
+          "test_case_log_markers": 2
+        },
+        {
+          "label": "restored",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateHarnessTests.testAQuitAppIsReleasedAndLateObservationOrEditorWorkNeitherReachesItNorWrites"
+          ],
+          "exit": 0,
+          "seconds": 6.828,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        }
+      ]
+    },
+    {
+      "group": "session-close",
+      "restored": true,
+      "ledger_sha256": "3a764d58d40940bfcfd76145211558731545a2917c06376f36b0a80508749842",
+      "error": null,
+      "checks": [
+        {
+          "label": "baseline",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "RuntimeEditorSessionChainTests.testASaveFrozenBeforeTheOwnerWentSettlesAndALaterTriggerSendsNothingAndClosesTheSession"
+          ],
+          "exit": 0,
+          "seconds": 2.439,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        },
+        {
+          "label": "owner-gone-session-stays-open",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "RuntimeEditorSessionChainTests.testASaveFrozenBeforeTheOwnerWentSettlesAndALaterTriggerSendsNothingAndClosesTheSession"
+          ],
+          "exit": 1,
+          "seconds": 6.964,
+          "stop": "semantic_failure",
+          "assertion": "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/AppStateEditorModelTests.swift:1001: error: -[ConduitTests.RuntimeEditorSessionChainTests testASaveFrozenBeforeTheOwnerWentSettlesAndALaterTriggerSendsNothingAndClosesTheSession] : XCTAssertFalse failed",
+          "test_case_log_markers": 2
+        },
+        {
+          "label": "restored",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "RuntimeEditorSessionChainTests.testASaveFrozenBeforeTheOwnerWentSettlesAndALaterTriggerSendsNothingAndClosesTheSession"
+          ],
+          "exit": 0,
+          "seconds": 5.871,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        }
+      ]
+    },
+    {
+      "group": "unowned-trap",
+      "restored": true,
+      "ledger_sha256": "f19453e145526af1313f1e014ca6c0db4e73a9887c2d882e472898894c155d51",
+      "error": null,
+      "checks": [
+        {
+          "label": "baseline",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateHarnessTests.testAQuitAppIsReleasedAndLateObservationOrEditorWorkNeitherReachesItNorWrites"
+          ],
+          "exit": 0,
+          "seconds": 2.672,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        },
+        {
+          "label": "known-unowned-runtime-trap",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateHarnessTests.testAQuitAppIsReleasedAndLateObservationOrEditorWorkNeitherReachesItNorWrites"
+          ],
+          "exit": 1,
+          "seconds": 6.215,
+          "stop": "expected_unowned_trap",
+          "assertion": "Fatal error: Attempted to read an unowned reference but object 0x103b91190 was already destroyed",
+          "test_case_log_markers": 1
+        },
+        {
+          "label": "restored",
+          "command": [
+            "xcrun",
+            "swift",
+            "test",
+            "--filter",
+            "AppStateHarnessTests.testAQuitAppIsReleasedAndLateObservationOrEditorWorkNeitherReachesItNorWrites"
+          ],
+          "exit": 0,
+          "seconds": 6.442,
+          "stop": null,
+          "assertion": null,
+          "test_case_log_markers": 2
+        }
+      ]
+    }
+  ],
+  "scope": "Four semantic assertions and one separately identified exact unowned runtime trap; no generic crash or compile failure is counted as a semantic kill.",
+  "test_compatibility_note": "After these witnesses, one test-only weak-let probe was expressed as weak-var declaration plus assignment to preserve the Swift6.2 floor. Production Source unchanged; all five fresh-process runs pass afterward."
+}

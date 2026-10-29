@@ -195,7 +195,7 @@ final class ControlRuntimeEventProjectionTests: XCTestCase {
     func testTheKnownVocabularyIsWhatTheWireWrites() throws {
         XCTAssertEqual(
             ControlLifecycleEvent.knownWireTypes,
-            ["superseded", "coalesced", "termination_drain_expired", "version_changed", "module_settled"]
+            ["superseded", "coalesced", "termination_drain_expired", "version_changed", "module_settled", "log_flush_unconfirmed"]
         )
         XCTAssertEqual(ControlLifecycleEvent.knownEventNames, Set(LifecycleEventName.allCases.map(\.rawValue)))
         let values: [ControlLifecycleEvent] = [
@@ -205,6 +205,8 @@ final class ControlRuntimeEventProjectionTests: XCTestCase {
             .versionChanged(from: "0.4.1", to: "0.5.0"),
             .moduleSettled(settlement: .explicit(.tunnels, .failed), group: 3),
             .moduleSettled(settlement: .conditionalDNS(.fenced), group: 1),
+            .logFlushUnconfirmed(source: .host, outcome: .timedOut),
+            .logFlushUnconfirmed(source: .app, outcome: .unavailable),
         ]
         for value in values {
             XCTAssertTrue(ControlLifecycleEvent.knownEventNames.contains(value.name), value.name)
@@ -227,7 +229,12 @@ final class ControlRuntimeEventProjectionTests: XCTestCase {
             .versionChanged(LifecycleVersionChanged(from: "0.4.1", to: "0.5.8-rc.1+7")),
         ] + LifecycleModuleSettlement.everySpelling.filter { LifecycleModuleSettled.isValid(settlement: $0, group: 2) }.map {
             LifecycleEvent.moduleSettled(LifecycleModuleSettled(settlement: $0, group: 2))
+        } + LifecycleLogFlushSource.allCases.flatMap { source in
+            LifecycleLogFlushOutcome.allCases.map { LifecycleEvent.logFlushUnconfirmed(LifecycleLogFlushUnconfirmed(source: source, outcome: $0)) }
         }
+        // The wire's closed sets are separate and spell the domain's values exactly.
+        XCTAssertEqual(ControlLifecycleLogFlushSource.allCases.map(\.rawValue), LifecycleLogFlushSource.allCases.map(\.rawValue))
+        XCTAssertEqual(ControlLifecycleLogFlushOutcome.allCases.map(\.rawValue), LifecycleLogFlushOutcome.allCases.map(\.rawValue))
         for value in values {
             let domain = RuntimeEvent(payload: .lifecycle(value))
             let projected = ControlRuntimeEvent(domain)

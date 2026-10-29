@@ -1,0 +1,18 @@
+{
+  "stage": "CI compatibility fix for the f3 hosted test compilation (Xcode 26.6), test file only",
+  "file": "Tests/ConduitTests/RuntimeActorFairnessTests.swift",
+  "source_unchanged": "every production module Source stays f3; no Source, CI, toolchain, dependency, docs, Probe.swift or cow-output edit",
+  "hash": "not computed in this lane (Bash limited to the fixed verifier); the parent should hash it at freeze",
+  "frozen_after_edit": true,
+  "ci_errors": "ci-f3-swift-unique-errors.txt: 11 errors 'pattern that the region-based isolation checker does not understand how to check' at :411, :435, :460, :461, :477, :480, :497, :532, :567, :630, :631, each a Task closure calling Self.readPage (and, at :630-631, Self.result)",
+  "change": "inside those Task closures, and at every other call site of the two static helpers, the dynamic Self is replaced by the concrete type: Self.readPage( becomes RuntimeActorFairnessTests.readPage( and Self.result { becomes RuntimeActorFairnessTests.result {. No other line changed.",
+  "not_done": "no actor annotation on the XCTest class, no @unchecked Sendable, no suppression, no assertion, request or test-logic change; the requests still run off the owner exactly as before",
+  "runs": [
+    {"run": "runtime-actor-stageb-u7W867", "mode": "correction", "result": "exit 0; 52 tests, 0 failures; all 14 RuntimeActorFairnessTests pass"},
+    {"run": "runtime-actor-stageb-FyhGIf", "mode": "strict", "result": "exit 0; 57 tests, 0 failures; RuntimeActorFairnessTests pass; both pm-sim scenarios PASS"}
+  ],
+  "limits": [
+    "Verified only with the local toolchain. Whether Xcode 26.6's older region checker accepts the concrete-type form is unproven until CI compiles it; the parent's push and CI run is the witness.",
+    "No full workflow was run here (the parent runs full41)."
+  ]
+}

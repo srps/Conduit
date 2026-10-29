@@ -7,7 +7,10 @@ candidates must be compared before deletion. A write-first item means coverage
 was not established by this review and must be checked or added before the cut.
 The parent checked all 132 non-keep test names occur below and generated the
 remaining 46 keep-only identities from source. The disposition tally totals 178.
-Current execution remains in [ROADMAP](../ROADMAP.md).
+This historical inventory is preserved as acceptance evidence. The
+[activation checkpoint](verification-appstate-activation-2026-10-28.md) records
+the implemented cut and remaining proof limits. Current execution remains in
+[ROADMAP](../ROADMAP.md).
 
 **What each label means**
 - **T(V):** the named host test exists and I compared its assertions with the app test.

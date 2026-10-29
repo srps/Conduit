@@ -44,7 +44,7 @@ jobs:
             test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
           fi
       - name: Run the standard full test suite
-        run: xcrun swift test
+        run: /usr/bin/script -q /dev/null /usr/bin/xcrun swift test </dev/null
       - name: Verify optimized PAC behavior
         timeout-minutes: 15
         shell: bash

@@ -185,6 +185,55 @@ final class SplitDNSEntryFileRepairTests: XCTestCase {
         XCTAssertNil(repair.pending, "a result with nothing recorded since is applied")
     }
 
+    /// Operations queued on the host's one platform queue run in queue order (#47), but the owner can observe their outcomes in another
+    /// order. Recorded in place order, two in flight at once both count, the later failure standing. An outcome recorded after one queued
+    /// behind it is dropped, so the physically latest result stands.
+    func testOperationsInFlightTogetherAreRecordedInQueueOrder() {
+        var repair = SplitDNSEntryFileRepair()
+        let start = repair.queue()
+        let drop = repair.queue()
+        repair.record(.succeeded(.apply), source: .start, startedAt: start, report: report)
+        repair.record(.failed(.remove, RecordingPrivilegeClient.Refused(operation: .removeDNS, subject: nil)), source: .vpnTransition,
+                      startedAt: drop, report: report)
+        XCTAssertEqual(repair.pending?.operation, .remove, "the later failure stands")
+        XCTAssertFalse(events.contains { $0.event == "platform.split_dns_outcome_superseded" }, "neither was dropped")
+
+        let older = repair.queue()
+        let newer = repair.queue()
+        repair.record(.succeeded(.remove), source: .vpnTransition, startedAt: newer, report: report)
+        XCTAssertNil(repair.pending, "the newer removal repaired it")
+        repair.record(.failed(.apply, RecordingPrivilegeClient.Refused(operation: .applyDNS, subject: nil)), source: .start,
+                      startedAt: older, report: report)
+        XCTAssertNil(repair.pending, "an outcome queued before one already recorded is older than the disk")
+        XCTAssertEqual(events.last?.detail, "operation=apply source=start failed=true newer=1")
+    }
+
+    /// The history a hosted run's failed assertions imply (#47); its event details were not captured, so the order is inferred, not
+    /// observed. A resolver switch-on's apply, a VPN drop's removal and the switch-on's correction removal behind it are queued and run in
+    /// that order, and both removals are refused. The owner records the apply, then the correction, then the drop. The drop's refusal is
+    /// older than the disk the correction saw, so it is dropped: the correction's refusal stands as the first attempt, and nothing older
+    /// clears or overwrites it.
+    func testAnOlderRefusalObservedAfterANewerRefusalIsSupersededAndTheNewerStands() {
+        var repair = SplitDNSEntryFileRepair()
+        let apply = repair.queue()
+        let drop = repair.queue()
+        let correction = repair.queue()
+        let refused = RecordingPrivilegeClient.Refused(operation: .removeDNS, subject: nil)
+
+        repair.record(.succeeded(.apply), source: .switchOn, startedAt: apply, report: report)
+        repair.record(.failed(.remove, refused), source: .vpnTransition, startedAt: correction, report: report)
+        repair.record(.failed(.remove, refused), source: .vpnTransition, startedAt: drop, report: report)
+
+        XCTAssertEqual(repair.pending?.operation, .remove, "the correction's refusal stands")
+        XCTAssertEqual(repair.pending?.source, .vpnTransition)
+        XCTAssertEqual(repair.pending?.attempts, 1, "the dropped refusal is not counted")
+        XCTAssertEqual(repair.generation, correction, "the older outcome did not take the newest place")
+        XCTAssertEqual(names(), ["platform.split_dns_failed", "platform.split_dns_outcome_superseded"])
+        XCTAssertEqual(events.first?.detail?.hasPrefix("operation=remove source=vpn_transition attempt=1 reason="), true,
+                       "\(events.first?.detail ?? "no failure")")
+        XCTAssertEqual(events.last?.detail, "operation=remove source=vpn_transition failed=true newer=1")
+    }
+
     /// Codex review: a deleted entry's file is swept only by a retry, so a
     /// success elsewhere must not settle the repair while it is on disk.
     func testASuccessThatLeavesAnUnconfiguredRecordedFileDoesNotSettle() throws {

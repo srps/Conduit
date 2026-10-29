@@ -66,7 +66,7 @@ enum LifecycleScenarios {
     }
 
     /// `AppState.startProxy` / `stopProxy`, reduced to the platform step.
-    @MainActor
+    @RuntimeActor
     private final class Host {
         let lane = LifecycleLane(name: "proxy")
         let work = PlatformWork(label: "io.github.srps.Conduit.pm-sim.platform-work")
@@ -157,7 +157,7 @@ enum LifecycleScenarios {
     }
 
     /// Bounded: the scenario watchdog is the backstop, this is the budget.
-    @MainActor
+    @RuntimeActor
     private static func yield(until condition: () -> Bool) async -> Bool {
         for _ in 0..<100_000 where !condition() {
             await Task.yield()
@@ -165,7 +165,7 @@ enum LifecycleScenarios {
         return condition()
     }
 
-    @MainActor
+    @RuntimeActor
     static func stopOvertakesStart() async throws -> ScenarioResult {
         let name = "lifecycle-stop-overtakes-start"
         let began = Date()

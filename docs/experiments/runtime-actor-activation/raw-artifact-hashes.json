@@ -1,0 +1,212 @@
+[
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/app-entry.log",
+    "bytes": 433,
+    "sha256": "d4e931c6be7b5eb51bb0905a201aed64b067e747cbba24797c42ba2361a6b0e2"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/appcast-notes.log",
+    "bytes": 611,
+    "sha256": "109c9100970f9021495b96167ee95a10d99c5efc15c9e8611428f8eafdff93e2"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/bounded-writers.log",
+    "bytes": 2257,
+    "sha256": "383bd747a5aab9b27fb556fd51485c4d00b9bcfa61744d235f20bf95daaad0fa"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/build.log",
+    "bytes": 924439,
+    "sha256": "57c890376a076c8db26410948573d90c50633e1ff35d77690008a3dd313ad5c2"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/check-decisions.log",
+    "bytes": 68,
+    "sha256": "135368b2ee14567717c22b2cdd6b9689b4d1437fb7f1fe7cb510b8048958c044"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/check-event-catalogue.log",
+    "bytes": 89,
+    "sha256": "4c7d746de50ffba152e91a800474fc60a47918ad460b8cb2c01e546600b125f4"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/check-kernel-imports.log",
+    "bytes": 114,
+    "sha256": "6550ab7634437678e2608299fe47e5260ef47a9dfee82d1f961fa1613fdbf3d7"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/check-third-party-notices.log",
+    "bytes": 90,
+    "sha256": "f05e8219cac22bff36f24205a2a4f852f135fa721daeb87a4586987eb4510a6d"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/connect-early-direct.log",
+    "bytes": 1098,
+    "sha256": "9168b82c225b837570639c196b5e978e08fdcf5fe975d9ca0abb3ac7bac895d5"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/connect-early-upstream.log",
+    "bytes": 1101,
+    "sha256": "2efd56d0c94b0e2a990128ff6fe7556670e65456edffaabf47ed00704a9acd9e"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/dev-bundle-regressions.log",
+    "bytes": 1643,
+    "sha256": "8d2a31af972ceea509b14fe1fd5a51a530798cba5189fccf5892b1785cff0668"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/dns-ephemeral-pair-rebind.log",
+    "bytes": 1774,
+    "sha256": "0dce45808f9a39223dadb937fdcbcf1755f8960672d8f29b292877f69cc17d6f"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/dns-shutdown.log",
+    "bytes": 58,
+    "sha256": "2d460a37b86b76804c6b35312854454efb683eafe5e5cccaec9770e76f90e0bb"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/forced-proxy-precedence.log",
+    "bytes": 1254,
+    "sha256": "027cfd45f139d382444a7ef42ab822c2dbbe5e5cc260a8ef5073d124419c5a25"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/gateway-probe-blocklist.log",
+    "bytes": 1339,
+    "sha256": "e366e270d9d2b7b1eb8db60ec5cc2de87acdb6cf2b34f2d3200a85055a0c4823"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/http-wire-target.log",
+    "bytes": 116,
+    "sha256": "d882991f898256265205d875b6a4c286e4d090a2aa0b7108dbc6ad2d0e315c66"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/kerberos-workers.log",
+    "bytes": 79,
+    "sha256": "a263b2bdfe74c3d95a4356abfbfa546451ab788aae8fac034ba49a225fa23082"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/observable-target-redaction.log",
+    "bytes": 1212,
+    "sha256": "ff19b8beb573fc63eb5b7f0e7591a9649d3212472e20e6cb9886672ef7cf7f1e"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/pac-fetch-bounds.log",
+    "bytes": 1225,
+    "sha256": "a2b159e66693e5e0cc7f99a16a7bdc21a2daf881ddf4cebaa93912d2b77debfd"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/pac-unsupported-only.log",
+    "bytes": 1461,
+    "sha256": "8bca5f033d93891638f671bb054538250d7dc856be72cf417fc7a91fe984c6e6"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/perf-gate.log",
+    "bytes": 5246,
+    "sha256": "03db7530cb7db8dd526e7cdb7f3f3395cfa6eb80b5444684b47515fec7cdb091"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/pm-sim-all.log",
+    "bytes": 260937,
+    "sha256": "238b06097b13988619ab49a3d14a71836a2a883ae95b7316a405fe2016645b65"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/security-boundaries-script.log",
+    "bytes": 147,
+    "sha256": "65197e4bf031c3320f9b4a80d326ddb0f3a65ef16075720743c494fbd7adfc34"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/security-boundaries.log",
+    "bytes": 1766,
+    "sha256": "9f7626d4b1466d61eadfa7cb64a1e8ac9b9bb5b0db543c78be2a5dfd3c7f37ad"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/server-first-connect.log",
+    "bytes": 1114,
+    "sha256": "e5cc33c9ff57ab9cdd216b3116cdf5590cf2f47044501dcaa5d0c09436d1d982"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/server-first-socks5.log",
+    "bytes": 1112,
+    "sha256": "f6c3566847822758ad267d863efef0f153384e76fa3345036ff53b67744b37e4"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/shared-inbound-budget.log",
+    "bytes": 1756,
+    "sha256": "623b004b4391b902aa11b0b472e155fed1665ddd3d39fb75c4f18e111408f1e3"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/sim-outcomes.log",
+    "bytes": 98,
+    "sha256": "ac22b96eba9a07bfb210e6d99125ad6830aa927598157236bd8e75a7fe22f1f3"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/status-stream.log",
+    "bytes": 106,
+    "sha256": "b4eb054eba841b64cc17fba40b501978a9a4c9c9dad3abd63217c6ce9771e285"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/strict-direct-reachable.log",
+    "bytes": 1655,
+    "sha256": "1d1f86f633bd9f2a18f51042c70ed958761a3e76ca88e86de0e51bb1baa3f51b"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/swift-tests.log",
+    "bytes": 1385567,
+    "sha256": "1938ebc391c6f040eda6e1a615afffc9af4e4d689318b5b04eb1d809ac609952"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/target-redaction.log",
+    "bytes": 130,
+    "sha256": "b22d1672296a245101460f065ffd9aea606c5879911289297280f2e25a469398"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/test-create-release-identity.log",
+    "bytes": 1505,
+    "sha256": "e5b2bfd0c13581f8169202a5d9d18d3ff56df77d8f1019635f9f3ef5cb4bd5dc"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/test-create-signing-identity.log",
+    "bytes": 605,
+    "sha256": "2319a08076be9bd1c00bfbe7e620e1e33a5fb5f0cf7cbc385c5c73c25bc41b23"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/test-decisions.log",
+    "bytes": 128,
+    "sha256": "1309db57bb0c867c87dbc2b447a3f8ddedc3f755a930a8df2b9d18f5d4fb2a3c"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/test-event-catalogue.log",
+    "bytes": 95,
+    "sha256": "a4525ab9d33eac0afb3ef271c72ff6ddcebd6006e2eaeeda22979bf7a1c0b773"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/test-install-helper-args.log",
+    "bytes": 825,
+    "sha256": "312e3bd6426322f1a220515ab1e4892ad65200688a1872e3fe70256106c379ec"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/test-kernel-imports.log",
+    "bytes": 177,
+    "sha256": "a2d114ee13593a4785c7f658e280183423b710595e3d0c0b0710e852f6343db6"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/test-third-party-notices.log",
+    "bytes": 84,
+    "sha256": "f48bbe30381040e7454092c091b566156c0eb47f342814359c7f5c9c295db90c"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/updater-e2e-signed.log",
+    "bytes": 607,
+    "sha256": "e6c9843dc0e28e28cf70526e37615c162c8f3cf05f49da52343a5559a922b611"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-full-gates/updater-e2e.log",
+    "bytes": 502,
+    "sha256": "6a6dca8dacf780d3c674346ee31e6a535cc36c468c8b7fbcd966ca9cb8c0dcfe"
+  },
+  {
+    "path": "/private/tmp/conduit-runtime-stage1-20261024/runtime-actor-stageb-r4-tsan/tests.log",
+    "bytes": 109940,
+    "sha256": "252ea4c490324d3f25b39dba6e916c51be22b92cc64aa5f5b94695fb8bb2a8b3"
+  }
+]

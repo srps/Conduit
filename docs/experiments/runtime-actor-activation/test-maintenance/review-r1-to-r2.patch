@@ -1,0 +1,52 @@
+--- r1/Tests/ConduitTests/RuntimeServiceFixtures.swift
++++ r2/Tests/ConduitTests/RuntimeServiceFixtures.swift
+@@ -293,7 +293,7 @@
+ 
+     /// Suspends, on no thread, until a hop is queued or `ended` holds. Both are read in the same locked step that registers the wait,
+     /// so a hop or a `wakeDriver` that lands in between is never missed. Nothing polls meanwhile, so the off-owner work that will queue
+-    /// the next hop has the pool. One driver waits at a time.
++    /// the next hop has the pool. One driver waits at a time. `ended` runs under this queue's lock, so it must not read this queue.
+     @RuntimeActor
+     func untilHopQueued(or ended: () -> Bool) async {
+         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+@@ -540,7 +540,7 @@
+ }
+ 
+ /// Runs one call that hops to the owner. It waits, on no thread, until the call has queued its work or ended, then runs the queued hops
+-/// and returns the call's value.
++/// and returns the call's value. It assumes an empty queue at the start and drains once: every hop the call needs is queued before it.
+ @RuntimeActor
+ func runCall<T: Sendable>(
+     _ scheduling: ManualOwnerScheduling,
+--- r1/Tests/ConduitTests/RuntimeManualSchedulerTests.swift
++++ r2/Tests/ConduitTests/RuntimeManualSchedulerTests.swift
+@@ -15,9 +15,10 @@
+         private let opened: AsyncStream<Void>
+         private let opening: AsyncStream<Void>.Continuation
+ 
++        /// Each stream is a one-shot signal, so it buffers at most one element.
+         init() {
+-            (entered, enter) = AsyncStream.makeStream(of: Void.self)
+-            (opened, opening) = AsyncStream.makeStream(of: Void.self)
++            (entered, enter) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
++            (opened, opening) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+         }
+ 
+         func pass() async {
+@@ -87,9 +88,15 @@
+         let read = try pageRead(harness, hosts: ["a.example", "b.example"], held: held)
+         let page = Task { try await runDrainingCall(harness.scheduling, read) }
+         await held.untilHeld()
++        guard harness.scheduling.hasWaitingDriver else {
++            held.open()
++            return XCTFail("with nothing queued and the page pending, the driver waits for the next hop")
++        }
++        // No suspension between the cancel and the open: the cancellation resolves the wait first, and a call the cancel did not reach
++        // is answered by the commit hop instead, so it fails the test rather than hanging it.
+         page.cancel()
++        held.open()
+         let result = await page.result
+-        held.open()
+         guard case .failure(let error) = result else { return XCTFail("a cancelled page is not answered") }
+         XCTAssertEqual(error as? RuntimeClientError, .notSent(.cancelled), "the parked page ends unsent, with the caller's cancellation")
+     }

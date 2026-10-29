@@ -1,536 +1,159 @@
 // SPDX-License-Identifier: Apache-2.0
 import AppKit
-import PlatformMac
+import Combine
+import ConduitRuntime
 import ConduitShared
+import Foundation
+import NIOConcurrencyHelpers
+import PlatformMac
 import ProxyAuth
 import ProxyControlBridge
 import ProxyKernel
 import ProxyPAC
 import RuntimeEvents
-import Combine
-import Foundation
-import NIOConcurrencyHelpers
 import SwiftUI
 
-/// Thread-safe mirror of the two `vpnFlap*Seconds` config fields the
-/// `VPNStatusMonitor` reads from its `monitorQueue` callback context. The
-/// AppState `$config` Combine sink writes to this box on every config edit so
-/// Settings-driven slider changes propagate to the next flap without
-/// recreating the monitor. Mirrors the `configBox` pattern used by
-/// `ProxyOrchestrator` for the same cross-isolation-context reason.
-private struct VPNFlapWindowConfig: Sendable {
-    var graceSeconds: TimeInterval
-    var minVisibleSeconds: TimeInterval
-}
-
-private final class PrivilegeAuditEventSink: @unchecked Sendable {
-    private let lock = NSLock()
-    private var sink: (@Sendable (RuntimeEvent) -> Void)?
-
-    func set(_ sink: @escaping @Sendable (RuntimeEvent) -> Void) {
-        lock.lock()
-        defer { lock.unlock() }
-        self.sink = sink
-    }
-
-    func emit(_ event: RuntimeEvent) {
-        let current = lock.withLock { sink }
-        current?(event)
-    }
-}
-
+/// The app over the shared runtime host (decisions 0031 and 0039). It keeps the Settings drafts and their editing, presentation,
+/// notifications, import and export, the PAC preview, updates, windows, onboarding, credential enrollment, helper installation and the
+/// login item. The runtime, its lifecycle, recovery and persistence are the host's: every command and every private editor change goes
+/// through the actual framed clients, and every presented value comes from their snapshots and pages.
 @MainActor
 final class AppState: ObservableObject {
+    /// Where the composition is. Controls act only while `ready`.
+    enum Phase: Equatable {
+        /// The configuration is being migrated and the host opened, or the first editor read is out.
+        case opening
+        case ready
+        /// The configuration could not be opened. Nothing was overwritten, and only a restart after a repair opens it.
+        case refused
+        /// The quit has begun.
+        case quitting
+    }
+
+    @Published private(set) var phase: Phase = .opening
+    /// The Settings drafts. They reach the runtime only through the editor's private updates.
     @Published var config: ProxyConfig
     @Published var platformConfig: PlatformIntegrationConfig
     @Published var appPreferences: AppPreferences
-    /// What Settings shows about updates (#111).
     @Published private(set) var updateStatus: UpdateCoordinator.Status
-    /// First-run setup, presented as a sheet on the app window. Set at init
-    /// when NTLM is configured without saved credentials, so the window is
-    /// presented at launch instead of waiting for the popover to be opened.
     @Published var isShowingOnboarding = false
-    /// The sidebar selection of the single app window. Lives here so the
-    /// popover, the menu commands, and the window agree on it.
     @Published var selectedSection: AppSection = .overview
     @Published var lastErrorMessage: String?
-    /// The "Configuration problem" banner the last save set, so a later
-    /// save that validates clears it and nothing else.
+    /// The "Configuration problem" banner the last save set, so a later save that validates clears it and nothing else.
     private var configProblemMessage: String?
+    /// The "not saved" banner the last unverified save of each kind set, so a later verified save of that kind clears it and nothing else.
+    private var saveFailureShown: [SettingsSave: String] = [:]
     @Published private(set) var pacPreviewMessage: String?
     @Published private(set) var isPACPreviewRunning = false
     private(set) var pacPreviewTask: Task<Void, Never>?
-    @Published private(set) var activationPreflight: ActivationPreflight = .noAdmin
+    /// The host's latest preflight reading. Nil before one.
+    @Published private(set) var activationPreflight: ControlPreflightItems?
+    /// The helper verdict the host holds, for display.
     @Published private(set) var helperStatusState: HelperToolPrivilegeClient.Status = .notInstalled
-    /// The latest helper reading was `busy`: `helperStatusState` holds the
-    /// last conclusive verdict (or `busy`, when there is none yet), and a
-    /// re-read is pending.
+    /// The latest helper reading was `busy`; a re-read is pending.
     @Published private(set) var helperCheckingAgain = false
-    /// The one pending re-read after a `busy` reading.
-    private var helperRecheck: Task<Void, Never>?
-    /// How long after a `busy` reading the helper is read again.
-    private let helperBusyRecheckDelay: Duration
-    /// Set when an install or uninstall replaced the helper: the held
-    /// verdict was about the old one, so a `busy` reading must not keep it
-    /// (STYLE rule 11, a restart is unproven). Cleared by the first
-    /// conclusive reading.
-    private var helperVerdictStale = false
-    /// The caller policy the last install from Settings reported (#121);
-    /// nil before one, and after an uninstall.
+    /// The caller policy the last install from Settings reported (#121); nil before one, and after an uninstall.
     @Published private(set) var helperCallerPolicy: HelperPinOutcome?
+    /// The draft holds an edit that would start, stop or replace a bound endpoint, so it waits for a commit.
+    @Published private(set) var listenerEditAwaitingCommit = false
+    /// A file's baseline was dropped by a conflict or an unknown write: only an explicit reload lets the editor write it again.
+    @Published private(set) var configurationNeedsReload = false
+    /// Why no Start may run now: the explicit launch options were not saved, so the saved input is not what this launch asked for. Stop
+    /// and Quit stay available. Cleared when the configuration draft is saved.
+    @Published private(set) var activationHeld: String?
 
     let runtime = RuntimePresentationAdapter()
-
     let logStore: AppLogStore
     let credentialManager: CredentialManager
     let helperLifecycle: any HelperLifecycleManaging
-    private let auditedPrivilegeClient: any PrivilegeClient
-    /// The root's writer authority (decision 0028). The app keeps it for its
-    /// lifetime, and the process pins its own copy until exit (`PreparedAppLaunch`).
-    private let stateSession: StateRootSession
-    private let runtimeEnvironment: RuntimeEnvironment
-    private let orchestrator: ProxyOrchestrator
-    private let updateCoordinator: UpdateCoordinator
-    /// Where the platform managers act: the process that runs `networksetup`
-    /// and `launchctl`, the home directory whose shell profiles get the proxy
-    /// block, and the directory the resolver files live in. Injected by the
-    /// test harness so a scenario runs against a fake machine and scratch
-    /// directories; production passes nothing and gets the real ones. Plain
-    /// parameters rather than a dependencies type, because the lifecycle
-    /// they serve is slated to move into the daemon and a parameter is
-    /// cheaper to delete than a protocol.
-    private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
-    /// Whether a resolver answers on `127.0.0.1:port`; a fake machine's
-    /// answer under test, so launch recovery never waits on the real port 53.
-    private let dnsResponds: @Sendable (Int) -> Bool
-    private let homeDirectory: URL
-    private let resolverDirectory: String
+    /// The app's own bounded event log: the app log's refusals, editor and helper decisions, the PAC preview. The host's events go to
+    /// its own diagnostics.
+    let eventLog: RuntimeEventLog
 
-    /// Prior values of the platform settings we change, so teardown restores
-    /// rather than blanket-clearing. Shared by every side-effect manager.
-    private lazy var platformStateJournal = PlatformStateJournal(
-        fileURL: runtimeEnvironment.platformStateFile,
-        logger: logStore,
-        eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
-    )
-    private lazy var systemConduit = SystemProxyManager(
-        privilegeClient: auditedPrivilegeClient,
-        journal: platformStateJournal,
-        commandRunner: commandRunner,
-        locationRecovery: locationRecovery,
-        configProvider: orchestrator.configSnapshotProvider
-    )
-    private lazy var environmentManager = EnvironmentManager(
-        journal: platformStateJournal,
-        homeDirectory: homeDirectory,
-        commandRunner: commandRunner,
-        eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
-    )
-    private lazy var environmentDriftRepair = EnvironmentDriftRepair(
-        manager: environmentManager,
-        eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) },
-        logger: logStore
-    )
-    private lazy var dnsManager = DNSManager(
-        privilegeClient: auditedPrivilegeClient,
-        resolverDirectory: resolverDirectory,
-        journal: platformStateJournal
-    )
-    private lazy var systemDNSManager = SystemDNSManager(
-        privilegeClient: auditedPrivilegeClient,
-        journal: platformStateJournal,
-        legacySnapshotFile: runtimeEnvironment.legacySavedDNSFile,
-        commandRunner: commandRunner,
-        respondsOnPort: dnsResponds,
-        locationRecovery: locationRecovery,
-        configProvider: orchestrator.configSnapshotProvider
-    )
-    private let loginItemManager: LoginItemManager
-    private let networkLocationStoreFactory: @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?
-    private let networkLocationObserver: any NetworkLocationObserving
-    private let networkLocationLimits: NetworkLocationLimits
-    /// At most one pending retry for a drift repair withheld by the contention budget.
-    private var proxyRepairRetry: Task<Void, Never>?
-    /// The shell environment drift pass (#175): one in flight, one wanted
-    /// after it, one retry, one periodic tick.
-    private var environmentDriftInFlight = false
-    /// The trigger of the pass wanted after the one in flight.
-    private var environmentDriftPending: EnvironmentDriftRepair.Trigger?
-    private var environmentRepairRetry: Task<Void, Never>?
-    private var environmentDriftTimer: Task<Void, Never>?
-    private let environmentDriftInterval: Duration
-    /// A failed re-apply of the system proxy or the environment, reported
-    /// and retried through the drift passes below (#194, narrow).
-    private(set) lazy var reapplyRetry: ConfigReapplyRetry = {
-        let retry = ConfigReapplyRetry(schedule: reapplyRetrySchedule) { [weak self] event, level in
-            guard let self else { return }
-            self.orchestrator.eventLog.append(event)
-            self.logStore.log(level, "Config: \(event.event) \(event.detail ?? "")", category: .system)
-        }
-        retry.attempt = { [weak self] surface, token in
-            await self?.retryReapply(surface, token: token) ?? .notWanted(reason: "host_gone")
-        }
-        return retry
-    }()
-    private let reapplyRetrySchedule: ConfigReapplyRetry.Schedule
-    private lazy var locationRecovery: LocationSettingsRecovery? = {
-        guard let store = networkLocationStoreFactory(auditedPrivilegeClient) else { return nil }
-        let eventLog = orchestrator.eventLog
-        let logger = logStore
-        return LocationSettingsRecovery(store: store, journal: platformStateJournal, limits: networkLocationLimits) { event in
-            eventLog.append(event)
-            logger.log(.notice, "Network location: \(event.event) \(event.detail ?? "")", category: .system)
-        }
-    }()
-    private var locationReconcileInFlight = false
-    private var locationReconcileWanted = false
-    private var proxySettingsReconcileInFlight = false
-    private var proxySettingsReconcileWanted = false
-    private let networkMonitor: NetworkMonitor
-    /// How long an install waits for the LaunchDaemon to bind its socket
-    /// before re-reading the preflight.
-    private let helperSocketBindWait: Duration
-    /// The trailing debounce before a DNS reconcile runs.
-    private let dnsReconcileDebounce: TimeInterval
-    /// The pause after the last Settings edit before it is saved (#171).
-    private let settingsSaveDebounce: Duration
-    /// The timer for the save the last edit scheduled.
-    private var pendingSave: Task<Void, Never>?
-    /// A section closed while a reconcile pass was out: one check after it
-    /// drains, since the pass may yet fail and rewind its baseline.
-    private var sectionCloseRetry: Task<Void, Never>?
-    /// An edit no save has written yet: the timer has not fired, or it
-    /// fired on an edit `holdsBackUnsavedEdit` keeps for a commit.
-    private(set) var hasUnsavedEdit = false
-    /// Temporary editor baseline: the config this editor last wrote, nil before the
-    /// first write (the reconciler's start config then stands in). It answers one
-    /// question, whether an unsaved edit is pending, because a held commit is written
-    /// but not applied. It is not a receipt or verification of what is on disk. The
-    /// durable store that replaces it owns that.
-    private var editorBaseline: ProxyConfig?
-    /// The draft holds an edit that would start, stop or replace a bound
-    /// endpoint (`ConfigDiff.replacesListeners`), so it waits for a commit:
-    /// Return in a field, Apply, leaving the section, or quit. Published
-    /// for the note `AppWindow` shows: neither `hasUnsavedEdit` nor the
-    /// reconciler's request is observable.
-    @Published private(set) var listenerEditAwaitingCommit = false
-    private let vpnStatusMonitor: VPNStatusObserving
-    private let vpnFlapWindowBox: NIOLockedValueBox<VPNFlapWindowConfig>
-    // The auth factory reads `orchestrator.configSnapshotProvider`, the
-    // config the runtime was handed, never the editor's draft.
-    /// Active PAC evaluator. `CFPACEvaluator` is the sole production backend
-    /// after removing the JavaScriptCore resolver.
-    /// The orchestrator and the Settings "Test PAC URL" preview share this
-    /// single instance — no risk of the test page taking a different path
-    /// than the live routing decisions.
-    private let pacEvaluator: any PacEvaluator
+    /// The root's writer authority (decision 0028), held for the app's lifetime.
+    private let stateSession: StateRootSession
+    private let composition: AppComposition
+    private let updateCoordinator: UpdateCoordinator
     private let notificationManager = NotificationManager()
+    /// The identity the credential controls name, from the editor's saved values.
+    private let credentialIdentity: NIOLockedValueBox<CredentialManager.Identity>
     private var cancellables: Set<AnyCancellable> = []
-    private var preflightRefreshID = UUID()
-    private var dnsReconcileWork: DispatchWorkItem?
-    private var dnsHealthTimer: Timer?
-    /// Blocking platform work: the system DNS reconcile and the relay
-    /// restart, one of each in flight at most, and the surface work of the
-    /// proxy and DNS starts and stops, one block per step. Serial, so a stop's
-    /// clear lands after the apply of a start it overtook.
-    private let platformWork = PlatformWork(label: "io.github.srps.Conduit.app.platform-work")
-    /// One preview in flight, admitted before either fetching or queueing.
+    /// Set while the app itself assigns the drafts (an observation, a reload), so the assignment is not an edit.
+    private var assigningDrafts = false
+
+    // The actual clients, once the host opened.
+    private var control: (any RuntimeClient)?
+    private var editorClient: PrivateEditorClient?
+    private(set) var observer: RuntimeObserver?
+    private(set) var editor: RuntimeEditorSession?
+    private var incarnation: ControlHostIncarnation?
+
+    /// The opening, joined by the quit and the harness.
+    private(set) var opening: Task<Void, Never>?
+    private var quitting: Task<RuntimeClientQuitResult?, Never>?
+    /// Set when the quit begins. The opening checks it after every suspension, so it never finishes ready, seeds or saves after it.
+    private var quitFence = false
+    /// The debounced save the last edit scheduled.
+    private var pendingSave: Task<Void, Never>?
+    /// Ordinary commands in flight from the controls. Bounded: a click past it is dropped with a log line. Stops do not count here.
+    private var commandsInFlight = 0
+    static let maximumCommandsInFlight = 8
+    /// A module's Stop lane (`send`): present while its one Stop is out, with the settlement of the one Stop wanted after it, if any.
+    private struct StopLane {
+        var wanted: (@MainActor (ControlOperationOutcome?) -> Void)?
+    }
+    private var stopLanes: [ControlModule: StopLane] = [:]
+    /// One preflight read out, one wanted after it, and whether a wanted one names a replaced helper.
+    private var preflightInFlight = false
+    private var preflightWanted: Bool?
+    private var helperRecheck: Task<Void, Never>?
+    /// Notices the host did not admit, tried again on a later snapshot a bounded number of times.
+    private var owedNotices = OwedNotices()
     private let pacPreviewWork = PlatformWork(label: "io.github.srps.Conduit.app.pac-preview")
-    /// `startProxy` / `stopProxy`: which is the latest, and a repeat of the
-    /// one in flight joins it. See `LifecycleLane`.
-    private let proxyLane = LifecycleLane(name: "proxy")
-    /// `startDNS` / `stopDNS`. A lane of its own, because a proxy start runs
-    /// a DNS start inside it and must not supersede itself.
-    private let dnsLane = LifecycleLane(name: "dns")
-    /// How many proxy and DNS starts and stops have begun. Internal so the
-    /// harness can wait for a stop to have begun rather than time it: its
-    /// first visible effect is queued behind the work a scenario is holding.
-    var lifecycleGenerations: (proxy: Int, dns: Int) { (proxyLane.current, dnsLane.current) }
-    /// Reconcile passes waiting for a start or stop to finish. Internal for
-    /// the harness, for the same reason.
-    var passesWaitingForLifecycle: Int { proxyLane.idleWaiterCount + dnsLane.idleWaiterCount }
-    /// The DNS run a health timer armed now would watch. Internal so the harness can name the run a reading belongs to.
-    var dnsObservationToken: LifecycleLane.Token { dnsLane.observationToken }
-    /// How long quit waits for the platform queue before it clears anyway.
-    /// Five seconds: long enough for a start's remaining step on a healthy
-    /// helper, short against the helper's 40 s transaction budget, which is
-    /// what a quit must not wait out. A step still running past it is
-    /// serialised with quit's own clears by the managers' operation locks.
-    static let terminationDrainDeadlineMilliseconds = 5_000
-    /// Internal so the harness can shorten it.
-    var terminationDrainDeadlineMilliseconds = AppState.terminationDrainDeadlineMilliseconds
-    /// Whether the 30 s relay probe is scheduled. Internal for the harness.
-    var hasDNSHealthTimer: Bool { dnsHealthTimer != nil }
-    private var dnsRelayRestartInFlight = false
-    private var dnsReconcileInFlight = false
-    private var dnsReconcileWanted = false
-    /// Its own queue: an install waits on a password dialog for as long as
-    /// the user takes, and DNS repair must not wait behind that.
+    /// An install waits on a password dialog for as long as the user takes, so it has its own queue.
     private let helperLifecycleWork = PlatformWork(label: "io.github.srps.Conduit.app.helper-lifecycle")
     private var helperChangeInFlight = false
-    private var wakeObserver: NSObjectProtocol?
-    /// Pushes each save into the running subsystems and the platform
-    /// surfaces, one serialised pass per save, and owns the two "last
-    /// reconciled" baselines. This is its host: see `RuntimeReconcilerHost`.
-    /// Internal so the harness can drain the queued passes before it asserts.
-    let reconciler: RuntimeReconciler
-    /// VPN-gating policy for split-DNS entry files (single source of truth
-    /// shared with `DaemonRuntimeHost`). Fed by `handleVPNStateChange`;
-    /// every resolver-file apply path consults `entriesWanted`.
-    private var splitDNSGate = SplitDNSVPNGate()
-    /// A failed entry-file write or removal, retried once the helper is
-    /// seen available (#165). Twin of `DaemonRuntimeHost.splitDNSRepair`.
-    private var splitDNSRepair = SplitDNSEntryFileRepair()
-    /// While a repair is pending, asks the helper for its status every
-    /// `splitDNSHelperCheckInterval` (backed off); gone otherwise.
-    private var splitDNSHelperCheck: Task<Void, Never>?
-    private let splitDNSHelperCheckInterval: Duration
-    private var splitDNSRetryInFlight = false
-    /// Whether the last intercept-file refresh a switch action ran failed.
-    /// The resolver flag's baseline covers it too, and a split-DNS retry
-    /// writes no intercept files, so a repair does not stand in for it.
-    private var resolverSwitchInterceptRefreshFailed = false
-    /// Stamps VPN reports on the monitor's callback; the split-DNS gate
-    /// and the orchestrator each apply only reports newer than the last
-    /// they applied, since deliveries can land out of order (#155).
-    private let vpnSequencer = VPNObservationSequencer()
-    private var splitDNSGateOrder = VPNObservationOrder()
-    /// Launch-time crash recovery for the system-proxy and system-DNS surfaces.
-    /// Started by `init` and joined by `awaitLaunchRecovery()` — see
-    /// `LaunchRecovery` for why it is neither inline nor unordered.
-    private var launchRecovery: LaunchRecovery?
-    /// The hops from the observers and the orchestrator's callbacks onto the
-    /// main actor, and the orchestrator work those handlers start. Internal so
-    /// the harness can `drain()` them instead of polling the snapshot.
-    let deliveries = ObserverDeliveries()
-    private let proxySettingsNotifications = CoalescedObserverDelivery()
-    private let configurationLoadError: ConfigurationLoadError?
+    /// The DNS module's last observed error while it ran, for the degraded notification's transition.
+    private var lastDNSError: String?
+    /// One explicit reload at a time; a second request while one runs is refused with a message.
+    private(set) var reloading = false
+    /// The login item refused the last registration; the next verified Settings save or successful proxy Start tries again.
+    private var loginItemRegistrationOwed = false
 
-    /// Every parameter defaults to the production collaborator; the test
-    /// harness passes the fakes. See `commandRunner` for why these are
-    /// parameters and not a dependencies type.
-    ///
-    /// - Parameters:
-    ///   - privilegeClient: what the platform managers run privileged writes
-    ///     through.
-    ///   - helperLifecycle: what the Settings surface's helper status,
-    ///     install and uninstall go through. In production the one helper
-    ///     client serves both roles; a host over a fake machine injects both,
-    ///     or its Settings would still reach the installed helper.
-    ///   - credentialStore: where saved credentials live. In production the
-    ///     login Keychain; a fake host keeps them in memory, or its
-    ///     credential controls would edit the installed app's entries.
-    ///   - pacEvaluator: where PAC scripts are fetched and evaluated, for
-    ///     routing and the Settings preview. Nil is the CFNetwork evaluator
-    ///     with the curl fallback; `AppStateHarness` and `DevLaunch` inject a fake. The seam
-    ///     goes with this runtime when the app activates the shared
-    ///     `RuntimeHost` (decision 0031), whose `RuntimeHostEffects.pacEvaluator`
-    ///     already carries the same role.
-    /// - Parameter stateSession: the prepared writer authority for the state root
-    ///   (decision 0028). Required: no construction path takes a raw environment,
-    ///   so no writer here exists without its lease. The launch takes the session
-    ///   before any load, and `AppStateHarness` and `DevLaunch` take theirs the same way.
-    init(
-        stateSession: StateRootSession,
-        privilegeClient: (any PrivilegeClient)? = nil,
-        helperLifecycle: (any HelperLifecycleManaging)? = nil,
-        credentialStore: (any SecretStore)? = nil,
-        kerberosTicketRecovery: any KerberosTicketRecovering = SystemKerberosTicketRecovery(),
-        commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult,
-        dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
-        networkPathDebounce: TimeInterval = NetworkMonitor.defaultDebounceInterval,
-        helperSocketBindWait: Duration = .seconds(1),
-        helperBusyRecheckDelay: Duration = .seconds(15),
-        dnsReconcileDebounce: TimeInterval = 1.0,
-        settingsSaveDebounce: Duration = .seconds(1),
-        environmentDriftInterval: Duration = .seconds(300),
-        reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
-        splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval,
-        homeDirectory: URL,
-        resolverDirectory: String? = nil,
-        loginItemManager: LoginItemManager? = nil,
-        vpnStatusMonitor: VPNStatusObserving? = nil,
-        pacEvaluator injectedPACEvaluator: (any PacEvaluator)? = nil,
-        networkLocationObserver: any NetworkLocationObserving = NetworkLocationMonitor(),
-        networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) },
-        networkLocationLimits: NetworkLocationLimits = .init(),
-        updaterLauncher: (any UpdaterLaunching)? = nil,
-        updateReports: (any UpdateReportSource)? = nil,
-        updaterAvailability: UpdaterAvailability? = nil,
-        currentVersion: String? = nil
-    ) {
-        let runtimeEnvironment = stateSession.environment
-        // The one canonical event log for this composition. The app log, the audit sink and the orchestrator all
-        // report into it, so a refused or failed destination is in the same stream as every other event (#222).
-        let refusalEvents = RuntimeEventLog()
+    /// The app takes a prepared `StateRootSession` and its composition; there is no other construction path (decisions 0028 and 0033).
+    init(stateSession: StateRootSession, composition: AppComposition) {
+        let environment = stateSession.environment
+        let eventLog = RuntimeEventLog()
+        self.eventLog = eventLog
+        // The authoritative guard holds the session, inside any effect the composition wraps around it, so a queued file-log write keeps
+        // the root's lease until it ends.
         let logStore = AppLogStore(
-            destinationGuard: diagnosticDestinationGuard(
-                for: .appLog, in: runtimeEnvironment, writerLeaseFile: stateSession.writerLeaseFile
-            ),
-            eventLog: refusalEvents
+            destinationGuard: composition.appLogGuard.wrap(stateSession.retainingAuthority(
+                diagnosticDestinationGuard(for: .appLog, in: environment, writerLeaseFile: stateSession.writerLeaseFile)
+            )),
+            eventLog: eventLog
         )
-        // Read before the load, which writes a migrated file back: a config
-        // file that predates this launch is what tells an upgrade from a
-        // fresh install, and the resolver-file recovery at launch hangs on it.
-        // Taken under the root's authority (decision 0028), so no load can have written it yet.
-        let configFilePredatesLaunch = stateSession.configFilePredatesLaunch
-        let loadedConfiguration: RuntimeConfigurationLoadResult
-        let loadFailure: ConfigurationLoadError?
-        do {
-            loadedConfiguration = try ProxyConfigPersistence.loadAllMigrating(in: runtimeEnvironment)
-            loadFailure = nil
-        } catch {
-            loadFailure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: runtimeEnvironment.configFile.path, reason: error.localizedDescription)
-            // Display-only state: every activation/save path remains blocked until
-            // the file is repaired and the app restarted. Never persist this value.
-            loadedConfiguration = RuntimeConfigurationLoadResult(
-                config: GenericDefaults.shared.makeConfig(), platformConfig: PlatformIntegrationConfig(),
-                appPreferences: AppPreferences(), migrated: false, warnings: []
-            )
-        }
-        self.configurationLoadError = loadFailure
-        // Attach the file before anything is logged: the load warnings and
-        // the migration notice below are the first lines of a session and
-        // the ones an after-the-fact read most wants, and the ring buffer
-        // is not replayed into the file.
-        if loadedConfiguration.appPreferences.fileLoggingEnabled {
-            logStore.logFileURL = runtimeEnvironment.logFile
-        }
-        for warning in loadedConfiguration.warnings {
-            logStore.log(.warning, warning, category: .system)
-        }
-        if loadedConfiguration.migrated {
-            logStore.log(.notice, "Configuration files migrated to the current schema.", category: .system)
-        }
-        var initialConfig = loadedConfiguration.config
-        // Before the reconciler takes its baseline: a `--port` override that
-        // only the editor held would read as a listener edit awaiting a
-        // commit, and hold every later edit with it.
-        if let portArg = AppState.parsePortArgument() {
-            initialConfig.localPort = portArg
-        }
-        let privilegeAuditEventSink = PrivilegeAuditEventSink()
-        // The sink also carries the "helper unreachable, falling back to an
-        // admin prompt" event, which is a recovery the user needs to see: it
-        // means the installed helper is missing or predates a protocol bump.
-        let helperClient = HelperToolPrivilegeClient(
-            eventSink: { event in privilegeAuditEventSink.emit(event) }
-        )
-        let auditedPrivilegeClient = AuditingPrivilegeClient(
-            base: privilegeClient ?? helperClient,
-            eventSink: { event in privilegeAuditEventSink.emit(event) }
-        )
-        self.networkLocationObserver = networkLocationObserver
-        self.networkLocationStoreFactory = networkLocationStoreFactory
-        self.networkLocationLimits = networkLocationLimits
-        self.stateSession = stateSession
-        self.runtimeEnvironment = runtimeEnvironment
         self.logStore = logStore
-        self.helperLifecycle = helperLifecycle ?? helperClient
-        self.auditedPrivilegeClient = auditedPrivilegeClient
-        self.dnsResponds = dnsResponds
-        self.networkMonitor = NetworkMonitor(debounceInterval: networkPathDebounce)
-        self.helperSocketBindWait = helperSocketBindWait
-        self.helperBusyRecheckDelay = helperBusyRecheckDelay
-        self.dnsReconcileDebounce = dnsReconcileDebounce
-        self.settingsSaveDebounce = settingsSaveDebounce
-        self.environmentDriftInterval = environmentDriftInterval
-        self.reapplyRetrySchedule = reapplyRetrySchedule
-        self.splitDNSHelperCheckInterval = splitDNSHelperCheckInterval
-        self.commandRunner = commandRunner
-        self.homeDirectory = homeDirectory
-        self.resolverDirectory = resolverDirectory ?? "/etc/resolver"
-        self.loginItemManager = loginItemManager ?? LoginItemManager()
-        self.config = initialConfig
-        self.platformConfig = loadedConfiguration.platformConfig
-        self.reconciler = RuntimeReconciler(config: initialConfig, platformConfig: loadedConfiguration.platformConfig)
-        self.appPreferences = loadedConfiguration.appPreferences
-        // Mirror the two flap-window values into a thread-safe box so the
-        // monitor's monitorQueue callback context can read them without
-        // hopping back to MainActor on every utun event. A committed edit
-        // updates it, in `applyConfigChange`.
-        let flapBox = NIOLockedValueBox(
-            VPNFlapWindowConfig(
-                graceSeconds: initialConfig.vpnFlapGraceSeconds,
-                minVisibleSeconds: initialConfig.vpnFlapMinVisibleSeconds
-            )
-        )
-        self.vpnFlapWindowBox = flapBox
-        // Default monitor reads the current grace + min-visible windows lazily
-        // from the box on every flap, so Settings changes take effect without
-        // restarting the monitor. Tests / pm-sim can inject a
-        // FakeVPNStatusObserver via the parameter to bypass SCDynamicStore.
-        self.vpnStatusMonitor = vpnStatusMonitor
-            ?? VPNStatusMonitor(
-                graceSecondsProvider: { flapBox.withLockedValue { $0.graceSeconds } },
-                minVisibleSecondsProvider: { flapBox.withLockedValue { $0.minVisibleSeconds } }
-            )
-        // The orchestrator no longer constructs its own PAC evaluator
-        // (concretes live in the ProxyPAC target).
-        // AppState owns the concrete evaluator both for the orchestrator's
-        // PAC routing path AND for the Settings "Test PAC URL" flow below —
-        // one instance, two callers.
-        //
-        // The `insecureFetcher:` injection point lets AppState (which
-        // links `PlatformMac`) provide a curl-backed fallback for plaintext
-        // PAC URLs that ATS would otherwise block — preserves today's
-        // corporate-network behaviour without re-introducing a kernel-side
-        // `Process()` shellout.
-        //
-        // A host over fakes injects its own evaluator instead (`pacEvaluator`), so it fetches no PAC from the network.
-        let pacEvaluator: any PacEvaluator
-        if let injectedPACEvaluator {
-            pacEvaluator = injectedPACEvaluator
-        } else {
-            pacEvaluator = AppState.makePACEvaluator(insecureFetcher: AppState.curlPACFetcher)
-            logStore.log(.notice, "PAC: using CFNetwork evaluator.", category: .pac)
-        }
-        self.pacEvaluator = pacEvaluator
-
-        // Construct orchestrator BEFORE the auth factory + credential
-        // manager so they can capture `orchestrator.configSnapshotProvider`.
-        // Single source of truth for the live config replaces the former
-        // AppState `configBox` mirror + `$config` Combine sink.
-        // The same event log the app log and audit sink report into, so every refusal is in one stream (#222).
-        let orchestratorEventLog = refusalEvents
-        let auditSink = AppState.makeAuditSink(
-            for: initialConfig,
-            environment: runtimeEnvironment,
-            writerLeaseFile: stateSession.writerLeaseFile,
-            logger: logStore,
-            eventLog: orchestratorEventLog
-        )
-        let tunnelResolverManager = TunnelResolverManager(
-            privilegeClient: auditedPrivilegeClient,
-            logger: logStore,
-            resolverDirectory: self.resolverDirectory
-        )
-        let orchestrator = ProxyOrchestrator(
-            config: initialConfig,
-            logger: logStore,
-            privilegeClient: auditedPrivilegeClient,
-            authenticatorProvider: nil,  // Wired below via setAuthenticatorProvider.
-            pacEvaluator: pacEvaluator,
-            auditSink: auditSink,
-            eventLog: orchestratorEventLog,
-            resolverManager: tunnelResolverManager,
-            portHolderProbe: PortHolderProbe()
-        )
-        self.orchestrator = orchestrator
-        let eventLog = orchestrator.eventLog
-        // The updater is a process of its own; the seam is what keeps a dev
-        // instance or a test host from starting the installed app's (#111).
+        self.stateSession = stateSession
+        self.composition = composition
+        self.helperLifecycle = composition.helperLifecycle
+        // Display-only until the first editor read: nothing is saved from these, and every control waits for `ready`.
+        self.config = GenericDefaults.shared.makeConfig()
+        self.platformConfig = PlatformIntegrationConfig()
+        self.appPreferences = AppPreferences()
+        let identity = NIOLockedValueBox<CredentialManager.Identity>((domain: "", username: "", profileName: ""))
+        self.credentialIdentity = identity
+        self.credentialManager = CredentialManager(identityProvider: { identity.withLockedValue { $0 } }, store: composition.credentialStore)
         let hostBundle = Bundle.main
-        let hostIdentifier = hostBundle.bundleIdentifier ?? "io.github.srps.Conduit"
         let updateCoordinator = UpdateCoordinator(
-            hostIdentifier: hostIdentifier,
+            hostIdentifier: hostBundle.bundleIdentifier ?? "io.github.srps.Conduit",
             hostPath: hostBundle.bundlePath,
-            currentVersion: currentVersion
-                ?? (hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "unbundled",
-            availability: updaterAvailability ?? UpdaterAvailability.of(hostBundle: hostBundle),
-            launcher: updaterLauncher ?? SystemUpdaterLauncher(hostURL: hostBundle.bundleURL),
-            store: UpdateStateStore(file: runtimeEnvironment.updateStateFile),
-            reports: updateReports ?? DistributedUpdateReports(),
+            currentVersion: composition.currentVersion,
+            availability: composition.updaterAvailability,
+            launcher: composition.updaterLauncher,
+            store: UpdateStateStore(file: environment.updateStateFile),
+            reports: composition.updateReports,
+            sleep: composition.timing.updateCheckSleep,
             record: { [logStore] event in
                 eventLog.append(event)
                 logStore.log(.notice, "Updates: \(event.event) \(event.detail ?? "")", category: .system)
@@ -538,359 +161,314 @@ final class AppState: ObservableObject {
         )
         self.updateCoordinator = updateCoordinator
         self.updateStatus = updateCoordinator.status
-        privilegeAuditEventSink.set { event in eventLog.append(event) }
+        observeDrafts()
+        notificationManager.requestAuthorization()
+        opening = Task { @MainActor [weak self] in await self?.open() }
+    }
 
-        // CredentialManager's identity-provider reads from the orchestrator's
-        // snapshot — same source as the auth factory. Active config drives
-        // the Keychain account key (`domain|username|profileName`).
-        let credentialManager = CredentialManager(
-            identityProvider: { [snapshotProvider = orchestrator.configSnapshotProvider] in
-                let c = snapshotProvider()
-                return (domain: c.domain, username: c.username, profileName: c.profileName)
+    /// Whether the controls may act now.
+    var controlsEnabled: Bool { phase == .ready && runtime.isLive }
+
+    /// Whether an edit has not been saved yet.
+    var hasUnsavedEdit: Bool {
+        guard let editor else { return false }
+        return editor.ledger.isDirty(.configuration) || editor.ledger.isDirty(.preferences)
+    }
+
+    /// Where file logging appends when it is on.
+    var logFileURL: URL { stateSession.environment.logFile }
+
+    // MARK: - Opening
+
+    /// Migrates the files under the held session, opens the one host, composes its clients under the shipping profile, seeds the drafts
+    /// from one editor observation, then commits any launch override save-only. Controls stay disabled until this returns ready.
+    private func open() async {
+        guard let loaded = await migrate() else { return await refuseOpening() }
+        guard !quitFence else { return }
+        if loaded.appPreferences.fileLoggingEnabled { logStore.logFileURL = stateSession.environment.logFile }
+        for warning in loaded.warnings { logStore.log(.warning, warning, category: .system) }
+        if loaded.migrated { logStore.log(.notice, "Configuration files migrated to the current schema.", category: .system) }
+
+        let opened: Result<(clients: RuntimeInMemoryClients, profile: RuntimeServiceProfile), any Error>
+        do {
+            opened = try await Self.openHost(
+                stateSession: stateSession, logger: logStore, effects: composition.effects, schedules: composition.hostSchedules
+            )
+        } catch is CancellationError {
+            // The quit cancelled the opening, and the factory refused before building the host: no recovery, observer or timer started.
+            logStore.log(.notice, "The quit began before the runtime opened; it was not opened.", category: .system)
+            return
+        } catch let refusal as RuntimeOpenRefusal {
+            reportOpeningFailure(refusal.event, message: refusal.event.detail ?? refusal.event.event)
+            return await refuseOpening()
+        } catch {
+            reportOpeningFailure(nil, message: error.localizedDescription)
+            return await refuseOpening()
+        }
+        let composed: (clients: RuntimeInMemoryClients, profile: RuntimeServiceProfile)
+        switch opened {
+        case .success(let clients):
+            composed = clients
+        case .failure(let error):
+            reportOpeningFailure(nil, message: "The runtime's control service could not be composed: \(error.localizedDescription).")
+            return refuseUnlessQuitting()
+        }
+        // Kept in the turn the clients arrive, before any await, so a quit from here on reaches the host whatever the opening does next.
+        control = composed.clients.control
+        editorClient = composed.clients.editor
+        await connect(composed.clients, rowBudget: composed.profile.collectionRowBudget)
+    }
+
+    /// The existing startup migration, off the main actor. Nil, with its event and banner, when the files do not load.
+    private func migrate() async -> RuntimeConfigurationLoadResult? {
+        let environment = stateSession.environment
+        let result: Result<RuntimeConfigurationLoadResult, ConfigurationLoadError> = await PlatformWork(
+            label: "io.github.srps.Conduit.app.migration"
+        ).run {
+            do {
+                return .success(try ProxyConfigPersistence.loadAllMigrating(in: environment))
+            } catch let error as ConfigurationLoadError {
+                return .failure(error)
+            } catch {
+                return .failure(ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription))
+            }
+        }
+        switch result {
+        case .success(let loaded):
+            return loaded
+        case .failure(let failure):
+            reportOpeningFailure(failure.event, message: failure.localizedDescription)
+            return nil
+        }
+    }
+
+    private func reportOpeningFailure(_ event: RuntimeEvent?, message: String) {
+        if let event { eventLog.append(event) }
+        lastErrorMessage = message + " Restart Conduit after repairing the file."
+        logStore.log(.error, lastErrorMessage ?? message, category: .system)
+    }
+
+    /// A refused open keeps every byte, runs the journal's configless recovery and shows the banner. No draft is saved.
+    private func refuseOpening() async {
+        // A quit that began first owns the process's end; no recovery starts after its fence.
+        guard !quitFence else { return }
+        let events = await RuntimeHost.recoverWithoutConfiguration(
+            stateSession: stateSession, logger: logStore, effects: composition.effects
+        )
+        for event in events { eventLog.append(event) }
+        guard !quitFence else { return }
+        phase = .refused
+        updateCoordinator.onStatus = { [weak self] status in self?.updateStatus = status }
+        updateCoordinator.start(automaticChecks: false)
+    }
+
+    /// Opens the one host and composes its clients under the shipping profile in the owner turn that built it, so a built host always
+    /// has the clients a quit reaches it through. The host is not kept here: the clients hold the composition. Throws what the open
+    /// throws; a composition failure is the result's.
+    @RuntimeActor
+    private static func openHost(
+        stateSession: StateRootSession, logger: any LogSink, effects: RuntimeHostEffects, schedules: AppHostSchedules
+    ) async throws -> Result<(clients: RuntimeInMemoryClients, profile: RuntimeServiceProfile), any Error> {
+        let host = try await RuntimeHost.open(
+            stateSession: stateSession,
+            logger: logger,
+            startupAllowsMissing: true,
+            startedAt: Date(),
+            // The app's process lifetime is AppKit's; it never asks the host for a terminal stop.
+            terminalExit: {},
+            effects: effects,
+            networkLocationLimits: schedules.networkLocationLimits,
+            environmentDriftInterval: schedules.environmentDriftInterval,
+            reapplyRetrySchedule: schedules.reapplyRetrySchedule,
+            splitDNSHelperCheckInterval: schedules.splitDNSHelperCheckInterval
+        )
+        return Result {
+            let profile = try RuntimeServiceProfile.inProcessApp()
+            return (try host.makeInMemoryControlClient(profile: profile), profile)
+        }
+    }
+
+    /// The first snapshot names the incarnation. Then one editor read seeds every draft and baseline together.
+    private func connect(_ clients: RuntimeInMemoryClients, rowBudget: ControlRowBudget) async {
+        let deadline = RuntimeDeadline.after(RuntimeEditorSession.exchangeBudget, from: .now)
+        let incarnation: ControlHostIncarnation
+        do {
+            incarnation = try await clients.control.readSnapshot(deadline: deadline).stamp.incarnation
+        } catch {
+            // A quit reads the incarnation itself; its fence is not this opening's failure.
+            guard !quitFence else { return }
+            reportOpeningFailure(nil, message: "The runtime opened, but its status could not be read (\(error)).")
+            return refuseUnlessQuitting()
+        }
+        self.incarnation = incarnation
+        guard !quitFence else { return }
+        let observation: PrivateEditorObservation
+        do {
+            observation = try await read(clients.editor, incarnation: incarnation, deadline: deadline)
+        } catch {
+            guard !quitFence else { return }
+            reportOpeningFailure(nil, message: "The runtime opened, but its configuration could not be read (\(error)).")
+            return refuseUnlessQuitting()
+        }
+        guard !quitFence else { return }
+        let observer = RuntimeObserver(control: clients.control, presentation: runtime, incarnation: incarnation, rowBudget: rowBudget)
+        self.observer = observer
+        guard let seeded = seed(observation) else { return refuseUnlessQuitting() }
+        // Weak: the session's operation in flight and the observer's tasks can outlive the app, after a quit whose total ended first, and
+        // must never reach it then. With the app gone the session reads no draft and makes none up, so it starts nothing.
+        editor = RuntimeEditorSession(
+            control: clients.control, editor: clients.editor, observer: observer, incarnation: incarnation, ledger: seeded,
+            drafts: { [weak self] in
+                guard let self else { return nil }
+                return (self.config, self.platformConfig, self.appPreferences)
             },
-            store: credentialStore ?? KeychainStore()
+            moduleIntents: { [weak self] holdApply in self?.settingsModuleIntents(holdApply: holdApply) },
+            report: { [weak self] report in self?.handle(report) }
         )
-        self.credentialManager = credentialManager
+        observer.onSnapshot = { [weak self] snapshot in self?.observed(snapshot) }
+        observer.onEvents = { [weak self] events in self?.observed(events) }
+        observer.onFailure = { [logStore] reason in
+            logStore.log(.warning, "Runtime observation: \(reason).", category: .system)
+        }
+        runtime.onDemand = { [weak observer] in observer?.scheduleRefresh() }
+        observer.start()
+        await commitLaunchOverrides()
+        guard !quitFence else { return }
+        finishOpening()
+    }
 
-        // Wire the auth factory now that the orchestrator exists. The
-        // closure captures `orchestrator.configSnapshotProvider` directly —
-        // no second NIOLockedValueBox in AppState.
-        let authenticatorProvider = credentialBasedAuthenticatorProvider(
-            configProvider: orchestrator.configSnapshotProvider,
-            credentialProvider: credentialManager,
-            kerberosTicketRecovery: kerberosTicketRecovery,
-            outcomeHandler: { [weak orchestrator] outcome, host, reason, diagnostics in
-                orchestrator?.reportAuthOutcome(outcome, host: host, reason: reason, diagnostics: diagnostics)
-            },
-            eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
+    private func refuseUnlessQuitting() {
+        guard !quitFence else { return }
+        phase = .refused
+    }
+
+    private func read(
+        _ editor: PrivateEditorClient, incarnation: ControlHostIncarnation, deadline: RuntimeDeadline
+    ) async throws -> PrivateEditorObservation {
+        let answer = try await editor.read(
+            requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: incarnation,
+            budget: try deadline.wireBudget(at: .now, cappedAt: RuntimeEditorSession.exchangeBudget), deadline: deadline
         )
-        orchestrator.setAuthenticatorProvider(authenticatorProvider)
+        switch answer {
+        case .observation(let observation): return observation
+        case .refused(let code): throw RuntimeClientError.wire(code == .changedIncarnation ? .changedIncarnation : .invalidValue)
+        case .admission: throw RuntimeClientError.unexpectedReply
+        }
+    }
 
-        if AppState.hasFlag("--no-system-proxy") {
-            self.platformConfig.manageSystemProxy = false
+    /// The drafts and their baselines from one observation, assigned without counting as edits.
+    private func seed(_ observation: PrivateEditorObservation) -> RuntimeEditorLedger? {
+        let values: (config: ProxyConfig, platform: PlatformIntegrationConfig, preferences: AppPreferences)
+        do {
+            values = try PrivateConfigurationBridge.makeValues(from: observation)
+        } catch {
+            reportOpeningFailure(nil, message: "The runtime's configuration could not be shown (\(error)).")
+            return nil
         }
-        if AppState.hasFlag("--no-env") {
-            self.platformConfig.manageEnvironmentVariables = false
-        }
-        // Launch flags are a session override, not an edit to reconcile:
-        // nothing was applied yet, so there is nothing to clear.
-        reconciler.markReconciled(platformConfig: platformConfig)
-        reconciler.host = self
-        orchestrator.config = config
-        orchestrator.onSnapshotChange = { [weak self, deliveries] snapshot in
-            deliveries.deliver {
-                self?.runtime.apply(snapshot: snapshot)
-            }
-        }
-        // `onConfigChange` is deliberately not wired. The orchestrator fires
-        // it from `applyConfigChange` and nowhere else, and in this host every
-        // `applyConfigChange` is one of our own saves, so the callback could
-        // only ever echo a config this host already holds — or, worse, one
-        // it has moved past. Passes are serialised, so a queued pass starts
-        // its apply after later edits may have landed in the editor; the
-        // orchestrator writes the pass's config into its box and echoes the
-        // box, and wiring that echo back into `config` replaced the newer
-        // edits with the older save. `RuntimeHost` leaves it unwired too:
-        // its accepted view moves only through the configuration workflow.
-        orchestrator.onEvent = { [weak self, deliveries] event in
-            deliveries.deliver {
-                self?.handle(orchestratorEvent: event)
-            }
-        }
-        runtime.apply(snapshot: orchestrator.snapshot)
-
-        networkMonitor.onChange = { [weak self, deliveries] change in
-            deliveries.deliver {
-                await self?.handleNetworkChange(change)
-            }
-        }
-        // The interface name is read here, on the monitor's own delivery,
-        // not after the hop: two transitions queued behind one another would
-        // otherwise both read whatever the monitor sees by the time their
-        // tasks run, and a connected state could carry a later tunnel's name.
-        // Weak on both: the monitor stores this closure, so a strong capture
-        // of the monitor would keep a stopped host's observer alive forever.
-        self.vpnStatusMonitor.setOnChange { [weak self, deliveries, vpnSequencer, weak monitor = self.vpnStatusMonitor] state in
-            let interfaceName = monitor?.connectedInterfaceName
-            let sequence = vpnSequencer.next()
-            deliveries.deliver {
-                self?.handleVPNStateChange(state, interfaceName: interfaceName, sequence: sequence)
-            }
-        }
-        // `config` is the editor's draft and never reaches the runtime from
-        // here: `orchestrator.config` moves only when a save's reconcile pass
-        // hands it a committed config (`applyConfigChange`). The sink only
-        // says whether the draft holds a listener edit awaiting its commit,
-        // from the emitted value: `@Published` emits before it assigns.
-        $config
-            .dropFirst()
-            .sink { [weak self] draft in self?.refreshListenerEditAwaitingCommit(draft: draft) }
-            .store(in: &cancellables)
-        // Settings has no Save button, so an edit persists and reconciles on
-        // its own once edits pause (#171). Subscribed after the launch-flag
-        // overrides above, which are a session override and are not saved.
-        Publishers.Merge3(
-            $config.dropFirst().map { _ in () },
-            $platformConfig.dropFirst().map { _ in () },
-            $appPreferences.dropFirst().map { _ in () }
+        assignDrafts(values.config, values.platform, values.preferences)
+        credentialIdentity.withLockedValue { $0 = (values.config.domain, values.config.username, values.config.profileName) }
+        applySavedHostSettings(values.config)
+        return RuntimeEditorLedger(
+            observation: observation, config: values.config, platform: values.platform, preferences: values.preferences
         )
-        .sink { [weak self] in self?.scheduleSave() }
-        .store(in: &cancellables)
-        applyCommittedHostSettings(config)
+    }
+
+    /// Explicit launch overrides are written save-only before any control can use them (decision 0015). One that is not verified holds
+    /// every Start until the configuration draft is saved: a Start must not run the input this launch asked to replace.
+    private func commitLaunchOverrides() async {
+        let overrides = composition.launchOverrides
+        guard !overrides.isEmpty, let editor else { return }
+        let (config, platform) = overrides.applied(to: self.config, platformConfig)
+        if config != self.config { self.config = config }
+        if platform != platformConfig { platformConfig = platform }
+        cancelPendingSave()
+        if !overrides.isSatisfied(by: editor.ledger.saved.config, editor.ledger.saved.platform) {
+            editor.save(.configuration)
+            await editor.settle()
+        }
+        refreshActivationHold()
+    }
+
+    /// Holds every Start while the saved values do not hold the launch options, and releases the hold only once they do, read field by
+    /// field from what this editor's own verified writes or its last read saved: a later save that turned a `--no-system-proxy` switch
+    /// back on does not release it, so no Start runs contrary to the launch's own options.
+    private func refreshActivationHold() {
+        let overrides = composition.launchOverrides
+        guard !overrides.isEmpty, let editor else { return }
+        if overrides.isSatisfied(by: editor.ledger.saved.config, editor.ledger.saved.platform) {
+            if activationHeld != nil, lastErrorMessage == activationHeld { lastErrorMessage = nil }
+            activationHeld = nil
+        } else if activationHeld == nil {
+            activationHeld = "The launch options were not saved, so nothing starts until Settings saving them succeeds."
+            lastErrorMessage = activationHeld
+            logStore.log(.warning, activationHeld ?? "", category: .system)
+        }
+    }
+
+    /// Whether a Start may be sent now. A held activation is reported instead.
+    private func mayStart() -> Bool {
+        guard let activationHeld else { return true }
+        lastErrorMessage = activationHeld
+        return false
+    }
+
+    private func finishOpening() {
+        phase = .ready
+        isShowingOnboarding = config.authMode == .ntlmv2 && !credentialManager.hasSavedCredentials(for: config)
         updateCoordinator.onStatus = { [weak self] status in self?.updateStatus = status }
         updateCoordinator.start(automaticChecks: appPreferences.automaticUpdateChecks)
         updateStatus = updateCoordinator.status
+        refreshPreflight()
+    }
+
+    // MARK: - Drafts
+
+    private func observeDrafts() {
+        $config.dropFirst().sink { [weak self] draft in self?.draftChanged(.configuration, config: draft) }.store(in: &cancellables)
+        $platformConfig.dropFirst().sink { [weak self] _ in self?.draftChanged(.configuration, config: nil) }.store(in: &cancellables)
+        $appPreferences.dropFirst().sink { [weak self] _ in self?.draftChanged(.preferences, config: nil) }.store(in: &cancellables)
         $appPreferences
             .map(\.automaticUpdateChecks)
             .removeDuplicates()
             .dropFirst()
-            .sink { [weak self] enabled in self?.updateCoordinator.setAutomaticChecks(enabled) }
+            .sink { [weak self] enabled in
+                guard let self, !self.quitFence else { return }
+                self.updateCoordinator.setAutomaticChecks(enabled)
+            }
             .store(in: &cancellables)
-        notificationManager.requestAuthorization()
-        startLocationObserver()
-        startEnvironmentDriftTimer()
-        networkMonitor.start()
-        self.vpnStatusMonitor.start()
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-        ) { [weak self, deliveries] _ in
-            deliveries.deliver { self?.handleSystemWake() }
-        }
-        // Crash recovery for both platform surfaces: a run that was `SIGKILL`ed
-        // never got to tear down, and launch is when the recorded prior state is
-        // most likely still the truth. Without this the machine keeps pointing
-        // at a dead proxy port and a dead resolver until the user next stops
-        // them by hand.
-        //
-        // Off the main actor, because both of these interrogate the machine
-        // before deciding anything — see `LaunchRecovery` for the measurements
-        // and for why `join()` has to guard every platform-surface caller.
-        let dnsRecovery = systemDNSManager
-        let proxyRecovery = systemConduit
-        let resolverRecovery = dnsManager
-        // Journal restoration uses recorded prior state, not the failed
-        // runtime config. Only legacy ownership inference needs that config:
-        // once per install, files an earlier release wrote before resolver
-        // files were journaled. See `recoverLegacyOwnership`.
-        let legacyResolvers = loadFailure == nil
-            ? LaunchRecovery.LegacyResolverInput(
-                configs: [config],
-                configFilePredatesLaunch: configFilePredatesLaunch,
-                resolversManaged: platformConfig.manageDNSResolvers
-            )
-            : nil
-        launchRecovery = LaunchRecovery {
-            LaunchRecovery.recoverPlatformSurfaces(
-                systemDNS: dnsRecovery,
-                systemProxy: proxyRecovery,
-                resolvers: resolverRecovery,
-                legacyResolvers: legacyResolvers,
-                emit: { eventLog.append($0) },
-                logger: logStore
-            )
-        }
-        if let loadFailure {
-            orchestrator.eventLog.append(loadFailure.event)
-            lastErrorMessage = loadFailure.localizedDescription + " Restart Conduit after repairing the file."
-            logStore.log(.error, lastErrorMessage ?? loadFailure.localizedDescription, category: .system)
-        }
-        isShowingOnboarding = loadFailure == nil && config.authMode == .ntlmv2 && !credentialManager.hasSavedCredentials(for: config)
-        refreshPreflight()
-        // The preflight above used to be guaranteed to read a machine recovery
-        // had already finished with, because recovery ran inline on the line
-        // before it. Now it can read the machine mid-restore and cache
-        // "system proxy applied" for a surface that is about to be handed back.
-        // Re-read once, when recovery lands.
-        Task { @MainActor [weak self] in
-            await self?.awaitLaunchRecovery()
-            self?.refreshPreflight()
-        }
     }
 
-    private static func parsePortArgument() -> Int? {
-        let args = CommandLine.arguments
-        if let idx = args.firstIndex(of: "--port"), idx + 1 < args.count, let port = Int(args[idx + 1]) {
-            return port
-        }
-        return nil
+    /// `@Published` emits before it assigns, so the draft a listener classification needs is the emitted one.
+    private func draftChanged(_ group: RuntimeEditorLedger.Group, config draft: ProxyConfig?) {
+        guard !assigningDrafts else { return }
+        editor?.edited(group)
+        if let draft { refreshListenerEditAwaitingCommit(draft: draft) }
+        scheduleSave()
     }
 
-    /// Constructs the PAC evaluator backend.
-    /// Internal-test-visibility (`package`) so `PACEvaluatorSettingsTests`
-    /// can pin the wiring contract without standing up the full AppState
-    /// (which touches Keychain, NSWorkspace, NWPathMonitor, etc.).
-    /// `CFPACEvaluator` is now the only production implementation.
-    package nonisolated static func makePACEvaluator(
-        insecureFetcher: @Sendable @escaping (URL) async throws -> String
-    ) -> any PacEvaluator {
-        CFPACEvaluator(insecureFetcher: insecureFetcher)
+    private func assignDrafts(_ config: ProxyConfig, _ platform: PlatformIntegrationConfig, _ preferences: AppPreferences) {
+        assigningDrafts = true
+        defer { assigningDrafts = false }
+        self.config = config
+        self.platformConfig = platform
+        self.appPreferences = preferences
+        refreshListenerEditAwaitingCommit(draft: config)
     }
 
-    /// Construct the connection audit sink the orchestrator should emit
-    /// per-connection records to. Honours `LoggingSection.auditLogEnabled`:
-    /// when off (the default), returns the no-op `DiscardingConnectionAuditSink`
-    /// so the orchestrator's emit funnel is harmless. When on, anchors the
-    /// `FileConnectionAuditSink` at `auditLogPath` (or
-    /// `$state-dir/audit.ndjson` if no override) with `auditLogMaxBytes`.
-    ///
-    /// Hot-reload caveat: the sink is captured
-    /// at orchestrator construction, so toggling the audit toggle in
-    /// Settings requires a daemon restart to re-resolve. Acceptable
-    /// because audit is itself a deploy-time config
-    /// decision, not something flipped per session. A subsequent
-    /// reload-aware path can swap the sink behind a `NIOLockedValueBox`.
-    private nonisolated static func makeAuditSink(
-        for config: ProxyConfig,
-        environment: RuntimeEnvironment,
-        writerLeaseFile: URL,
-        logger: any LogSink,
-        eventLog: RuntimeEventLog
-    ) -> any ConnectionAuditSink {
-        guard config.auditLogEnabled else {
-            return DiscardingConnectionAuditSink()
-        }
-        let url: URL
-        if let path = config.auditLogPath, !path.isEmpty {
-            url = URL(fileURLWithPath: path)
-        } else {
-            url = environment.configDirectory.appendingPathComponent("audit.ndjson")
-        }
-        // An explicit path may leave the state directory, never land on a protected resource (#222).
-        return FileConnectionAuditSink(
-            fileURL: url,
-            maxBytes: config.auditLogMaxBytes,
-            logger: logger,
-            destinationGuard: diagnosticDestinationGuard(
-                for: .connectionAudit, in: environment, writerLeaseFile: writerLeaseFile
-            ),
-            eventLog: eventLog
-        )
-    }
-
-    /// Plaintext-URL PAC fetcher for `CFPACEvaluator.init(insecureFetcher:)`.
-    /// This logic previously lived inside the old resolver's curl fallback
-    /// (which imported `CommandRunner` from `ConduitCore`).
-    /// `CommandRunner` now lives in `PlatformMac`; `ProxyPAC` can no longer
-    /// shell out, so the app target provides the closure. Headless daemons
-    /// (`pm-proxy`, `pm-tunnel`) use the kernel default that throws, relying
-    /// on a TLS-capable PAC URL instead.
-    /// Ceiling on a fetched PAC document, stated here rather than inherited.
-    ///
-    /// This is the one caller that reads a whole document instead of a line or
-    /// two of tool output, so `CommandRunner.defaultMaxOutputBytes` — sized as
-    /// a runaway guard for `networksetup` and friends — answers a different
-    /// question. 256 KiB is not a working limit either: the enterprise PAC this
-    /// path was developed against, carrying a full regional host list, is 4,688
-    /// bytes, so the ceiling is roughly 55x headroom.
-    ///
-    /// The reason to bound it at all is not size but what the bytes become. A
-    /// PAC is JavaScript this process evaluates on **every routing decision**,
-    /// so an unbounded fetch hands an arbitrary-sized script to the hot path
-    /// and holds it for the lifetime of the resolver. Exceeding the ceiling
-    /// fails the fetch rather than truncating, because a half-read PAC routes
-    /// traffic wrongly instead of visibly breaking.
-    nonisolated static let pacMaxOutputBytes = PACFetchLimits.maxScriptBytes
-
-    @Sendable
-    nonisolated static func curlPACFetcher(_ url: URL) async throws -> String {
-        guard url.user == nil, url.password == nil else {
-            throw PACResolverError.fetchFailed("PAC URLs must not contain embedded credentials.")
-        }
-        return try await Task.detached(priority: .utility) {
-            let result: CommandResult
-            do {
-                result = try CommandRunner.run(
-                    launchPath: "/usr/bin/curl",
-                    arguments: [
-                        "--silent",
-                        "--show-error",
-                        "--location",
-                        "--fail",
-                        "--max-time", "15",
-                        // The PAC decides how the proxy routes; fetching it
-                        // through that proxy (via the `http_proxy` variables
-                        // Conduit itself publishes) sends the request
-                        // around the loop — evaluated against a stale PAC,
-                        // then to an upstream that is exactly what is
-                        // unreachable when a refresh matters.
-                        "--noproxy", "*",
-                        url.absoluteString,
-                    ],
-                    maxOutputBytes: AppState.pacMaxOutputBytes
-                )
-            } catch let error as CommandRunnerError {
-                // Wrapped so every failure on this path is one type. Without it a
-                // PAC that was too large, or a fetch that timed out, surfaced as a
-                // bare `CommandRunnerError` while an HTTP failure surfaced as
-                // `PACResolverError` — and the two read to a user as the same
-                // "PAC unreachable".
-                throw PACResolverError.fetchFailed(error.localizedDescription)
-            }
-            guard result.exitCode == 0 else {
-                let message = [result.standardError, result.standardOutput]
-                    .filter { !$0.isEmpty }
-                    .joined(separator: " | ")
-                throw PACResolverError.fetchFailed(
-                    message.isEmpty ? "curl exited with code \(result.exitCode)." : message
-                )
-            }
-            return result.standardOutput
-        }.value
-    }
-
-    private static func hasFlag(_ flag: String) -> Bool {
-        CommandLine.arguments.contains(flag)
-    }
-
-    private func rejectUnavailableConfiguration() -> Bool {
-        guard let configurationLoadError else { return false }
-        orchestrator.eventLog.append(configurationLoadError.event)
-        lastErrorMessage = configurationLoadError.localizedDescription + " Restart Conduit after repairing the file."
-        logStore.log(.error, lastErrorMessage ?? configurationLoadError.localizedDescription, category: .system)
-        return true
-    }
-
-    // MARK: - Updates
-
-    /// "Check for Updates…": starts the nested updater, which shows its own
-    /// windows (#111).
-    func checkForUpdates() {
-        updateCoordinator.checkNow()
-    }
-
-    // MARK: - Config
-
-    /// The config the runtime was last handed by a reconcile pass: what a
-    /// start binds and every surface advertises. `config` is the editor's
-    /// draft; it reaches the runtime only through a save.
-    var runtimeConfig: ProxyConfig { orchestrator.config }
-
-    /// The integration flags the last save committed. Lifecycle work reads
-    /// these rather than the editor's `platformConfig`, for the same reason.
-    var committedPlatformConfig: PlatformIntegrationConfig { reconciler.requestedPlatformConfig }
-
-    /// Where a commit of the editor's draft came from, for its event.
+    /// Where a commit came from, for its event.
     enum CommitTrigger: String {
-        /// Return in a Settings field.
         case submit
-        /// The Apply button beside a held listener edit.
         case apply
-        /// A Configure section went away: another section, or the window closed.
         case sectionClose = "section_close"
-        /// Quit: written for the next launch, not applied.
         case quit
     }
 
-    /// Saves after edits pause for `settingsSaveDebounce` (#171); the
-    /// pause keeps a half-typed value from being written and reconciled per
-    /// keystroke. Two kinds of edit are not saved by the timer, see
-    /// `holdsBackUnsavedEdit`. A problem that does not block a start (a
-    /// bypass entry the system settings refuse) is saved and reported as
-    /// before; holding it back would stop every later edit from saving.
+    /// Saves after edits pause (#171). Two kinds of configuration edit wait for a commit instead (`holdsBackUnsavedEdit`).
     func scheduleSave() {
-        hasUnsavedEdit = true
         pendingSave?.cancel()
-        let delay = settingsSaveDebounce
+        // The quit froze its final saves; an edit after it schedules nothing.
+        guard !quitFence else { return }
+        let delay = composition.timing.settingsSaveDebounce
         pendingSave = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: delay)
@@ -900,254 +478,75 @@ final class AppState: ObservableObject {
             }
             guard let self else { return }
             self.pendingSave = nil
+            self.editor?.save(.preferences)
             guard !self.holdsBackUnsavedEdit(trigger: "pause") else { return }
-            self.saveConfig()
+            self.submitConfiguration()
         }
     }
 
-    /// A save the lifecycle makes for its own state (the DNS flag, a start).
-    /// `config` is one value, so it carries a Settings edit still waiting
-    /// for its pause; one that would block a proxy start must not reach a
-    /// reconcile through here either. The whole save then waits, and the
-    /// edit's own save, or quit, writes both.
-    private func saveLifecycleChange() {
-        guard !holdsBackUnsavedEdit(trigger: "lifecycle") else { return }
-        saveConfig()
-    }
-
-    /// Whether an unsaved edit must wait for a commit rather than be saved
-    /// now, and so reach the runtime, by a pause or a lifecycle save:
-    ///
-    /// - It has a problem that would block a proxy start: a reconcile could
-    ///   restart the listener on a half-typed host, fail the start and
-    ///   revert every surface.
-    /// - It would start, stop or replace a bound endpoint (a port, a host,
-    ///   the SOCKS or gateway switch, the DNS section, the local PAC
-    ///   server, a tunnel): every intermediate value typed would be bound
-    ///   in turn. The runtime sees it once it is committed.
-    ///
-    /// The whole value waits, flags and other edits included: a partial
-    /// save would persist a config the editor does not show. A decision
-    /// not to save: event first, so the UI, pmctl and pm-sim see why.
+    /// Whether an unsaved configuration edit must wait for a commit rather than be saved by a pause: it blocks a proxy start, or it would
+    /// start, stop or replace a bound endpoint. The whole value waits. Event first.
     private func holdsBackUnsavedEdit(trigger: String) -> Bool {
-        // Only an edit to the config: one left invalid by a section close is
-        // already saved, and must not hold back an unrelated toggle.
-        guard hasUnsavedEdit, config != (editorBaseline ?? reconciler.requestedConfig) else { return false }
-        let blocking = config.startBlockingProblems
+        guard let editor, editor.ledger.isDirty(.configuration) else { return false }
+        // Only an unsaved runtime change can introduce a problem: a platform toggle beside an already-saved invalid runtime value saves.
+        let runtimeChanged = config != editor.ledger.saved.config
+        let blocking = runtimeChanged ? config.startBlockingProblems : []
         let detail: String
         if !blocking.isEmpty {
             detail = "reason=start_blocking_problems problems=\(blocking.count) trigger=\(trigger)"
-        } else if ConfigDiff(old: reconciler.requestedConfig, new: config).replacesListeners {
+        } else if ConfigDiff(old: editor.ledger.saved.config, new: config).replacesListeners {
             detail = "reason=listener_change trigger=\(trigger)"
         } else {
             return false
         }
-        recordLifecycle(RuntimeEvent(kind: .config, event: "config.autosave_held", detail: detail), level: .info)
+        record(RuntimeEvent(kind: .config, event: "config.autosave_held", detail: detail), level: .info)
         return true
     }
 
-    /// Commits the editor's draft now: Return in a field, Apply, or a
-    /// section going away. The only way a held listener edit reaches the
-    /// runtime, apart from quit writing it for the next launch. An edit
-    /// that does not validate is saved and reported, as before.
+    /// Commits the drafts now: Return in a field, Apply, or a section going away. The only way a held listener edit reaches the runtime.
     func commitPendingEdit(trigger: CommitTrigger) {
         if hasUnsavedEdit {
-            recordCommit(trigger: trigger)
+            let listener = editor.map { ConfigDiff(old: $0.ledger.saved.config, new: config).replacesListeners } ?? false
+            record(RuntimeEvent(kind: .config, event: "config.edit_committed",
+                                detail: "trigger=\(trigger.rawValue) listener_change=\(listener)"), level: .info)
         }
-        flushPendingSave()
+        saveConfig()
     }
 
-    /// Commits after the active field has handed over its text. A
-    /// formatted number field writes its binding only when editing ends,
-    /// and SwiftUI may deliver that write on a later main-actor turn, so
-    /// `endEditing` runs first and the commit one hop after it. A button
-    /// click does not end the field's editing on its own.
+    /// Commits after the active field has handed over its text, one hop after `endEditing`.
     @discardableResult
     func commitPendingEdit(trigger: CommitTrigger, afterEnding endEditing: () -> Void) -> Task<Void, Never> {
         endEditing()
         return Task { @MainActor in self.commitPendingEdit(trigger: trigger) }
     }
 
-    /// Event first: a commit is a config decision.
-    private func recordCommit(trigger: CommitTrigger) {
-        let listener = ConfigDiff(old: reconciler.requestedConfig, new: config).replacesListeners
-        recordLifecycle(RuntimeEvent(kind: .config, event: "config.edit_committed",
-                                     detail: "trigger=\(trigger.rawValue) listener_change=\(listener)"),
-                        level: .info)
-    }
-
-    private func refreshListenerEditAwaitingCommit(draft: ProxyConfig) {
-        let awaiting = ConfigDiff(old: reconciler.requestedConfig, new: draft).replacesListeners
-        if listenerEditAwaitingCommit != awaiting {
-            listenerEditAwaitingCommit = awaiting
-        }
-    }
-
-    /// Saves now if an edit has not been saved; `commitPendingEdit` is the
-    /// entry point for the views.
-    func flushPendingSave() {
-        // A pass already out advanced the baseline before acting; if one of
-        // its actions fails, it rewinds after this returns, and a pass this
-        // starts began from the advanced baseline, so it cannot retry it.
-        let passWasOut = reconciler.hasPassInFlight
-        // Also when everything is written but an action did not land: closing
-        // a section retried it before autosave, and nothing else may (#176).
-        if hasUnsavedEdit || reconciler.requestLags {
-            saveConfig()
-        }
-        // Look again once everything out has drained.
-        guard passWasOut else { return }
-        sectionCloseRetry?.cancel()
-        sectionCloseRetry = Task { [weak self] in
-            await self?.reconciler.drain()
-            // What the close saved, not what is current: an edit made since
-            // has its own debounced save, gated as usual.
-            guard let self, !Task.isCancelled, self.reconciler.requestLags else { return }
-            self.reconciler.retryRequest()
-        }
-    }
-
-    /// Joins the post-drain check a section close scheduled, for tests.
-    func awaitSectionCloseRetry() async {
-        await sectionCloseRetry?.value
-    }
-
-    /// Writes an unsaved edit to disk without the runtime reconcile: at
-    /// quit, termination cleanup is about to tear the surfaces down, and an
-    /// apply started here would race it. The login item needs no runtime
-    /// and is registered, or the next launch would disagree with the file.
-    ///
-    /// A config edit with a problem that would block a proxy start is not
-    /// written: the autosave never saves one, and quit must not make a
-    /// half-typed value the next launch's config. The flags and
-    /// preferences, which that validation does not cover, still are.
-    func persistPendingEditForTermination() {
+    /// Saves both drafts now, through the editor.
+    func saveConfig() {
         cancelPendingSave()
-        guard configurationLoadError == nil else { return }
-        if hasUnsavedEdit {
-            // Every unsaved config, even one equal to the last request: a save
-            // that wrote the config and then failed on a platform file advanced
-            // the request and left the edit unsaved. A failed config write leaves
-            // the request at its prior config.
-            let blocking = config.startBlockingProblems
-            if let first = blocking.first {
-                recordLifecycle(RuntimeEvent(kind: .config, event: "config.edit_discarded",
-                                             detail: "trigger=quit reason=start_blocking_problems check=\(first.check) problems=\(blocking.count)"),
-                                level: .notice)
-            } else {
-                recordCommit(trigger: .quit)
-            }
-            // A flip the platform file does not hold is not registered.
-            guard persistConfiguration(includingConfig: blocking.isEmpty).platformSaved else { return }
-        }
-        // Even when a later file failed, and with nothing unsaved: the next
-        // launch reads the platform file as its baseline, and would never see
-        // a flip it holds whose registration failed and rewound.
-        reconciler.reconcileImmediateActions(platformConfig: platformConfig)
+        guard phase == .ready, let editor else { return }
+        editor.save(.preferences)
+        submitConfiguration()
     }
 
-    /// Waits for the save an edit scheduled, if any. For the harness.
+    /// Waits for the save an edit scheduled and the editor's operations it started. For the harness.
     func awaitPendingSave() async {
         await pendingSave?.value
+        await editor?.settle()
     }
 
-    /// Stops the timer. The edit stays unsaved until a write succeeds.
     private func cancelPendingSave() {
         pendingSave?.cancel()
         pendingSave = nil
     }
 
-    /// Which files were written. Each file is attempted on its own: a refused
-    /// runtime config does not stop the platform flags or preferences from being
-    /// written, since each file is the next launch's baseline for itself. A
-    /// failed write keeps the edit unsaved, so leaving the section or quitting
-    /// tries again. `configSaved` is false when the config was not written, which
-    /// includes `includingConfig: false` (a discarded edit at quit).
-    @discardableResult
-    private func persistConfiguration(includingConfig: Bool = true) -> (configSaved: Bool, platformSaved: Bool) {
-        var configSaved = false
-        if includingConfig {
-            do {
-                try ProxyConfigPersistence.save(config, in: runtimeEnvironment)
-                configSaved = true
-                editorBaseline = config
-            } catch {
-                reportSaveFailure(error)
-            }
-        }
-        var platformSaved = false
-        do {
-            try PlatformConfigPersistence.save(platformConfig, in: runtimeEnvironment)
-            platformSaved = true
-        } catch {
-            reportSaveFailure(error)
-        }
-        var preferencesSaved = false
-        do {
-            try AppPreferencesPersistence.save(appPreferences, in: runtimeEnvironment)
-            preferencesSaved = true
-        } catch {
-            reportSaveFailure(error)
-        }
-        // The edit is saved only when every file it touches was written. A later failure
-        // keeps it unsaved, so the next section close, commit or quit tries the missing
-        // write again. A discarded config (`includingConfig: false`) never marks it saved.
-        let allWritten = configSaved && platformSaved && preferencesSaved
-        if includingConfig && allWritten {
-            hasUnsavedEdit = false
-        }
-        if allWritten || (!includingConfig && platformSaved && preferencesSaved) {
-            logStore.log(.debug, "Saved configuration.")
-        }
-        return (configSaved, platformSaved)
+    private func submitConfiguration() {
+        guard phase == .ready || phase == .opening, let editor, editor.ledger.isDirty(.configuration) else { return }
+        editor.save(.configuration)
+        refreshConfigurationProblem()
     }
 
-    /// The banner text and a log line for a failed save. A refusal also has its
-    /// structured event, `config.save_rejected`, which names the field and never
-    /// the value.
-    private func reportSaveFailure(_ error: Error) {
-        lastErrorMessage = error.localizedDescription
-        // The structured event is emitted first, and the log line is written after it.
-        if let refusal = error as? ConfigFileRepresentabilityError {
-            recordLifecycle(refusal.event, level: .warning)
-        } else if let refusal = error as? ConfigurationResourceRefusal {
-            recordLifecycle(refusal.event, level: .warning)
-        } else if let refusal = error as? ConfigurationFileSizeRefusal {
-            recordLifecycle(refusal.event, level: .warning)
-        } else if let refusal = error as? ConfigurationSidecarSaveRefusal {
-            recordLifecycle(refusal.event, level: .warning)
-        }
-        logStore.log(.warning, "Failed to save configuration: \(error.localizedDescription)")
-    }
-
-    func saveConfig() {
-        cancelPendingSave()
-        guard !rejectUnavailableConfiguration() else { return }
-        let persisted = persistConfiguration()
-        // The gate sits before the reconcile, not inside the host's apply. A
-        // reconcile advances its applied baseline when it queues a pass, so a
-        // refusal inside the pass would leave the reconciler believing the value
-        // landed. A refused save, or a value that blocks a proxy start, stays out of
-        // the runtime, which keeps the last config it applied, as a held autosave does.
-        // A held config still reconciles the platform side, at the config the runtime
-        // already applies, so an unrelated toggle is not stranded behind it.
-        let blocking = config.startBlockingProblems
-        if persisted.configSaved, blocking.isEmpty {
-            reconciler.reconcile(config: config, platformConfig: platformConfig)
-        } else {
-            if let first = blocking.first {
-                recordLifecycle(RuntimeEvent(kind: .config, event: "config.apply_held",
-                                             detail: "trigger=commit reason=start_blocking_problems check=\(first.check) problems=\(blocking.count)"),
-                                level: .notice)
-            }
-            reconciler.reconcile(config: reconciler.requestedConfig, platformConfig: platformConfig)
-        }
-        refreshListenerEditAwaitingCommit(draft: config)
-        // Surface validation problems at edit time instead of at the next
-        // proxy (re)start, where LocalProxyServer would reject the config
-        // long after the user closed Settings. The save itself is not
-        // blocked: the runtime re-validates at start, and refusing to
-        // persist would silently discard the user's edits.
+    /// Surfaces validation problems at edit time. The save is not blocked: the runtime re-validates at start.
+    private func refreshConfigurationProblem() {
         let validationErrors = config.validate()
         if let first = validationErrors.first {
             let summary = validationErrors.count > 1
@@ -1156,1245 +555,634 @@ final class AppState: ObservableObject {
             let message = "Configuration problem: \(summary)"
             lastErrorMessage = message
             configProblemMessage = message
-            for error in validationErrors {
-                logStore.log(.warning, "Config validation: \(error.localizedDescription)")
-            }
+            for error in validationErrors { logStore.log(.warning, "Config validation: \(error.localizedDescription)") }
         } else if let shown = configProblemMessage {
-            // The problem was fixed. An error shown since is left alone.
             configProblemMessage = nil
-            if lastErrorMessage == shown {
-                lastErrorMessage = nil
+            if lastErrorMessage == shown { lastErrorMessage = nil }
+        }
+    }
+
+    private func refreshListenerEditAwaitingCommit(draft: ProxyConfig) {
+        guard let editor else { return }
+        let awaiting = ConfigDiff(old: editor.ledger.saved.config, new: draft).replacesListeners
+        if listenerEditAwaitingCommit != awaiting { listenerEditAwaitingCommit = awaiting }
+    }
+
+    /// The intent a Settings save carries: each running module applies the saved pair at the revision the latest snapshot named; a stopped
+    /// one only saves. A draft that blocks a start, or a save before the controls are ready, saves only.
+    private func settingsModuleIntents(holdApply: Bool) -> PrivateModuleSlots<PrivateModuleIntent> {
+        let saveOnly = PrivateModuleSlots<PrivateModuleIntent>(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly)
+        guard !holdApply, phase == .ready, runtime.isLive, let modules = runtime.stamp?.modules else { return saveOnly }
+        func intent(_ running: Bool, _ revision: ControlLifecycleRevision) -> PrivateModuleIntent {
+            running ? .applyWhileRunning(ifLifecycleRevision: revision) : .saveOnly
+        }
+        let proxyRunning = [.running, .degraded, .recovering].contains(runtime.runtimeStatus.state)
+        return PrivateModuleSlots(
+            proxy: intent(proxyRunning, modules.proxy),
+            dns: intent([.running, .warning].contains(runtime.dnsRunState), modules.dns),
+            tunnels: intent([.running, .warning].contains(runtime.tunnelsRunState), modules.tunnels)
+        )
+    }
+
+    /// One editor operation's answer.
+    private func handle(_ report: RuntimeEditorSession.Report) {
+        switch report {
+        case .submitted(.configuration, let held):
+            if held, let first = config.startBlockingProblems.first {
+                record(RuntimeEvent(kind: .config, event: "config.apply_held",
+                                    detail: "trigger=commit reason=start_blocking_problems check=\(first.check) problems=\(config.startBlockingProblems.count)"),
+                       level: .notice)
             }
+        case .submitted(.preferences, _):
+            break
+        case .settled(let submission, let outcome):
+            settledEdit(submission, outcome)
+        case .notAdmitted(let group, let code):
+            // The host recorded nothing; nothing was written.
+            notice(.rejected(SettingsSave(group), .notAdmitted(code)))
+        case .refusedLocally(let group, let refusal):
+            // Refused before anything was sent.
+            notice(.rejected(SettingsSave(group), refusal))
+            switch refusal {
+            case .needsReload:
+                lastErrorMessage = "Settings can't be saved until the configuration is reloaded from disk."
+            case .resourceLimit, .notStorable, .tooLarge, .notRepresentable, .clientRefused, .notAdmitted, .editorBusy:
+                lastErrorMessage = "Settings could not be saved (\(refusal.detail))."
+            }
+        case .unknown(let group):
+            notice(.unverified(.save, .whole(SettingsSave(group), .unknown), reloadNeeded: true))
+            lastErrorMessage = "Whether Settings were saved is unknown. Reload the configuration from disk before editing again."
+        case .launchAtLogin(let enabled, let verified):
+            launchAtLoginSettled(enabled, verified: verified)
+        }
+        refreshReloadNeed()
+        followHostOwnedIntent()
+    }
+
+    private func settledEdit(_ submission: RuntimeEditorLedger.Submission, _ outcome: ControlOperationOutcome) {
+        guard let editor else { return }
+        let saved = editor.ledger.saved
+        credentialIdentity.withLockedValue { $0 = (saved.config.domain, saved.config.username, saved.config.profileName) }
+        applySavedHostSettings(saved.config)
+        refreshListenerEditAwaitingCommit(draft: config)
+        for unverified in SettingsSaveNotice.unverified(
+            outcome, of: SettingsSave(submission.kind), trigger: .save, reloadNeeded: !editor.ledger.filesNeedingReload.isEmpty
+        ) {
+            notice(unverified)
+        }
+        let save = SettingsSave(submission.kind)
+        if case .configurationSettled(let receipt) = outcome,
+           !receipt.runtime.write.isVerified || !receipt.platform.write.isVerified {
+            // A mismatch an own command's write may still explain is resubmitted once it does; it is no failure yet.
+            if editor.ledger.heldMismatches.isEmpty {
+                showSaveFailure(save, "Settings were not saved: \(Self.describe(receipt.runtime.write)) / \(Self.describe(receipt.platform.write)).")
+            }
+        } else if case .preferencesSettled(let receipt) = outcome, !receipt.preferences.write.isVerified {
+            showSaveFailure(save, "Preferences were not saved: \(Self.describe(receipt.preferences.write)).")
+        } else if case .failed(let failure) = outcome {
+            lastErrorMessage = failure.humanDescription
+        } else if Self.verified(outcome), let shown = saveFailureShown.removeValue(forKey: save), lastErrorMessage == shown {
+            // A later verified save of the same files, an automatic resubmission included, ends the failure that banner reported.
+            lastErrorMessage = nil
+        }
+        // The launch options' hold ends only once the saved values hold them.
+        if activationHeld != nil { refreshActivationHold() }
+        if loginItemRegistrationOwed, Self.verified(outcome) {
+            registerLoginItem(editor.ledger.saved.platform.launchAtLogin)
         }
         refreshPreflight()
     }
 
-    // MARK: - Observability
-
-    /// Where file logging appends when it is on. Beside the state directory
-    /// for an isolated instance; see `RuntimeEnvironment.logFile`.
-    var logFileURL: URL { runtimeEnvironment.logFile }
-
-    /// The orchestrator's own snapshot, for the harness. Read for the same
-    /// reason every lifecycle path here reads it instead of `runtime`: the
-    /// mirror is an async hop behind. Views keep reading `runtime`.
-    var runtimeSnapshot: ProxyOrchestratorSnapshot { orchestrator.snapshot }
-
-    /// The typed event stream, which is what a scenario asserts on: log
-    /// lines are derived from these, not the other way round.
-    var eventLog: RuntimeEventLog { orchestrator.eventLog }
-
-    // MARK: - RuntimeReconcilerHost
-
-    func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async -> RuntimeConfigApplication {
-        guard !rejectUnavailableConfiguration() else { return .notHeld }
-        // A pass queued before a DNS start or stop carries the flag from
-        // before it; the lifecycle's own value wins on both sides, so the
-        // pass neither reverts it in the runtime nor restarts DNS over it.
-        var new = new, old = old
-        new.dnsForwarderEnabled = config.dnsForwarderEnabled
-        old.dnsForwarderEnabled = config.dnsForwarderEnabled
-        applyCommittedHostSettings(new)
-        await orchestrator.applyConfigChange(new, from: old)
-        // The value this call assigned, not `orchestrator.config` read now: the presentation mirror can change that while the call suspends.
-        return .held(new)
+    private func showSaveFailure(_ save: SettingsSave, _ message: String) {
+        lastErrorMessage = message
+        saveFailureShown[save] = message
     }
 
-    /// The settings this host keeps outside the orchestrator, from a
-    /// committed config: the VPN flap window the monitor reads off the main
-    /// actor, and the log levels.
-    private func applyCommittedHostSettings(_ config: ProxyConfig) {
-        vpnFlapWindowBox.withLockedValue { window in
-            window.graceSeconds = config.vpnFlapGraceSeconds
-            window.minVisibleSeconds = config.vpnFlapMinVisibleSeconds
+    /// Whether a save's receipt verified every file it wrote.
+    private static func verified(_ outcome: ControlOperationOutcome) -> Bool {
+        switch outcome {
+        case .configurationSettled(let receipt): receipt.runtime.write.isVerified && receipt.platform.write.isVerified
+        case .preferencesSettled(let receipt): receipt.preferences.write.isVerified
+        default: false
         }
+    }
+
+    /// One editor notice, event first, log line derived from it.
+    private func notice(_ notice: SettingsSaveNotice) {
+        record(notice.event, level: .warning)
+    }
+
+    private static func describe(_ write: ControlConfigWorkflowWrite) -> String {
+        switch write {
+        case .persisted, .unchanged: "saved"
+        case .notPersisted: "not written"
+        case .unknown: "write state unknown; reload from disk"
+        case .conflict: "the file changed on disk; reload from disk"
+        case .notAttempted: "not attempted"
+        }
+    }
+
+    private func refreshReloadNeed() {
+        let needs = !(editor?.ledger.filesNeedingReload.isEmpty ?? true)
+        if configurationNeedsReload != needs { configurationNeedsReload = needs }
+    }
+
+    /// The forwarder's enabled bit is host-owned intent: a DNS Start or Stop moves it, no Settings field edits it, and the host merges its
+    /// own over whatever a draft carries. So the draft follows the saved bit, without counting as an edit and without touching any value
+    /// the user edits; a stale draft bit would otherwise read as a DNS section change, holding every later pause save as a listener edit.
+    private func followHostOwnedIntent() {
+        guard let saved = editor?.ledger.saved.config.dnsForwarderEnabled, config.dnsForwarderEnabled != saved else { return }
+        assigningDrafts = true
+        config.dnsForwarderEnabled = saved
+        assigningDrafts = false
+        refreshListenerEditAwaitingCommit(draft: config)
+    }
+
+    /// The log levels follow the saved configuration, the one the runtime runs.
+    private func applySavedHostSettings(_ config: ProxyConfig) {
         logStore.minStderrLevel = config.verboseLogging ? .debug : .notice
         logStore.minBufferedLevel = config.verboseLogging ? .debug : .notice
     }
 
-    /// Read the snapshot, not `runtime`: `applyConfigChange` has just
-    /// mutated it, and the mirror that gates these resolver-file side
-    /// effects is still an async hop behind.
-    func runtimeState() -> RuntimeReconciler.RuntimeState {
-        let snapshot = orchestrator.snapshot
-        let proxyIsUp: Bool
-        switch snapshot.runtimeStatus.state {
-        case .running, .degraded, .recovering: proxyIsUp = true
-        default: proxyIsUp = false
+    /// The explicit reload (decision 0032): the host re-reads the files and reconciles, then one fresh editor read rebuilds clean drafts.
+    /// Unsaved edits are discarded by this choice.
+    func reloadConfigurationFromDisk() {
+        guard phase == .ready, let editor, let editorClient, let incarnation else { return }
+        guard !reloading else {
+            lastErrorMessage = "A reload from disk is already running."
+            return
         }
-        return RuntimeReconciler.RuntimeState(proxyIsUp: proxyIsUp, dnsIsUp: snapshot.dnsRunState == .running)
-    }
-
-    /// Reads `pass.platform` and nothing live. By the time a queued pass
-    /// runs, a later save may have moved a flag again; the pass that save
-    /// queued owns that flag, and this one acts on the flags of its own.
-    func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) async {
-        guard !rejectUnavailableConfiguration() else { return }
-        let old = pass.old
-        let new = pass.new
-        let platform = pass.platform
-
-        if pass.diff.dnsChanged, platform.manageDNSResolvers, !pass.resolversFollowTheirFlag,
-           pass.runtime.proxyIsUp || pass.runtime.dnsIsUp {
-            // With the tunnel up the reconcile writes the new entries; either
-            // way it removes the files the new config no longer names, and a
-            // refused removal there leaves a file only the journal names.
-            let operation: SplitDNSEntryFileRepair.Operation = splitDNSGate.entriesWanted ? .apply : .remove
-            var entryFiles: SplitDNSEntryFileRepair.Outcome?
-            DNSResolverReconciliation.run(
-                after: "config change",
-                logger: logStore,
-                reconcile: {
-                    do {
-                        try dnsManager.reconcile(old: old, new: new, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
-                        entryFiles = .succeeded(operation)
-                    } catch {
-                        entryFiles = .failed(operation, error)
-                        throw error
-                    }
-                },
-                // `applyConfigChange` restarted the forwarder if the DNS
-                // section changed, possibly onto a different port, and
-                // `reconcile` does not rewrite intercept files. Re-point
-                // them at the listeners that came back — or remove them if
-                // none did. Runs whatever the reconcile did: see
-                // `DNSResolverReconciliation`.
-                refreshInterceptFiles: {
-                    try refreshInterceptFiles(for: new)
-                }
-            )
-            recordSplitDNS(entryFiles, source: .configChange)
-        }
-
-        // The listener endpoint is in every advertised surface; the bypass
-        // list is in the shell environment always and in the system proxy
-        // only in manual mode, where it is `ExceptionsList`. PAC mode's
-        // served script is refreshed by the routing reload itself, but its
-        // URL is in the system proxy: a local PAC server that started,
-        // stopped or moved has to be advertised where it now listens.
-        let pacEndpointMoved = pass.diff.localPACEndpointChanged && platform.systemProxyMode == .pac
-        let systemProxyFollows = pass.diff.proxyChanged || pacEndpointMoved
-            || (pass.diff.advertisedBypassChanged && platform.systemProxyMode == .manual)
-        let environmentFollows = pass.diff.proxyChanged || pass.diff.advertisedBypassChanged
-        if pass.runtime.proxyIsUp, pass.diff.advertisedBypassChanged, !pass.diff.proxyChanged {
-            let surfaces = [
-                platform.manageEnvironmentVariables && !pass.platformActions.contains(.applyEnvironment) ? "environment" : nil,
-                platform.manageSystemProxy && systemProxyFollows && !pass.platformActions.contains(.applySystemProxy) ? "system_proxy" : nil,
-            ].compactMap { $0 }
-            if !surfaces.isEmpty {
-                // Event first: the writes below are a config decision.
-                let event = RuntimeEvent(kind: .config, event: "config.advertised_bypass_changed",
-                                         detail: "surfaces=\(surfaces.joined(separator: ","))")
-                orchestrator.eventLog.append(event)
-                logStore.log(.notice, "Config change: bypass list changed; re-applying \(surfaces.joined(separator: " and ")). \(event.event) \(event.detail ?? "")", category: .system)
+        reloading = true
+        cancelPendingSave()
+        reloadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.reloading = false
+                self.reloadTask = nil
             }
-        }
-        if pass.runtime.proxyIsUp, pacEndpointMoved, !pass.diff.proxyChanged, platform.manageSystemProxy,
-           !pass.platformActions.contains(.applySystemProxy) {
-            // Event first: the write below is a config decision.
-            let event = RuntimeEvent(kind: .config, event: "config.advertised_pac_changed", detail: "surfaces=system_proxy")
-            orchestrator.eventLog.append(event)
-            logStore.log(.notice, "Config change: local PAC endpoint changed; re-applying system proxy. \(event.event) \(event.detail ?? "")", category: .system)
-        }
-        guard pass.runtime.proxyIsUp else { return }
-        let reapplySystemProxy = systemProxyFollows && platform.manageSystemProxy
-            && !pass.platformActions.contains(.applySystemProxy)
-        let reapplyEnvironment = environmentFollows && platform.manageEnvironmentVariables
-            && !pass.platformActions.contains(.applyEnvironment)
-        guard reapplySystemProxy || reapplyEnvironment else { return }
-        // Off the main actor: up to twelve `launchctl` calls and a
-        // `networksetup` pass, each bounded only by its runner's timeout,
-        // and with autosave a bypass edit reaches here on every pause.
-        let systemProxy = systemConduit, environment = environmentManager, logger = logStore
-        let mode = platform.systemProxyMode, pacURL = orchestrator.snapshot.bindings.localPACURL
-        let token = proxyLane.observationToken
-        let failures = await platformWork.run { () -> [(ConfigReapplyRetry.Surface, String)] in
-            var failures: [(ConfigReapplyRetry.Surface, String)] = []
-            if reapplySystemProxy {
-                do {
-                    try systemProxy.apply(config: new, mode: mode, logger: logger, localPACURL: pacURL)
-                } catch {
-                    failures.append((.systemProxy, error.localizedDescription))
-                }
-            }
-            if reapplyEnvironment {
-                do {
-                    // Partial counts: `apply` reports a profile left alone
-                    // or a variable not published instead of throwing.
-                    if let shortfall = try environment.apply(config: new, logger: logger).shortfall {
-                        failures.append((.environment, shortfall))
-                    }
-                } catch {
-                    failures.append((.environment, "apply_error error=\(error.localizedDescription)"))
-                }
-            }
-            return failures
-        }
-        for (surface, reason) in failures {
-            reapplyRetry.failed(surface, cause: .configChange, reason: reason, token: token)
-        }
-    }
-
-    func recordPlatformDecision(_ action: PlatformIntegrationReconciler.Action) {
-        orchestrator.eventLog.append(
-            RuntimeEvent(kind: .config, event: "config.platform_integration", detail: String(describing: action))
-        )
-    }
-
-    /// Runs one platform-flag action through the manager the start and stop
-    /// paths use, with their warning-not-throw treatment: a surface that
-    /// could not be applied or cleared is logged, and the rest still run.
-    /// Returns whether the action landed, so the caller can leave the flag
-    /// unreconciled for the next save to retry.
-    func perform(
-        _ action: PlatformIntegrationReconciler.Action,
-        config: ProxyConfig,
-        previousConfig: ProxyConfig,
-        platform: PlatformIntegrationConfig,
-        previousPlatform: PlatformIntegrationConfig
-    ) -> Bool {
-        guard !rejectUnavailableConfiguration() else { return false }
-        func attempt(_ failure: String, _ body: () throws -> Void) -> Bool {
+            await editor.settle()
+            _ = await self.settle(.reload)
             do {
-                try body()
-                return true
+                let deadline = RuntimeDeadline.after(RuntimeEditorSession.exchangeBudget, from: .now)
+                let observation = try await self.read(editorClient, incarnation: incarnation, deadline: deadline)
+                guard !self.quitFence else { return }
+                // A save an edit started during the reload is out: the drafts are kept, and nothing is rebuilt under it.
+                guard editor.isIdle else {
+                    self.lastErrorMessage = "Settings were being saved during the reload, so nothing was reloaded. Reload again."
+                    return
+                }
+                guard let ledger = self.seed(observation) else { return }
+                editor.rebuild(ledger)
+                self.lastErrorMessage = nil
+                self.refreshReloadNeed()
+                // The fresh drafts are the files' values: the launch options go again over them, and the hold follows what is saved.
+                if self.activationHeld != nil { await self.commitLaunchOverrides() }
             } catch {
-                logStore.log(.warning, "\(failure): \(error.localizedDescription)", category: .system)
-                return false
+                self.lastErrorMessage = "The configuration could not be read again (\(error))."
             }
-        }
-
-        switch action {
-        case .applySystemProxy:
-            // Also for a mode change with the switch left on.
-            return applySystemProxySwitch(config: config, platform: platform,
-                                          cause: previousPlatform.manageSystemProxy ? .modeChange : .switchOn)
-        case .clearSystemProxy:
-            // No `isCleared()` gate, unlike `stopProxy`: "every proxy is
-            // disabled" is not "nothing to restore" when the journal holds a
-            // corporate proxy that something else switched off after we
-            // applied. `clear` decides for itself from the journal.
-            // The managers report a partial teardown by keeping its records,
-            // not by throwing, so the journal is the oracle for "landed":
-            // records left means the next save must try again.
-            return attempt("Could not clear system proxy after the setting changed") {
-                try systemConduit.clear(logger: logStore)
-            } && !systemConduit.hasManagedState()
-        case .applyEnvironment:
-            return applyEnvironmentSwitch(config: config)
-        case .clearEnvironment:
-            return attempt("Could not clear environment variables after the setting changed") {
-                try environmentManager.clear(logger: logStore)
-            } && !environmentManager.hasManagedState()
-        case .applyResolverEntries:
-            // The switch turned on: entry files follow the gate, as in a
-            // config change. The outcome feeds the split-DNS repair, since
-            // this pass skips the config-change reconcile.
-            let operation: SplitDNSEntryFileRepair.Operation = splitDNSGate.entriesWanted ? .apply : .remove
-            if dnsManager.isApplied(config: config, vpnConnected: splitDNSGate.entriesWanted) {
-                // The write is skipped; the record must not be. See `adoptAppliedFiles`.
-                dnsManager.adoptAppliedFiles(config: config, vpnConnected: splitDNSGate.entriesWanted)
-                logStore.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
-                recordSplitDNS(.succeeded(operation), source: .switchOn)
-                return true
-            }
-            var outcome = SplitDNSEntryFileRepair.Outcome.succeeded(operation)
-            let applied = attempt("Could not apply DNS resolvers after the setting changed") {
-                do {
-                    try dnsManager.apply(config: config, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
-                } catch {
-                    outcome = .failed(operation, error)
-                    throw error
-                }
-            }
-            recordSplitDNS(outcome, source: .switchOn)
-            return applied
-        case .refreshInterceptFiles:
-            let refreshed = attempt("Could not apply intercept resolver files after the setting changed") {
-                try refreshInterceptFiles(for: config)
-            }
-            resolverSwitchInterceptRefreshFailed = !refreshed
-            return refreshed
-        case .clearResolvers:
-            // Only what the journal names as ours. The switch is off now, so
-            // a file for a configured domain we never wrote is the user's.
-            // The teardown is what a pending repair retries with the switch
-            // off, so a failed one is recorded for it: a later VPN drop no
-            // longer touches entry files with the switch off.
-            var failure: String?
-            let cleared = attempt("Could not clear DNS resolvers after the setting changed") {
-                do {
-                    try dnsManager.clearRecorded(configs: [previousConfig, config], logger: logStore)
-                } catch {
-                    failure = error.localizedDescription
-                    throw error
-                }
-            } && !dnsManager.hasManagedState()
-            recordSplitDNS(
-                SplitDNSEntryFileRepair.Outcome(
-                    operation: .remove,
-                    failure: cleared ? nil : failure ?? SplitDNSEntryFileRepair.recordedFilesRemainReason
-                ),
-                source: .switchOff
-            )
-            return cleared
-        case .applySystemDNS:
-            // The same three steps as `startDNS`, in the same order: the
-            // prior state is captured before the interfaces are pointed at
-            // the relay, and the health timer runs whether or not the apply
-            // succeeded, because its relay restart is the retry.
-            let saved = attempt("Could not save current DNS state (non-fatal)") {
-                try systemDNSManager.saveCurrentDNS(logger: logStore)
-            }
-            let applied = attempt("Could not set system DNS after the setting changed") {
-                try systemDNSManager.apply(forwarderPort: effectiveDNSForwarderPort, logger: logStore)
-            }
-            startDNSHealthTimer()
-            return saved && applied
-        case .clearSystemDNS:
-            // Timer first, as in `stopDNS`: left running, its 30 s probe
-            // would restart the relay the user just asked to remove.
-            stopDNSHealthTimer()
-            return attempt("Could not restore system DNS after the setting changed") {
-                try systemDNSManager.clear(logger: logStore)
-            } && !systemDNSManager.hasSavedState()
-        case .setLaunchAtLogin(let enabled):
-            return loginItemManager.setEnabled(enabled, logger: logStore)
         }
     }
 
-    /// The system proxy switch turned on, or its mode changed, while the
-    /// proxy runs; `cause` says which. A failure rewinds the flag for the
-    /// next save; the retry looks again sooner, since no save may follow
-    /// (#194).
-    private func applySystemProxySwitch(config: ProxyConfig, platform: PlatformIntegrationConfig,
-                                        cause: ConfigReapplyRetry.Cause) -> Bool {
-        do {
-            try systemConduit.apply(
-                config: config,
-                mode: platform.systemProxyMode,
-                logger: logStore,
-                localPACURL: orchestrator.snapshot.bindings.localPACURL
-            )
-            return true
-        } catch {
-            reapplyRetry.failed(.systemProxy, cause: cause, reason: error.localizedDescription, token: proxyLane.observationToken)
-            return false
-        }
-    }
+    /// The explicit reload running now, for the harness.
+    private(set) var reloadTask: Task<Void, Never>?
 
-    /// The environment switch turned on. A partial apply still lands the
-    /// flag: the switch is on, and a profile that may not be edited is not
-    /// something a later save can fix. It is reported and retried like a
-    /// failure (#194).
-    private func applyEnvironmentSwitch(config: ProxyConfig) -> Bool {
-        do {
-            if let shortfall = try environmentManager.apply(config: config, logger: logStore).shortfall {
-                reapplyRetry.failed(.environment, cause: .switchOn, reason: shortfall, token: proxyLane.observationToken)
-            }
-            return true
-        } catch {
-            reapplyRetry.failed(.environment, cause: .switchOn, reason: "apply_error error=\(error.localizedDescription)",
-                                token: proxyLane.observationToken)
-            return false
-        }
-    }
+    // MARK: - Import and export
 
+    /// The import passes the same gate as a startup load; the draft is assigned only after it passes, then saved as a commit.
     func importConfiguration(from url: URL) throws {
-        // The import passes the same gate as a startup load: the bounded read, the strict filter, the newer-schema refusal
-        // and the in-memory migration. The editor is assigned only after all of them pass.
+        // A panel answered after the quit began starts nothing.
+        guard !quitFence else { return }
         let imported = try ProxyConfigPersistence.loadImport(from: url)
         config = imported
         saveConfig()
     }
 
+    /// Writes the draft to a file the user chose. The destination passes the state root's own guard first, so an export cannot write
+    /// over the configuration, the journal, the lease or any other runtime file.
     func exportConfiguration(to url: URL) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(config)
-        try data.write(to: url, options: .atomic)
+        guard !quitFence else { return }
+        let guardian = stateSession.retainingAuthority(diagnosticDestinationGuard(
+            for: .connectionAudit, in: stateSession.environment, writerLeaseFile: stateSession.writerLeaseFile
+        ))
+        try guardian.admit(destination: url)
+        // A file leaving the process: the canonical encoder the configuration file itself uses (Unix-epoch timestamps, sorted keys).
+        try CanonicalJSON.encoder(prettyPrinted: true).encode(config).write(to: url, options: .atomic)
     }
 
     // MARK: - Credentials
 
     func savePassword(_ password: String) {
+        // After the quit's fence no app administration starts: the store is not written, and the host is not told.
+        guard !quitFence else { return }
         do {
-            // `NTLMAuth.ntHash` lives in `ProxyAuth`, so the
-            // NTLMv2 hash is computed here (the app links `ProxyAuth`)
-            // rather than inside `CredentialManager` (which is kernel-
-            // bound and no longer links CommonCrypto).
-            //
-            // `NTLMAuth.ntHash(for:)` returns
-            // `SecretBytes`; the hash is opaque from the moment it's
-            // computed. The only plaintext-String entry in the
-            // credential pipeline is the `password` parameter here —
-            // that's an unavoidable SwiftUI `SecureField` boundary.
-            // We let ARC release the `String` immediately after this
-            // method returns; no long-lived copy escapes.
+            // The only plaintext entry in the credential pipeline is the `SecureField` string, released when this returns.
             let hash: SecretBytes = try NTLMAuth.ntHash(for: password)
             try credentialManager.saveHash(hash, for: config)
             isShowingOnboarding = false
             logStore.log(.notice, "Saved proxy credentials to Keychain.", category: .auth)
+            notifyCredentialsChanged()
         } catch {
             lastErrorMessage = error.localizedDescription
             logStore.log(.error, "Could not save credentials: \(error.localizedDescription)", category: .auth)
         }
     }
 
-    /// Reads the saved password once at proxy start, so a Keychain prompt
-    /// appears now rather than in the middle of a burst of NTLM fallbacks
-    /// (#98). Internal so the harness can join it.
-    private(set) var credentialWarmup: Task<Void, Never>?
-
-    private func warmCredentialCache() {
-        credentialWarmup = credentialManager.warmCacheInBackground(
-            eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
-        )
-    }
-
     func clearCredentials() {
+        guard !quitFence else { return }
         do {
             try credentialManager.clear(for: config)
             isShowingOnboarding = true
             logStore.log(.notice, "Cleared saved credentials.", category: .auth)
+            notifyCredentialsChanged()
         } catch {
             lastErrorMessage = error.localizedDescription
         }
     }
 
-    // MARK: - Proxy Lifecycle
+    /// The host drops the credential it caches. A notice the host did not admit is owed and sent again on a later snapshot.
+    private func notifyCredentialsChanged() {
+        guard !quitFence else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let admitted = await self.submitNotice(.credentialsChanged)
+            self.owedNotices.credentialsChanged = admitted ? 0 : self.owedNotices.credentialsChanged + 1
+        }
+    }
+
+    // MARK: - Lifecycle controls
 
     func toggleProxy() {
-        // Gate on the orchestrator snapshot, not the lagging `runtime` mirror,
-        // so a fast double-tap can't start an already-running proxy or skip a
-        // stop. `runtime` is for rendering only.
-        guard orchestrator.snapshot.runtimeStatus.state != .starting else { return }
-        Task {
-            switch orchestrator.snapshot.runtimeStatus.state {
-            case .running, .degraded, .recovering: await stopProxy()
-            default: try? await startProxy()
+        guard controlsEnabled, let modules = runtime.stamp?.modules else { return }
+        switch runtime.runtimeStatus.state {
+        case .starting:
+            return
+        case .running, .degraded, .recovering:
+            send(.stop(.proxy)) { [weak self] outcome in self?.proxyStopped(outcome) }
+        case .stopped, .failed:
+            guard mayStart() else { return }
+            // A saved Start, with DNS's conditional companion (decisions 0036 and 0037). No draft value rides along.
+            send(.start(.proxy, ifModuleRevision: modules.proxy, conditionalDNSRevision: modules.dns)) { [weak self] outcome in
+                self?.proxyStarted(outcome, restart: false)
             }
-            refreshPreflight()
         }
     }
 
     func restartProxy() {
-        guard orchestrator.snapshot.runtimeStatus.state != .starting else { return }
-        Task {
-            await restartProxyLifecycle()
-            refreshPreflight()
-        }
-    }
-
-    /// What a restart came to, for the notification and the harness.
-    enum RestartOutcome: Equatable {
-        case restarted
-        case failed
-        /// The start did not complete as the latest operation: already
-        /// running or starting, or overtaken by a stop. No "Proxy Restarted".
-        case notStarted
-    }
-
-    @discardableResult
-    func restartProxyLifecycle() async -> RestartOutcome {
+        guard controlsEnabled, let stamp = runtime.stamp, let modules = stamp.modules,
+              MenuBarPresentation.canRestartProxy(for: runtime.runtimeStatus.state), mayStart() else { return }
         lastErrorMessage = nil
-        let shouldStopFirst = MenuBarPresentation.shouldStopBeforeRestart(for: orchestrator.snapshot.runtimeStatus.state)
-
-        if shouldStopFirst {
-            logStore.log(.notice, "Restarting proxy runtime from menu bar.", category: .proxy)
-            await stopProxy(postNotification: false)
-        }
-
-        do {
-            guard try await startProxy(postNotification: false) else { return .notStarted }
-            notificationManager.post(title: "Proxy Restarted", body: runtime.runtimeStatus.activeUpstream ?? "Local proxy is running.")
-            return .restarted
-        } catch {
-            lastErrorMessage = error.localizedDescription
-            notificationManager.post(title: "Proxy Restart Failed", body: error.localizedDescription)
-            return .failed
+        logStore.log(.notice, "Restarting proxy runtime from menu bar.", category: .proxy)
+        send(.restart(.proxy, ifLifecycleRevision: stamp.lifecycleRevision, conditionalDNSRevision: modules.dns)) { [weak self] outcome in
+            self?.proxyStarted(outcome, restart: true)
         }
     }
-
-    /// Waits for launch-time crash recovery before this session touches a
-    /// platform surface. Free after the first call; see `LaunchRecovery` for
-    /// what goes wrong without it.
-    ///
-    /// Internal so the harness can join recovery too. Recovery restores the
-    /// machine and then releases the journal, and a scenario that polled for
-    /// the first could assert on the second before it happened (#19).
-    func awaitLaunchRecovery() async {
-        await launchRecovery?.join()
-        launchRecovery = nil
-    }
-
-    func startProxy() async throws {
-        try await startProxy(postNotification: true)
-    }
-
-    /// Returns whether the start completed as the latest operation, which
-    /// is what a restart's notification hangs on.
-    @discardableResult
-    private func startProxy(postNotification: Bool) async throws -> Bool {
-        if let configurationLoadError {
-            _ = rejectUnavailableConfiguration()
-            throw configurationLoadError
-        }
-        await awaitLaunchRecovery()
-        // A stop still tearing down leaves the snapshot `running`; a start admitted then runs after it instead of returning as though up.
-        let state = orchestrator.snapshot.runtimeStatus.state
-        guard (state != .starting && state != .running) || orchestrator.isStopInFlight else { return false }
-        guard let token = await admit(proxyLane, .start, .proxyStart) else { return false }
-        defer { proxyLane.end(token) }
-
-        do {
-            try await orchestrator.startProxy()
-            warmCredentialCache()
-            // A stop issued while the listeners came up has already queued
-            // its clear; applying now would put the surfaces back after it.
-            guard proxyStartIsCurrent(token) else { return false }
-
-            let entryGeneration = splitDNSRepair.generation
-            let (entriesWantedAtApply, entryFiles) = await applyProxyStartSurfaces(token)
-            recordSplitDNS(entryFiles, source: .start, startedAt: entryGeneration)
-            // A stop issued while the apply was out queued its clear behind
-            // it, so the machine ends cleared; what must not happen now is
-            // the rest of a start for a runtime that is down.
-            guard proxyStartIsCurrent(token) else { return false }
-            // A VPN transition handled while the apply was out reconciled the
-            // entry files then, possibly before the apply wrote them with the
-            // gate as it was when it was queued: entry files for servers only
-            // the tunnel reaches, left with the tunnel down. Put them where
-            // the gate is now.
-            if committedPlatformConfig.manageDNSResolvers, splitDNSGate.entriesWanted != entriesWantedAtApply {
-                let outcome = splitDNSGate.reconcileEntryFiles(
-                    config: runtimeConfig,
-                    dnsManager: dnsManager,
-                    logger: logStore,
-                    runtimeStarted: true
-                )
-                recordSplitDNS(outcome, source: .vpnTransition)
-            }
-
-            // Bring the DNS forwarder up with the proxy when the user last
-            // left it on. `dnsForwarderEnabled` is that persisted intent —
-            // `startDNS`/`stopDNS` are its only writers — and this is the GUI
-            // analog of `DaemonRuntimeHost`'s boot sequence, which starts DNS
-            // right after the proxy on the same flag. Without it the flag was
-            // GUI-write-only: every launch came up with DNS off regardless of
-            // how it was left, so intercepted clients whose transport ignores
-            // the proxy stayed broken until a manual toggle. Guarded so a
-            // proxy restart with DNS already up is a no-op.
-            if config.dnsForwarderEnabled,
-               orchestrator.snapshot.dnsRunState != .running,
-               orchestrator.snapshot.dnsRunState != .starting {
-                await startDNS()
-                guard proxyStartIsCurrent(token) else { return false }
-            }
-
-            // The switch itself is handled by the platform reconcile in
-            // `saveConfig()`. This repairs a registration lost outside the
-            // app — removed in System Settings, reset by an upgrade — for a
-            // flag that is already on; `setEnabled` is idempotent.
-            loginItemManager.setEnabled(committedPlatformConfig.launchAtLogin, logger: logStore)
-
-            saveLifecycleChange()
-            if postNotification {
-                notificationManager.post(title: "Proxy Enabled", body: runtime.runtimeStatus.activeUpstream ?? "Local proxy is running.")
-            }
-            return true
-        } catch {
-            // A superseded start has nothing to revert: the stop or newer start that superseded it owns the listeners and the surfaces now.
-            // Twin of `RuntimeHost.startRuntime`.
-            guard isCurrent(token, on: proxyLane, .proxyStart) else { return false }
-            // Revert the surfaces this start may have applied. A PAC or resolver entry left naming a dead listener breaks every client on the
-            // machine, and nothing else clears it. The teardown is the stop's, and each step is idempotent, so it is safe whether or not a
-            // given surface was applied.
-            logStore.log(
-                .warning,
-                "Proxy start failed (\(error.displayDescription)) — reverting system proxy, environment and DNS resolver settings so they cannot point at listeners that are not running.",
-                category: .system
-            )
-            await stopProxy(postNotification: false)
-
-            if postNotification {
-                notificationManager.post(title: "Proxy Start Failed", body: error.displayDescription)
-            }
-            throw error
-        }
-    }
-
-    func stopProxy() async {
-        await stopProxy(postNotification: true)
-    }
-
-    private func stopProxy(postNotification: Bool) async {
-        await awaitLaunchRecovery()
-        guard let token = await admit(proxyLane, .stop, .proxyStop) else { return }
-        defer { proxyLane.end(token) }
-        await orchestrator.stopProxy()
-        // A start issued since owns the surfaces now; clearing them here
-        // would take them from a runtime that is coming up.
-        guard isCurrent(token, on: proxyLane, .proxyStop) else { return }
-
-        let entryGeneration = splitDNSRepair.generation
-        let entryFiles = await clearProxyStopSurfaces(token)
-        recordSplitDNS(entryFiles, source: .stop, startedAt: entryGeneration)
-        guard isCurrent(token, on: proxyLane, .proxyStop) else { return }
-
-        if postNotification {
-            notificationManager.post(title: "Proxy Disabled", body: "System proxy settings have been cleared.")
-        }
-    }
-
-    /// Admits a start or stop onto `lane`, or, when the identical operation
-    /// is already the latest and running, joins it and returns `nil`: a
-    /// second copy of its work on the queue would only repeat it.
-    private func admit(
-        _ lane: LifecycleLane,
-        _ kind: LifecycleLane.Kind,
-        _ operation: LifecycleOperation
-    ) async -> LifecycleLane.Token? {
-        switch lane.begin(kind) {
-        case .run(let token):
-            return token
-        case .coalesced(let generation):
-            recordLifecycle(lane.coalescedEvent(operation: operation, joining: generation))
-            await lane.join(generation)
-            return nil
-        }
-    }
-
-    /// Whether the proxy start holding `token` may go on: no stop or later
-    /// start has overtaken it, and the listeners it started are still up.
-    /// When not, says so with a `lifecycle.superseded` event.
-    private func proxyStartIsCurrent(_ token: LifecycleLane.Token) -> Bool {
-        guard isCurrent(token, on: proxyLane, .proxyStart) else { return false }
-        guard runtimeState().proxyIsUp else {
-            recordLifecycle(proxyLane.supersededEvent(operation: .proxyStart, token: token, reason: .runtimeDown))
-            return false
-        }
-        return true
-    }
-
-    private func isCurrent(_ token: LifecycleLane.Token, on lane: LifecycleLane, _ operation: LifecycleOperation) -> Bool {
-        guard !token.isSuperseded else {
-            recordLifecycle(lane.supersededEvent(operation: operation, token: token))
-            return false
-        }
-        return true
-    }
-
-    /// Event first, log line derived from it.
-    private func recordLifecycle(_ event: RuntimeEvent, level: LogLevel = .notice) {
-        orchestrator.eventLog.append(event)
-        logStore.log(level, "Lifecycle: \(event.event) \(event.detail ?? "")", category: .system)
-    }
-
-    /// For the reconciler: returns once no proxy or DNS start or stop is in
-    /// flight, so a pass never lands between a start's platform steps.
-    func awaitLifecycleIdle() async {
-        while !proxyLane.isIdle || !dnsLane.isIdle {
-            await proxyLane.waitUntilIdle()
-            await dnsLane.waitUntilIdle()
-        }
-    }
-
-    /// Everything a proxy start applies to the machine once its listeners
-    /// are up, as one piece of work on `platformWork`: 15 to 30 helper round
-    /// trips and `networksetup` reads on a machine with several services,
-    /// which used to hold the main thread for as long as they took (#47).
-    ///
-    /// Reads every input from this actor before queueing: the config, the
-    /// flags, the bindings the orchestrator just published and the VPN gate.
-    /// The block itself touches only the managers, which serialise their own
-    /// operations, and each check-then-act runs as one of them.
-    ///
-    /// Each manager step checks `token` under that manager's lock before it
-    /// acts, so a start overtaken by a stop or a quit stops at its next step,
-    /// and a quit's clear of a manager lands either before the step (which
-    /// then sees itself superseded) or after it.
-    ///
-    /// Returns the VPN gate's `entriesWanted` the entry files were applied
-    /// for, so the caller can tell whether a transition landed meanwhile, and
-    /// what the entry-file step did, for `splitDNSRepair` (`nil` when it did
-    /// not run).
-    private func applyProxyStartSurfaces(_ token: LifecycleLane.Token) async -> (Bool, SplitDNSEntryFileRepair.Outcome?) {
-        let config = runtimeConfig
-        let platform = committedPlatformConfig
-        let localPACURL = orchestrator.snapshot.bindings.localPACURL
-        let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
-        let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
-        let vpnConnected = splitDNSGate.entriesWanted
-        let systemProxy = systemConduit
-        let environment = environmentManager
-        let resolvers = dnsManager
-        let logger = logStore
-
-        let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Outcome? in
-            if platform.manageSystemProxy {
-                systemProxy.serialized {
-                    guard !token.isSuperseded else { return }
-                    if systemProxy.isApplied(config: config, mode: platform.systemProxyMode, localPACURL: localPACURL) {
-                        logger.log(.debug, "System proxy already configured correctly, skipped.", category: .system)
-                        return
-                    }
-                    do {
-                        try systemProxy.apply(config: config, mode: platform.systemProxyMode, logger: logger, localPACURL: localPACURL)
-                    } catch {
-                        logger.log(.warning, "Could not apply system proxy settings (non-fatal): \(error.localizedDescription)", category: .system)
-                    }
-                }
-            }
-            if platform.manageEnvironmentVariables {
-                environment.serialized {
-                    guard !token.isSuperseded else { return }
-                    do {
-                        try environment.apply(config: config, logger: logger)
-                    } catch {
-                        logger.log(.warning, "Could not apply environment variables (non-fatal): \(error.localizedDescription)", category: .system)
-                    }
-                }
-            }
-            guard platform.manageDNSResolvers else { return nil }
-            return resolvers.serialized { () -> SplitDNSEntryFileRepair.Outcome? in
-                guard !token.isSuperseded else { return nil }
-                // With the VPN down, `apply` sweeps the entry files rather than writing them.
-                let operation: SplitDNSEntryFileRepair.Operation = vpnConnected ? .apply : .remove
-                var outcome = SplitDNSEntryFileRepair.Outcome.succeeded(operation)
-                if resolvers.isApplied(config: config, vpnConnected: vpnConnected) {
-                    // The write is skipped; the record must not be. See `adoptAppliedFiles`.
-                    resolvers.adoptAppliedFiles(config: config, vpnConnected: vpnConnected)
-                    logger.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
-                } else {
-                    do {
-                        try resolvers.apply(config: config, logger: logger, vpnConnected: vpnConnected)
-                    } catch {
-                        outcome = .failed(operation, error)
-                        logger.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
-                    }
-                }
-                // The DNS forwarder cannot be running yet, so no intercept
-                // resolver file may exist — sweep any that a previous instance
-                // left behind. Termination cleanup removes them on a clean
-                // quit, but a `SIGKILL` (an installer replacing the app, a
-                // crash) never runs it, and the files it strands blackhole
-                // their domains for every process on the machine until
-                // someone deletes them by hand. Only a *start* can be trusted
-                // to repair that, so repair it here.
-                do {
-                    try resolvers.refreshInterceptFiles(
-                        config: config,
-                        interceptReady: interceptReady,
-                        forwarderRunning: forwarderRunning,
-                        logger: logger
-                    )
-                } catch {
-                    logger.log(.warning, "Could not sweep stale intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
-                }
-                return outcome
-            }
-        }
-        return (vpnConnected, entryFiles)
-    }
-
-    /// Everything a proxy stop clears, as one piece of work on
-    /// `platformWork`, queued behind the apply of any start it overtook.
-    ///
-    /// Each surface is cleared when its flag is on *or* when the manager
-    /// holds evidence that the surface is ours. The flag alone skipped the
-    /// clear whenever the user had turned the integration off since it was
-    /// applied. `saveConfig()` now clears on that flip, so what is left for
-    /// the guard is the residue: a crash between the flip and the
-    /// reconcile, or a config file edited by hand — either way a machine
-    /// still pointing at the listener that is about to stop (#13). The
-    /// ownership reads happen inside the block, after whatever was queued
-    /// ahead of it has landed.
-    ///
-    /// Returns what the clear did to the split-DNS entry files, for
-    /// `splitDNSRepair`: `nil` when it did not run or the switch is off.
-    private func clearProxyStopSurfaces(_ token: LifecycleLane.Token) async -> SplitDNSEntryFileRepair.Outcome? {
-        let config = runtimeConfig
-        let platform = committedPlatformConfig
-        let systemProxy = systemConduit
-        let environment = environmentManager
-        let resolvers = dnsManager
-        let logger = logStore
-
-        return await platformWork.run { () -> SplitDNSEntryFileRepair.Outcome? in
-            systemProxy.serialized {
-                guard !token.isSuperseded else { return }
-                guard platform.manageSystemProxy || systemProxy.hasManagedState() else { return }
-                if systemProxy.isCleared() {
-                    logger.log(.debug, "System proxy already cleared, skipped.", category: .system)
-                    return
-                }
-                do {
-                    try systemProxy.clear(logger: logger)
-                } catch {
-                    logger.log(.warning, "Could not clear system proxy: \(error.localizedDescription)", category: .system)
-                }
-            }
-            environment.serialized {
-                guard !token.isSuperseded else { return }
-                guard platform.manageEnvironmentVariables || environment.hasManagedState() else { return }
-                do {
-                    try environment.clear(logger: logger)
-                } catch {
-                    logger.log(.warning, "Could not clear environment variables: \(error.localizedDescription)", category: .system)
-                }
-            }
-            return resolvers.serialized { () -> SplitDNSEntryFileRepair.Outcome? in
-                guard !token.isSuperseded else { return nil }
-                if platform.manageDNSResolvers {
-                    if resolvers.isCleared(config: config) {
-                        logger.log(.debug, "DNS resolvers already cleared, skipped.", category: .system)
-                        return .succeeded(.remove)
-                    }
-                    do {
-                        try resolvers.clear(config: config, logger: logger)
-                    } catch {
-                        logger.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
-                        // Only an entry file left on disk is the repair's; an
-                        // intercept file the clear could not remove is not.
-                        if resolvers.entryFilesPresent(config: config) || resolvers.unconfiguredRecordedFilesPresent(config: config) {
-                            return .failed(.remove, error)
-                        }
-                    }
-                    return .succeeded(.remove)
-                } else if resolvers.hasManagedState() {
-                    // Switch off: only what the journal names as ours, never a file
-                    // for a configured domain we did not write.
-                    do {
-                        try resolvers.clearRecorded(configs: [config], logger: logger)
-                    } catch {
-                        logger.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
-                    }
-                }
-                return nil
-            }
-        }
-    }
-
-    // MARK: - DNS Lifecycle
 
     func toggleDNS() {
-        Task {
-            // `runtime` is a presentation mirror fed through an async hop, so
-            // it lags the orchestrator — never gate a side effect on it.
-            switch MenuBarPresentation.moduleToggleAction(for: orchestrator.snapshot.dnsRunState) {
-            case .stop: await stopDNS()
-            case .none: break
-            case .start: await startDNS()
+        guard controlsEnabled, let modules = runtime.stamp?.modules else { return }
+        switch MenuBarPresentation.moduleToggleAction(for: runtime.dnsRunState) {
+        case .stop: send(.stop(.dns)) { _ in }
+        case .none: break
+        case .start:
+            guard mayStart() else { return }
+            send(.start(.dns, ifModuleRevision: modules.dns)) { [weak self] outcome in
+                self?.moduleStarted(outcome, module: .dns)
             }
         }
     }
-
-    /// Intercept resolver files for the reconciler's passes, which still run
-    /// on this actor. See `DNSManager.refreshInterceptFiles` for the rule.
-    ///
-    /// Reads `orchestrator.snapshot`, never `runtime`. The latter is a
-    /// presentation mirror fed by `onSnapshotChange` through a
-    /// `Task { @MainActor }` hop, so at the instant `startDNS()` returns it
-    /// still holds the snapshot taken *before* the transparent proxy bound:
-    /// `transparentProxyPort` is nil, `dnsInterceptReady` is false, and the
-    /// files get withheld from a fully healthy stack.
-    private func refreshInterceptFiles(for config: ProxyConfig) throws {
-        guard committedPlatformConfig.manageDNSResolvers else { return }
-        let snapshot = orchestrator.snapshot
-        try dnsManager.refreshInterceptFiles(
-            config: config,
-            interceptReady: snapshot.bindings.dnsInterceptReady,
-            forwarderRunning: snapshot.dnsRunState == .running,
-            logger: logStore
-        )
-    }
-
-    /// The surface work runs on `platformWork` in two blocks, one on each
-    /// side of the forwarder start, because the prior DNS servers are
-    /// captured before the forwarder binds and the interfaces are pointed at
-    /// it only after. The `dnsLane` token is checked after every suspension
-    /// and before every manager step.
-    func startDNS() async {
-        guard !rejectUnavailableConfiguration() else { return }
-        await awaitLaunchRecovery()
-        guard let token = await admit(dnsLane, .start, .dnsStart) else { return }
-        defer { dnsLane.end(token) }
-        let manageSystemDNS = committedPlatformConfig.manageSystemDNS
-        let systemDNS = systemDNSManager
-        let logger = logStore
-        if manageSystemDNS {
-            await platformWork.run {
-                systemDNS.serialized {
-                    guard !token.isSuperseded else { return }
-                    do {
-                        try systemDNS.saveCurrentDNS(logger: logger)
-                    } catch {
-                        logger.log(.warning, "Could not save current DNS state (non-fatal): \(error.localizedDescription)", category: .system)
-                    }
-                }
-            }
-            guard isCurrent(token, on: dnsLane, .dnsStart) else { return }
-        }
-
-        await orchestrator.startDNS()
-        guard isCurrent(token, on: dnsLane, .dnsStart) else { return }
-
-        // Read the orchestrator, not `runtime`: the mirror is one async hop
-        // behind and still reports `.starting` here when no `await` inside
-        // `startDNS()` happened to let its Task run.
-        let snapshot = orchestrator.snapshot
-        if snapshot.dnsRunState == .running {
-            let forwarderPort = effectiveDNSForwarderPort
-            let startConfig = runtimeConfig
-            let manageResolvers = committedPlatformConfig.manageDNSResolvers
-            let interceptReady = snapshot.bindings.dnsInterceptReady
-            let resolvers = dnsManager
-            await platformWork.run {
-                if manageSystemDNS {
-                    systemDNS.serialized {
-                        guard !token.isSuperseded else { return }
-                        do {
-                            try systemDNS.apply(forwarderPort: forwarderPort, logger: logger)
-                        } catch {
-                            logger.log(.warning, "Could not set system DNS (non-fatal): \(error.localizedDescription)", category: .system)
-                        }
-                    }
-                }
-                // Intercept resolver files are written only from here — `apply` at
-                // proxy start deliberately skips them, because at that point the
-                // forwarder they name has not bound.
-                if manageResolvers {
-                    resolvers.serialized {
-                        guard !token.isSuperseded else { return }
-                        do {
-                            try resolvers.refreshInterceptFiles(
-                                config: startConfig,
-                                interceptReady: interceptReady,
-                                forwarderRunning: true,
-                                logger: logger
-                            )
-                        } catch {
-                            logger.log(.warning, "Could not apply intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
-                        }
-                    }
-                }
-            }
-            // A stop issued while the apply was out queued its restore
-            // behind it; a health timer or a persisted "DNS on" now would
-            // outlive it.
-            guard isCurrent(token, on: dnsLane, .dnsStart) else { return }
-            if manageSystemDNS {
-                // Whether or not `apply` succeeded: a refused or failed apply
-                // is exactly what the probe's relay restart exists to retry,
-                // and until now the timer only ran for a start that had
-                // already worked.
-                startDNSHealthTimer()
-            }
-            recordDNSForwarderIntent(true)
-            saveLifecycleChange()
-        } else if let err = snapshot.dnsError {
-            notificationManager.post(title: "DNS Forwarder Failed", body: err)
-            if manageSystemDNS {
-                await platformWork.run {
-                    systemDNS.serialized {
-                        guard !token.isSuperseded else { return }
-                        do {
-                            try systemDNS.clear(logger: logger)
-                        } catch {
-                            logger.log(.warning, "Could not restore system DNS after the forwarder failed to start: \(error.localizedDescription)", category: .system)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Two blocks on `platformWork`, one on each side of the forwarder stop,
-    /// for the same reason as `startDNS`: the interfaces are handed back
-    /// before the forwarder they point at goes, and the intercept files are
-    /// removed once it has.
-    func stopDNS() async {
-        await awaitLaunchRecovery()
-        // A stop already out is joined, not repeated: while a helper is slow
-        // every toggle used to queue another teardown behind the first.
-        guard let token = await admit(dnsLane, .stop, .dnsStop) else { return }
-        defer { dnsLane.end(token) }
-        stopDNSHealthTimer()
-
-        let manageSystemDNS = committedPlatformConfig.manageSystemDNS
-        let systemDNS = systemDNSManager
-        let logger = logStore
-        await platformWork.run {
-            systemDNS.serialized {
-                guard !token.isSuperseded else { return }
-                guard manageSystemDNS || systemDNS.hasSavedState() else { return }
-                do {
-                    try systemDNS.clear(logger: logger)
-                } catch {
-                    logger.log(.warning, "Could not restore system DNS: \(error.localizedDescription)", category: .system)
-                }
-            }
-        }
-        guard isCurrent(token, on: dnsLane, .dnsStop) else { return }
-
-        await orchestrator.stopDNS()
-        guard isCurrent(token, on: dnsLane, .dnsStop) else { return }
-
-        // Remove intercept resolver files while we still can compute their
-        // set — leaving them behind strands e.g. `*.cursor.sh` pointing at a
-        // forwarder that no longer listens, which surfaces as ENOTFOUND /
-        // dead lookups in every client that resolved through them.
-        if committedPlatformConfig.manageDNSResolvers {
-            let config = runtimeConfig
-            let resolvers = dnsManager
-            await platformWork.run {
-                resolvers.serialized {
-                    guard !token.isSuperseded else { return }
-                    do {
-                        try resolvers.clearInterceptFiles(config: config, logger: logger)
-                    } catch {
-                        logger.log(.warning, "Could not remove intercept resolver files: \(error.localizedDescription)", category: .system)
-                    }
-                }
-            }
-            guard isCurrent(token, on: dnsLane, .dnsStop) else { return }
-        }
-
-        recordDNSForwarderIntent(false)
-        saveLifecycleChange()
-    }
-
-    /// `dnsForwarderEnabled` is the DNS lifecycle's own intent, which no
-    /// Settings field edits: written into the draft for the next save, the
-    /// runtime (which reserves the forwarder's port by it) and the
-    /// reconciler's baseline and request, so the save does not restart the
-    /// forwarder the lifecycle just started or stopped.
-    private func recordDNSForwarderIntent(_ enabled: Bool) {
-        config.dnsForwarderEnabled = enabled
-        orchestrator.config.dnsForwarderEnabled = enabled
-        reconciler.markReconciled(dnsForwarderEnabled: enabled)
-    }
-
-    // MARK: - Tunnels Lifecycle
 
     func toggleTunnels() {
-        Task {
-            // Gate on the orchestrator, not `runtime`: the mirror lags by an
-            // async hop, so a rapid toggle could double-start or skip a stop.
-            // Same rule as `toggleDNS`/`toggleProxy`.
-            switch MenuBarPresentation.moduleToggleAction(for: orchestrator.snapshot.tunnelsRunState) {
-            case .stop: await stopTunnels()
-            case .none: break
-            case .start: await startTunnels()
+        guard controlsEnabled, let modules = runtime.stamp?.modules else { return }
+        switch MenuBarPresentation.moduleToggleAction(for: runtime.tunnelsRunState) {
+        case .stop: send(.stop(.tunnels)) { _ in }
+        case .none: break
+        case .start:
+            guard mayStart() else { return }
+            send(.start(.tunnels, ifModuleRevision: modules.tunnels)) { [weak self] outcome in
+                self?.moduleStarted(outcome, module: .tunnels)
             }
         }
-    }
-
-    func startTunnels() async {
-        guard !rejectUnavailableConfiguration() else { return }
-        await orchestrator.startTunnels()
-
-        // `startTunnels` updated the snapshot synchronously; `runtime` has not
-        // caught up yet, so read the snapshot or the failure notification is
-        // silently missed when the mirror still shows `.starting`.
-        let snapshot = orchestrator.snapshot
-        if snapshot.tunnelsRunState == .failed {
-            notificationManager.post(title: "Tunnels Failed", body: snapshot.tunnelsError ?? "All tunnel listeners failed to bind.")
-        } else if snapshot.tunnelsRunState == .running, let err = snapshot.tunnelsError {
-            notificationManager.post(title: "Tunnels Partially Started", body: err)
-        }
-        saveLifecycleChange()
-    }
-
-    func stopTunnels() async {
-        await orchestrator.stopTunnels()
-        saveLifecycleChange()
-    }
-
-    // MARK: - DNS Health & Diagnostics
-
-    private func startDNSHealthTimer() {
-        stopDNSHealthTimer()
-        let manager = systemDNSManager
-        // Twin of `RuntimeHost.startDNSHealthTimer`: taken when the timer is armed, so a probe still out when a Stop or a newer Start
-        // begins names the run that asked for it, and its reading is never taken for the newer run's.
-        let token = dnsLane.observationToken
-        dnsHealthTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            DispatchQueue.global(qos: .utility).async {
-                let alive = manager.probeLiveness()
-                Task { @MainActor in
-                    self?.handleDNSHealthResult(alive: alive, armedBy: token)
-                }
-            }
-        }
-    }
-
-    private func stopDNSHealthTimer() {
-        dnsHealthTimer?.invalidate()
-        dnsHealthTimer = nil
-    }
-
-    /// Internal so the harness can report a failed probe; the probe itself
-    /// asks the real port 53. A reading for a DNS run a Stop or newer Start
-    /// superseded (`token`) acts on nothing: no relay restart and no override.
-    func handleDNSHealthResult(alive: Bool, armedBy token: LifecycleLane.Token) {
-        guard !token.isSuperseded else { return }
-        if alive {
-            if runtime.dnsRunState == .failed {
-                runtime.applyDNSHealthOverride(runState: .running, error: nil)
-                logStore.log(.notice, "DNS pipeline recovered.", category: .system)
-            }
-            return
-        }
-
-        // The restart is a helper round trip and then a probe of up to two
-        // seconds, so it runs off the main actor. A tick that finds the last
-        // one still out adds nothing: that one is already doing this.
-        guard !dnsRelayRestartInFlight else { return }
-        dnsRelayRestartInFlight = true
-        logStore.log(.warning, "DNS liveness probe failed. Attempting relay restart.", category: .system)
-        let manager = systemDNSManager
-        let forwarderPort = effectiveDNSForwarderPort
-        deliveries.deliver { [weak self, platformWork, logStore] in
-            let outcome = await platformWork.run {
-                manager.restartRelayIfManaged(forwarderPort: forwarderPort, logger: logStore)
-            }
-            self?.finishDNSRelayRestart(outcome, armedBy: token)
-        }
-    }
-
-    private func finishDNSRelayRestart(_ outcome: SystemDNSManager.RelayRestart, armedBy token: LifecycleLane.Token) {
-        dnsRelayRestartInFlight = false
-        // `notManaged` is a stop that finished while the restart was out; a superseded run's result degrades nothing newer.
-        guard outcome == .unresponsive, !token.isSuperseded else { return }
-        runtime.applyDNSHealthOverride(runState: nil, error: "DNS pipeline unresponsive")
-        notificationManager.post(title: "DNS Forwarder Degraded", body: "The DNS relay is not responding. DNS resolution may fail.")
     }
 
     func testDNS() {
-        let manager = systemDNSManager
-        let logger = logStore
-        let port = committedPlatformConfig.manageSystemDNS ? 53 : effectiveDNSForwarderPort
-        DispatchQueue.global(qos: .userInitiated).async {
-            logger.log(.notice, "DNS test: probing 127.0.0.1:\(port)...", category: .system)
-            let alive = manager.probeLiveness(port: port)
-            if alive {
-                logger.log(.notice, "DNS test: PASS — received response from relay/forwarder pipeline.", category: .system)
-            } else {
-                logger.log(.warning, "DNS test: FAIL — no response from 127.0.0.1:\(port) within 2s.", category: .system)
-            }
-        }
+        guard controlsEnabled else { return }
+        send(.testDNS) { _ in }
     }
 
-    private var effectiveDNSForwarderPort: Int {
-        orchestrator.snapshot.bindings.dnsPort ?? runtimeConfig.dnsForwarderPort
-    }
-
-    private func handle(orchestratorEvent event: ProxyOrchestratorEvent) {
-        switch event {
-        case .proxyRecovered(let activeUpstream):
-            notificationManager.post(title: "Proxy Recovered", body: activeUpstream ?? "Connectivity restored.")
-        case .proxyRecoveryFailed(let summary, let authenticationLikely):
-            if authenticationLikely {
-                notificationManager.post(title: "Authentication Failed", body: "Your proxy credentials may be stale. Re-enter your password in Settings.")
-            } else {
-                notificationManager.post(title: "Proxy Recovery Failed", body: summary)
-            }
-        }
-    }
-
-    // MARK: - Preflight
-
-    func refreshPreflight() {
-        // `refreshPreflight` runs right after `startProxy`/`stopProxy` awaits,
-        // when `runtime` still lags; read the authoritative snapshot so the
-        // preflight doesn't check the wrong applied/cleared branch.
-        let runtimeState = orchestrator.snapshot.runtimeStatus.state
-        let isRunning = runtimeState == .running
-            || runtimeState == .degraded
-            || runtimeState == .recovering
-        let configSnapshot = reconciler.requestedConfig
-        let platformConfigSnapshot = committedPlatformConfig
-        let refreshID = UUID()
-        preflightRefreshID = refreshID
-        let helperLifecycle = self.helperLifecycle
-        let systemConduit = self.systemConduit
-        let dnsManager = self.dnsManager
-        let vpnConnected = splitDNSGate.entriesWanted
-        // `notInstalled` holds no verdict, so `busy` stands on its own.
-        let heldHelperStatus: HelperToolPrivilegeClient.Status = helperVerdictStale ? .notInstalled : helperStatusState
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let reading = helperLifecycle.status
-            let helperStatus = heldHelperStatus.updated(by: reading)
-            let preflight = ActivationPreflightEvaluator.evaluate(
-                config: configSnapshot,
-                platformConfig: platformConfigSnapshot,
-                isRunning: isRunning,
-                helperStatus: helperStatus,
-                systemConduit: systemConduit,
-                dnsManager: dnsManager,
-                vpnConnected: vpnConnected
-            )
-            Task { @MainActor [weak self] in
-                guard let self, self.preflightRefreshID == refreshID else { return }
-                let helperBecameAvailable = helperStatus == .installed && self.helperStatusState != .installed
-                self.helperStatusState = helperStatus
-                self.activationPreflight = preflight
-                self.helperCheckingAgain = reading == .busy
-                if reading != .busy { self.helperVerdictStale = false }
-                if reading == .busy {
-                    self.scheduleHelperRecheck()
-                } else {
-                    self.helperRecheck?.cancel()
-                    self.helperRecheck = nil
-                }
-                if helperBecameAvailable {
-                    self.deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
-                }
-                // The raw reading, not the held verdict: `.busy` keeps `.installed`
-                // on display, but is no evidence the helper takes writes (#210).
-                // The busy recheck brings the conclusive reading here.
-                self.observeHelperForSplitDNS(available: reading == .installed, trigger: "helper_available")
-            }
-        }
-    }
-
-    /// A `busy` reading asks for another observation rather than a verdict
-    /// (STYLE rule 11). One re-read at a time; a conclusive reading from any
-    /// refresh cancels it. The client already emitted
-    /// `auth.privilege_helper_busy` for the reading.
-    private func scheduleHelperRecheck() {
-        guard helperRecheck == nil else { return }
-        let delay = helperBusyRecheckDelay
-        helperRecheck = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(for: delay)
-            } catch {
-                // Cancelled: a conclusive reading landed first.
+    /// One command through the framed client and its settlement. A saved command's own causal writes are handed to the editor.
+    ///
+    /// A Stop is never dropped behind ordinary work: each module has a Stop lane of its own, as the host's Stop lanes do, outside the
+    /// ordinary cap. A lane holds one Stop out and at most one wanted after it; a Stop asked for while one is out is sent again once that
+    /// one ends, so a Start admitted in between cannot outlive it, and only the latest caller's settlement is kept.
+    private func send(_ command: ControlRuntimeCommand, settled: @escaping @MainActor (ControlOperationOutcome?) -> Void) {
+        guard !quitFence else { return }
+        if case .stop(let module) = command {
+            guard stopLanes[module] == nil else {
+                stopLanes[module]?.wanted = settled
                 return
             }
+            stopLanes[module] = StopLane()
+            return dispatch(command, settled: settled) { [weak self] in
+                guard let self, let wanted = self.stopLanes.removeValue(forKey: module)?.wanted else { return }
+                self.send(command, settled: wanted)
+            }
+        }
+        guard commandsInFlight < Self.maximumCommandsInFlight else {
+            logStore.log(.warning, "Lifecycle: \(command.kind.rawValue) dropped; \(Self.maximumCommandsInFlight) commands are in flight.",
+                         category: .system)
+            return
+        }
+        commandsInFlight += 1
+        dispatch(command, settled: settled) { [weak self] in self?.commandsInFlight -= 1 }
+    }
+
+    private func dispatch(
+        _ command: ControlRuntimeCommand,
+        settled: @escaping @MainActor (ControlOperationOutcome?) -> Void,
+        ended: @escaping @MainActor () -> Void
+    ) {
+        let requestID = ControlRequestID(rawValue: UUID())
+        // Known to the editor from this turn, before the send, so a save submitted while it is out can wait for its write.
+        editor?.ownCommandSent(command, requestID: requestID)
+        Task { @MainActor [weak self] in
             guard let self else { return }
-            self.helperRecheck = nil
+            defer { ended() }
+            let end = await self.settle(command, requestID: requestID)
+            switch end {
+            case .settled(let outcome): self.editor?.ownCommandEnded(outcome: outcome, requestID: requestID)
+            case .notRun: self.editor?.ownCommandNotRun(requestID: requestID)
+            case .unknown: self.editor?.ownCommandEnded(outcome: nil, requestID: requestID)
+            }
+            self.refreshReloadNeed()
+            self.followHostOwnedIntent()
+            settled(end.outcome)
             self.refreshPreflight()
         }
     }
 
-    // MARK: - Helper Management
+    /// How a command ended, as far as the app can know.
+    private enum CommandEnd {
+        case settled(ControlOperationOutcome)
+        /// Not sent, refused locally, or rejected at admission: nothing ran.
+        case notRun
+        /// Admitted, or possibly admitted, and no settlement was read.
+        case unknown
 
-    var helperStatus: HelperToolPrivilegeClient.Status {
-        helperStatusState
+        var outcome: ControlOperationOutcome? {
+            if case .settled(let outcome) = self { return outcome }
+            return nil
+        }
     }
 
-    /// Installs from the running app through the installer it ships, which
-    /// also pins the helper to this build (#121). The policy that install
-    /// left is shown in Settings until the next install or uninstall.
+    /// Submits and reads the settlement. A lost admission is looked up by request ID, never resent.
+    private func settle(_ command: ControlRuntimeCommand, requestID: ControlRequestID = ControlRequestID(rawValue: UUID())) async
+        -> CommandEnd
+    {
+        guard let control, let observer, let incarnation else { return .notRun }
+        let deadline = RuntimeDeadline.after(RuntimeEditorSession.exchangeBudget, from: .now)
+        let admission: ControlAdmission
+        do {
+            admission = try await control.submit(command, requestID: requestID, expectedIncarnation: incarnation, deadline: deadline)
+        } catch RuntimeClientError.admissionUnknown {
+            do {
+                guard case .admission(let recorded) = try await control.lookupAdmission(
+                    of: requestID, expectedIncarnation: incarnation, deadline: deadline
+                ) else {
+                    logStore.log(.warning, "Lifecycle: the admission of \(command.kind.rawValue) is unknown.", category: .system)
+                    return .unknown
+                }
+                admission = recorded
+            } catch {
+                logStore.log(.warning, "Lifecycle: the admission of \(command.kind.rawValue) could not be looked up (\(error)).",
+                             category: .system)
+                return .unknown
+            }
+        } catch RuntimeClientError.notSent, RuntimeClientError.localRefusal {
+            logStore.log(.warning, "Lifecycle: \(command.kind.rawValue) was not sent.", category: .system)
+            return .notRun
+        } catch {
+            logStore.log(.warning, "Lifecycle: \(command.kind.rawValue) may have been sent; its answer was lost (\(error)).",
+                         category: .system)
+            return .unknown
+        }
+        switch admission {
+        case .accepted(let operation), .joined(let operation):
+            guard let outcome = await observer.settlement(of: operation) else { return .unknown }
+            return .settled(outcome)
+        case .rejected(let code):
+            logStore.log(.warning, "Lifecycle: \(command.kind.rawValue) refused: \(code.humanDescription)", category: .system)
+            return .notRun
+        }
+    }
+
+    /// Submits a notice and says whether the host admitted it.
+    private func submitNotice(_ command: ControlRuntimeCommand) async -> Bool {
+        guard let control, let incarnation else { return false }
+        do {
+            let admission = try await control.submit(
+                command, requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: incarnation,
+                deadline: .after(RuntimeEditorSession.exchangeBudget, from: .now)
+            )
+            if case .rejected = admission { return false }
+            return true
+        } catch RuntimeClientError.admissionUnknown {
+            // It may have been admitted; a notice is not replayed blindly.
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func proxyStarted(_ outcome: ControlOperationOutcome?, restart: Bool) {
+        let started: Bool
+        if case .configurationSettled(let receipt)? = outcome {
+            started = receipt.modules.contains(ControlModuleReceipt(module: .proxy, result: .started))
+            // Overtaken by a newer Start or a Stop: neither a success nor a failure of this Start.
+            if receipt.modules.contains(ControlModuleReceipt(module: .proxy, result: .superseded)) { return }
+        } else {
+            started = false
+        }
+        if case .superseded? = outcome { return }
+        if started {
+            notificationManager.post(title: restart ? "Proxy Restarted" : "Proxy Enabled", body: "Local proxy is running.")
+            // A Start that came up repairs a registration lost outside the app, to the saved flag. An overtaken one returned above.
+            if let saved = editor?.ledger.saved.platform.launchAtLogin { registerLoginItem(saved) }
+        } else if outcome != nil {
+            let title = restart ? "Proxy Restart Failed" : "Proxy Start Failed"
+            notificationManager.post(title: title, body: "The proxy did not start. Open Conduit for details.")
+        }
+    }
+
+    private func proxyStopped(_ outcome: ControlOperationOutcome?) {
+        guard case .completed? = outcome else { return }
+        notificationManager.post(title: "Proxy Disabled", body: "System proxy settings have been cleared.")
+    }
+
+    private func moduleStarted(_ outcome: ControlOperationOutcome?, module: ControlModule) {
+        guard case .configurationSettled(let receipt)? = outcome,
+              receipt.modules.contains(ControlModuleReceipt(module: module, result: .failed)) else { return }
+        switch module {
+        case .dns: notificationManager.post(title: "DNS Forwarder Failed", body: "The DNS forwarder did not start.")
+        case .tunnels: notificationManager.post(title: "Tunnels Failed", body: "Tunnel listeners failed to bind.")
+        case .proxy: break
+        }
+    }
+
+    // MARK: - Login item
+
+    /// The login-item flag is administration: it is written alone, under the exact platform baseline, and the registration follows only a
+    /// verified write (decision 0015). It is admitted only while the editor is idle; a flip while a save is out is refused, never queued
+    /// where a quit would drop it.
+    func setLaunchAtLogin(_ enabled: Bool) {
+        guard controlsEnabled, let editor else { return }
+        guard editor.setLaunchAtLogin(enabled) else {
+            notice(.rejected(.launchAtLogin, .editorBusy))
+            lastErrorMessage = "Settings are being saved. Change Launch at login again once they are."
+            return
+        }
+    }
+
+    private func launchAtLoginSettled(_ enabled: Bool, verified: Bool) {
+        guard let editor else { return }
+        assigningDrafts = true
+        platformConfig.launchAtLogin = editor.ledger.saved.platform.launchAtLogin
+        assigningDrafts = false
+        guard verified else {
+            lastErrorMessage = "Launch at login was not saved."
+            return
+        }
+        registerLoginItem(enabled)
+    }
+
+    /// Registers or removes the login item to match the saved flag. A refusal is owed for this session and tried again on the next
+    /// verified Settings save or successful proxy Start. Nothing registers after the quit's fence (decisions 0015 and 0039), and nothing
+    /// reconciles at launch (ROADMAP #194).
+    private func registerLoginItem(_ enabled: Bool) {
+        guard !quitFence else { return }
+        if composition.loginItemManager.setEnabled(enabled, logger: logStore) {
+            loginItemRegistrationOwed = false
+        } else {
+            loginItemRegistrationOwed = true
+            lastErrorMessage = "Launch at login was saved, but the login item could not be \(enabled ? "registered" : "removed")."
+        }
+    }
+
+    // MARK: - Observation
+
+    private func observed(_ snapshot: ControlRuntimeSnapshot) {
+        editor?.revisionsMayHaveMoved()
+        payOwedNotices()
+        let dnsError = snapshot.dnsRunState == .running ? snapshot.dnsError : nil
+        if let dnsError, lastDNSError == nil {
+            notificationManager.post(title: "DNS Forwarder Degraded", body: dnsError)
+        }
+        lastDNSError = dnsError
+    }
+
+    /// Typed recovery events classify the generic notifications; no event is paired with a snapshot.
+    private func observed(_ events: [ControlRuntimeEvent]) {
+        for event in events {
+            if case .configWorkflow(.held(phase: .start, input: _, reason: .inputReplaced))? = event.typed {
+                // Decision 0037: a newer write replaced the input a Start captured, so the host held its remaining work (the whole Start,
+                // or only its DNS companion) and tore down what that work brought up. It is never retried; say so rather than report
+                // nothing. The explanation grants nothing and names no module.
+                lastErrorMessage = Self.startInterrupted
+                notificationManager.post(title: "Start Interrupted", body: Self.startInterrupted)
+                continue
+            }
+            guard case .proxyRecovery(let recovery)? = event.typed else { continue }
+            switch recovery {
+            case .recovered:
+                notificationManager.post(title: "Proxy Recovered", body: "Connectivity restored.")
+            case .failed(authenticationLikely: true):
+                notificationManager.post(title: "Authentication Failed", body: "Your proxy credentials may be stale. Re-enter your password in Settings.")
+            case .failed(authenticationLikely: false):
+                notificationManager.post(title: "Proxy Recovery Failed", body: "The proxy could not recover its upstream.")
+            }
+        }
+    }
+
+    /// Module-neutral: the event can stand for a whole Start held or for only its DNS companion beside a proxy that stays up, so it names
+    /// no module and claims nothing the snapshot does not show.
+    static let startInterrupted = "A settings change replaced the configuration a Start was using, so part of that Start was held. "
+        + "Check which modules are running, and start the one you need again."
+
+    private func payOwedNotices() {
+        if owedNotices.credentialsChanged > 0, owedNotices.credentialsChanged <= OwedNotices.attempts {
+            notifyCredentialsChanged()
+        }
+        if let helperReplaced = owedNotices.preflight, owedNotices.preflightAttempts <= OwedNotices.attempts {
+            owedNotices.preflight = nil
+            refreshPreflight(helperReplaced: helperReplaced)
+        }
+    }
+
+    // MARK: - Preflight and helper
+
+    var helperStatus: HelperToolPrivilegeClient.Status { helperStatusState }
+
+    /// One preflight read through the host; a request while one is out asks for one more after it.
+    func refreshPreflight(helperReplaced: Bool = false) {
+        guard phase == .ready else { return }
+        guard !preflightInFlight else {
+            preflightWanted = (preflightWanted ?? false) || helperReplaced
+            return
+        }
+        preflightInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let outcome = await self.settle(.refreshPreflight(helperReplaced: helperReplaced)).outcome
+            self.preflightInFlight = false
+            if case .completed(let completion)? = outcome, case .preflight(let observation) = completion.result {
+                self.owedNotices.preflightAttempts = 0
+                self.apply(observation.reading)
+            } else if outcome == nil {
+                self.owedNotices.preflight = helperReplaced || (self.owedNotices.preflight ?? false)
+                self.owedNotices.preflightAttempts += 1
+            }
+            if let wanted = self.preflightWanted {
+                self.preflightWanted = nil
+                self.refreshPreflight(helperReplaced: wanted)
+            }
+        }
+    }
+
+    private func apply(_ reading: ControlPreflightReading) {
+        switch reading {
+        case .observed(let items):
+            activationPreflight = items
+            helperStatusState = HelperToolPrivilegeClient.Status(items.helper)
+            helperCheckingAgain = items.helperReadBusy
+            if items.helperReadBusy { scheduleHelperRecheck() } else { cancelHelperRecheck() }
+        case .unavailable(.busy):
+            helperCheckingAgain = true
+            scheduleHelperRecheck()
+        case .unavailable(.notObserved):
+            break
+        }
+    }
+
+    /// A `busy` reading asks for another observation rather than a verdict (STYLE rule 11). One re-read at a time.
+    private func scheduleHelperRecheck() {
+        guard helperRecheck == nil else { return }
+        let delay = composition.timing.helperBusyRecheckDelay
+        helperRecheck = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: delay) } catch { return }
+            self?.helperRecheck = nil
+            self?.refreshPreflight()
+        }
+    }
+
+    private func cancelHelperRecheck() {
+        helperRecheck?.cancel()
+        helperRecheck = nil
+    }
+
+    /// Installs through the installer the app ships, which pins the helper to this build (#121).
     func installHelper() {
         changeHelper(
             "install",
             // The LaunchDaemon takes a moment to bind its socket.
-            refreshAfter: helperSocketBindWait,
+            refreshAfter: composition.timing.helperSocketBindWait,
             { lifecycle in try lifecycle.installHelper() },
             succeeded: { appState, policy in
                 appState.helperCallerPolicy = policy
@@ -2418,20 +1206,17 @@ final class AppState: ObservableObject {
         )
     }
 
-    /// An install or uninstall, off the main actor: it waits on an admin
-    /// password dialog and then on `launchctl`, and run inline the window
-    /// that asked for it stopped drawing until both were done. One at a
-    /// time; a second click while the dialog is up is dropped. Event first,
-    /// log line derived from it.
+    /// An install or uninstall, off the main actor, one at a time. Event first, log line derived from it. A success tells the host the
+    /// helper was replaced, so the verdict it held for the old one is not kept.
     private func changeHelper<Outcome: Sendable>(
         _ operation: String,
         refreshAfter delay: Duration,
         _ change: @escaping @Sendable (any HelperLifecycleManaging) throws -> Outcome,
         succeeded: @escaping @MainActor (AppState, Outcome) -> (RuntimeEvent, LogLevel)
     ) {
-        guard !helperChangeInFlight else { return }
+        guard !helperChangeInFlight, !quitFence else { return }
         helperChangeInFlight = true
-        deliveries.deliver { [weak self, helperLifecycleWork, helperLifecycle] in
+        Task { @MainActor [weak self, helperLifecycleWork, helperLifecycle] in
             let result: Result<Outcome, HelperChangeFailure> = await helperLifecycleWork.run {
                 do {
                     return .success(try change(helperLifecycle))
@@ -2445,25 +1230,20 @@ final class AppState: ObservableObject {
             case .failure(let failure):
                 let reason = failure.reason
                 let event = RuntimeEvent(kind: .lifecycle, event: "helper.\(operation)_failed", detail: "reason=\(reason)")
-                self.orchestrator.eventLog.append(event)
+                self.eventLog.append(event)
                 self.logStore.log(.error, "Helper: \(event.event) \(event.detail ?? "")", category: .system)
                 self.lastErrorMessage = reason
                 return
             case .success(let outcome):
-                // The helper was replaced: what was held, and any reading
-                // still out, describe the old one.
-                self.helperVerdictStale = true
-                self.preflightRefreshID = UUID()
-                self.helperRecheck?.cancel()
-                self.helperRecheck = nil
+                self.cancelHelperRecheck()
                 let (event, level) = succeeded(self, outcome)
-                self.orchestrator.eventLog.append(event)
+                self.eventLog.append(event)
                 self.logStore.log(level, "Helper: \(event.event) \(event.detail ?? "")", category: .system)
             }
             if delay > .zero {
-                try? await Task.sleep(for: delay)
+                do { try await Task.sleep(for: delay) } catch { return }
             }
-            self.refreshPreflight()
+            self.refreshPreflight(helperReplaced: true)
         }
     }
 
@@ -2471,101 +1251,17 @@ final class AppState: ObservableObject {
         let reason: String
     }
 
-    /// Deliberately does *not* `awaitLaunchRecovery()`, unlike every other
-    /// platform-surface caller. `applicationWillTerminate` is synchronous by
-    /// AppKit's contract, so waiting would mean blocking the main thread at
-    /// quit — trading the launch freeze for a shutdown one. Quitting inside the
-    /// recovery window is instead left to overlap, which is safe rather than
-    /// merely unlikely: `PlatformStateJournal` is lock-protected per operation,
-    /// every write both paths make is an absolute set, and whichever finishes
-    /// first leaves the surface marked `.released` so the other skips.
-    ///
-    /// It does wait for `platformWork`, though, before its first clear, and
-    /// only so long. A start's apply runs there, one manager after another.
-    /// Every start and stop in flight is superseded first, so each block stops
-    /// at its next manager step and queues nothing more, and the queue drains
-    /// within one step. The wait is bounded by
-    /// `terminationDrainDeadlineMilliseconds` all the same, because one step
-    /// can be a helper round trip held for its whole 40 s budget. Past the
-    /// deadline the clears go ahead: a step still running holds its manager's
-    /// operation lock, so the clear of that manager lands after it, and every
-    /// step checks the supersession under the same lock before it acts, so no
-    /// step lands after the clear of the manager it belongs to. The expiry is
-    /// recorded as `lifecycle.termination_drain_expired`.
-    func performTerminationCleanup() {
-        updateCoordinator.stop()
-        sectionCloseRetry?.cancel()
-        environmentDriftTimer?.cancel()
-        environmentRepairRetry?.cancel()
-        reapplyRetry.cancelAll()
-        splitDNSHelperCheck?.cancel()
-        proxyLane.supersedeAll()
-        dnsLane.supersedeAll()
-        let deadline = terminationDrainDeadlineMilliseconds
-        if !platformWork.waitUntilIdle(timeout: .milliseconds(deadline)) {
-            recordLifecycle(
-                RuntimeEvent(payload: .lifecycle(.terminationDrainExpired(LifecycleTerminationDrainExpired(deadlineMilliseconds: deadline)))),
-                level: .warning
-            )
-        }
-        runtime.stop()
-        stopDNSHealthTimer()
-        networkLocationObserver.stop()
-        networkMonitor.stop()
-        // Tier B observer owns an SCDynamicStore handle bound to a dispatch
-        // queue plus pending grace/min-visible DispatchWorkItem timers. Without
-        // this call, the kernel-side notification subscription leaks until
-        // process exit and any pending timers continue running.
-        vpnStatusMonitor.stop()
-        if let wakeObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
-            self.wakeObserver = nil
-        }
-        if committedPlatformConfig.manageSystemDNS || systemDNSManager.hasSavedState() {
-            do {
-                try systemDNSManager.clear(logger: logStore)
-            } catch {
-                logStore.log(.warning, "Termination cleanup could not restore system DNS: \(error.localizedDescription)", category: .system)
-            }
-        }
-        orchestrator.performTerminationCleanup()
+    // MARK: - Updates
 
-        // Flag or ownership, as in `stopProxy` and the system-DNS guard above:
-        // quitting cleans up whatever Conduit applied, whatever the switch
-        // says now.
-        if committedPlatformConfig.manageSystemProxy || systemConduit.hasManagedState() {
-            do {
-                try systemConduit.clear(logger: logStore)
-            } catch {
-                logStore.log(.warning, "Termination cleanup could not clear system proxy: \(error.localizedDescription)", category: .system)
-            }
-        }
-        if committedPlatformConfig.manageEnvironmentVariables || environmentManager.hasManagedState() {
-            do {
-                try environmentManager.clear(logger: logStore)
-            } catch {
-                logStore.log(.warning, "Termination cleanup could not clear environment variables: \(error.localizedDescription)", category: .system)
-            }
-        }
-        if committedPlatformConfig.manageDNSResolvers {
-            do {
-                try dnsManager.clear(config: runtimeConfig, logger: logStore)
-            } catch {
-                logStore.log(.warning, "Termination cleanup could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
-            }
-        } else if dnsManager.hasManagedState() {
-            do {
-                try dnsManager.clearRecorded(configs: [runtimeConfig], logger: logStore)
-            } catch {
-                logStore.log(.warning, "Termination cleanup could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
-            }
-        }
+    func checkForUpdates() {
+        guard !quitFence else { return }
+        updateCoordinator.checkNow()
     }
 
-    // MARK: - Misc
+    // MARK: - PAC preview
 
     func refreshPACResolutionPreview() {
-        guard !isPACPreviewRunning else { return }
+        guard !isPACPreviewRunning, !quitFence else { return }
         let pacURL = config.pacURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let target: URL
         do {
@@ -2577,7 +1273,7 @@ final class AppState: ObservableObject {
         }
         isPACPreviewRunning = true
         pacPreviewMessage = nil
-        let evaluator = pacEvaluator
+        let evaluator = composition.pacEvaluator
         let work = pacPreviewWork
         pacPreviewTask = Task {
             defer {
@@ -2611,510 +1307,347 @@ final class AppState: ObservableObject {
     }
 
     func revealHealthTestURL() {
-        guard let url = URL(string: appPreferences.preferredBrowserTestURL) else { return }
+        guard !quitFence, let url = URL(string: appPreferences.preferredBrowserTestURL) else { return }
         NSWorkspace.shared.open(url)
     }
 
-    // MARK: - Network
+    // MARK: - Quit
 
-    private func handleSystemWake() {
-        guard !rejectUnavailableConfiguration() else { return }
-        deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
-        deliveries.deliver { [orchestrator] in
-            await orchestrator.handleSystemWake()
+    /// Begins the quit, once, in this turn: the fence, the phase and the one deadline are taken here, and so is the final intent, the
+    /// drafts frozen as they are now, so no later edit or dispatch delay changes what the quit saves or how long it may take. False when
+    /// it had already begun: the caller joins that one, unchanged and with no new budget.
+    func beginQuit() -> Bool {
+        guard quitting == nil else { return false }
+        let deadline = ContinuousClock.now.advanced(by: composition.timing.quitTotal)
+        quitFence = true
+        phase = .quitting
+        // An opening that has not built the host yet builds none: the factory refuses a cancelled caller before construction.
+        opening?.cancel()
+        cancelPendingSave()
+        updateCoordinator.stop()
+        cancelHelperRecheck()
+        if editor?.close() == true {
+            // Admitted one turn ago and never sent: the quit's flush carries no admin write, so the flip is reported, not kept.
+            notice(.unverified(.quit, .whole(.launchAtLogin, .quitBegan), reloadNeeded: nil))
         }
-        // Sleep is when the VPN client (Cisco Secure Client) most often
-        // rewrites interface DNS behind our back: on wake it re-establishes
-        // the tunnel and re-asserts its own resolvers, silently undoing the
-        // 127.0.0.1 override while our relay keeps answering port 53 (so the
-        // 30 s liveness probe alone never notices). Reconcile re-pins the
-        // interfaces and re-checks relay liveness immediately instead of
-        // waiting for the next network-change event.
-        if committedPlatformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
-            scheduleDNSReconcile()
+        let final = editor.flatMap { editor in incarnation.map { finalSaves(editor.ledger, incarnation: $0) } }
+        let prior = editor?.ledger.active
+        quitting = Task { @MainActor [weak self] in
+            let result = await self?.quit(until: deadline, final: final, prior: prior)
+            // Every return of the quit, under its one deadline.
+            await self?.drainQuitLog(until: deadline)
+            return result
         }
-    }
-
-    /// Only a material change resets DNS transports and refetches PAC; the
-    /// DNS reconcile runs for every report, since a VPN client can rewrite
-    /// service DNS with no material path change (#101, `NetworkPathReports`).
-    /// The reaction is its own delivery, so the reconcile is scheduled in
-    /// this turn rather than after the PAC fetch.
-    private func startLocationObserver() {
-        networkLocationObserver.start(onChange: { [weak self, deliveries] result in
-            deliveries.deliver { await self?.handleLocationChange(result) }
-        }, onSettingsChange: { [weak self, deliveries, proxySettingsNotifications] in
-            proxySettingsNotifications.deliver(using: deliveries) {
-                guard let self else { return }
-                self.recordLifecycle(RuntimeEvent(kind: .config, event: "platform.settings_observed",
-                                                  detail: "surface=proxies source=preferences"))
-                await self.reconcileSystemProxyIfRunning()
-            }
-        })
-    }
-
-    private func handleLocationChange(_ result: Result<String, NetworkSettingsError>) async {
-        guard !rejectUnavailableConfiguration() else { return }
-        switch result {
-        case .success(let locationID):
-            recordLifecycle(RuntimeEvent(kind: .config, event: "platform.location_observed", detail: "location=\(locationID)"))
-        case .failure(let error):
-            recordLifecycle(RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=observe reason=\(error.localizedDescription)"))
-            return
-        }
-        guard !locationReconcileInFlight else { locationReconcileWanted = true; return }
-        locationReconcileInFlight = true
-        defer { locationReconcileInFlight = false }
-        repeat {
-            locationReconcileWanted = false
-            await awaitLaunchRecovery()
-            while !proxyLane.isIdle || !dnsLane.isIdle {
-                await proxyLane.waitUntilIdle()
-                await dnsLane.waitUntilIdle()
-            }
-            let state = runtimeState()
-            let proxyToken = proxyLane.observationToken
-            let dnsToken = dnsLane.observationToken
-            let proxy = systemConduit, dns = systemDNSManager
-            // What was applied, not the editor draft: autosave can hold back a start-blocking edit.
-            let config = reconciler.lastReconciledConfig, platform = committedPlatformConfig
-            let pacURL = orchestrator.snapshot.bindings.localPACURL
-            let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
-            let events = orchestrator.eventLog, logger = logStore
-            let proxyRetry = await platformWork.run { () -> Duration? in
-                var retry: Duration?
-                do {
-                    if !proxyToken.isSuperseded {
-                        retry = try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, localPACURL: pacURL,
-                                                            apply: platform.manageSystemProxy && state.proxyIsUp)
-                    }
-                } catch {
-                    let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=reconcile surface=systemProxy reason=\(error.localizedDescription)")
-                    events.append(event)
-                    logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
-                }
-                do {
-                    if !dnsToken.isSuperseded {
-                        try dns.reconcileLocation(apply: platform.manageSystemDNS && state.dnsIsUp, forwarderPort: forwarderPort, logger: logger)
-                    }
-                } catch {
-                    let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=reconcile surface=systemDNS reason=\(error.localizedDescription)")
-                    events.append(event)
-                    logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
-                }
-                return retry
-            }
-            if let proxyRetry { scheduleProxyRepairRetry(after: proxyRetry) }
-        } while locationReconcileWanted
-    }
-
-    private func handleNetworkChange(_ path: NetworkPathState) async {
-        guard !rejectUnavailableConfiguration() else { return }
-        await NetworkPathReports.receive(
-            path, orchestrator: orchestrator,
-            act: { [deliveries, orchestrator] change in
-                deliveries.deliver { await orchestrator.handleNetworkChange(change) }
-            },
-            reconcileSystemDNS: { [weak self] in
-                guard let self, self.committedPlatformConfig.manageSystemDNS,
-                      self.orchestrator.snapshot.dnsRunState == .running else { return }
-                self.scheduleDNSReconcile()
-            },
-            reconcileSystemProxy: { [weak self] in
-                self?.deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
-            }
-        )
-        // Note: `autoEnableOnVPN` / `autoDisableOffVPN` retired in Phase 3 of
-        // docs/design-vpn-flap-resilience.md. The behavior they encoded
-        // ("toggle the whole proxy on VPN state change") is now subsumed by
-        // direct mode: when off-VPN, direct mode is silent and fast; when
-        // on-VPN, the proxy uses upstreams normally. No nuclear toggle needed.
-    }
-
-    /// Tier B observer reports a new VPN state. Phase 4 implements the
-    /// transition table in the orchestrator (direct-mode flips, breaker
-    /// reset, flap recovery, slow reprobe cadence, vpn.* events).
-    private func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String?, sequence: UInt64) {
-        guard !rejectUnavailableConfiguration() else { return }
-        // A report older than one the gate already took is not the tunnel's
-        // state; the orchestrator still sees it and drops it itself.
-        let entriesWantedChanged = splitDNSGateOrder.admit(sequence) ? splitDNSGate.update(state) : false
-
-        deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
-        deliveries.deliver { [orchestrator] in
-            await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName, sequence: sequence)
-        }
-
-        if committedPlatformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
-            scheduleDNSReconcile()
-        }
-
-        // Entry files live and die with the tunnel (`vpn-gw.corp.example` under a
-        // `corp.example` entry deadlocks reconnection otherwise — see `SplitDNSVPNGate`).
-        guard committedPlatformConfig.manageDNSResolvers, entriesWantedChanged else { return }
-
-        // The activation preflight consults the gate (deferred entry files
-        // count as applied), so a gating flip invalidates it — recompute even
-        // when the proxy is down, which is exactly when the preflight shows.
-        refreshPreflight()
-
-        // Note the run state is *passed*, not used as a guard: the gate applies
-        // files only while the proxy is up, but removes them whenever the VPN
-        // is down and they are still on disk. A proxy that died or failed to
-        // start with its entry files applied is precisely the case where a
-        // run-state guard would strand them — see `SplitDNSVPNGate.action`.
-        let proxyIsUp: Bool
-        switch orchestrator.snapshot.runtimeStatus.state {
-        case .running, .degraded, .recovering: proxyIsUp = true
-        default: proxyIsUp = false
-        }
-
-        let outcome = splitDNSGate.reconcileEntryFiles(
-            config: runtimeConfig,
-            dnsManager: dnsManager,
-            logger: logStore,
-            runtimeStarted: proxyIsUp
-        )
-        recordSplitDNS(outcome, source: .vpnTransition)
-    }
-
-    // MARK: - Split-DNS entry-file repair (#165)
-
-    /// Feeds an entry-file outcome to `splitDNSRepair`, event first and the
-    /// log line derived from it, and keeps the helper check running while
-    /// something is pending. `startedAt` fences a start's or stop's result,
-    /// computed off this actor, against a VPN transition recorded meanwhile.
-    private func recordSplitDNS(
-        _ outcome: SplitDNSEntryFileRepair.Outcome?,
-        source: SplitDNSEntryFileRepair.Source,
-        startedAt: Int? = nil
-    ) {
-        guard let outcome else { return }
-        // Only a retry sweeps a deleted entry's file; nothing else settles it.
-        let residue = outcome.failure == nil && splitDNSRepair.pending != nil
-            && dnsManager.unconfiguredRecordedFilesPresent(config: runtimeConfig)
-        let wasPending = splitDNSRepair.pending != nil
-        splitDNSRepair.record(outcome, source: source, startedAt: startedAt, residue: residue, report: recordSplitDNSEvent)
-        // A new episode starts its check at the first interval, not at the
-        // back-off a check left over from the last episode is sleeping on.
-        if !wasPending, splitDNSRepair.pending != nil { endSplitDNSHelperCheck() }
-        // Settled by something other than a retry (a VPN flip, a start, a
-        // config change): the switch's action has landed all the same.
-        if wasPending { settleResolverSwitchBaseline(managed: committedPlatformConfig.manageDNSResolvers) }
-        scheduleSplitDNSHelperCheck()
-    }
-
-    private func recordSplitDNSEvent(_ event: RuntimeEvent, level: LogLevel) {
-        orchestrator.eventLog.append(event)
-        logStore.log(level, "Split DNS: \(event.event) \(event.detail ?? "")", category: .system)
-    }
-
-    /// One observation of the helper: from the preflight, which runs at
-    /// launch, after an install and on a Settings refresh, or from the check
-    /// below. A retry waits for the start or stop in flight.
-    ///
-    /// A dispatched retry ends the helper check: the retry's completion
-    /// schedules the next one from the attempt count it leaves, rather than
-    /// a check sleeping on the count from before it. Returns whether it
-    /// dispatched one.
-    @discardableResult
-    private func observeHelperForSplitDNS(available: Bool, trigger: String) -> Bool {
-        guard splitDNSRepair.shouldRetry(helperAvailable: available), !splitDNSRetryInFlight else { return false }
-        splitDNSRetryInFlight = true
-        endSplitDNSHelperCheck()
-        deliveries.deliver { [weak self] in await self?.retrySplitDNSEntryFiles(trigger: trigger) }
         return true
     }
 
-    private func retrySplitDNSEntryFiles(trigger: String) async {
-        defer { splitDNSRetryInFlight = false }
-        await awaitLaunchRecovery()
-        while !proxyLane.isIdle { await proxyLane.waitUntilIdle() }
-        // Nothing suspends from here on: the decision and the write see the
-        // same gate state (`SplitDNSEntryFileRepair.retry`).
-        guard splitDNSRepair.pending != nil, !rejectUnavailableConfiguration() else { return }
-        splitDNSRepair.retry(
-            trigger: trigger,
-            gate: splitDNSGate,
-            config: runtimeConfig,
-            resolversManaged: committedPlatformConfig.manageDNSResolvers,
-            dnsManager: dnsManager,
-            logger: logStore,
-            runtimeStarted: runtimeState().proxyIsUp,
-            report: recordSplitDNSEvent
-        )
-        settleResolverSwitchBaseline(managed: committedPlatformConfig.manageDNSResolvers)
-        scheduleSplitDNSHelperCheck()
+    /// The quit's last step: the app's own final lines, drained under the Quit's one deadline, never a fresh one. A deadline already
+    /// passed waits for nothing. A drain that did not confirm them records `lifecycle.log_flush_unconfirmed`, event first and one derived
+    /// line after it; neither is claimed persisted, and nothing waits after them.
+    private func drainQuitLog(until deadline: ContinuousClock.Instant) async {
+        let outcome = ContinuousClock.now < deadline ? await logStore.drain(until: deadline) : .skippedBudget
+        guard let unconfirmed = LifecycleLogFlushOutcome(outcome) else { return }
+        let event = RuntimeEvent(payload: .lifecycle(.logFlushUnconfirmed(LifecycleLogFlushUnconfirmed(source: .app, outcome: unconfirmed))))
+        eventLog.append(event)
+        logStore.log(.warning, "Lifecycle: \(event.event) \(event.detail ?? "")", category: .system)
     }
 
-    /// A settled repair did what the resolver switch's action had to, so the
-    /// reconciler's baseline follows (`markResolverSwitchLanded`), whatever
-    /// settled it: entry files that landed must be torn down when the switch
-    /// next turns off, and a baseline left behind diffs that flip as no
-    /// change. With the switch off the settling operation is the whole
-    /// teardown. With it on, it writes only entry files, so an intercept
-    /// refresh the switch-on owes is retried here first; one that fails
-    /// again is reported (`platform.split_dns_intercept_refresh_failed`),
-    /// and the next DNS start or DNS-affecting config change rewrites them.
-    private func settleResolverSwitchBaseline(managed: Bool) {
-        guard splitDNSRepair.pending == nil else { return }
-        if managed, resolverSwitchInterceptRefreshFailed {
+    /// The quit's result, once it has run.
+    func finishQuit() async -> RuntimeClientQuitResult? {
+        await quitting?.value
+    }
+
+    /// The client Quit with one total budget (decision 0039): the fence, the final frozen saves and cleanup confirmation, counted once.
+    /// It applies nothing and saves no disable. Nothing app-owned runs after it under a fresh budget.
+    private func quit(
+        until deadline: ContinuousClock.Instant,
+        final: FinalSaves?,
+        prior: RuntimeEditorLedger.Submission?
+    ) async -> RuntimeClientQuitResult? {
+        if control == nil, let opening {
+            // No client exists yet: the opening is joined, bounded by the same deadline. It was cancelled, so it builds no host after
+            // this; one it built before the cancellation composed its clients in that same turn and is quit below.
+            await Self.firstOf(opening, orDeadline: deadline)
+        }
+        guard let control, let editorClient else {
+            logStore.log(.notice, "Quit: no runtime was opened; nothing was fenced or saved.", category: .system)
+            runtime.observationEnded()
+            return nil
+        }
+        let incarnation: ControlHostIncarnation
+        if let known = self.incarnation {
+            incarnation = known
+        } else {
+            // The opening built the host and was fenced before it read the incarnation.
             do {
-                try refreshInterceptFiles(for: runtimeConfig)
-                resolverSwitchInterceptRefreshFailed = false
+                incarnation = try await control.readSnapshot(
+                    deadline: .after(max(.zero, ContinuousClock.now.duration(to: deadline)), from: .now)
+                ).stamp.incarnation
             } catch {
-                recordSplitDNSEvent(
-                    RuntimeEvent(
-                        kind: .config,
-                        event: "platform.split_dns_intercept_refresh_failed",
-                        detail: "reason=\(error.localizedDescription)"
-                    ),
-                    level: .warning
+                logStore.log(.warning, "Quit: the runtime's status could not be read (\(error)); nothing was fenced.", category: .system)
+                runtime.observationEnded()
+                return nil
+            }
+        }
+        // An editor not yet seeded when the quit began has no draft of the user's to save.
+        let result = await RuntimeClientQuit.quit(
+            control: control, editor: editorClient, incarnation: incarnation,
+            total: max(.zero, ContinuousClock.now.duration(to: deadline)), now: .now,
+            priorUpdate: prior?.requestID,
+            configuration: final?.configuration, preferences: final?.preferences
+        )
+        recordQuit(result, prior: prior.map { SettingsSave($0.kind) })
+        observer?.stop()
+        runtime.observationEnded()
+        return result
+    }
+
+    /// Returns when `task` ends or `deadline` passes, whichever is first. The task is not cancelled; only this wait ends.
+    private static func firstOf(_ task: Task<Void, Never>, orDeadline deadline: ContinuousClock.Instant) async {
+        let signal = FirstSignal()
+        await withCheckedContinuation { continuation in
+            signal.arm(continuation)
+            Task {
+                await task.value
+                signal.fire()
+            }
+            Task {
+                do {
+                    try await Task.sleep(until: deadline, clock: .continuous)
+                } catch {
+                    // Cancelled sleeps cannot happen here: nothing holds this task to cancel it. Firing is idempotent either way.
+                }
+                signal.fire()
+            }
+        }
+    }
+
+    /// The final saves the quit declares: each dirty draft not already in flight, save-only, under the baselines the prior operation's own
+    /// settlement leaves. A file that settlement left without one keeps the verified baseline the save was frozen under, as an unsettled
+    /// prior does: it is only the save's precondition, which the host compares with the file before writing, so a file the prior or anyone
+    /// else moved is refused unwritten, and the save is not left undeclarable to hold the host's flush window open to the deadline. A
+    /// runtime draft that blocks a start is replaced by the last value saved, so it never becomes the next launch's configuration, and the
+    /// platform edit beside it is still written.
+    typealias FinalSaves = (
+        configuration: (@Sendable (ControlRequestID, RuntimeQuitStep) throws -> PrivateConfigurationRequest)?,
+        preferences: (@Sendable (ControlRequestID, RuntimeQuitStep) throws -> PrivatePreferencesRequest)?
+    )
+
+    private func finalSaves(_ ledger: RuntimeEditorLedger, incarnation: ControlHostIncarnation) -> FinalSaves {
+        var configuration: (@Sendable (ControlRequestID, RuntimeQuitStep) throws -> PrivateConfigurationRequest)?
+        var preferences: (@Sendable (ControlRequestID, RuntimeQuitStep) throws -> PrivatePreferencesRequest)?
+        // A file whose baseline was dropped cannot be written before an explicit reload, and no settlement restores one, so its group
+        // is not declared: a declared save that is never admitted would hold the host's flush window open until the deadline.
+        for group in [RuntimeEditorLedger.Group.configuration, .preferences] where ledger.needsSubmission(group) {
+            if RuntimeEditorLedger.files(of: group).contains(where: { ledger.baselines[$0] == nil }) {
+                record(RuntimeEvent(kind: .config, event: "config.edit_discarded",
+                                    detail: "trigger=quit reason=needs_reload file=\(SettingsSave(group).files)"),
+                       level: .warning)
+            }
+        }
+        let writable = { (group: RuntimeEditorLedger.Group) in
+            ledger.needsSubmission(group) && RuntimeEditorLedger.files(of: group).allSatisfy { ledger.baselines[$0] != nil }
+        }
+        if writable(.configuration) {
+            let draft = config
+            let platform = platformConfig
+            let blocking = draft.startBlockingProblems
+            // A value past an approved ceiling is refused before it is sent, and one the runtime file cannot hold is refused by the
+            // store's staging, which refuses the whole request: so each too gives way to the last saved runtime value and the platform
+            // edit beside it is still written.
+            let violation = draft.resourceViolation()
+            let unstorable = blocking.isEmpty && violation == nil ? draft.runtimeFileRefusal() : nil
+            if let first = blocking.first {
+                record(RuntimeEvent(kind: .config, event: "config.edit_discarded",
+                                    detail: "trigger=quit reason=start_blocking_problems check=\(first.check) problems=\(blocking.count)"),
+                       level: .notice)
+            } else if let violation {
+                record(RuntimeEvent(kind: .config, event: "config.edit_discarded",
+                                    detail: "trigger=quit reason=resource_limit field=\(violation.field) limit=\(violation.limit)"),
+                       level: .notice)
+            } else if let unstorable {
+                record(RuntimeEvent(kind: .config, event: "config.edit_discarded",
+                                    detail: "trigger=quit reason=not_storable field=\(unstorable.field) requirement=\(SettingsSaveRefusal.code(unstorable.requirement))"),
+                       level: .notice)
+            } else {
+                record(RuntimeEvent(kind: .config, event: "config.edit_committed",
+                                    detail: "trigger=\(CommitTrigger.quit.rawValue) listener_change=\(ConfigDiff(old: ledger.saved.config, new: draft).replacesListeners)"),
+                       level: .info)
+            }
+            let keepsDraft = blocking.isEmpty && violation == nil && unstorable == nil
+            configuration = { requestID, prior in
+                let after = ledger.afterQuitPrior(prior, incarnation: incarnation)
+                let baselines = ledger.quitSaveBaselines(after: after)
+                guard let runtime = baselines.runtime, let platformBaseline = baselines.platform else {
+                    throw PrivateConfigurationWireError.invalidValue
+                }
+                return try PrivateConfigurationBridge.makeRequest(
+                    config: keepsDraft ? draft : after.saved.config, platform: platform, requestID: requestID, incarnation: incarnation,
+                    budget: try ControlWireBudget(0), runtimeBaseline: runtime, platformBaseline: platformBaseline,
+                    modules: PrivateModuleSlots(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly)
                 )
             }
         }
-        reconciler.markResolverSwitchLanded(manageDNSResolvers: managed)
-    }
-
-    /// While a repair is pending, asks the helper for its status after
-    /// `SplitDNSEntryFileRepair.helperCheckDelay`, one check at a time: an
-    /// install from outside the app (`sudo ./install-helper.sh`) sends this
-    /// host nothing. A backstop that gathers evidence and decides nothing.
-    private func scheduleSplitDNSHelperCheck() {
-        guard splitDNSRepair.pending != nil, splitDNSHelperCheck == nil else { return }
-        let base = splitDNSHelperCheckInterval
-        let helperLifecycle = self.helperLifecycle
-        splitDNSHelperCheck = Task { @MainActor [weak self] in
-            while let delay = self?.splitDNSHelperCheckDelay(base: base) {
-                // Cancelled: a retry took over, a new episode restarted the
-                // check, or quit. Whoever cancelled it has cleared the handle.
-                do { try await Task.sleep(for: delay) }
-                catch { return }
-                guard self?.splitDNSRepair.pending != nil else { break }
-                // The raw reading: `.busy` is no evidence the helper takes
-                // writes, whatever verdict is held for display (#210).
-                let reading = await withCheckedContinuation { continuation in
-                    DispatchQueue.global(qos: .utility).async { continuation.resume(returning: helperLifecycle.status) }
+        if writable(.preferences) {
+            let draft = appPreferences
+            // A value past its ceiling is refused before it is sent, so it is not declared: a declared save that is never sent would hold
+            // the host's flush window open until the deadline.
+            if let violation = DomainResourceCheck.text(draft.preferredBrowserTestURL, .browserTestURL) {
+                record(RuntimeEvent(kind: .config, event: "config.edit_discarded",
+                                    detail: "trigger=quit reason=resource_limit field=\(violation.field) limit=\(violation.limit)"),
+                       level: .notice)
+                return (configuration, nil)
+            }
+            preferences = { requestID, prior in
+                guard let baseline = ledger.quitSaveBaselines(after: ledger.afterQuitPrior(prior, incarnation: incarnation)).preferences
+                else {
+                    throw PrivateConfigurationWireError.invalidValue
                 }
-                guard !Task.isCancelled else { return }
-                if self?.observeHelperForSplitDNS(available: reading == .installed, trigger: "helper_check") == true { return }
+                return try PrivateConfigurationBridge.makePreferencesRequest(
+                    preferences: draft, requestID: requestID, incarnation: incarnation, budget: try ControlWireBudget(0),
+                    preferencesBaseline: baseline
+                )
             }
-            self?.splitDNSHelperCheck = nil
+        }
+        return (configuration, preferences)
+    }
+
+    /// Unresolved steps are reported as they are; nothing is retried or replaced.
+    private func recordQuit(_ result: RuntimeClientQuitResult, prior: SettingsSave?) {
+        switch result.quit {
+        case .settled(.completed): break
+        default: logStore.log(.warning, "Quit: \(result.quit)", category: .system)
+        }
+        // Each save the quit waited for, event first: a receipt that did not verify, or a step that never settled, is not a saved edit.
+        // The editor has ended, so no reload follows and none is named.
+        var saves: [(SettingsSaveTrigger, SettingsSave, RuntimeQuitStep)] = [
+            (.quit, .configuration, result.configuration), (.quit, .preferences, result.preferences),
+        ]
+        if let prior { saves.insert((.quitPrior, prior, result.priorUpdate), at: 0) }
+        for (trigger, save, step) in saves {
+            let end: SettingsSaveEnd
+            switch step {
+            case .notDeclared:
+                continue
+            case .settled(let outcome):
+                for unverified in SettingsSaveNotice.unverified(outcome, of: save, trigger: trigger, reloadNeeded: nil) { notice(unverified) }
+                continue
+            case .rejected(let code): end = .notAdmitted(code)
+            case .notRecorded(let reason): end = .notRecorded(reason)
+            case .clientFailure(.notSent), .clientFailure(.localRefusal): end = .notSent
+            case .clientFailure: end = .clientFailure
+            case .unsettled: end = .unsettled
+            case .skipped: end = .quitNotAdmitted
+            }
+            notice(.unverified(trigger, .whole(save, end), reloadNeeded: nil))
+        }
+        if let failure = result.observationFailure {
+            logStore.log(.warning, "Quit: observation ended early (\(failure)).", category: .system)
         }
     }
 
-    private func endSplitDNSHelperCheck() {
-        splitDNSHelperCheck?.cancel()
-        splitDNSHelperCheck = nil
+    // MARK: - Events
+
+    /// Event first, log line derived from it.
+    private func record(_ event: RuntimeEvent, level: LogLevel = .notice) {
+        eventLog.append(event)
+        logStore.log(level, "Settings: \(event.event) \(event.detail ?? "")", category: .system)
     }
 
-    /// `nil` once nothing is pending, which ends the check.
-    private func splitDNSHelperCheckDelay(base: Duration) -> Duration? {
-        splitDNSRepair.pending == nil ? nil : splitDNSRepair.helperCheckDelay(base: base)
+    // MARK: - PAC evaluator
+
+    /// The CFNetwork PAC evaluator with the app's plaintext fetch fallback. `package` so `PACEvaluatorSettingsTests` pins the wiring.
+    package nonisolated static func makePACEvaluator(
+        insecureFetcher: @Sendable @escaping (URL) async throws -> String
+    ) -> any PacEvaluator {
+        CFPACEvaluator(insecureFetcher: insecureFetcher)
     }
 
-    /// One pass and one pending retry; never queues a helper call per report.
-    private func reconcileSystemProxyIfRunning() async {
-        guard !rejectUnavailableConfiguration() else { return }
-        scheduleEnvironmentDriftPass(trigger: .observed)
-        guard committedPlatformConfig.manageSystemProxy else { return }
-        guard !proxySettingsReconcileInFlight else { proxySettingsReconcileWanted = true; return }
-        proxySettingsReconcileInFlight = true
-        defer { proxySettingsReconcileInFlight = false; proxySettingsReconcileWanted = false }
-        repeat {
-            proxySettingsReconcileWanted = false
-            await awaitLaunchRecovery()
-            await proxyLane.waitUntilIdle()
-            guard committedPlatformConfig.manageSystemProxy, runtimeState().proxyIsUp else { return }
-            let token = proxyLane.observationToken
-            // What was applied, not the editor draft: autosave can hold back a start-blocking edit.
-            let proxy = systemConduit, config = reconciler.lastReconciledConfig, platform = committedPlatformConfig
-            let pacURL = orchestrator.snapshot.bindings.localPACURL
-            let events = orchestrator.eventLog, logger = logStore
-            let retry = await platformWork.run { () -> Duration? in
-                guard !token.isSuperseded else { return nil }
-                do {
-                    return try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, localPACURL: pacURL, apply: true)
-                } catch {
-                    let event = RuntimeEvent(kind: .config, event: "platform.location_failed",
-                                             detail: "operation=reconcile surface=systemProxy reason=\(error.localizedDescription)")
-                    events.append(event)
-                    logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
-                    return nil
-                }
-            }
-            if let retry { scheduleProxyRepairRetry(after: retry) }
-        } while proxySettingsReconcileWanted
-    }
+    /// Ceiling on a fetched PAC document. A PAC is JavaScript evaluated on every routing decision, so an unbounded fetch hands an
+    /// arbitrary-sized script to the hot path; exceeding the ceiling fails the fetch rather than truncating it.
+    nonisolated static let pacMaxOutputBytes = PACFetchLimits.maxScriptBytes
 
-    /// One retry of a failed re-apply (#194): the drift pass for `surface`,
-    /// run once and judged. Not through the coalescing entry points above,
-    /// so the verdict is this pass's; both go to the same serial queue and
-    /// the managers' locks. Every write is checked under its manager's lock
-    /// against the request's lifecycle token and, for the system proxy,
-    /// against the switch and mode the last save asked for: a flag action
-    /// runs on the main actor, and can clear the surface after this pass
-    /// was queued.
-    private func retryReapply(_ surface: ConfigReapplyRetry.Surface, token: LifecycleLane.Token) async -> ConfigReapplyRetry.Outcome {
-        guard configurationLoadError == nil else { return .notWanted(reason: "config_unavailable") }
-        await awaitLaunchRecovery()
-        await proxyLane.waitUntilIdle()
-        guard !token.isSuperseded else { return .notWanted(reason: "superseded") }
-        guard runtimeState().proxyIsUp else { return .notWanted(reason: "proxy_stopped") }
-        // What was applied, not the editor draft: autosave can hold back a start-blocking edit.
-        let config = reconciler.lastReconciledConfig, platform = committedPlatformConfig
-        switch surface {
-        case .systemProxy:
-            guard platform.manageSystemProxy else { return .notWanted(reason: "switch_off") }
-            let (outcome, retry) = await SystemProxyReapplyRetry.run(
-                manager: systemConduit, work: platformWork, config: config, mode: platform.systemProxyMode,
-                localPACURL: orchestrator.snapshot.bindings.localPACURL, token: token,
-                fence: reconciler.platformRequest, events: orchestrator.eventLog, logger: logStore)
-            if let retry { scheduleProxyRepairRetry(after: retry) }
-            return outcome
-        case .environment:
-            guard platform.manageEnvironmentVariables else { return .notWanted(reason: "switch_off") }
-            let repair = environmentDriftRepair, generation = environmentManager.generation
-            let pass = await platformWork.run {
-                repair.pass(config: config, generation: generation, trigger: .retry, isCurrent: { !token.isSuperseded })
-            }
-            if let retry = pass.retry { scheduleEnvironmentRepairRetry(after: retry) }
-            return pass.settled ? .applied : .failed(reason: pass.reason ?? "unsettled")
+    /// Plaintext-URL PAC fetcher for `CFPACEvaluator.init(insecureFetcher:)`, through curl, never through Conduit's own proxy.
+    @Sendable
+    nonisolated static func curlPACFetcher(_ url: URL) async throws -> String {
+        guard url.user == nil, url.password == nil else {
+            throw PACResolverError.fetchFailed("PAC URLs must not contain embedded credentials.")
         }
-    }
-
-    /// A contended repair budget withholds the write. If the other program then
-    /// stops rewriting, no notification would bring the managed settings back,
-    /// so one pass runs when the window reopens. A newer schedule replaces it;
-    /// the pass itself re-checks that the proxy is still up.
-    private func scheduleProxyRepairRetry(after delay: Duration) {
-        proxyRepairRetry?.cancel()
-        proxyRepairRetry = Task { [weak self] in
-            do { try await Task.sleep(for: delay) }
-            catch { return } // Cancelled by a newer schedule; that one runs instead.
-            await self?.reconcileSystemProxyIfRunning()
-        }
-    }
-
-    // MARK: - Shell environment drift (#175)
-
-    /// One environment drift pass after the work in flight. Fed by every
-    /// trigger of the system proxy drift pass, and by the periodic tick:
-    /// none of those triggers is guaranteed after a silent wipe.
-    private func scheduleEnvironmentDriftPass(trigger: EnvironmentDriftRepair.Trigger) {
-        deliveries.deliver { [weak self] in await self?.reconcileEnvironmentDriftIfRunning(trigger: trigger) }
-    }
-
-    /// Off the main actor: three profile reads and six `launchctl getenv`,
-    /// and a repair only when something drifted. Coalesced like the system
-    /// proxy pass, and checked against the lifecycle under the manager's
-    /// lock before it writes (`EnvironmentManager.repair`).
-    private func reconcileEnvironmentDriftIfRunning(trigger: EnvironmentDriftRepair.Trigger) async {
-        guard committedPlatformConfig.manageEnvironmentVariables else { return }
-        guard !environmentDriftInFlight else {
-            environmentDriftPending = trigger.coalesced(with: environmentDriftPending)
-            return
-        }
-        environmentDriftInFlight = true
-        defer { environmentDriftInFlight = false; environmentDriftPending = nil }
-        var trigger = trigger
-        repeat {
-            environmentDriftPending = nil
-            await awaitLaunchRecovery()
-            await proxyLane.waitUntilIdle()
-            guard committedPlatformConfig.manageEnvironmentVariables, runtimeState().proxyIsUp else { return }
-            let token = proxyLane.observationToken
-            // What was applied, not the editor draft: autosave can hold back a start-blocking edit.
-            let repair = environmentDriftRepair, config = reconciler.lastReconciledConfig
-            let generation = environmentManager.generation, passTrigger = trigger
-            let retry = await platformWork.run {
-                repair.run(config: config, generation: generation, trigger: passTrigger, isCurrent: { !token.isSuperseded })
+        return try await Task.detached(priority: .utility) {
+            let result: CommandResult
+            do {
+                result = try CommandRunner.run(
+                    launchPath: "/usr/bin/curl",
+                    arguments: [
+                        "--silent", "--show-error", "--location", "--fail", "--max-time", "15",
+                        // The PAC decides how the proxy routes; fetching it through that proxy sends the request around the loop.
+                        "--noproxy", "*",
+                        url.absoluteString,
+                    ],
+                    maxOutputBytes: AppState.pacMaxOutputBytes
+                )
+            } catch let error as CommandRunnerError {
+                // One error type for every failure on this path.
+                throw PACResolverError.fetchFailed(error.localizedDescription)
             }
-            if let retry { scheduleEnvironmentRepairRetry(after: retry) }
-            guard let next = environmentDriftPending else { break }
-            trigger = next
-        } while true
+            guard result.exitCode == 0 else {
+                let message = [result.standardError, result.standardOutput].filter { !$0.isEmpty }.joined(separator: " | ")
+                throw PACResolverError.fetchFailed(message.isEmpty ? "curl exited with code \(result.exitCode)." : message)
+            }
+            return result.standardOutput
+        }.value
+    }
+}
+
+/// Resumes one waiter at the first of several signals; later signals do nothing.
+private final class FirstSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func arm(_ continuation: CheckedContinuation<Void, Never>) {
+        lock.withLock { self.continuation = continuation }
     }
 
-    /// One pass when a withheld repair's window reopens, since no trigger
-    /// may follow. A newer schedule replaces it.
-    private func scheduleEnvironmentRepairRetry(after delay: Duration) {
-        environmentRepairRetry?.cancel()
-        environmentRepairRetry = Task { [weak self] in
-            do { try await Task.sleep(for: delay) }
-            catch { return } // Cancelled by a newer schedule; that one runs instead.
-            await self?.reconcileEnvironmentDriftIfRunning(trigger: .retry)
+    func fire() {
+        let waiting = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            defer { continuation = nil }
+            return continuation
         }
+        waiting?.resume()
     }
+}
 
-    /// The periodic tick: one task for the host's lifetime. `Task.sleep`
-    /// runs on the continuous clock, so a tick due during sleep fires once
-    /// after wake rather than once per missed interval.
-    private func startEnvironmentDriftTimer() {
-        let interval = environmentDriftInterval
-        environmentDriftTimer = Task { @MainActor [weak self] in
-            while true {
-                do { try await Task.sleep(for: interval) }
-                catch { return }
-                guard let self else { return }
-                self.scheduleEnvironmentDriftPass(trigger: .timer)
-            }
-        }
-    }
+/// Notices the host did not admit, owed to it. Each is one flag or count, never a queue.
+private struct OwedNotices {
+    static let attempts = 3
+    var credentialsChanged = 0
+    var preflight: Bool?
+    var preflightAttempts = 0
+}
 
-    private func scheduleDNSReconcile() {
-        dnsReconcileWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.runDNSReconcile()
-        }
-        dnsReconcileWork = work
-        // The debounce fires on the main queue because it touches `AppState`;
-        // the reconcile itself does not run here.
-        DispatchQueue.main.asyncAfter(deadline: .now() + dnsReconcileDebounce, execute: work)
-    }
-
-    /// Off the main actor: one `networksetup` read per interface, and a
-    /// helper round trip for each that drifted. It fires on every wake,
-    /// network change and VPN transition. A trigger that finds a reconcile
-    /// still out asks for one more after it, since that one may have read
-    /// the machine before the change that caused this trigger.
-    private func runDNSReconcile() {
-        guard !dnsReconcileInFlight else {
-            dnsReconcileWanted = true
-            return
-        }
-        dnsReconcileInFlight = true
-        let manager = systemDNSManager
-        deliveries.deliver { [weak self, platformWork, logStore] in
-            guard let self else { return }
-            await self.dnsLane.waitUntilIdle()
-            guard self.committedPlatformConfig.manageSystemDNS, self.orchestrator.snapshot.dnsRunState == .running else {
-                self.dnsReconcileInFlight = false
-                self.dnsReconcileWanted = false
-                return
-            }
-            let token = self.dnsLane.observationToken
-            let forwarderPort = self.effectiveDNSForwarderPort
-            // Followed at once by a liveness probe, so a relay that died
-            // across sleep or VPN churn is restarted now rather than at the
-            // next 30 s health tick.
-            let alive = await platformWork.run {
-                guard !token.isSuperseded else { return true }
-                manager.reconcile(logger: logStore, forwarderPort: forwarderPort)
-                return manager.probeLiveness()
-            }
-            self.dnsReconcileInFlight = false
-            if self.dnsReconcileWanted {
-                self.dnsReconcileWanted = false
-                self.scheduleDNSReconcile()
-            }
-            // Authoritative "is the forwarder up?"; the mirror's
-            // dnsRunState may be a UI-only `.failed` health override,
-            // which `handleDNSHealthResult` itself inspects.
-            guard self.orchestrator.snapshot.dnsRunState == .running else { return }
-            self.handleDNSHealthResult(alive: alive, armedBy: token)
+extension HelperToolPrivilegeClient.Status {
+    /// The wire verdict, case for case. The helper's own refusal text is not carried on the wire.
+    init(_ wire: ControlHelperStatus) {
+        switch wire {
+        case .installed: self = .installed
+        case .outdated: self = .outdated
+        case .notInstalled: self = .notInstalled
+        case .notResponding: self = .notResponding
+        case .busy: self = .busy
+        case .waitingForConsoleUser: self = .waitingForConsoleUser
+        case .unauthorized: self = .unauthorized
+        case .callerNotAccepted: self = .callerNotAccepted(message: "")
         }
     }
 }
 
-extension AppState: RuntimeReconcilerHost {}
+extension ControlPreflightItems {
+    /// The banner text: which surfaces may prompt for admin. Empty when none would.
+    var summary: String {
+        var parts: [String] = []
+        if systemProxy.willPromptAdmin { parts.append("system proxy") }
+        if splitDNS.willPromptAdmin { parts.append("DNS resolvers") }
+        if parts.isEmpty { return "" }
+        return "May need admin for: " + parts.joined(separator: ", ")
+    }
+}

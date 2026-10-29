@@ -1,0 +1,22 @@
+{
+  "source_commit": "66c411d4e91823db8eeb255d55d615f22b4e6f82",
+  "production_sources_clean": true,
+  "head_stable": true,
+  "build_command": [
+    "xcrun",
+    "swift",
+    "build",
+    "--disable-sandbox",
+    "-c",
+    "release"
+  ],
+  "enable_testing": false,
+  "build_exit": 0,
+  "runner_exit": 0,
+  "modes": [
+    "client-quit-widest",
+    "logger-held",
+    "logger-held-nosampler"
+  ],
+  "scope": "Affected actual-host client Quit plus unchanged ordinary logger-held drainage; list projections/native UI unchanged and retain earlier qualified evidence."
+}

@@ -1,0 +1,80 @@
+{
+  "checks": [
+    {
+      "name": "baseline",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "TunnelForwarderTests|ProxiedTunnelTests"
+      ],
+      "exit": 0,
+      "seconds": 13.76,
+      "expected_failure": false,
+      "intended_result": true,
+      "crash_marker": false
+    },
+    {
+      "name": "closed-admission-removed",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "TunnelForwarderTests.testJoinedMockProxyDialsAdmitNoLaterDial"
+      ],
+      "exit": 1,
+      "seconds": 9.42,
+      "expected_failure": true,
+      "intended_result": true,
+      "crash_marker": false
+    },
+    {
+      "name": "held-dial-error-cleanup",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "TunnelForwarderTests.testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol"
+      ],
+      "exit": 1,
+      "seconds": 14.48,
+      "expected_failure": true,
+      "intended_result": true,
+      "crash_marker": false
+    },
+    {
+      "name": "completion-barrier-removed",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "TunnelForwarderTests.testProxiedTunnelCarriesMongoDBBytesExactlyAndLogsTheDetectedProtocol"
+      ],
+      "exit": 1,
+      "seconds": 9.13,
+      "expected_failure": true,
+      "intended_result": true,
+      "crash_marker": false
+    },
+    {
+      "name": "restored",
+      "command": [
+        "xcrun",
+        "swift",
+        "test",
+        "--filter",
+        "TunnelForwarderTests|ProxiedTunnelTests"
+      ],
+      "exit": 0,
+      "seconds": 8.45,
+      "expected_failure": false,
+      "intended_result": true,
+      "crash_marker": false
+    }
+  ],
+  "restored": true
+}

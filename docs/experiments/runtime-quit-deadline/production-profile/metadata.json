@@ -1,0 +1,240 @@
+{
+  "sourceCommit": "66c411d4e91823db8eeb255d55d615f22b4e6f82",
+  "provenanceBefore": {
+    "head": "66c411d4e91823db8eeb255d55d615f22b4e6f82",
+    "productSourcesDirty": false,
+    "productSourceFingerprint": "1ec051ef8efbd73ec5f5c5683eb42962f9492529e6273619212ef2c0fb2853da",
+    "untrackedProductFiles": 0,
+    "experimentFiles": {
+      "Probe.swift": "c69ec9521c31819a9e1337c892411d5321da7cf62c6187a23932fc726a86d288",
+      "README.md": "5b0be495364b4823fb6d83fec3e18e4613806550f9b14d542e2f8980d3fe2931",
+      "run.py": "2ae0f902e3bb66d9875d8549e169cbf3e195f9099016926850b8906a2879e070"
+    }
+  },
+  "provenanceAfter": {
+    "head": "66c411d4e91823db8eeb255d55d615f22b4e6f82",
+    "productSourcesDirty": false,
+    "productSourceFingerprint": "1ec051ef8efbd73ec5f5c5683eb42962f9492529e6273619212ef2c0fb2853da",
+    "untrackedProductFiles": 0,
+    "experimentFiles": {
+      "Probe.swift": "c69ec9521c31819a9e1337c892411d5321da7cf62c6187a23932fc726a86d288",
+      "README.md": "5b0be495364b4823fb6d83fec3e18e4613806550f9b14d542e2f8980d3fe2931",
+      "run.py": "2ae0f902e3bb66d9875d8549e169cbf3e195f9099016926850b8906a2879e070"
+    }
+  },
+  "sourceUnchangedDuringRun": true,
+  "objectsUnchangedDuringRun": true,
+  "probe_sha256": "c69ec9521c31819a9e1337c892411d5321da7cf62c6187a23932fc726a86d288",
+  "runner_sha256": "2ae0f902e3bb66d9875d8549e169cbf3e195f9099016926850b8906a2879e070",
+  "swiftc": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)\nTarget: arm64-apple-macosx26.0",
+  "objects": {
+    "CNIOOpenBSD.o": {
+      "sha256": "9ee5ca76c7e6995b5ad57aab52f02fa59b545c76a3ba55489ffb32ea7f5eb379",
+      "mtime": 1793205774.0339735
+    },
+    "RuntimeEvents.o": {
+      "sha256": "be0a363fc034b0269d02f26b175176fcef0280303edd4db00d79dc35c5c45c3d",
+      "mtime": 1793205776.1063254
+    },
+    "CNIOLinux.o": {
+      "sha256": "b4295e1b0aadafe014b2cab20c598b82680c89617c55e2e8c2edbe8651bb948e",
+      "mtime": 1793205774.2818415
+    },
+    "InternalCollectionsUtilities.o": {
+      "sha256": "ee03dc9dbd576825f8b9ce546061ade0fffdd0560e3ffb7e7e79db98bca139bc",
+      "mtime": 1793205774.831639
+    },
+    "CNIOFreeBSD.o": {
+      "sha256": "6ec6ca7414a8c5a137e8076dc3f01bc620090cfd08fb90e01d9320d399966e85",
+      "mtime": 1793205774.1028569
+    },
+    "_AtomicsShims.o": {
+      "sha256": "bca90041b54b077b56b754be48c78642e71f427b4cbe91eabf93ac75eb9f78fb",
+      "mtime": 1793075878.1386788
+    },
+    "CNIOAtomics.o": {
+      "sha256": "b3475fc7c945ac10dbcd8a2af4494d39bab6d4d7a5b6db06e896e7c704a8e855",
+      "mtime": 1793205774.9752448
+    },
+    "CNIOLLHTTP.o": {
+      "sha256": "88920ff3061a24f78228c8583d37750019949149c5578d7e780e9d7f77cddee3",
+      "mtime": 1793205774.8688798
+    },
+    "_NIODataStructures.o": {
+      "sha256": "63c6c7ef6bf988504c7fa462cb91ce1f92c21cee3f19fbeb707d52eb385e9edf",
+      "mtime": 1793205774.89163
+    },
+    "CNIOWindows.o": {
+      "sha256": "63f3e7d513bc29cbf870c6c9703ccb049b718b2e992161fdc27489940990cea7",
+      "mtime": 1793075876.4970024
+    },
+    "Atomics.o": {
+      "sha256": "128baa89cbc770530cd07bfc574fe5c424c2248fc44606cce47196327ac125f8",
+      "mtime": 1793205776.1266217
+    },
+    "NIOConcurrencyHelpers.o": {
+      "sha256": "e7590981e37cb41743aef8e23e15b04740dd06b1280e45b80e3e9b7a73a21a50",
+      "mtime": 1793205775.3999827
+    },
+    "ProxyKernel.o": {
+      "sha256": "a8eda66743ac4963dce75560dfe42cb71097d371f3d300c21c62818ce5d35c8a",
+      "mtime": 1793205819.5076492
+    },
+    "CNIOPosix.o": {
+      "sha256": "691597e6be0d2ac824bcb5435addb4bc003d1df3012b2973f9400c97e64cf86f",
+      "mtime": 1793205774.1954513
+    },
+    "NIOCore.o": {
+      "sha256": "544f7cd2c103e8cfed0a808e119445ce2ceea21e74552d8c3a983daade1dadca",
+      "mtime": 1793205784.2885518
+    },
+    "DequeModule.o": {
+      "sha256": "14b71645ecc4ece9881c8d471feaa85746fcec370a4dc9bbb9eca610846fe64e",
+      "mtime": 1793205776.9583716
+    },
+    "CNIODarwin.o": {
+      "sha256": "050d60fbc53a627e6471feee0eb6d425216650e5ce29101cc1a130bfc6743bf6",
+      "mtime": 1793205774.629122
+    },
+    "NIOEmbedded.o": {
+      "sha256": "7dea919bf836d7a719ab3048e1392b7dc5d89e346347cdcfcd107b7e96abac88",
+      "mtime": 1793205786.678689
+    },
+    "NIO.o": {
+      "sha256": "7b4b3248c23cce04097741322a8fe53ed5b091143db2faa8544b43b0f5db3b47",
+      "mtime": 1793205794.4070687
+    },
+    "ConduitShared.o": {
+      "sha256": "5772e7d6247d0580b08f35fb0d88e8ae75282b1a303e023d7480dbaeb0c35ad6",
+      "mtime": 1793205787.4926646
+    },
+    "NIOPosix.o": {
+      "sha256": "c321c0d6c98df509521e5a9fa2139fa437884120222abd730b43d4b39395bb5d",
+      "mtime": 1793205794.2231338
+    },
+    "ContainersPreview.o": {
+      "sha256": "9c4e6cd4945f84d3569af9613055a207cab1ee89e48573843dc3e04caa4819dc",
+      "mtime": 1793205775.216107
+    },
+    "CNIOWASI.o": {
+      "sha256": "63f3e7d513bc29cbf870c6c9703ccb049b718b2e992161fdc27489940990cea7",
+      "mtime": 1793205774.054874
+    },
+    "NIOHTTP1.o": {
+      "sha256": "aac4e909f7bb93dd0cb1961a940c8e2e9bed44f8878a19013b4db701920b314c",
+      "mtime": 1793205798.2284617
+    },
+    "_NIOBase64.o": {
+      "sha256": "f73e8f3cad52bc1eafd55464470806ea85f7eef6ea609e82b37cd06ca06ca713",
+      "mtime": 1793205774.5289176
+    },
+    "ProxyControlBridge.o": {
+      "sha256": "071169cdb31b01e90ae85d8bcfd4185344f8b1046af4bde2b0865d9777c80a82",
+      "mtime": 1793205820.9404173
+    },
+    "ConduitRuntime.o": {
+      "sha256": "334478b2cec39395e47676bbbeee6acd80c6d9793abbcd800ce5dff895dba5f1",
+      "mtime": 1793205840.1794083
+    },
+    "PlatformMac.o": {
+      "sha256": "d5ff833514a1f9c012c56761f72889063202676e8e4f9b2fff59f3be1c2421a4",
+      "mtime": 1793205831.5646079
+    },
+    "ProxyAuth.o": {
+      "sha256": "67563063582c01f5d3ea7759270267dca23177002bde27ed7461f009d592f404",
+      "mtime": 1793205821.7562978
+    },
+    "ProxyPAC.o": {
+      "sha256": "66b20f38ad97ad2eb74962bacc8aa7a90b26ec2f9277fc2b7c281494b881addb",
+      "mtime": 1793205820.832796
+    }
+  },
+  "modeTimeoutSeconds": 300,
+  "maxOutputBytes": 4194304,
+  "checks": [
+    {
+      "kind": "client-quit-widest",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 3.95,
+      "log": "client-quit-widest.ndjson",
+      "outputBytes": 11303,
+      "outputTruncated": false,
+      "records": 44,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "logger-held",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 2.368,
+      "log": "logger-held-t1.ndjson",
+      "outputBytes": 11408,
+      "outputTruncated": false,
+      "records": 46,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "logger-held",
+      "trial": 2,
+      "exit": 0,
+      "seconds": 2.376,
+      "log": "logger-held-t2.ndjson",
+      "outputBytes": 11401,
+      "outputTruncated": false,
+      "records": 46,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "logger-held",
+      "trial": 3,
+      "exit": 0,
+      "seconds": 2.325,
+      "log": "logger-held-t3.ndjson",
+      "outputBytes": 11432,
+      "outputTruncated": false,
+      "records": 46,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "logger-held-nosampler",
+      "trial": 1,
+      "exit": 0,
+      "seconds": 2.442,
+      "log": "logger-held-nosampler-t1.ndjson",
+      "outputBytes": 11890,
+      "outputTruncated": false,
+      "records": 46,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "logger-held-nosampler",
+      "trial": 2,
+      "exit": 0,
+      "seconds": 2.251,
+      "log": "logger-held-nosampler-t2.ndjson",
+      "outputBytes": 11900,
+      "outputTruncated": false,
+      "records": 46,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    },
+    {
+      "kind": "logger-held-nosampler",
+      "trial": 3,
+      "exit": 0,
+      "seconds": 2.397,
+      "log": "logger-held-nosampler-t3.ndjson",
+      "outputBytes": 11867,
+      "outputTruncated": false,
+      "records": 46,
+      "labelViolations": 0,
+      "scratchRemoved": true
+    }
+  ]
+}

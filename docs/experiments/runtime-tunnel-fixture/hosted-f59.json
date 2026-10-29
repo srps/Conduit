@@ -1,0 +1,33 @@
+{
+  "head": "f59dbb96e93bd0132f4f15c39e5c99b9a4fa52c6",
+  "observed": "2026-10-28T18:05Z",
+  "Swift": {
+    "run": 40737878466,
+    "job": 122991227162,
+    "conclusion": "success",
+    "annotations_read": "runner capacity notice only",
+    "url": "https://github.com/srps/Conduit/actions/runs/40737878466/job/122991227162"
+  },
+  "Release": {
+    "run": 40737878892,
+    "job": 122991228132,
+    "conclusion": "failure",
+    "stage": "standard Debug full suite",
+    "optimized_reached": false,
+    "cause_observation": "HappyEyeballs promise-leak crash while legacy detection fixture active; historical origin unproven",
+    "url": "https://github.com/srps/Conduit/actions/runs/40737878892/job/122991228132"
+  },
+  "SlowDrain": {
+    "run": 40737879200,
+    "job": 122991229244,
+    "conclusion": "success"
+  },
+  "CodeQL": {
+    "summary": 122991457805,
+    "actions": 122991212353,
+    "python": 122991211839,
+    "conclusion": "success",
+    "annotations_read": "300-file diff limit and Ubuntu image notices"
+  },
+  "scope": "Observed using the connected check-diagnostics and workflow-step tools. The README reviewer had an older in-progress Swift status; this closes that conditional factual check."
+}

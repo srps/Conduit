@@ -1,0 +1,46 @@
+{
+  "source_original_sha256": "90252b9b065e2e30ce9c23ca92f2cb96ef4357cac0fbf6cdc59630aff5d67993",
+  "tests_sha256": "7cdfbf058855a55375a37d7f415baba66b277440205bfd745438532b213a5b33",
+  "checks": [
+    {
+      "name": "strip-recognized-prior",
+      "exit": 1,
+      "seconds": 13.67,
+      "bounded_summary": [
+        "<checkout>/Tests/ConduitTests/NetworkLocationRecoveryTests.swift:91: error: -[ConduitTests.NetworkLocationRecoveryTests testFreshJournalPreservesUserConduitLookingPACAndRemovesOnlyIntroducedFields] : XCTAssertEqual failed: (\"[PlatformMac.LocationServiceSettings(locationID: \"11111111-1111-1111-1111-111111111111\", serviceID: \"33333333-3333-3333-3333-333333333333\", name: \"Wi-Fi\", enabled: true, proxies: [:], dns: [\"ServerAddresses\": ConduitShared.NetworkSettingValue.list([\"192.0.2.1\"])], supportsProxies: true, supportsDNS: true, unreadableProxies: false, unreadableDNS: false), PlatformMac.LocationServiceSettings(locationID: \"22222222-2222-2222-2222-222222222222\", serviceID: \"44444444-4444-4444-4444-444444444444\", name: \"Wi-Fi\", enabled: true, proxies: [\"HTTPPort\": ConduitShared.NetworkSettingValue.number(8080), \"HTTPEnable\": ConduitShared.NetworkSettingValue.number(1), \"HTTPProxy\": ConduitShared.NetworkSettingValue.text(\"proxy.office.example\")], dns: [\"ServerAddresses\": ConduitShared.NetworkSettingValue.list([\"192.0.2.2\"])], supportsProxies: true, supportsDNS: true, unreadableProxies: false, unreadableDNS: false)]\") is not equal to (\"[PlatformMac.LocationServiceSettings(locationID: \"11111111-1111-1111-1111-111111111111\", serviceID: \"33333333-3333-3333-3333-333333333333\", name: \"Wi-Fi\", enabled: true, proxies: [\"ProxyAutoConfigURLString\": ConduitShared.NetworkSettingValue.text(\"http://127.0.0.1:63145/proxy.pac\"), \"ProxyAutoConfigEnable\": ConduitShared.NetworkSettingValue.number(1)], dns: [\"ServerAddresses\": ConduitShared.NetworkSettingValue.list([\"192.0.2.1\"])], supportsProxies: true, supportsDNS: true, unreadableProxies: false, unreadableDNS: false), PlatformMac.LocationServiceSettings(locationID: \"22222222-2222-2222-2222-222222222222\", serviceID: \"44444444-4444-4444-4444-444444444444\", name: \"Wi-Fi\", enabled: true, proxies: [\"HTTPPort\": ConduitShared.NetworkSettingValue.number(8080), \"HTTPEnable\": ConduitShared.NetworkSettingValue.number(1), \"HTTPProxy\": ConduitShared.NetworkSettingValue.text(\"proxy.office.example\")], dns: [\"ServerAddresses\": ConduitShared.NetworkSettingValue.list([\"192.0.2.2\"])], supportsProxies: true, supportsDNS: true, unreadableProxies: false, unreadableDNS: false)]\") - manual",
+        "<checkout>/Tests/ConduitTests/NetworkLocationRecoveryTests.swift:91: error: -[ConduitTests.NetworkLocationRecoveryTests testFreshJournalPreservesUserConduitLookingPACAndRemovesOnlyIntroducedFields] : XCTAssertEqual failed: (\"[PlatformMac.LocationServiceSettings(locationID: \"11111111-1111-1111-1111-111111111111\", serviceID: \"33333333-3333-3333-3333-333333333333\", name: \"Wi-Fi\", enabled: true, proxies: [:], dns: [\"ServerAddresses\": ConduitShared.NetworkSettingValue.list([\"192.0.2.1\"])], supportsProxies: true, supportsDNS: true, unreadableProxies: false, unreadableDNS: false), PlatformMac.LocationServiceSettings(locationID: \"22222222-2222-2222-2222-222222222222\", serviceID: \"44444444-4444-4444-4444-444444444444\", name: \"Wi-Fi\", enabled: true, proxies: [\"HTTPPort\": ConduitShared.NetworkSettingValue.number(8080), \"HTTPEnable\": ConduitShared.NetworkSettingValue.number(1), \"HTTPProxy\": ConduitShared.NetworkSettingValue.text(\"proxy.office.example\")], dns: [\"ServerAddresses\": ConduitShared.NetworkSettingValue.list([\"192.0.2.2\"])], supportsProxies: true, supportsDNS: true, unreadableProxies: false, unreadableDNS: false)]\") is not equal to (\"[PlatformMac.LocationServiceSettings(locationID: \"11111111-1111-1111-1111-111111111111\", serviceID: \"33333333-3333-3333-3333-333333333333\", name: \"Wi-Fi\", enabled: true, proxies: [\"ProxyAutoConfigURLString\": ConduitShared.NetworkSettingValue.text(\"http://127.0.0.1:63145/proxy.pac\"), \"ProxyAutoConfigEnable\": ConduitShared.NetworkSettingValue.number(1)], dns: [\"ServerAddresses\": ConduitShared.NetworkSettingValue.list([\"192.0.2.1\"])], supportsProxies: true, supportsDNS: true, unreadableProxies: false, unreadableDNS: false), PlatformMac.LocationServiceSettings(locationID: \"22222222-2222-2222-2222-222222222222\", serviceID: \"44444444-4444-4444-4444-444444444444\", name: \"Wi-Fi\", enabled: true, proxies: [\"HTTPPort\": ConduitShared.NetworkSettingValue.number(8080), \"HTTPEnable\": ConduitShared.NetworkSettingValue.number(1), \"HTTPProxy\": ConduitShared.NetworkSettingValue.text(\"proxy.office.example\")], dns: [\"ServerAddresses\": ConduitShared.NetworkSettingValue.list([\"192.0.2.2\"])], supportsProxies: true, supportsDNS: true, unreadableProxies: false, unreadableDNS: false)]\") - pac",
+        "\t Executed 1 test, with 2 failures (0 unexpected) in 1.458 (1.458) seconds",
+        "\t Executed 1 test, with 2 failures (0 unexpected) in 1.458 (1.458) seconds",
+        "\t Executed 1 test, with 2 failures (0 unexpected) in 1.458 (1.466) seconds"
+      ],
+      "log_sha256": "6b3c11c6cb94caa1669b7071d8f9e702f38424a9d710ead1a0c576b4cfb2fa69"
+    },
+    {
+      "name": "omit-rebase-restore",
+      "exit": 1,
+      "seconds": 6.4,
+      "bounded_summary": [
+        "<checkout>/Tests/ConduitTests/NetworkLocationRecoveryTests.swift:662: error: -[ConduitTests.NetworkLocationRecoveryTests testReapplyAfterExternalBypassEditKeepsOriginalPACPriorRatherThanAppliedPAC] : XCTAssertTrue failed",
+        "<checkout>/Tests/ConduitTests/NetworkLocationRecoveryTests.swift:667: error: -[ConduitTests.NetworkLocationRecoveryTests testReapplyAfterExternalBypassEditKeepsOriginalPACPriorRatherThanAppliedPAC] : XCTAssertEqual failed: (\"[\"ProxyAutoConfigURLString\": ConduitShared.NetworkSettingValue.text(\"http://corporate.example/proxy.pac\"), \"ProxyAutoConfigEnable\": ConduitShared.NetworkSettingValue.number(1)]\") is not equal to (\"[\"ProxyAutoConfigURLString\": ConduitShared.NetworkSettingValue.text(\"http://corporate.example/proxy.pac\"), \"ProxyAutoConfigEnable\": ConduitShared.NetworkSettingValue.number(1), \"ExceptionsList\": ConduitShared.NetworkSettingValue.list([\"external.example\"])]\")",
+        "<checkout>/Tests/ConduitTests/NetworkLocationRecoveryTests.swift:671: error: -[ConduitTests.NetworkLocationRecoveryTests testReapplyAfterExternalBypassEditKeepsOriginalPACPriorRatherThanAppliedPAC] : XCTAssertEqual failed: (\"[\"ProxyAutoConfigURLString\": ConduitShared.NetworkSettingValue.text(\"http://corporate.example/proxy.pac\"), \"ProxyAutoConfigEnable\": ConduitShared.NetworkSettingValue.number(1)]\") is not equal to (\"[\"ProxyAutoConfigURLString\": ConduitShared.NetworkSettingValue.text(\"http://corporate.example/proxy.pac\"), \"ProxyAutoConfigEnable\": ConduitShared.NetworkSettingValue.number(1), \"ExceptionsList\": ConduitShared.NetworkSettingValue.list([\"external.example\"])]\")",
+        "\t Executed 1 test, with 3 failures (0 unexpected) in 0.851 (0.852) seconds",
+        "\t Executed 1 test, with 3 failures (0 unexpected) in 0.851 (0.852) seconds",
+        "\t Executed 1 test, with 3 failures (0 unexpected) in 0.851 (0.858) seconds"
+      ],
+      "log_sha256": "e89636cbcb5a4fc8a30d81263882d95aa22a4ab5633e8ae54bede9b7dc5a7d48"
+    },
+    {
+      "name": "exact-restored",
+      "exit": 0,
+      "seconds": 5.34,
+      "bounded_summary": [
+        "\t Executed 47 tests, with 0 failures (0 unexpected) in 0.268 (0.271) seconds",
+        "\t Executed 47 tests, with 0 failures (0 unexpected) in 0.268 (0.271) seconds",
+        "\t Executed 47 tests, with 0 failures (0 unexpected) in 0.268 (0.278) seconds"
+      ],
+      "log_sha256": "dded57d28638e2c156b9506e72ef67ccccb7454b91f7a1b12f86d8fcfced30fe"
+    }
+  ],
+  "exact_product_source_restored": true,
+  "tests_unchanged": true
+}

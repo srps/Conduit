@@ -1,0 +1,9 @@
+Test Case '-[ConduitTests.RotatingLogFileProtectionTests testConcurrentWritesAndCloseAccountForEveryRecord]' started.
+TEMP-CONTROL close returned with pending=314 draining=true
+/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/RotatingLogFileProtectionTests.swift:536: error: -[ConduitTests.RotatingLogFileProtectionTests testConcurrentWritesAndCloseAccountForEveryRecord] : XCTAssertEqual failed: ("314") is not equal to ("0") - the close wrote everything it had admitted before it returned
+/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/RotatingLogFileProtectionTests.swift:542: error: -[ConduitTests.RotatingLogFileProtectionTests testConcurrentWritesAndCloseAccountForEveryRecord] : XCTAssertEqual failed: ("314") is not equal to ("0") - no admitted record was failed by a drain after the close
+/Users/SIS8LIS/.codex/worktrees/shared-runtime-host/Conduit/Tests/ConduitTests/RotatingLogFileProtectionTests.swift:544: error: -[ConduitTests.RotatingLogFileProtectionTests testConcurrentWritesAndCloseAccountForEveryRecord] : XCTAssertEqual failed: ("4948") is not equal to ("5262") - every write is accounted for
+Test Case '-[ConduitTests.RotatingLogFileProtectionTests testConcurrentWritesAndCloseAccountForEveryRecord]' failed (1.775 seconds).
+	 Executed 1 test, with 3 failures (0 unexpected) in 1.775 (1.775) seconds
+	 Executed 1 test, with 3 failures (0 unexpected) in 1.775 (1.775) seconds
+	 Executed 1 test, with 3 failures (0 unexpected) in 1.775 (1.781) seconds

@@ -2,16 +2,16 @@
 import XCTest
 @testable import ConduitRuntime
 import ConduitShared
+import ProxyKernel
 
 /// The transport's wait lifetimes: parked pulls, timers, waiter cleanup, the single pull slot, first frames and terminal
 /// cleanup. The owner, the timers and the hops are all manual, so each state is reached by an explicit step, and every
 /// wait for an asynchronous end is bounded on an observable state.
-@MainActor
 final class RuntimeServiceLifetimeTests: XCTestCase {
     private let lifecycle = ControlLifecycleRevision(rawValue: 5) ?? ControlLifecycleRevision(rawValue: 0)!
     private let frameLimits = try! ControlFrameLimits(maxFrameBytes: 64 * 1024)
 
-    private func makeClient(_ harness: RuntimeServiceHarness, _ transport: RuntimeInMemoryTransport) throws -> any RuntimeClient {
+    @RuntimeActor private func makeClient(_ harness: RuntimeServiceHarness, _ transport: RuntimeInMemoryTransport) throws -> any RuntimeClient {
         let epoch = harness.timing.now
         return try makeFramedRuntimeClient(
             transport: transport,
@@ -23,7 +23,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
     }
 
     /// The error a call ended with, when it ended with one.
-    private func thrownError<T>(_ body: () async throws -> T) async -> RuntimeClientError? {
+    @RuntimeActor private func thrownError<T>(_ body: () async throws -> T) async -> RuntimeClientError? {
         do {
             _ = try await body()
             return nil
@@ -33,7 +33,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
     }
 
     /// The transport-level end of a direct stream call, when it ended with one.
-    private func thrownWaitEnd<T>(_ body: () async throws -> T) async -> RuntimeWaitEnd? {
+    @RuntimeActor private func thrownWaitEnd<T>(_ body: () async throws -> T) async -> RuntimeWaitEnd? {
         do {
             _ = try await body()
             return nil
@@ -44,7 +44,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
 
     /// Ends what a failed step left pending, without awaiting it. The manual clock never fires a deadline and a held cancellation never
     /// completes on its own, so awaiting the caller after a failed step could hang the suite instead of failing the test.
-    private func abandonAfterFailure(_ harness: RuntimeServiceHarness, cancel: () -> Void) {
+    @RuntimeActor private func abandonAfterFailure(_ harness: RuntimeServiceHarness, cancel: () -> Void) {
         cancel()
         harness.timing.releaseHeldCancellations()
         harness.timing.fireAll()
@@ -53,7 +53,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
     }
 
     /// Opens one live subscription directly on the transport, and runs the open's owner hop.
-    private func openStreamDirectly(_ harness: RuntimeServiceHarness, _ transport: RuntimeInMemoryTransport) async throws -> ControlRuntimeStream {
+    @RuntimeActor private func openStreamDirectly(_ harness: RuntimeServiceHarness, _ transport: RuntimeInMemoryTransport) async throws -> ControlRuntimeStream {
         let frame = try ControlRuntimeCodec.encodeFrame(
             ControlRuntimeMessage(
                 correlation: RuntimeServiceFixtures.requestID(7),
@@ -70,7 +70,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
 
     // MARK: - Park, timeout, refill
 
-    func testAParkedPullTimesOutThenItsRegistrationIsCleanedBeforeTheNextPullParks() async throws {
+    @RuntimeActor func testAParkedPullTimesOutThenItsRegistrationIsCleanedBeforeTheNextPullParks() async throws {
         let harness = try RuntimeServiceHarness()
         let transport = harness.transport()
         let client = try makeClient(harness, transport)
@@ -85,6 +85,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         XCTAssertEqual(harness.core.parkedWaiterCount, 1, "the pull parked on its registration")
         let armed = await awaitState { harness.timing.armedTimerCount == 1 }
         XCTAssertTrue(armed)
+        guard queued, armed else { return abandonAfterFailure(harness) { parked.cancel(); subscription.cancel() } }
 
         harness.timing.fireAll()
         let timedOut = await thrownError { try await parked.value }
@@ -102,6 +103,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         let again = Task { try await subscription.next(deadline) }
         let againQueued = await awaitState { harness.scheduling.pendingCount > 0 }
         XCTAssertTrue(againQueued)
+        guard againQueued else { return abandonAfterFailure(harness) { again.cancel(); subscription.cancel() } }
         harness.scheduling.drainAll()
         XCTAssertEqual(harness.core.parkedWaiterCount, 1, "the next pull parks instead of reporting busy")
 
@@ -110,7 +112,79 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         _ = await thrownError { try await again.value }
     }
 
-    func testAStalledOwnerHoldsItsReservationsAndRefillsAreBoundedByTheLane() async throws {
+    // MARK: - Abandoning after a failed gate
+
+    /// A guard that returns after a failed gate leaves no suspended pull, so its test fails instead of hanging the suite. A pull whose
+    /// task has not started is still abandoned: the task inherits this actor, so it cannot start before the test suspends.
+    @RuntimeActor func testAPullAbandonedBeforeItStartedEnds() async throws {
+        final class Answered: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            var value: Bool { lock.withLock { done } }
+            func set() { lock.withLock { done = true } }
+        }
+        let harness = try RuntimeServiceHarness()
+        let transport = harness.transport()
+        let client = try makeClient(harness, transport)
+        let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
+        let subscription = try await runCall(harness.scheduling) { try await client.subscribe(.live, deadline: deadline) }
+        _ = try await subscription.next(deadline)
+
+        let started = Answered()
+        let ended = Answered()
+        let parked = Task {
+            started.set()
+            defer { ended.set() }
+            _ = try await subscription.next(deadline)
+        }
+        XCTAssertFalse(started.value, "the pull has not started: its task inherits this actor, which the test still holds")
+
+        abandonAfterFailure(harness) {
+            parked.cancel()
+            subscription.cancel()
+        }
+        let pullEnded = await awaitState { ended.value }
+        XCTAssertTrue(pullEnded, "the abandoned pull ends instead of staying suspended")
+    }
+
+    /// The state a missed `fireAll` leaves: the pull is parked on its registration and its timer is armed, and nothing fires it.
+    @RuntimeActor func testAParkedPullAbandonedWithItsTimerUnfiredEnds() async throws {
+        final class Answered: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            var value: Bool { lock.withLock { done } }
+            func set() { lock.withLock { done = true } }
+        }
+        let harness = try RuntimeServiceHarness()
+        let transport = harness.transport()
+        let client = try makeClient(harness, transport)
+        let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
+        let subscription = try await runCall(harness.scheduling) { try await client.subscribe(.live, deadline: deadline) }
+        _ = try await subscription.next(deadline)
+
+        let ended = Answered()
+        let parked = Task {
+            defer { ended.set() }
+            _ = try await subscription.next(deadline)
+        }
+        let queued = await awaitState { harness.scheduling.pendingCount > 0 }
+        XCTAssertTrue(queued)
+        harness.scheduling.drainAll()
+        XCTAssertEqual(harness.core.parkedWaiterCount, 1, "the pull parked on its registration")
+        let armed = await awaitState { harness.timing.armedTimerCount == 1 }
+        XCTAssertTrue(armed)
+        guard queued, armed else { return abandonAfterFailure(harness) { parked.cancel(); subscription.cancel() } }
+
+        // No `fireAll`: a timer that armed just after its gate leaves exactly this state.
+        abandonAfterFailure(harness) {
+            parked.cancel()
+            subscription.cancel()
+        }
+        let pullEnded = await awaitState { ended.value }
+        XCTAssertTrue(pullEnded, "the abandoned pull ends although its timer was never fired")
+    }
+
+    @RuntimeActor func testAStalledOwnerHoldsItsReservationsAndRefillsAreBoundedByTheLane() async throws {
         let harness = try RuntimeServiceHarness()
         let transport = harness.transport()
         let client = try makeClient(harness, transport)
@@ -124,6 +198,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
             }
             let armed = await awaitState { harness.timing.armedTimerCount == 1 }
             XCTAssertTrue(armed)
+            guard armed else { return abandonAfterFailure(harness) { call.cancel() } }
             harness.timing.fireAll()
             let outcome = await thrownError { try await call.value }
             XCTAssertEqual(outcome, .notSent(.deadlineExpired), "the owner never claimed the call")
@@ -157,7 +232,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
     /// left un-run. The timer makes the typed refusal before any claim, so it reaches the caller at once while the hop still holds the
     /// lane; draining the hop then runs the round unclaimed and releases the lane. It returns the caller's bytes, or nil after a failed
     /// step, having ended what that step left pending instead of awaiting it.
-    private func budgetRefusalUnderAStalledOwner(
+    @RuntimeActor private func budgetRefusalUnderAStalledOwner(
         _ harness: RuntimeServiceHarness,
         _ transport: RuntimeInMemoryTransport,
         lane: RuntimeLane,
@@ -202,7 +277,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         return refusal
     }
 
-    func testASubmitBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound() async throws {
+    @RuntimeActor func testASubmitBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound() async throws {
         let harness = try RuntimeServiceHarness()
         let transport = harness.transport()
         let limits = frameLimits
@@ -232,7 +307,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         XCTAssertEqual(lookup, .unknown(.notRecorded), "nothing was admitted")
     }
 
-    func testAnOpenBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound() async throws {
+    @RuntimeActor func testAnOpenBudgetRefusalReturnsWhileTheStalledOwnerStillHoldsItsRound() async throws {
         let harness = try RuntimeServiceHarness()
         let transport = harness.transport()
         let limits = frameLimits
@@ -258,7 +333,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
 
     // MARK: - Cancelled timers and cleanup
 
-    func testACancelledWaitKeepsItsReservationUntilItsTimerAndItsCleanupQuiesce() async throws {
+    @RuntimeActor func testACancelledWaitKeepsItsReservationUntilItsTimerAndItsCleanupQuiesce() async throws {
         let harness = try RuntimeServiceHarness()
         let transport = harness.transport()
         let client = try makeClient(harness, transport)
@@ -274,6 +349,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         XCTAssertEqual(harness.core.parkedWaiterCount, 1)
         let armed = await awaitState { harness.timing.armedTimerCount == 1 }
         XCTAssertTrue(armed)
+        guard queued, armed else { return abandonAfterFailure(harness) { parked.cancel(); subscription.cancel() } }
 
         parked.cancel()
         let cancelled = await thrownError { try await parked.value }
@@ -282,6 +358,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         XCTAssertTrue(held, "the cancelled timer's completion is held")
         XCTAssertEqual(harness.scheduling.pendingCount, 1, "the registration's cleanup is queued")
         XCTAssertEqual(transport.lanes.inFlight(.stream), 1, "the timer and the cleanup still hold the reservation")
+        guard held else { return abandonAfterFailure(harness) { subscription.cancel() } }
         let refusedWhileHeld = await thrownError { try await subscription.next(deadline) }
         XCTAssertEqual(refusedWhileHeld, .readAborted(.transportBusy))
 
@@ -300,7 +377,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
 
     /// The same successful handoff on a capacity-one lane: an answered Stop returns only once its reservation has released, so the next
     /// Stop of the module is admitted at once, not refused busy. A Stop's lane holds one slot per module.
-    func testAnAnsweredStopReturnsOnlyAfterItsReservationReleasedSoTheNextStopIsNotBusy() async throws {
+    @RuntimeActor func testAnAnsweredStopReturnsOnlyAfterItsReservationReleasedSoTheNextStopIsNotBusy() async throws {
         final class Answered: @unchecked Sendable {
             private let lock = NSLock()
             private var done = false
@@ -351,7 +428,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
     /// The ticket's complete release: a waiter that named no part to keep resumes only after the final end has returned the lane slot
     /// and its release callback has returned, whether it registered before that end or arrived while the release was in progress. The
     /// callback is held on a bounded gate; the gate is always opened, so a failure cannot strand the callback's thread.
-    func testSettledWaitsUntilTheReleaseCallbackHasReturned() async throws {
+    @RuntimeActor func testSettledWaitsUntilTheReleaseCallbackHasReturned() async throws {
         final class Flag: @unchecked Sendable {
             private let lock = NSLock()
             private var set = false
@@ -397,7 +474,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
     /// A pull that delivers returns only once its reservation has fully released, as an answered private exchange does: with its
     /// cancelled timer's completion held, its caller is not answered; once that completes, the answer arrives with the lane slot already
     /// returned and the pull slot free, so the next pull succeeds at once, with no wait or retry in the caller.
-    func testADeliveredPullReturnsOnlyAfterItsReservationReleasedSoTheNextPullSucceeds() async throws {
+    @RuntimeActor func testADeliveredPullReturnsOnlyAfterItsReservationReleasedSoTheNextPullSucceeds() async throws {
         final class Answered: @unchecked Sendable {
             private let lock = NSLock()
             private var done = false
@@ -464,7 +541,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
 
     // MARK: - Open cancelled after registration
 
-    func testAnOpenCancelledAfterItsSubscriberRegisteredRemovesIt() async throws {
+    @RuntimeActor func testAnOpenCancelledAfterItsSubscriberRegisteredRemovesIt() async throws {
         let harness = try RuntimeServiceHarness()
         let lanes = RuntimeLaneCounter(limits: harness.limits)
         let ticket = try XCTUnwrap(lanes.reserve(.read, onQuiesced: nil))
@@ -498,6 +575,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         }
         let queued = await awaitState { harness.scheduling.pendingCount > 0 }
         XCTAssertTrue(queued)
+        guard queued else { return abandonAfterFailure(harness) { waiter.cancel() } }
         harness.scheduling.drainAll()
 
         XCTAssertEqual(core.openSubscriberCount, 0, "the subscriber registered inside the lost open is removed")
@@ -511,7 +589,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
 
     // MARK: - First frame
 
-    func testAnExpiredFirstPullConsumesNothingAndTheBaselineIsStillThere() async throws {
+    @RuntimeActor func testAnExpiredFirstPullConsumesNothingAndTheBaselineIsStillThere() async throws {
         let harness = try RuntimeServiceHarness()
         let transport = harness.transport()
         let stream = try await openStreamDirectly(harness, transport)
@@ -530,7 +608,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
 
     // MARK: - Single pull on the direct transport
 
-    func testTheDirectTransportRefusesASecondPullWhileTheFirstHoldsTheSlot() async throws {
+    @RuntimeActor func testTheDirectTransportRefusesASecondPullWhileTheFirstHoldsTheSlot() async throws {
         let harness = try RuntimeServiceHarness()
         let transport = harness.transport()
         let stream = try await openStreamDirectly(harness, transport)
@@ -556,7 +634,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
     /// The production registration path, with a cancel landing after the registration is installed and before the wait parks.
     /// The cleanup hop is queued and the waiter part holds the reservation until that hop runs. The pull slot, which the lane's
     /// release callback frees, stays held until the timer part ends too.
-    func testARegistrationResolvedBeforeItParksKeepsItsReservationUntilItsCleanupRuns() throws {
+    @RuntimeActor func testARegistrationResolvedBeforeItParksKeepsItsReservationUntilItsCleanupRuns() async throws {
         final class ReleaseFlag: @unchecked Sendable {
             var released = false
         }
@@ -605,7 +683,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
 
     /// A subscriber the ring evicted past gets a stream end. The end is terminal in the same owner turn: the subscription leaves
     /// the service and the handle releases, so a later cancel queues nothing, and a further pull is disconnected.
-    func testAStreamEndReleasesTheSubscriberInTheSameOwnerTurn() async throws {
+    @RuntimeActor func testAStreamEndReleasesTheSubscriberInTheSameOwnerTurn() async throws {
         let harness = try RuntimeServiceHarness()
         let transport = harness.transport()
         let stream = try await openStreamDirectly(harness, transport)
@@ -636,7 +714,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
 
     /// A resolved wait releases the closure that captured its request, while its timer is still held. The lane keeps its slot
     /// until that timer ends, so the release is of payload only, and no capacity is freed early.
-    func testAResolvedWaitReleasesItsCapturedRequestWhileItsHeldTimerKeepsTheLane() async throws {
+    @RuntimeActor func testAResolvedWaitReleasesItsCapturedRequestWhileItsHeldTimerKeepsTheLane() async throws {
         final class Freed: @unchecked Sendable {
             var value = false
         }
@@ -682,7 +760,10 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         XCTAssertTrue(armed)
         let queued = await awaitState { harness.scheduling.pendingCount == 1 }
         XCTAssertTrue(queued)
-        XCTAssertTrue(harness.scheduling.runNext(), "the round runs and resolves the wait")
+        guard armed, queued else { return abandonAfterFailure(harness) { waiter.cancel() } }
+        let ran = harness.scheduling.runNext()
+        XCTAssertTrue(ran, "the round runs and resolves the wait")
+        guard ran else { return abandonAfterFailure(harness) { waiter.cancel() } }
         XCTAssertTrue(freed.value, "the resolved wait released the closure that captured its request")
         XCTAssertEqual(lanes.inFlight(.read), 1, "the held timer still holds the lane")
 
@@ -699,7 +780,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
     /// the closure's only holder, and its destructor tries the gate's lock. A destructor that ran under the lock would find it held,
     /// and the test would fail at once: `try` never waits, so no regression can hang the suite. The deadline ends a parked wait,
     /// which is the path where the gate itself is the last holder.
-    func testTheParkedClosureIsReleasedAfterTheGateLockIsFreeAndBeforeTheCallerResumes() async throws {
+    @RuntimeActor func testTheParkedClosureIsReleasedAfterTheGateLockIsFreeAndBeforeTheCallerResumes() async throws {
         final class Verdict: @unchecked Sendable {
             var lockWasFree: Bool?
         }
@@ -748,7 +829,10 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         XCTAssertTrue(armed)
         let queued = await awaitState { harness.scheduling.pendingCount == 1 }
         XCTAssertTrue(queued)
-        XCTAssertTrue(harness.scheduling.runNext(), "the round runs and parks")
+        guard armed, queued else { return abandonAfterFailure(harness) { waiter.cancel() } }
+        let ran = harness.scheduling.runNext()
+        XCTAssertTrue(ran, "the round runs and parks")
+        guard ran else { return abandonAfterFailure(harness) { waiter.cancel() } }
         XCTAssertNil(verdict.lockWasFree, "a parked wait still holds its closure")
 
         harness.timing.fireAll()
@@ -762,7 +846,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
     // MARK: - Dropping a framed subscription
 
     /// A framed subscription dropped without a cancel releases its subscriber once, through the framed client's own cleanup.
-    func testADroppedFramedSubscriptionReleasesItsSubscriberWithoutACancel() async throws {
+    @RuntimeActor func testADroppedFramedSubscriptionReleasesItsSubscriberWithoutACancel() async throws {
         let harness = try RuntimeServiceHarness()
         let client = try makeClient(harness, harness.transport())
         let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
@@ -779,7 +863,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
 
     // MARK: - Terminal cleanup
 
-    func testCancelIsTerminalAndTheSubscriberIsRemovedExactlyOnce() async throws {
+    @RuntimeActor func testCancelIsTerminalAndTheSubscriberIsRemovedExactlyOnce() async throws {
         let harness = try RuntimeServiceHarness()
         let transport = harness.transport()
         let stream = try await openStreamDirectly(harness, transport)

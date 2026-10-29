@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-import ConduitShared
 import Foundation
 import XCTest
 @testable import Conduit
+@testable import PlatformMac
 @testable import ProxyKernel
 
-/// The sidecar refusal as the app presents it (decision 0026), on a real `AppState` over the harness's scratch directories and
-/// fake machine. A refused preferences save does not veto the runtime save or its apply, and the banner, the events and the log
-/// name the file and the field, never the private URL. A refused startup sidecar blocks every save and keeps its bytes.
+/// A sidecar the startup load refuses refuses the whole open: no draft is seeded, nothing is saved, every file keeps its bytes, and the
+/// controls stay disabled. The loader's refusal itself is pinned by `ConfigSidecarBoundaryTests`.
 @MainActor
 final class AppStateHarnessSidecarRefusalTests: XCTestCase {
-    private var harness: AppStateHarness!
+    private var harness: AppStateHarness?
 
     override func tearDown() async throws {
         await harness?.tearDown()
@@ -18,58 +17,37 @@ final class AppStateHarnessSidecarRefusalTests: XCTestCase {
         try await super.tearDown()
     }
 
-    /// A browser URL past its raw limit. The marker must never reach a banner, an event or the log.
-    private let privateMarker = "PREF-SIDECAR-SECRET"
-
-    private var oversizedURL: String {
-        "https://user:\(privateMarker)@preferences.example.test/" + String(repeating: "p", count: DomainResourceLimits.urlText)
+    func testAMalformedPlatformSidecarRefusesTheOpenAndKeepsEveryFile() async throws {
+        try await assertRefusesTheOpen(malformed: "platform.json")
     }
 
-    func testARefusedPreferencesSaveKeepsTheRuntimeSaveAndApplyAndNamesOnlyTheFile() throws {
-        harness = try AppStateHarness(config: ProxyConfig.testFixture(), platformConfig: PlatformIntegrationConfig())
-        let state = harness.launch()
-        let preferencesBefore = try Data(contentsOf: harness.environment.preferencesFile)
-
-        state.appPreferences.preferredBrowserTestURL = oversizedURL
-        state.config.health.checkInterval = 47
-        state.scheduleSave()
-        state.saveConfig()
-
-        // The runtime file is written and applied, so the refused preferences do not veto it.
-        XCTAssertEqual(try ProxyConfigPersistence.load(from: harness.environment.configFile).health.checkInterval, 47)
-        XCTAssertEqual(state.reconciler.requestedConfig, state.config)
-        // The preferences file keeps its previous bytes, and the edit stays unsaved so a later save or quit retries it.
-        XCTAssertEqual(try Data(contentsOf: harness.environment.preferencesFile), preferencesBefore)
-        XCTAssertTrue(state.hasUnsavedEdit)
-
-        let banner = try XCTUnwrap(state.lastErrorMessage, "the refused save shows a banner")
-        XCTAssertTrue(banner.contains("the app preferences"), banner)
-        XCTAssertTrue(banner.contains("browserTestURL"), banner)
-        XCTAssertFalse(banner.contains(privateMarker), banner)
-        let rejected = state.eventLog.events.filter { $0.event == "config.save_rejected" }
-        XCTAssertEqual(rejected.count, 1)
-        XCTAssertTrue(rejected.first?.detail?.contains("browserTestURL") ?? false)
-        XCTAssertFalse(state.eventLog.events.contains { ($0.detail ?? "").contains(privateMarker) })
-        XCTAssertFalse(state.logStore.exportDiagnosticLog().contains(privateMarker))
+    func testAMalformedPreferencesSidecarRefusesTheOpenAndKeepsEveryFile() async throws {
+        try await assertRefusesTheOpen(malformed: "preferences.json")
     }
 
-    func testARefusedStartupPreferencesSidecarBlocksEverySaveAndKeepsItsBytes() throws {
-        harness = try AppStateHarness(config: ProxyConfig.testFixture(), platformConfig: PlatformIntegrationConfig())
-        let sidecar = Data(#"{"preferredBrowserTestURL":""#.utf8) + Data(oversizedURL.utf8) + Data(#""}"#.utf8)
-        try sidecar.write(to: harness.environment.preferencesFile)
-        let runtimeBefore = try Data(contentsOf: harness.environment.configFile)
-
+    private func assertRefusesTheOpen(malformed filename: String, line: UInt = #line) async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        let harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        self.harness = harness
+        let path = harness.stateDirectory.appendingPathComponent(filename)
+        // Malformed, and carrying a value the banner must not repeat.
+        let corrupt = Data(#"{"preferredBrowserTestURL": "https://private-witness.test/"#.utf8)
+        let runtimeBytes = try Data(contentsOf: harness.environment.configFile)
+        try corrupt.write(to: path)
         let state = harness.launch()
-
-        let banner = try XCTUnwrap(state.lastErrorMessage, "the refused load shows a banner")
-        XCTAssertTrue(banner.contains("preferences.json"), banner)
-        XCTAssertTrue(banner.contains("resource limit"), banner)
-        XCTAssertFalse(banner.contains(privateMarker), banner)
-
-        state.config.health.checkInterval = 47
+        await state.opening?.value
+        XCTAssertEqual(state.phase, .refused, line: line)
+        let banner = try XCTUnwrap(state.lastErrorMessage, "the refusal is shown", line: line)
+        XCTAssertTrue(banner.contains(filename), "the banner names the refused file: \(banner)", line: line)
+        XCTAssertFalse(banner.contains("private-witness"), "and none of its content", line: line)
+        XCTAssertNil(state.editor, "no editor exists without an observation", line: line)
+        state.appPreferences.fileLoggingEnabled.toggle()
+        state.platformConfig.manageSystemProxy.toggle()
         state.saveConfig()
-        XCTAssertEqual(try Data(contentsOf: harness.environment.preferencesFile), sidecar, "the rejected sidecar keeps its bytes")
-        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), runtimeBefore, "no save reaches the runtime file")
-        XCTAssertFalse(state.eventLog.events.contains { ($0.detail ?? "").contains(privateMarker) })
+        state.toggleProxy()
+        XCTAssertEqual(try Data(contentsOf: path), corrupt, line: line)
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), runtimeBytes, line: line)
+        XCTAssertFalse(state.controlsEnabled, line: line)
     }
 }

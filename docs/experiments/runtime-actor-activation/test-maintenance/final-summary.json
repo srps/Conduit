@@ -1,0 +1,20 @@
+{
+  "checks": 41,
+  "tests": 3768,
+  "skips": 4,
+  "simulator_scenarios": 103,
+  "source_sha256": "3e79fd7dc652f57f4279b3afc92e32105d864413c4b23a46a0de93aeeb7cfbf7",
+  "stable": true,
+  "terminal_exit": 0,
+  "logs": {
+    "swift-tests.log": {
+      "sha256": "beb61eea28e3f8a39bb8e8968ecc2c2943a9c54eb118d9c9e16d37e4be17ff0d",
+      "bytes": 1237480
+    },
+    "pm-sim-all.log": {
+      "sha256": "aa6ee45bdde3fbd3983c5eb304d190f03c184e701e8305a0e85ff5946f22ab0c",
+      "bytes": 261264
+    }
+  },
+  "production_module_diff": ""
+}

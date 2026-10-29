@@ -1,0 +1,6 @@
+Test Case '-[ConduitTests.LoggingTests testABurstWhileMainIsParkedReachesTheFileAndOneDrainBringsTheNewestHistory]' started.
+Test Case '-[ConduitTests.LoggingTests testABurstWhileMainIsParkedReachesTheFileAndOneDrainBringsTheNewestHistory]' passed (0.029 seconds).
+Test Case '-[ConduitTests.LoggingTests testATimeoutAcrossAToggleIsCountedOnceAndNoCounterGoesBack]' started.
+Test Case '-[ConduitTests.LoggingTests testATimeoutAcrossAToggleIsCountedOnceAndNoCounterGoesBack]' passed (0.336 seconds).
+Test Case '-[ConduitTests.RotatingLogFileProtectionTests testConcurrentWritesAndCloseAccountForEveryRecord]' started.
+Test Case '-[ConduitTests.RotatingLogFileProtectionTests testConcurrentWritesAndCloseAccountForEveryRecord]' passed (0.215 seconds).

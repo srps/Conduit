@@ -1,0 +1,8 @@
+{
+  "baseline": "f59dbb96e93bd0132f4f15c39e5c99b9a4fa52c6",
+  "files_sha256": {
+    "Tests/ConduitTests/ProxiedTunnelTests.swift": "60717379414c7ad66b3731be91f3cf0bf69a240d587d04ad781c085cd1210be8",
+    "Tests/ConduitTests/TunnelForwarderTests.swift": "8336cf72931d54f254780e5c2dbacac26d560766a4aeff68abf8c247be69aca9"
+  },
+  "patch_sha256": "b4b98c04b13ea2375727124e42bff15190264bcc581d661a5d836272c65f0f51"
+}

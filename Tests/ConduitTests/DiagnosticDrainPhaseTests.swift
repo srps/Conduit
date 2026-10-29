@@ -39,6 +39,41 @@ final class DiagnosticDrainPhaseTests: XCTestCase {
         XCTAssertLessThanOrEqual(cut ?? ContinuousClock.now, ContinuousClock.now.advanced(by: .seconds(1)))
     }
 
+    /// A cap only cuts the phase's one deadline. A passed cap leaves no wait at all; a cap inside the envelope and the writer wait is the
+    /// deadline itself; a cap past the envelope, like no cap, leaves the ordinary per-writer wait. Computed values only, nothing timed.
+    func testACapCutsThePhaseDeadlineAndNeverExtendsIt() throws {
+        let before = ContinuousClock.now
+        XCTAssertNil(DiagnosticFlushPhase(cappedAt: before.advanced(by: .milliseconds(-1))).nextDeadline(), "a passed cap waits for nothing")
+        let cap = before.advanced(by: .seconds(1))
+        XCTAssertEqual(DiagnosticFlushPhase(cappedAt: cap).nextDeadline(), cap, "a near cap is the deadline, never passed")
+
+        let far = DiagnosticFlushPhase(cappedAt: before.advanced(by: .seconds(60))).nextDeadline()
+        let ordinary = DiagnosticFlushPhase().nextDeadline()
+        let after = ContinuousClock.now
+        for next in [far, ordinary] {
+            let deadline = try XCTUnwrap(next, "a cap past the envelope, like none, leaves a wait")
+            XCTAssertGreaterThanOrEqual(deadline, before.advanced(by: DiagnosticFlushPhase.writerWait))
+            XCTAssertLessThanOrEqual(deadline, after.advanced(by: DiagnosticFlushPhase.writerWait))
+        }
+    }
+
+    /// The logger's drain is reported beside the artifacts and never changes their confirmation: unset, it is `unavailable`, not a
+    /// claimed drain, and no outcome of it makes a confirmed phase unconfirmed or the reverse.
+    func testTheLoggerOutcomeStaysApartFromTheArtifactConfirmation() {
+        var confirmed = DiagnosticFlushReport(audit: .drained, events: .drained, eventsRetry: nil, snapshot: .current,
+                                              snapshotEvent: .notNeeded, auditStatistics: RecordWriterStatistics(),
+                                              eventsStatistics: RecordWriterStatistics())
+        XCTAssertEqual(confirmed.logger, .unavailable)
+        var unconfirmed = confirmed
+        unconfirmed.events = .timedOut
+        for outcome in [RecordDrainOutcome.drained, .timedOut, .busy, .skippedBudget, .cancelled, .unavailable] {
+            confirmed.logger = outcome
+            unconfirmed.logger = outcome
+            XCTAssertTrue(confirmed.allConfirmed, "\(outcome)")
+            XCTAssertFalse(unconfirmed.allConfirmed, "\(outcome)")
+        }
+    }
+
     func testExhaustedPhaseSkipsEveryWriterAndSaysSo() async {
         let events = RuntimeEventLog(capacity: 16)
         let logger = RecordingLogSink()

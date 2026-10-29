@@ -1,0 +1,16 @@
+{
+  "tests_sha256": "7cdfbf058855a55375a37d7f415baba66b277440205bfd745438532b213a5b33",
+  "checks": [
+    {
+      "name": "optimized-build",
+      "exit": 0,
+      "seconds": 210.87
+    },
+    {
+      "name": "optimized-network-recovery",
+      "exit": 0,
+      "seconds": 0.94
+    }
+  ],
+  "scope": "Local optimized recovery class; hosted compiler acceptance remains separate."
+}

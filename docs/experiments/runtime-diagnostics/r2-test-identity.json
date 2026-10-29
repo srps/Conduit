@@ -1,0 +1,30 @@
+{
+  "key_new_tests_passed_in_full_run": [
+    {
+      "method": "testConcurrentWritesAndCloseAccountForEveryRecord",
+      "full_workflow_result": "Test Case '-[ConduitTests.RotatingLogFileProtectionTests testConcurrentWritesAndCloseAccountForEveryRecord]' passed (0.216 seconds)."
+    },
+    {
+      "method": "testAHeldLoggerDrainLeavesStatusReadsAndStopAdmissionAnswered",
+      "full_workflow_result": "Test Case '-[ConduitTests.RuntimeHostControlOwnerTests testAHeldLoggerDrainLeavesStatusReadsAndStopAdmissionAnswered]' passed (2.045 seconds)."
+    },
+    {
+      "method": "testTheReadyFileHoldsTheReadinessStatus",
+      "full_workflow_result": "Test Case '-[ConduitTests.DaemonRuntimeHostTests testTheReadyFileHoldsTheReadinessStatus]' passed (0.013 seconds)."
+    },
+    {
+      "method": "testABurstWhileMainIsParkedReachesTheFileAndOneDrainBringsTheNewestHistory",
+      "full_workflow_result": "Test Case '-[ConduitTests.LoggingTests testABurstWhileMainIsParkedReachesTheFileAndOneDrainBringsTheNewestHistory]' passed (0.038 seconds)."
+    },
+    {
+      "method": "testATimeoutAcrossAToggleIsCountedOnceAndNoCounterGoesBack",
+      "full_workflow_result": "Test Case '-[ConduitTests.LoggingTests testATimeoutAcrossAToggleIsCountedOnceAndNoCounterGoesBack]' passed (0.321 seconds)."
+    }
+  ],
+  "existing_skips": [
+    "Test Case '-[ConduitTests.ProxyAuthenticatorTests testBareNegotiateRechallengeAfterInitialTokenDoesNotCrash]' skipped (0.033 seconds).",
+    "Test Case '-[ConduitTests.ProxyAuthenticatorTests testBareNegotiateRechallengeClearsStaleGSSContextWithoutCrashing]' skipped (0.000 seconds).",
+    "Test Case '-[ConduitTests.RuntimeServiceProfileProjectionTests testFreshKernelConstructionAloneIsSampledForComparison]' skipped (0.000 seconds).",
+    "Test Case '-[ConduitTests.RuntimeServiceProfileProjectionTests testProjectionOnARetainedKernelIsSampledWithoutACallerPool]' skipped (0.000 seconds)."
+  ]
+}

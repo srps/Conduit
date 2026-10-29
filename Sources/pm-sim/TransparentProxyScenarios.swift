@@ -46,7 +46,7 @@ enum TransparentProxyScenarios {
     /// Pause the reconnect probe explicitly, then send a real intercepted
     /// ClientHello while routing is unsettled. Echo alone cannot distinguish
     /// DIRECT from upstream, so also assert the upstream CONNECT count.
-    @MainActor
+    @RuntimeActor
     static func vpnReconnectRouting(verbose: Bool) async throws -> ScenarioResult {
         let start = Date()
         let group = MultiThreadedEventLoopGroup.singleton
@@ -125,7 +125,7 @@ enum TransparentProxyScenarios {
         )
     }
 
-    @MainActor
+    @RuntimeActor
     static func transparentDirectRouting(verbose: Bool) async throws -> ScenarioResult {
         let name = "transparentDirectRouting"
         let start = Date()
@@ -276,7 +276,7 @@ enum TransparentProxyScenarios {
     ///
     /// `causeProvider` is a closure rather than a value so a scenario can change
     /// the answer between the handler's two reads — see case E.
-    @MainActor
+    @RuntimeActor
     private static func probe(
         group: EventLoopGroup,
         logger: any LogSink,

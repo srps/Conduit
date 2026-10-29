@@ -1,0 +1,10 @@
+{
+  "source_commit": "c6e2c41160e69e558a17452f89b3fcae111c18ae",
+  "gate_report_head": "f59dbb96e93bd0132f4f15c39e5c99b9a4fa52c6",
+  "gate_source_sha256": "ac3e7adc5b77638b1250c923401becdbc4c802bc407386b14cbde8c2032afdba",
+  "committed_relevant_source_sha256": "ac3e7adc5b77638b1250c923401becdbc4c802bc407386b14cbde8c2032afdba",
+  "matching": true,
+  "product_changed_paths_since_candidate_e120": [],
+  "candidate_build_head": "e120a5c62fd9203691d0e6994d50e1b9df94bb3c",
+  "scope": "Test-only corrections leave the archived local candidate product source unchanged."
+}

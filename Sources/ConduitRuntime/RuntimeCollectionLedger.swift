@@ -154,13 +154,14 @@ struct RuntimeCollectionLedger {
         return .stale(revision: cursor, rows: rows)
     }
 
-    /// Stores one capture of a kind's current revision. A capture is refused whole, with no truncation, and with no state change,
-    /// when its rows are of another kind or do not count the exact total, when the total is past the row bound, or when its bytes
-    /// exceed one capture's bound or the retained bound. Every one of those checks runs before the first change.
+    /// Stores one capture of the revision its start turn named, which may since have been superseded. A capture is refused whole, with no
+    /// truncation, and with no state change, when its rows are of another kind or do not count the exact total, when the total is past the
+    /// row bound, or when its bytes exceed one capture's bound or the retained bound. Every one of those checks runs before the first change.
     ///
-    /// A stored capture first replaces any proof of the same revision, then releases every logically expired row set, then evicts the
-    /// oldest live row sets of its kind until the count bound holds, then the oldest live row sets of any kind until the byte bound
-    /// holds, then the oldest proofs of its kind. The byte check compares against the remaining room, so it cannot overflow.
+    /// A stored capture first replaces any proof of the same revision, then releases every logically expired row set at `now`, then evicts
+    /// the oldest live row sets of its kind until the count bound holds, then the oldest live row sets of any kind until the byte bound
+    /// holds, then the oldest proofs of its kind. The byte check compares against the remaining room, so it cannot overflow. The proof's age
+    /// is measured from `capturedAt`, the capture's start, which is `now` unless the caller names an earlier start.
     @discardableResult
     mutating func capture(
         _ kind: ControlCollectionKind,
@@ -168,6 +169,7 @@ struct RuntimeCollectionLedger {
         total: ControlCount,
         rows: ControlProjectedRows,
         encodedBytes: Int,
+        capturedAt: ContinuousClock.Instant? = nil,
         at now: ContinuousClock.Instant
     ) -> RuntimeCaptureResult {
         guard rows.kind == kind, rows.rowCount == total.rawValue else { return .countOrKindMismatch }
@@ -202,7 +204,7 @@ struct RuntimeCollectionLedger {
         let entry = RuntimeCaptureProof(
             revision: revision,
             total: total,
-            capturedAt: now,
+            capturedAt: capturedAt ?? now,
             rows: rows,
             rowBytes: encodedBytes
         )

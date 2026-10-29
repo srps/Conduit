@@ -25,7 +25,7 @@ enum ForcedRoutingScenarios {
         func routeChain(for entries: [String]) -> PACChain { PACChain(routes: [.direct]) }
     }
 
-    @MainActor
+    @RuntimeActor
     private final class Fixture {
         let group = MultiThreadedEventLoopGroup.singleton
         let directOrigin: FakeOrigin
@@ -131,7 +131,7 @@ enum ForcedRoutingScenarios {
         }
     }
 
-    @MainActor
+    @RuntimeActor
     static func forcedProxyPrecedence(verbose: Bool) async throws -> ScenarioResult {
         let started = Date()
         let literals = ["::1", "[::1]", "0:0:0:0:0:0:0:1"]
