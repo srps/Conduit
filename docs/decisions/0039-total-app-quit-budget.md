@@ -124,3 +124,17 @@ The [correction checkpoint](../verification-runtime-quit-deadline-2026-10-28.md)
 The final local workflow passes all 41 checks (3,770 tests / four skips / 103 scenarios), focused/optimized guards and seven production Release trials/162 checks. An earlier unconfirmed ordinary simulator flush remains recorded without a proven cause; diagnostic-only bounded evidence was added, with all assertions and budgets intact. Final hosted and real-machine validation remain pending.
 
 Status 2026-10-29: the normal-path installed Quit is recorded under Implementation evidence, and validation is passed for that scope. The "remains due" and "pending" lines above are historical. Expiry under a slow or stuck helper is still not observed on a real machine; revisit as Consequences describes.
+
+### Deterministic no-stream confirmation coverage — 2026-10-29
+
+The strict hosted Swift run found a test requiring a settled receipt from the one
+final lookup inside its 200 ms reserve. At total expiry, either pending work or
+a missed lookup deadline legitimately leaves confirmation unresolved. Increasing
+the test's total had only narrowed that race. The client now accepts one package
+wait effect, defaulting to the identical continuous-clock sleep. Tests hold the
+last declared save, observe the pending Quit and held wait, release the save and
+join actual host settlement, then release the final read with wire budget left.
+Real-clock expiry and held-teardown coverage remains separate. The selected ten
+seconds, receipt rules and wire contract are unchanged. See the
+[NIO/concurrency verification](../verification-nio-concurrency-2026-10-29.md) for
+checkpoint results, controls and final validation status.

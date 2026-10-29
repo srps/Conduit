@@ -1,0 +1,14 @@
+{
+  "original_sha256": "d649fb6d62adc07bff5aa532a43f7edbf7d0f9bf52a7da6cfdaab5b16b4b46e3",
+  "control": "omit final Quit outcome lookup",
+  "negative_exit": 1,
+  "negative_seconds": 39.874,
+  "failed_cases": [
+    "Test Case '-[ConduitTests.RuntimeHostControlOwnerTests testTheClientQuitFlushesBothDeclaredSavesWhenItsSubscriptionIsRefused]' failed (11.588 seconds).",
+    "Test Case '-[ConduitTests.RuntimeHostControlOwnerTests testTheClientQuitFlushesItsDeclaredSaveWhenItsStreamEndsEarly]' failed (10.055 seconds)."
+  ],
+  "semantic_failure": true,
+  "exactly_restored": true,
+  "restored_exit": 0,
+  "restored_seconds": 5.787
+}

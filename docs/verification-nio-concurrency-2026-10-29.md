@@ -1,8 +1,9 @@
 # NIO concurrency verification — 2026-10-29
 
 Status: implementation, independent review and local workflow gates passed.
-Hosted PR checks and a new candidate remain pending. The existing 0.6.0 draft
-does not contain these repairs.
+The first hosted Release checkpoint passed; its parallel Swift run found a separate
+Quit-test deadline race, repaired below. Final hosted checks and a new candidate
+remain pending. The existing 0.6.0 draft does not contain these repairs.
 
 ## Report and baseline
 
@@ -70,7 +71,8 @@ fallback.
 | Scoped ThreadSanitizer | 264 affected tests, then 32 final pool/streaming/tunnel/VPN tests, passed without suppressions |
 | Full ThreadSanitizer | Failed on the independently reproduced Swift continuation finding described below; not counted as passed |
 | Every Swift workflow step, simulator suite and perf gate | All 20 steps passed on one stable tree; 104 simulator cases passed; perf gate passed (10.12 s, 33.5 MiB maximum RSS) |
-| Optimized tests and hosted PR checks | Pending |
+| Optimized checkpoint | Local release compilation and all 32 repaired pool/VPN/tunnel tests passed; hosted Release checkpoint passed its full standard suite, optimized PAC checks and ad-hoc package verification |
+| Parallel hosted Swift checkpoint | Failed one no-stream Quit assertion; zero NIO misuse diagnostics. The original result remains failed |
 | Independent final reviews | Claude accepted the production synchronization, fixture repairs, streaming coverage and final tunnel shutdown changes after requested fixes |
 
 Strict NIO enforcement is inherited by the Swift, release and sanitizer workflows,
@@ -94,3 +96,42 @@ The installed candidate's earlier
 remains evidence for that exact candidate. The production pool repair needs a new
 candidate and its own release validation. The serving app is not stopped or
 replaced by this investigation.
+
+## Hosted Quit deadline follow-up
+
+The [first hosted checkpoints](experiments/nio-concurrency/hosted-workflow-checkpoints.json)
+ran the same head. Release passed all 3,780 tests, four skips, optimized PAC
+checks and complete ad-hoc ZIP/DMG verification with no NIO misuse. Swift failed
+one no-stream Quit test: its final read reported `unsettled` after 10.836 s.
+There was no NIO misuse in that run either. The log cannot distinguish pending
+Quit work from a lookup that missed its 200 ms remaining deadline; both are
+permitted expiry under decision 0039.
+
+The test now controls the existing keep-caller wait through one package sleep
+effect whose default is the original `Task.sleep`. It holds the final declared
+save through the routine's pending lookups, proves the caller is held, releases
+the save, observes actual host completion and operation settlement, then releases
+the final read. It checks the real Quit receipt, saved values and cleanup. The
+real-clock held-teardown and exhausted-budget tests retain expiry coverage.
+Nothing adds another Quit algorithm, host timing dependency, public type or wire
+change.
+
+Both repaired tests passed 20 isolated strict trials each. Eighteen focused
+client/Quit tests passed, and all 76 affected host/client tests passed TSan
+without suppressions. The [independent Claude review](experiments/nio-concurrency/quit-fallback-review.md)
+accepted the wait, cancellation, bounded recording and task joins; its early
+setup release gap was closed before final gates. Removing the final lookup
+failed both intended receipt assertions; exact
+restoration passed. An injected early setup error ended normally with the
+expected test error in 1.505 s, confirming task cleanup; restoration passed.
+The [semantic](experiments/nio-concurrency/quit-semantic-controls.json),
+[cleanup](experiments/nio-concurrency/quit-failure-control.json) and
+[repeat](experiments/nio-concurrency/quit-strict-repeat.json) receipts retain
+those outcomes. The [final workflow receipt](experiments/nio-concurrency/local-workflow-gates-quit-followup.json)
+records all 20 steps passing on the stable `db11f4ab` tree: 3,780 tests, four
+skips, zero failures/misuse diagnostics and 104 simulator cases. Perf passed at
+10.13 s and 34,783,232 bytes maximum RSS. Only documentation receipts/status
+wording were added after that run, with their checks rerun before push.
+
+The separate Swift continuation finding remains tracked in [issue #118](https://github.com/srps/Conduit/issues/118).
+The full unsuppressed TSan run remains failed; scoped passes do not erase it.

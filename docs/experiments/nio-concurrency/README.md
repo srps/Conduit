@@ -66,3 +66,21 @@ TSAN_OPTIONS=halt_on_error=1:exitcode=66 \
 
 The full TSan run remains a failed run. No test is quarantined, no dependency is
 forked and no second future/continuation bridge is added to hide the report.
+
+## Hosted deadline follow-up
+
+`hosted-workflow-checkpoints.json` retains both the passing Release and failed
+Swift checkpoints. The latter is not rewritten as passed: its no-stream Quit
+assertion depended on a near-deadline wall-clock read. `quit-fallback-review.md`
+reviews the narrow wait injection and controlled store/host ordering used to
+remove that race. See the verification page for subsequent controls and gates.
+
+`quit-semantic-controls.json` removes the one final lookup and records both
+intended assertion failures plus exact restoration and passing controls.
+`quit-failure-control.json` injects an early setup exception after teardown
+registration and confirms normal bounded failure and restoration.
+`quit-strict-repeat.json` records 20 strict isolated trials of both repaired tests.
+
+`local-workflow-gates-quit-followup.json` records the second complete 20-step
+local workflow on the final code/test tree, preserving the earlier receipt.
+Documentation-only receipts/status updates were added afterwards and checked.
