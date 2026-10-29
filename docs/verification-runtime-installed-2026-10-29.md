@@ -31,8 +31,20 @@ A private, non-shipping verifier (SHA-256 `e8405532…`) read the machine before
 - **Local workflow:** all 41 checks pass on unchanged production Source plus the two tests: 3,773 tests, four existing skips and 103 simulator scenarios, on local Swift 6.4.
 - **Hosted on `8a036fe`:** the complete Swift workflow, Release (Swift 6.3.3, 3,771 standard tests with four skips, optimized build and PAC checks, ad-hoc ZIP/DMG verification), slow-drain and CodeQL pass. CodeQL warned that the diff exceeds its 300-file limit, so it is not a full security review. This is not the final head.
 
+## Release CI stall on `512a6b0` and the test guards
+
+The prepared evidence is in [`release-ci-stall-and-guards.json`](experiments/runtime-installed-acceptance/lifetime-guard-closeout-evidence/release-ci-stall-and-guards.json).
+
+- **What happened:** on `512a6b0` the full Swift workflow passed on Swift 6.3.3: 3,773 tests, four skips, no failures. The Release job built normally in 169 s, then hit its 30-minute job limit during the standard debug `swift test`. The last line it delivered was a stop-flood test's `started`; nothing followed for 21 minutes.
+- **Why the cause is unknown:** that output was block-buffered, so the last line marks a buffer boundary, not the stalled test. The named test cannot suspend. **The stalled test and its cause are unknown.** No deadline was raised, and no fix is claimed for that hang.
+- **The local diagnostic did not reproduce it.** The suspect window was run with line-buffered output: 20 normal trials passed, 117 tests each. One trial under the strict cooperative-pool setting ended on a finite assertion in a different suite (`RuntimePhysicalOrderingTests`, DNS metrics). That is a diagnostic finding, not a stall, and is not part of this change.
+- **A real hazard was found and closed.** Review found waits in `RuntimeServiceLifetimeTests` and one in `RuntimeServicePressureMetricsTests` that assert a bounded gate without returning, then wait without bound. Two new controls prove that `abandonAfterFailure` ends a pull before it starts and with its timer unfired. With the cleanup removed, both controls fail their assertions and still finish. The guards then use the file's existing idiom, and the focused classes pass four runs. Three gate-started waiters can still leak if a guard returns before a timer or round exists. That is not a hang, and no claim of complete cleanup quiescence is made.
+- **CI change:** the Release standard step now runs under `/usr/bin/script` with stdin from `/dev/null`, so its output is line-buffered. A native probe confirmed exit statuses 0 and 23, a child SIGTERM (exit 15), a tty, and that stdin EOF does not end the child early. The job timeout stays at 30 minutes. The first new run must show a timestamp on each test line.
+- **Production Source is unchanged.** The installed `97a5b43` candidate's acceptance stands, and no further owner checks are needed. Locally on Swift 6.4, the full standard suite passed: 3,775 tests, four skips, no failures. All 41 local workflow checks pass, including 103 simulator scenarios, on the stable `4890eab0` fingerprint recorded in the evidence file. The local optimized test build and all 22 affected tests also pass. Independent reviews accepted the guard change and this record.
+
 ## Does not prove
 
+- Which test stalled the Release job on `512a6b0`, or why.
 - Release-certificate packaging, the signed tag build or publication.
 - Behavior under heavy load or a slow helper, Quit at its ten-second expiry, or a product-only Quit duration.
 - Automatic start on relaunch. None is selected or added.
@@ -42,6 +54,6 @@ A private, non-shipping verifier (SHA-256 `e8405532…`) read the machine before
 
 ## Remaining
 
-Hosted CI on the final head, then merging PR #258. Then a release-certificate tag build and draft through the release environment with its approval. Publication is the owner's decision.
+Hosted CI on the final head, including Swift 6.3.3 optimized and line-timestamped Release output, then merging PR #258. Then a release-certificate tag build and draft through the release environment with its approval. Publication is the owner's decision.
 
 The private verifier's relaunch prompt stayed silent until the owner pressed Start. That is a harness UX defect, not a product one, and it needs no change.

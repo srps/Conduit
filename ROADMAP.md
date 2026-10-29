@@ -30,6 +30,10 @@ candidate, which is now serving on the owner's machine and passed the
 [installed verification](./docs/verification-runtime-installed-2026-10-29.md).
 `VERSION` is 0.6.0, and the [CHANGELOG](./CHANGELOG.md) has versioned 0.6.0
 notes prepared for packaging. The signed tag build and publication are pending.
+On `512a6b0` the Release job stalled under buffered test output; its cause is
+unknown. Test-only guards and a line-buffered Release test step followed, with
+production Source unchanged
+([checkpoint](./docs/verification-runtime-installed-2026-10-29.md#release-ci-stall-on-512a6b0-and-the-test-guards)).
 
 | Stage | Current state | Remaining work |
 | --- | --- | --- |

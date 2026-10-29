@@ -1,0 +1,89 @@
+{
+  "prepared": "2026-10-29",
+  "scope": "Release CI stall on 512a6b0 and the test-only guards that followed. Prepared summary; no raw logs, paths, process IDs or configuration.",
+  "historic_stall": {
+    "head": "512a6b0d8d740f5703cedfb51a10bf76a7133dd6",
+    "swift_workflow": {
+      "job": 123469674886,
+      "conclusion": "success",
+      "compiler": "Swift 6.3.3",
+      "standard": "3773 tests, 4 skipped, 0 failures"
+    },
+    "release_workflow": {
+      "run": 40880292571,
+      "job": 123469675505,
+      "conclusion": "cancelled at the 30-minute job limit during the standard debug swift test, before the optimized build",
+      "build": "169.43 s, normal",
+      "last_delivered_test_line": "RuntimeServiceAdmissionTests/testAStopFloodStaysInsideItsPartitionAndAnotherModuleStillAdmits started, 13:24:41Z",
+      "silence": "no further output until the cancel at 13:45:56Z",
+      "log_sha256": "fd7725e82ee7bd299110ad6a93627e1f16557d0568f2861c6a85d40200d95b36",
+      "log_bytes": 1490348
+    },
+    "attribution": "unknown",
+    "why_unknown": "The test output was block-buffered: lines arrived in chunks of about 130 sharing one timestamp, and the last delivered chunk arrived about 22 s after XCTest wrote its first line. The last delivered line is a buffer boundary, not the stalled test. The named test has no suspension point. The stall lies in roughly the next buffer of tests, which was lost when the job was cancelled.",
+    "not_a_budget_overrun": "Both runs moved at the same pace, and the remaining suite normally takes about 90 s.",
+    "no_deadline_increase": true,
+    "no_fix_claimed_for_the_historic_hang": true
+  },
+  "local_diagnostic": {
+    "tool": "private, non-shipping PTY runner over the built debug test bundle; not committed",
+    "narrow_lifetime_and_pressure": "2 normal + 2 strict trials clean",
+    "window_8_classes_plus_5_predecessors": "20 normal trials clean, 117 tests each; strict trial 1 ran all 117 and ended on a finite assertion",
+    "strict_finding": "RuntimePhysicalOrderingTests.testTheDNSMetricsHopPublishesTheRunningCoresCountsAtLandingAcrossAStopAndRestart: 'both queries were answered' failed under LIBDISPATCH_COOPERATIVE_POOL_STRICT=1. It is a separate diagnostic, not a stall, does not reproduce the historic hang, and is out of this change.",
+    "hang_reproduced": false
+  },
+  "hazard_found_by_review": "Waits in six RuntimeServiceLifetimeTests tests, and one in RuntimeServicePressureMetricsTests, assert a bounded gate without returning. A missed manual fire or drain then leaves an unbounded await. The same file already guarded this with abandonAfterFailure in three places.",
+  "controls": {
+    "C1": "testAPullAbandonedBeforeItStartedEnds",
+    "C2": "testAParkedPullAbandonedWithItsTimerUnfiredEnds",
+    "positive": "exit 0: 2 started, 2 finished, 0 failures, no trigger (test binary SHA-256 prefix 53c42edb)",
+    "omit_abandon_mutant": "exit 1: 2 started, 2 finished; both 'the abandoned pull ends' assertions failed; no inactivity trigger and no hang",
+    "restored": "the exact positive file (SHA-256 prefix a19) passes normal and strict"
+  },
+  "guards": {
+    "files": [
+      "Tests/ConduitTests/RuntimeServiceLifetimeTests.swift",
+      "Tests/ConduitTests/RuntimeServicePressureMetricsTests.swift"
+    ],
+    "shape": "guard \u2026 else { return abandonAfterFailure(harness) { \u2026 } } after each bounded gate. Each runNext() result is bound to a constant, asserted with its original message and then guarded. PressureMetrics returns with XCTFail unless the stream lane is full.",
+    "focused_runs": "4 runs (2 normal, 2 strict), 22 tests each, no errors and no trigger",
+    "limit": "Three tests start their waiter through the gate directly. If neither a timer nor a round exists yet, a guard that returns can leave that waiter suspended: a leak, not a hang. No claim of complete cleanup quiescence."
+  },
+  "ci_change": {
+    "file": ".github/workflows/release.yml",
+    "standard_step": "/usr/bin/script -q /dev/null /usr/bin/xcrun swift test </dev/null",
+    "native_probe": "success 0, failure 23, a tty, child SIGTERM 15, and stdin EOF that does not end a delayed child early (5 s, exit 7)",
+    "job_timeout_minutes": 30,
+    "first_new_run_must_show": "per-line timestamps on the test output"
+  },
+  "production_source_changed": false,
+  "installed_candidate": "97a5b43, executable SHA-256 prefix a894b35a; native acceptance stays valid, and no further owner checks are needed",
+  "local_standard_suite": "Executed 3775 tests, with 4 tests skipped and 0 failures, on local Swift 6.4 (the full-gates swift-tests summary)",
+  "full_local_workflow_41_checks": {
+    "conclusion": "passed",
+    "checks": 41,
+    "failed": 0,
+    "stable": true,
+    "source_sha256": "4890eab02d8b6c6b36c66a4b2beeb250494d74b68a7784c9391adc6115332124",
+    "final_source_sha256": "4890eab02d8b6c6b36c66a4b2beeb250494d74b68a7784c9391adc6115332124",
+    "standard_tests": 3775,
+    "skipped": 4,
+    "simulator_scenarios": 103
+  },
+  "reviews": {
+    "source_guard_delta": "independent review ACCEPT, no blockers: every guard follows its assertion and precedes the otherwise unbounded step; gate-started waiters stay a documented leak",
+    "docs_delta": "independent review ACCEPT; its five non-blocking wording corrections are applied"
+  },
+  "remaining": [
+    "hosted CI on the final head, including Swift 6.3.3 optimized",
+    "merge",
+    "release-certificate tag build and draft"
+  ],
+  "optimized_affected": {
+    "conclusion": "passed",
+    "local_toolchain": "Swift 6.4",
+    "tests": 22,
+    "scope": "All Release test targets compiled; affected Lifetime and Pressure classes executed. Hosted Swift 6.3.3 remains required.",
+    "summary": "Executed 22 tests, with 0 failures (0 unexpected) in 0.028 (0.039) seconds"
+  }
+}

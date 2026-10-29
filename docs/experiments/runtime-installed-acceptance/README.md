@@ -24,6 +24,7 @@ Bounded evidence for the [installed-candidate verification](../../verification-r
 | `optimized-recovery.json` | Local optimized build and recovery test class | Local only; hosted compiler acceptance separate. |
 | `local-gates.json` | All 41 local workflow checks, exit 0, on stable fingerprint `713e7e96…` | The `swift-tests` log, read in place, reads `Executed 3773 tests, with 4 tests skipped and 0 failures`; the `pm-sim-all` log has 103 scenario records, none failed. Local Swift 6.4. |
 | `hosted-8a.json` | Hosted Swift, Release (Swift 6.3.3 standard 3,771 tests/4 skips, optimized/PAC, ad-hoc ZIP/DMG), slow-drain and CodeQL on `8a036fe` | Not the final head. The ad-hoc PR package is not a release-certificate artifact. The CodeQL 300-file diff warning means it is not a full security review. |
+| `lifetime-guard-closeout-evidence/release-ci-stall-and-guards.json` | The Release CI stall on `512a6b0`, the local diagnostic, the C1/C2 controls and their mutant, the test guards and the Release step's PTY wrapper | Test and CI changes only; production Source unchanged. The historic stall's cause stays unknown. The full 41-check local run was pending when this was prepared. |
 | `source-provenance.json` | Empty `Sources/` diff and test hash for `97a5b43` to `983ba39`, the path list for `97a5b43` to `8a036fe`, and the recovery and journal files byte-identical from `v0.5.8` to `97a5b43` | Prepared by the parent from git; the archive keeps the result, not the commands. |
 
 ## Required qualification
