@@ -37,3 +37,8 @@ cleanup here; the Stop/Quit checks use non-marker record counts. Manual Start is
 inferred from the ordered no-listener/new-process/Start-prompt/serving sequence,
 with user-source lifecycle events corroborated by the independent read; no UI
 click was instrumented.
+
+GitHub records [0.6.1](https://github.com/srps/Conduit/releases/tag/v0.6.1) as
+published on 2026-10-29 at 22:40:28 UTC, observed during documentation closeout.
+The draft-state fields in `signed-assets.json` and the publication wording in
+`independent-review.md` describe their earlier checkpoints and remain unchanged.

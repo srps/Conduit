@@ -1,8 +1,10 @@
 # Signed 0.6.1 release verification — 2026-10-29
 
 Status: the signed candidate passes its scoped normal-path machine acceptance.
-It is installed and serving. The GitHub draft is unpublished; 0.5.8 remains the
-latest public release. Publication is the owner's remaining decision.
+It is installed and serving. GitHub records [0.6.1](https://github.com/srps/Conduit/releases/tag/v0.6.1)
+as published at 22:40:28 UTC on 2026-10-29. This was observed during documentation
+closeout after the acceptance report and independent review, which retain their
+unpublished-draft checkpoint. No release asset or tag was changed by this closeout.
 
 ## Candidate and automated gates
 
@@ -85,4 +87,4 @@ concurrency interleaving, product-only Quit duration or autostart. Opening stopp
 and manually pressing Start remains selected behavior. The production daemon and
 socket, other event-family migrations and recorded follow-up hardening issues
 remain later work. No material architecture decision is introduced by this
-closeout; the release is ready for the owner's publication decision.
+closeout; the verified release is now published.
