@@ -104,6 +104,7 @@ enum PMSim {
               kerberos-fallback-flood A fallback on every handshake is one event a minute, with the GSS codes
               kerberos-kdc-recovery   A process-pinned KDC failure recovers after independent ticket acquisition
               ntlm-credential-cache   A burst of NTLM fallbacks reads the saved password once, also across a proxy start; a failing store is reported once
+              pool-auth-reset-during-exchange  A reauthentication while an exchange is in flight makes the same pooled connection authenticate again, once
               network-location-recovery  inactive-location recovery, external edits, and write races
               environment-drift       A silently wiped shell environment is repaired with its events; repeats are withheld past the budget; an unsafe profile is left alone (#175)
               journal-integrity       A journal from a newer Conduit fails closed, is kept and reported; a failing disk is one event per episode; version 1 reads in every shape (#182, #191)
@@ -292,6 +293,7 @@ enum PMSim {
         "kerberos-fallback-flood",
         "kerberos-kdc-recovery",
         "ntlm-credential-cache",
+        "pool-auth-reset-during-exchange",
         "helper-caller-identity",
         "network-location-recovery",
         "environment-drift",
@@ -487,6 +489,8 @@ enum PMSim {
             return [try KerberosRecoveryScenarios.negativeCache()]
         case "ntlm-credential-cache":
             return [try await CredentialCacheScenarios.burstReadsOnce(verbose: verbose)]
+        case "pool-auth-reset-during-exchange":
+            return [try await PoolConcurrencyScenarios.authResetDuringExchange(verbose: verbose)]
         case "network-location-recovery":
             return [try await NetworkLocationScenarios.recovery()]
         case "environment-drift":
