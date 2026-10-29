@@ -3,7 +3,7 @@
 - Date: 2026-10-27
 - Decision: accepted (owner, 2026-10-27, #186: selected “10 seconds total (Recommended)”)
 - Implementation: implemented
-- Validation: pending
+- Validation: passed
 - Supersedes: none
 - Superseded by: none
 
@@ -94,6 +94,21 @@ app wait and exit may cut unconfirmed output short.
 Does not prove: native AppKit termination timing, real-helper teardown latency,
 or release readiness. Those checks remain separate from focused fake-effect tests.
 
+### Installed-candidate validation — 2026-10-29
+
+Validation: on the owner's installed 0.6.0 candidate (locally signed, real helper,
+VPN connected), the owner's normal Quit while the proxy ran exited without being
+forced. The exit came at most 1.91 s after the
+owner pressed Return, inside the ten-second total; that upper bound includes the
+owner's reaction. Per-service cleanup was confirmed; whether a global route to
+Conduit remained after Quit is unproven (see the verification). All eight
+journal-scoped per-service proxy field sets matched the priors Start tracked, resolver files and launchd
+variables were restored, and the listener was closed. The final snapshot shows
+every service stopped, and the journal holds no surface records. Results and
+limits are in the [installed verification](../verification-runtime-installed-2026-10-29.md).
+This is one normal-path Quit. It does not exercise expiry, a slow or stuck
+helper, or a product-only duration, because no readable quit-start event exists.
+
 ## Open questions
 
 Verify the selected-total actual-client probe and native AppKit path on the
@@ -107,3 +122,5 @@ Validation checkpoint — 2026-10-28: [native isolated Dev checks](../verificati
 The [correction checkpoint](../verification-runtime-quit-deadline-2026-10-28.md) records 66c411d implementing this existing policy: the logger cap now also clips the one artifact phase. Ordinary nil-cap flushes keep six seconds; started physical writes retain authority until completion or process exit. The prior implementation and reviews clipped only the logger despite stronger checkpoint wording. Causal unit, actual-host and simulator guards fail when propagation/clamping is removed and pass when restored. The selected total and wire policy are unchanged.
 
 The final local workflow passes all 41 checks (3,770 tests / four skips / 103 scenarios), focused/optimized guards and seven production Release trials/162 checks. An earlier unconfirmed ordinary simulator flush remains recorded without a proven cause; diagnostic-only bounded evidence was added, with all assertions and budgets intact. Final hosted and real-machine validation remain pending.
+
+Status 2026-10-29: the normal-path installed Quit is recorded under Implementation evidence, and validation is passed for that scope. The "remains due" and "pending" lines above are historical. Expiry under a slow or stuck helper is still not observed on a real machine; revisit as Consequences describes.

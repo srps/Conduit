@@ -54,12 +54,12 @@ Each record carries three statuses, because merged does not mean it works:
 | [0028](0028-fixed-writable-state-filenames.md) | Fixed writable state filenames within the canonical root | accepted | partial | none |
 | [0029](0029-bound-runtime-display-text.md) | Bound runtime display text with explicit notices | accepted | partial | none |
 | [0030](0030-ordinary-runtime-reply-frame-cap.md) | Ordinary v2 replies and stream frames capped at 64 KiB | accepted | partial | none |
-| [0031](0031-incremental-runtime-development-single-activation.md) | Incremental runtime development with one AppState activation | accepted | implemented | pending |
+| [0031](0031-incremental-runtime-development-single-activation.md) | Incremental runtime development with one AppState activation | accepted | implemented | passed |
 | [0032](0032-explicit-reload-and-reconcile.md) | Explicit configuration reload adopts and reconciles eligible changes | accepted | partial | none |
 | [0033](0033-headless-real-host-simulation.md) | Headless real-host simulation with explicit effect injection | accepted | implemented | none |
 | [0034](0034-private-editor-reply-frame-cap.md) | Complete private editor replies capped at eight MiB | accepted | partial | none |
 | [0035](0035-whole-request-lifecycle-validation.md) | Validate combined editor lifecycle intent as one request | accepted | partial | none |
 | [0036](0036-conditional-dns-activation.md) | Explicit host-checked conditional DNS activation | accepted | partial | none |
-| [0037](0037-saved-command-preparation-capture.md) | Capture saved command input once at preparation | accepted | implemented | pending |
+| [0037](0037-saved-command-preparation-capture.md) | Capture saved command input once at preparation | accepted | implemented | passed |
 | [0038](0038-bounded-runtime-collection-capture.md) | Bound complete runtime collection captures independently of live connections | accepted | implemented | none |
-| [0039](0039-total-app-quit-budget.md) | Bound the in-process app's complete Quit wait to ten seconds | accepted | implemented | pending |
+| [0039](0039-total-app-quit-budget.md) | Bound the in-process app's complete Quit wait to ten seconds | accepted | implemented | passed |

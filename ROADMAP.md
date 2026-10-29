@@ -20,22 +20,24 @@ with remaining validation called out separately. An item needs a pillar fit.
 See also [Product Pillars](./README.md#product-pillars), [`AGENTS.md`](./AGENTS.md),
 and [`docs/STYLE.md`](./docs/STYLE.md).
 
-## Immediate priorities (2026-10-28)
+## Immediate priorities (2026-10-29)
 
 The runtime architecture program ([#186](https://github.com/srps/Conduit/issues/186),
 [#180](https://github.com/srps/Conduit/issues/180),
-[#183](https://github.com/srps/Conduit/issues/183)) is **unreleased**. Conduit 0.5.8
-remains the serving version. `VERSION` is prepared as 0.6.0 and its notes stay
-under Unreleased in the [CHANGELOG](./CHANGELOG.md) until acceptance and
-publication.
+[#183](https://github.com/srps/Conduit/issues/183)) is **unreleased**: 0.5.8 is
+still the latest public release. The owner installed the locally signed 0.6.0
+candidate, which is now serving on the owner's machine and passed the
+[installed verification](./docs/verification-runtime-installed-2026-10-29.md).
+`VERSION` is 0.6.0, and the [CHANGELOG](./CHANGELOG.md) has versioned 0.6.0
+notes prepared for packaging. The signed tag build and publication are pending.
 
 | Stage | Current state | Remaining work |
 | --- | --- | --- |
 | Contracts and mechanisms | Typed lifecycle/configuration values, framed client/service, bounded observation/replay, verified store and file readers are merged. | Broader event families migrate with their owners. |
 | Shared owner | PR253 converges DNS, tunnels and proxy on one lifecycle/store path, with preparation-time capture, exact freshness and Stop/Quit policy. PR257 adds guarded host-owned audit parity. | AppState now consumes the single owner; release acceptance is in the final row. |
 | Actual client integration | PR254 connects host admission/observation, private frozen updates, receipts, preferences/admin persistence and final Quit saves through the actual framed clients. | Integrated through AppState; final release gates are in the last row. |
-| Native client completion | PR256 merged saved Start receipts, explicit reload, bounded preflight/credential/wake operations, typed recovery and DNS health after local and hosted checks. | Selected ten-second Quit is integrated and passes the fake production profile; real-machine acceptance remains. |
-| AppState, isolation and release | The single AppState activation (0031) and RuntimeActor isolation are implemented in draft PR #258. The collection profile (0038), 64 KiB ordinary and 8 MiB private frames, production resource and fairness measurements, and source-qualified native Dev checks pass. Final-head CI is tracked below. | CI on #258's final release head and its merge to main, applicable real-machine acceptance, then release-signed 0.6.0 packaging and publication. |
+| Native client completion | PR256 merged saved Start receipts, explicit reload, bounded preflight/credential/wake operations, typed recovery and DNS health after local and hosted checks. | Selected ten-second Quit is integrated and passes the fake production profile. An installed normal-path Quit finished within 1.91 s, including the owner's reaction; expiry under a slow helper has not been observed on a real machine. |
+| AppState, isolation and release | The single AppState activation (0031) and RuntimeActor isolation are implemented in draft PR #258. The collection profile (0038), 64 KiB ordinary and 8 MiB private frames, production resource and fairness measurements, and source-qualified native Dev checks pass. The owner's installed-candidate run passes for normal use; 0031 and 0039 validation is recorded. | Hosted CI on #258's final head and its merge to main. Then a release-certificate tag build and draft through the approved release environment. Publication waits for the owner. |
 
 The [RuntimeActor activation verification](./docs/verification-runtime-actor-activation-2026-10-28.md)
 keeps the source-qualified isolation, collection-fairness, sanitizer and native Dev
@@ -43,26 +45,38 @@ evidence. The [Quit correction](./docs/verification-runtime-quit-deadline-2026-1
 is the production checkpoint: seven affected production Release trials/162 checks
 pass with fake effects. Earlier measurements remain scoped to unchanged paths.
 
-The [observation-order checkpoint](./docs/verification-runtime-split-dns-observation-2026-10-28.md)
-records the latest correction, `97a5b43`: all 41 local checks pass
+Current state (2026-10-29). The installed candidate's executable (`a894b35a…`) was built from
+`97a5b43`, without a helper reinstall or helper change. In the owner's lifecycle run, 37 checks
+pass, 1 is attention and none fail or are unproven. After both Stop and Quit, all eight
+journal-scoped per-service proxy field sets, seven resolver files and six launchd variables
+were back to their captured priors. The listener closed. Quit took at most 1.91 s, including
+the owner's reaction. After relaunch and a manual Start, HTTPS/CONNECT, Kerberos and the helper
+worked. The Stop attention is a preserved user prior under existing policy. Whether a global
+route to Conduit remained after Quit is unproven. The run does not cover heavy load, a slow
+helper or autostart. `983ba39` adds two recovery-policy tests and no Source change. With them,
+all 41 local checks pass: 3,773 tests, four skips and 103 scenarios. Hosted Swift, Release
+(Swift 6.3.3), slow-drain and CodeQL pass on `8a036fe`. Final-head CI, the merge of #258,
+release-certificate packaging and owner-approved publication remain.
+
+Historical checkpoint (2026-10-28, before installation). The [observation-order checkpoint](./docs/verification-runtime-split-dns-observation-2026-10-28.md)
+records the correction `97a5b43`: all 41 local checks pass
 (3,771 tests/four skips/103 scenarios), with independent source and causal-control
 reviews. The host test explicitly selects its intended record order, while a unit
 witness covers the other valid order implied by CI. Production executable lines
 are unchanged; a misleading comment is corrected. The optimized build, 107 affected
 tests and ten fresh Debug host histories pass. The exact-source mechanical candidate
 rebuild, strict/deep signature verification and early read-only helper preflight pass;
-the candidate is archived and remains unlaunched and uninstalled. The [real-tunnel checkpoint](./docs/verification-runtime-tunnel-fixture-2026-10-28.md)
+the candidate was then archived, unlaunched and uninstalled. The [real-tunnel checkpoint](./docs/verification-runtime-tunnel-fixture-2026-10-28.md)
 retains the prior copied-handler removal and actual-forwarder coverage.
 
-Pushed head `6cb3657` passes the complete hosted Swift workflow, slow-drain and
-CodeQL. Its Release standard suite completed with two order-dependent assertions
-failing before optimized compilation; the selected production contract preserved
-the correct final state. New final-head hosted standard/optimized/package checks,
-merge to main, normal real-helper/VPN/auth acceptance and release-signed packaging
-remain. Production acceptance requires the owner to quit serving 0.5.8 and approve
-the proposed stable Applications installation: normal Start applies the saved
-login-item flag. Rollback uses preserved 0.5.8 at that stable path, never the
-inactive 0.5.5 copy. No installed-app acceptance is claimed.
+At that checkpoint, pushed head `6cb3657` passed the complete hosted Swift workflow,
+slow-drain and CodeQL. Its Release standard suite completed with two order-dependent
+assertions failing before optimized compilation; the selected production contract
+preserved the correct final state. That Release failure is superseded by the passing
+`8a036fe` run above. Installation then required the owner to quit the serving 0.5.8 and
+approve the stable Applications installation. Normal Start applies the saved login-item
+flag. The rollback plan used the preserved 0.5.8 at that stable path, never the inactive
+0.5.5 copy.
 
 Historical checkpoints follow. The [client-owner checkpoint](./docs/verification-runtime-client-owner-2026-10-27.md)
 records the scoped independent review and all 41 passing local gates: 3,619 tests
@@ -187,16 +201,17 @@ not a requirement to finish every event or property test before extraction:
    Collection observation caps are selected in
    [0038](./docs/decisions/0038-bounded-runtime-collection-capture.md);
    the app now consumes the measured production profile and selected ten-second
-   total Quit wait (0039). Release/resource trials, source-qualified native Dev checks
-   and earlier-head hosted CI pass. Final-head hosted standard/optimized checks and
-   installed real-machine acceptance remain.
+   total Quit wait (0039). Release/resource trials, source-qualified native Dev checks,
+   hosted standard/optimized checks on `8a036fe` and the owner's installed-candidate
+   run pass. Final-head hosted CI remains.
 
    Earlier source/test counts are historical checkpoints, kept in the linked
    [client inventory](./docs/runtime-client-stage1-inventory.md),
    [store verification](./docs/verification-configuration-store-2026-10-25.md) and
    [session authority verification](./docs/verification-session-store-authority-2026-10-25.md).
    The single AppState switch and RuntimeActor isolation are implemented in draft
-   PR #258; applicable installed-machine acceptance remains.
+   PR #258. The owner's installed-candidate run passes for normal use
+   ([verification](./docs/verification-runtime-installed-2026-10-29.md)).
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, first with the daemon as its entry point. The stage-3 activation removes AppState's twin.
    The move preserves MainActor and existing policy, with the daemon fake-machine
@@ -208,7 +223,7 @@ not a requirement to finish every event or property test before extraction:
    and verify DNS, tunnels and proxy in reviewable host increments, then switch
    AppState once and delete its replaced runtime/save paths together (0031).
    The activation is implemented in draft PR #258, with local full workflow and
-   exact-head hosted checks passed. Native isolated Dev lifecycle and focused final-edit Quit checks pass, the consumed app logger drain is corrected, and production resource and control-fairness measurements pass. Applicable real-machine acceptance and versioned packaging remain open; it is not released. AppState retains editor drafts and UI responsibilities. Migrate the event
+   exact-head hosted checks passed. Native isolated Dev lifecycle and focused final-edit Quit checks pass, the consumed app logger drain is corrected, and production resource and control-fairness measurements pass. The owner's installed-candidate run passes for normal use, and the 0.6.0 notes are versioned. Release-certificate packaging and publication remain; it is not released. AppState retains editor drafts and UI responsibilities. Migrate the event
    families touched by each slice. Bring
    [#183](https://github.com/srps/Conduit/issues/183)'s independent models,
    bounded exhaustive exploration and seeded tests alongside lifecycle,
@@ -235,7 +250,7 @@ not a requirement to finish every event or property test before extraction:
    passes corrected full workflow and independent review after a write/close
    race found in review; nine fresh Release probe trials and three optimized
    consumer/logger trials pass. Its first passing workflow alone was not acceptance; the activation checkpoint below carries the later hosted and native checks.
-   The [whole isolation move](./docs/verification-runtime-actor-activation-2026-10-28.md) is implemented and independently reviewed. All 41 checks pass on the product checkpoint (3,766 tests, four existing skips, 103 simulator scenarios), and isolated native Dev lifecycle/final-edit Quit checks pass. The full production profile and optimized fairness pass: status/Stop admission answer during the full projection. The test-maintenance workflow also passes (3,768 tests, four existing skips, 103 scenarios), as does its exact-head hosted CI, including the older Swift 6.3.3 compiler; applicable real-machine gates remain. Work per turn stays bounded, and diagnostics cannot gate control progress.
+   The [whole isolation move](./docs/verification-runtime-actor-activation-2026-10-28.md) is implemented and independently reviewed. All 41 checks pass on the product checkpoint (3,766 tests, four existing skips, 103 simulator scenarios), and isolated native Dev lifecycle/final-edit Quit checks pass. The full production profile and optimized fairness pass: status/Stop admission answer during the full projection. The test-maintenance workflow also passes (3,768 tests, four existing skips, 103 scenarios), as does its exact-head hosted CI, including the older Swift 6.3.3 compiler. The owner's installed-candidate run passes for normal use; heavy-load and slow-helper behavior on a real machine are not covered. Work per turn stays bounded, and diagnostics cannot gate control progress.
 
 **Stage 5 — strengthen the shared implementation (separately scoped follow-ups).**
 A bounded applied-state slice may join 0.6 once defined and validated; the full

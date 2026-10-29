@@ -3,7 +3,7 @@
 - Date: 2026-10-26
 - Decision: accepted (owner, 2026-10-26, #186)
 - Implementation: implemented
-- Validation: pending
+- Validation: passed
 - Supersedes: none
 - Superseded by: none
 
@@ -139,6 +139,20 @@ the installed app or real helper is required. Ordinary real-helper and app
 acceptance of the release remains due and has not been recorded.
 
 Does not prove: installed-app or real-helper behavior, release packaging or release readiness.
+
+### Installed-candidate evidence (2026-10-29)
+
+Validation: on the owner's installed 0.6.0 candidate (locally signed, real
+helper, VPN connected, Kerberos), an ordinary saved Start after Stop and a
+manual Start after relaunch both went through preparation capture and reached
+running. Start's recaptured system-proxy records all matched their preflight
+priors, and Quit restored them exactly. Results and limits are in the
+[installed verification](../verification-runtime-installed-2026-10-29.md).
+This is the ordinary real-helper and app acceptance the activation section
+above leaves due, so validation is passed for normal use. No input was replaced
+during preparation, so the run does not observe the `input_replaced` hold on a
+real machine. As recorded above, the actual-client harness covers that hold,
+and no forced race on the installed app or real helper is required.
 
 ## Open questions
 

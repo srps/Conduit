@@ -3,7 +3,7 @@
 - Date: 2026-10-25
 - Decision: accepted (owner, 2026-10-25, #186: selected “Incremental development; one final AppState switch (Recommended)”)
 - Implementation: implemented
-- Validation: pending
+- Validation: passed
 - Supersedes: 0001, 0013
 - Superseded by: none
 
@@ -247,6 +247,23 @@ No registry, queue or runtime/store path is added. Native activation and
 applicable machine checks are now due, so validation is pending; unit tests,
 models and hosted CI are not recorded as owner/real-machine validation.
 
+### Installed-candidate validation — 2026-10-29
+
+Validation: the owner installed the activated 0.6.0 candidate (executable
+`a894b35a…`, built from `97a5b43`, locally signed rather than release-certificate
+signed) and ran normal Stop, Start, Connections, Quit and a relaunch with manual
+Start, using the real helper, VPN and Kerberos. The run reported 37 pass,
+1 attention and 0 fail or unproven. All eight journal-scoped per-service proxy
+field sets, seven resolver files and six launchd variables returned to their
+captured priors after both Stop and Quit. After relaunch, HTTPS and CONNECT
+answered 200, Kerberos succeeded and 21 helper requests succeeded with none
+failed. The Stop attention is a preserved user prior under existing policy. The
+after-Quit global-route result is qualified as unproven. Results, scope and
+limits are in the [installed verification](../verification-runtime-installed-2026-10-29.md).
+This validates the single activation for normal use on the owner's machine. It
+does not cover heavy load, a slow helper, release-certificate packaging,
+publication or production daemon ownership.
+
 ## Open questions
 
 The workflow freshness/private-editor observation API, private reply ceiling
@@ -274,3 +291,5 @@ The [activation checkpoint](../verification-runtime-actor-activation-2026-10-28.
 ### Completed implementation and separate release gates — 2026-10-28
 
 The [final activation checkpoint](../verification-runtime-actor-activation-2026-10-28.md) records the shared [RuntimeHost](../../Sources/ConduitRuntime/RuntimeHost.swift), [RuntimeActor](../../Sources/ProxyKernel/Abstractions/RuntimeActor.swift) and [off-owner capture flight](../../Sources/ConduitRuntime/RuntimeCaptureFlight.swift). AppState's replaced paths are deleted. Source review, all 41 local checks, scoped strict tests, unsuppressed TSan, optimized control-fairness and complete production-profile measurements pass. Final-source isolated native paged-client/active-tunnel Quit checks pass. Implementation is complete; the test-maintenance workflow also passes (3,768 tests with four existing skips and 103 scenarios); final hosted compiler compatibility, release integration and applicable real-machine acceptance remain distinct, with validation pending. Earlier partial/MainActor checkpoints are historical.
+
+Status 2026-10-29: the owner's installed-candidate run is recorded under Implementation evidence, and validation is passed for normal use. The Open questions text above that calls native edit/Quit acceptance pending, or real-machine/release acceptance still to verify, is historical. Exact-head hosted Swift 6.3.3 checks passed on `8a036fe`. Final-head CI, the merge of PR #258, release-certificate packaging and publication remain release work, not validation of this decision.

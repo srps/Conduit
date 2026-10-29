@@ -7,12 +7,17 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
-Prepared as 0.6.0 and not yet released: real-machine acceptance and signed
-packaging remain. 0.5.8 remains the released version.
+The 0.6.0 notes below are prepared for packaging. 0.6.0 is not published, and
+0.5.8 is the latest release. The owner's installed 0.6.0 candidate passed a
+normal Stop/Start/Quit/relaunch check on the owner's machine
+([verification](./docs/verification-runtime-installed-2026-10-29.md)). The
+release-certificate signed tag build and publication remain.
+
+## 0.6.0
 
 The app now runs on the one runtime host that `ConduitDaemon` also uses (#186).
-It is meant as an app-only update: helper protocol v5 and the helper's behaviour
-are unchanged, so it needs no helper reinstall. The schema-two settings files,
+It is an app-only update: helper protocol v5 and the helper's behaviour are
+unchanged, so it needs no helper reinstall. The schema-two settings files,
 the platform-state journal format and the v1 control protocol are unchanged, so
 0.5.8 can still read what this version writes. The production daemon and its
 socket, the remaining event families and the follow-up hardening work are not
