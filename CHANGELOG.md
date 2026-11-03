@@ -7,6 +7,10 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
+- The status menu, the Help menu and General settings link to the project on
+  GitHub, so people who find Conduit useful can star it or report an issue.
+  The links are passive: Conduit never prompts for a star and records nothing.
+
 ## 0.6.1
 
 [Published](https://github.com/srps/Conduit/releases/tag/v0.6.1) on 2026-10-29

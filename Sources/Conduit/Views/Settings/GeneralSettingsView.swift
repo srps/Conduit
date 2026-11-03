@@ -186,6 +186,18 @@ struct GeneralSettingsView: View {
             } footer: {
                 SettingsNote("Install the helper once to manage system proxy and split DNS without repeated admin prompts. Reinstall after helper protocol changes or when the status is outdated.")
             }
+
+            Section {
+                HStack(spacing: 16) {
+                    Link("Star Conduit on GitHub", destination: ProjectLinks.repository)
+                    Link("Report an Issue", destination: ProjectLinks.newIssue)
+                    Spacer()
+                }
+            } header: {
+                Text("Project")
+            } footer: {
+                SettingsNote("Conduit is free and open source. If it saves you time, a star helps other people behind corporate proxies find it.")
+            }
         }
     }
 
