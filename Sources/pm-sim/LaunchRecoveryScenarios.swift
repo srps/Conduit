@@ -39,8 +39,6 @@ enum LaunchRecoveryScenarios {
         let goneRestored = try store.snapshot().services == services
             && !journal.hasRecords(for: .systemDNS) && !journal.hasRecords(for: .systemProxy)
 
-        // Crash again, decline again, then the user's Start and Stop of DNS: the Start points the relay at its own forwarder and keeps
-        // the original record, and the Stop puts that record back.
         try crashed.apply(kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])], config: config)
         let again = launch(store: store, journal: journal, dns: FakeDNSProbe(timingOut: [53]), proxy: FakeLoopbackPortProbe())
         let declinedAgain = again.contains { $0.event == "platform.launch_recovery_declined" && $0.detail == "surface=systemDNS reason=probe_inconclusive" }

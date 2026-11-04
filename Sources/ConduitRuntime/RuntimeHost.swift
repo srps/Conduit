@@ -236,10 +236,7 @@ package final class RuntimeHost {
     private(set) var dnsRelayUnresponsive = false {
         didSet { if dnsRelayUnresponsive != oldValue { onControlStateChange?() } }
     }
-    /// Launch recovery declined to restore system DNS because its probe timed out, and nothing has written system DNS since. After a crash
-    /// the helper's relay keeps port 53 and drops every query, so this holds until a DNS Start or Stop, or a Quit (#201). Control snapshots
-    /// carry it so the app can offer both.
-    var systemDNSRecoveryDeclined = false {
+    private(set) var systemDNSRecoveryDeclined = false {
         didSet { if systemDNSRecoveryDeclined != oldValue { onControlStateChange?() } }
     }
     /// Whether the proxy module's surfaces are up: a proxy Start completed them, and no teardown of the proxy has begun since. Its
@@ -323,8 +320,6 @@ package final class RuntimeHost {
     /// `awaitLaunchRecovery()` — see `LaunchRecovery` for why it is neither
     /// inline nor unordered.
     private var launchRecovery: LaunchRecovery?
-    /// The system DNS decision of `launchRecovery`, written by its work and read once by the first join after it.
-    private let launchRecoverySystemDNS = NIOLockedValueBox<LaunchRecoveryOutcome?>(nil)
     /// The process start `status()` reports. The entry point passes it in, so
     /// the host reads no clock of its own for status.
     private let startedAt: Date
@@ -614,9 +609,8 @@ package final class RuntimeHost {
         let eventLog = orchestrator.eventLog
         // On the host's one platform queue, as all its other blocking work. Each surface path joins recovery first or cannot run before
         // a path that did (`awaitLaunchRecovery`).
-        let systemDNSOutcome = launchRecoverySystemDNS
         launchRecovery = LaunchRecovery(on: platformWork) { [logger] in
-            let outcome = LaunchRecovery.recoverPlatformSurfaces(
+            LaunchRecovery.recoverPlatformSurfaces(
                 systemDNS: dnsRecovery,
                 systemProxy: proxyRecovery,
                 resolvers: resolverRecovery,
@@ -624,10 +618,8 @@ package final class RuntimeHost {
                 emit: { eventLog.append($0) },
                 logger: logger
             )
-            systemDNSOutcome.withLockedValue { $0 = outcome }
         }
-        // Joined now as well, so a decline reaches the snapshot without waiting for the first command.
-        Task { [weak self] in await self?.awaitLaunchRecovery() }
+        publishLaunchRecoveryOnceJoined()
         startLocationObserver()
         startWakeObserver()
         startEnvironmentDriftTimer()
@@ -679,14 +671,20 @@ package final class RuntimeHost {
     /// by a reload's `.applySystemDNS`), after its join. The VPN handler in
     /// particular must not join: two transitions suspended on the join could
     /// resume out of order, and `SplitDNSVPNGate` acts on the latest one.
-    ///
-    /// The first caller to resume records the system DNS decision, in the same turn, before it touches a surface.
     func awaitLaunchRecovery() async {
-        guard let recovery = launchRecovery else { return }
-        await recovery.join()
-        guard launchRecovery === recovery else { return }
+        guard let decisions = await launchRecovery?.join() else { return }
         launchRecovery = nil
-        systemDNSRecoveryDeclined = launchRecoverySystemDNS.withLockedValue { $0 } == .declinedInconclusiveProbe
+        systemDNSRecoveryDeclined = decisions.systemDNS == .declinedInconclusiveProbe
+    }
+
+    /// A decline must reach the control snapshot without waiting for the first command, so the host joins its own recovery too.
+    private func publishLaunchRecoveryOnceJoined() {
+        Task { [weak self] in await self?.awaitLaunchRecovery() }
+    }
+
+    /// A DNS Start, a DNS Stop or management switched off wrote system DNS, so no declined recovery describes it any more.
+    func systemDNSWritten() {
+        systemDNSRecoveryDeclined = false
     }
 
     /// Publishes readiness: `daemon.ready`, `daemon-ready.json` and a
@@ -2092,7 +2090,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
                     try systemDNS.clear(logger: logger)
                 } && !systemDNS.hasSavedState()
             }
-            if cleared { systemDNSRecoveryDeclined = false }
+            if cleared { systemDNSWritten() }
             return cleared
         case .setLaunchAtLogin:
             return performImmediate(action, platform: platform, previousPlatform: previousPlatform)

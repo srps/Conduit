@@ -627,7 +627,7 @@ extension RuntimeHost {
         let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
         let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
         let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
-        let systemDNSWritten = await platformWork.run { () -> Bool in
+        let systemDNSWasWritten = await platformWork.run { () -> Bool in
             var written = false
             if platform.manageSystemDNS {
                 systemDNS.serialized {
@@ -661,7 +661,7 @@ extension RuntimeHost {
             }
             return written
         }
-        if systemDNSWritten { systemDNSRecoveryDeclined = false }
+        if systemDNSWasWritten { systemDNSWritten() }
         if let stop = current() { return stop }
         guard forwarderRunning else { return .failed }
         if platform.manageSystemDNS {
@@ -772,7 +772,7 @@ extension RuntimeHost {
                     return !systemDNS.hasSavedState()
                 }
             }
-            if systemDNSRestored { systemDNSRecoveryDeclined = false }
+            if systemDNSRestored { systemDNSWritten() }
             if goesOn(.dns) { await orchestrator.stopDNS() }
             // The proxy's own clear below removes every resolver file; a proxy that stays up keeps its entry files.
             if goesOn(.dns), !remaining.contains(.proxy), platform.manageDNSResolvers {

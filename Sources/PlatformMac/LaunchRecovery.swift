@@ -33,22 +33,26 @@ import ProxyKernel
 package final class LaunchRecovery {
     /// Dropped once joined, so the second and later `join()`s cost nothing and
     /// the closure's captures do not outlive the recovery.
-    private var task: Task<Void, Never>?
+    private var task: Task<LaunchRecoveryDecisions, Never>?
 
     /// Starts `work` on `platformWork`, the caller's blocking-work queue. The
     /// work blocks its thread for seconds, so it must not run on the calling
     /// actor or on the concurrency pool, which every task and actor shares. The
     /// detached task only queues it and waits. When it is queued is not what
     /// orders it: every surface path awaits `join()` first.
-    package init(on platformWork: PlatformWork, work: @escaping @Sendable () -> Void) {
+    package init(on platformWork: PlatformWork, work: @escaping @Sendable () -> LaunchRecoveryDecisions) {
         task = Task.detached(priority: .utility) { await platformWork.run(work) }
     }
 
-    /// Waits for recovery to finish. Returns immediately once it has.
-    package func join() async {
-        guard let task else { return }
-        await task.value
+    /// Waits for recovery to finish. Returns immediately once it has. Only the first joiner to resume gets the decisions, so a later
+    /// joiner cannot replay them over what that first one has done since.
+    @discardableResult
+    package func join() async -> LaunchRecoveryDecisions? {
+        guard let task else { return nil }
+        let decisions = await task.value
+        guard self.task != nil else { return nil }
         self.task = nil
+        return decisions
     }
 }
 
@@ -87,9 +91,7 @@ package enum LaunchRecoveryOutcome: Equatable, Sendable {
     /// session is running), so they were left alone.
     case declinedLiveListener
     /// A liveness probe timed out, so a session may still be serving the
-    /// settings and only be slow: left alone. After a crash the helper's DNS
-    /// relay keeps port 53 and answers nothing, so every launch declines again
-    /// until a DNS Start or Stop, a Quit, or a reboot that ends the relay.
+    /// settings and only be slow: left alone.
     case declinedInconclusiveProbe
     /// System DNS: a resolver answers but no interface points at loopback any
     /// more, so the records describe nothing and were dropped without a write.
@@ -101,6 +103,17 @@ package enum LaunchRecoveryOutcome: Equatable, Sendable {
     /// The restore threw, or kept records because part of it did not land;
     /// the next launch retries from those records.
     case failed(reason: String)
+}
+
+/// What launch recovery decided for the two network surfaces.
+package struct LaunchRecoveryDecisions: Equatable, Sendable {
+    package var systemDNS: LaunchRecoveryOutcome
+    package var systemProxy: LaunchRecoveryOutcome
+
+    package init(systemDNS: LaunchRecoveryOutcome, systemProxy: LaunchRecoveryOutcome) {
+        self.systemDNS = systemDNS
+        self.systemProxy = systemProxy
+    }
 }
 
 /// What the one-time legacy resolver scan found. `report` is its log line.
@@ -130,9 +143,8 @@ extension LaunchRecovery {
 
     /// The recovery every host runs, in this order: system DNS, system proxy,
     /// then legacy resolver ownership. Each step's outcome is emitted as an
-    /// event and then logged. Returns the system DNS outcome, which the shared
-    /// host keeps in its snapshots while it is a decline. Blocking: run it
-    /// through `LaunchRecovery.init`, or where nothing else is left to wait on.
+    /// event and then logged. Blocking: run it through `LaunchRecovery.init`,
+    /// or where nothing else is left to wait on.
     @discardableResult
     nonisolated package static func recoverPlatformSurfaces(
         systemDNS: SystemDNSManager,
@@ -141,13 +153,15 @@ extension LaunchRecovery {
         legacyResolvers: LegacyResolverInput?,
         emit: (RuntimeEvent) -> Void,
         logger: (any LogSink)?
-    ) -> LaunchRecoveryOutcome {
+    ) -> LaunchRecoveryDecisions {
         let systemDNSOutcome = systemDNS.restoreIfNeeded(logger: logger)
         report(systemDNSOutcome, surface: .systemDNS, emit: emit, logger: logger)
-        report(systemProxy.restoreIfNeeded(logger: logger), surface: .systemProxy, emit: emit, logger: logger)
+        let systemProxyOutcome = systemProxy.restoreIfNeeded(logger: logger)
+        report(systemProxyOutcome, surface: .systemProxy, emit: emit, logger: logger)
+        let decisions = LaunchRecoveryDecisions(systemDNS: systemDNSOutcome, systemProxy: systemProxyOutcome)
         guard let legacyResolvers, let resolvers else {
             report(.skipped(.configUnavailable), surface: .resolverFile, emit: emit, logger: logger)
-            return systemDNSOutcome
+            return decisions
         }
         let outcome = resolvers.recoverLegacyOwnership(
             configs: legacyResolvers.configs,
@@ -156,7 +170,7 @@ extension LaunchRecovery {
             logger: logger
         )
         report(outcome, surface: .resolverFile, emit: emit, logger: logger)
-        return systemDNSOutcome
+        return decisions
     }
 
     /// Emits the event for `outcome`, then logs the line derived from it.
@@ -222,10 +236,10 @@ extension LaunchRecovery {
         case .declinedLiveListener:
             return (.debug, "\(what): recorded state exists and a local listener is still serving it; left alone.")
         case .declinedInconclusiveProbe:
-            let clears = surface == .systemDNS
-                ? "Start or Stop DNS, Quit Conduit, or reboot to end the helper's relay"
-                : "Start or Stop the proxy, or Quit Conduit"
-            return (.notice, "\(what): recorded state exists and the liveness probe got no answer in time; left alone. \(clears) to clear it; until then each launch declines again.")
+            let clearedBy = surface == .systemDNS
+                ? "a DNS Start or Stop, a Quit, or a reboot that ends the helper's relay"
+                : "a proxy Start or Stop, or a Quit"
+            return (.notice, "\(what): recorded state exists and the liveness probe got no answer in time; left alone until \(clearedBy). Each launch declines again until then.")
         case .discardedStaleRecords:
             return (.notice, "\(what): saved state exists but no interface points at 127.0.0.1 any more; dropped the stale records.")
         case .adoptedLegacyFiles(let adoption):

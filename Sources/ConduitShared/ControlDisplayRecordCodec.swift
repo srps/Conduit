@@ -3,8 +3,7 @@ import Foundation
 
 // The codec of the records that display text (decision 0029). Each record encodes and decodes its own fields, so the display check runs on
 // every encode and every decode, whichever encoder the value reaches. The keys are the property names, and an absent optional is an absent
-// key, as the synthesized codec wrote it. The wire additions are the `displayNotices` key and the snapshot's `systemDNSRecoveryDeclined`,
-// which is absent when false.
+// key, as the synthesized codec wrote it. The only wire addition is the `displayNotices` key.
 
 extension ControlRuntimeSnapshot {
     private enum CodingKeys: String, CodingKey {

@@ -39,7 +39,6 @@ final class RuntimePresentationAdapter: ObservableObject {
     @Published private(set) var proxyError: String?
     @Published private(set) var dnsError: String?
     @Published private(set) var tunnelsError: String?
-    /// System DNS still points at a crashed session's relay, which launch recovery could not prove gone (#201).
     @Published private(set) var systemDNSRecoveryDeclined = false
     @Published private(set) var bindings = RuntimeBindingsDisplay()
     @Published private(set) var lastAuthOutcome: RuntimeAuthOutcome?

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import SwiftUI
 
-/// Shown while launch recovery has left system DNS on a crashed session's silent relay (#201), in the popover and on Overview. It has no
-/// dismiss button: it goes when the host reports that a DNS Start or Stop has written system DNS.
 struct SystemDNSRecoveryNotice: View {
     @EnvironmentObject private var appState: AppState
 
@@ -25,7 +23,7 @@ struct SystemDNSRecoveryNotice: View {
             HStack(spacing: 8) {
                 Button("Start DNS") { appState.startDNSAfterDeclinedRecovery() }
                     .help("Start the DNS forwarder and point the relay at it.")
-                Button("Restore DNS Settings") { appState.restoreSystemDNSAfterDeclinedRecovery() }
+                Button("Restore DNS Settings") { appState.restoreSystemDNSByStoppingDNS() }
                     .help("Put back the DNS servers recorded before Conduit changed them, and stop the relay.")
             }
             .controlSize(.small)

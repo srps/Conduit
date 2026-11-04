@@ -13,6 +13,7 @@ import ProxyKernel
 final class LaunchRecoveryTests: XCTestCase {
     private static let workLabel = "io.github.srps.Conduit.launch-recovery-tests.platform-work"
     private let work = PlatformWork(label: LaunchRecoveryTests.workLabel)
+    private static let nothingRecorded = LaunchRecoveryDecisions(systemDNS: .nothingToDo(.nothingRecorded), systemProxy: .nothingToDo(.nothingRecorded))
 
     /// The freeze. Run inline from the host's initialiser, launch-time
     /// recovery is seconds of an app that is on screen nowhere and answering
@@ -23,6 +24,7 @@ final class LaunchRecoveryTests: XCTestCase {
 
         let recovery = LaunchRecovery(on: work) {
             ranOnMainThread.withLockedValue { $0 = Thread.isMainThread }
+            return Self.nothingRecorded
         }
         await recovery.join()
 
@@ -41,6 +43,7 @@ final class LaunchRecoveryTests: XCTestCase {
 
         let recovery = LaunchRecovery(on: work) {
             label.withLockedValue { $0 = HeldCall.currentQueueLabel() }
+            return Self.nothingRecorded
         }
         await recovery.join()
 
@@ -59,6 +62,7 @@ final class LaunchRecoveryTests: XCTestCase {
         let recovery = LaunchRecovery(on: work) {
             Thread.sleep(forTimeInterval: 0.1)
             finished.withLockedValue { $0 = true }
+            return Self.nothingRecorded
         }
         await recovery.join()
 
@@ -77,11 +81,13 @@ final class LaunchRecoveryTests: XCTestCase {
 
         let recovery = LaunchRecovery(on: work) {
             runs.withLockedValue { $0 += 1 }
+            return Self.nothingRecorded
         }
-        await recovery.join()
-        await recovery.join()
-        await recovery.join()
+        let first = await recovery.join()
+        let later = await recovery.join()
 
         XCTAssertEqual(runs.withLockedValue { $0 }, 1)
+        XCTAssertEqual(first, Self.nothingRecorded)
+        XCTAssertNil(later, "only the first joiner gets the decisions")
     }
 }
