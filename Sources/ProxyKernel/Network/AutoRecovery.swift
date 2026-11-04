@@ -95,9 +95,9 @@ package final class AutoRecovery: @unchecked Sendable {
 
         for step in RecoveryStep.allCases {
             guard isCurrent(), service.listenerStamp == expected else { return abandon(at: "next_step=\(step.rawValue)") }
-            if step == .reauthenticate, case .unreachable(let detail) = latestFailure {
-                emit("recovery.step_skipped", detail: "step=\(step.rawValue) reason=upstream_unreachable summary=\(detail)")
-                logger.log(.notice, "Recovery step skipped: \(step.description) (no upstream answered: \(detail)).", category: .network)
+            if step == .reauthenticate, let skip = Self.reauthenticationSkip(latestFailure) {
+                emit("recovery.step_skipped", detail: "step=\(step.rawValue) reason=\(skip.reason) summary=\(skip.detail)")
+                logger.log(.notice, "Recovery step skipped: \(step.description) (\(skip.why): \(skip.detail)).", category: .network)
                 continue
             }
             do {
@@ -146,6 +146,16 @@ package final class AutoRecovery: @unchecked Sendable {
         return false
     }
 
+    /// Credentials cannot help an upstream that never answered: one that refused or missed the connect, or one that connected and
+    /// stayed silent.
+    private static func reauthenticationSkip(_ failure: HealthCheckFailure?) -> (reason: String, why: String, detail: String)? {
+        switch failure {
+        case .unreachable(let detail): ("upstream_unreachable", "no upstream answered", detail)
+        case .answerTimedOut(let detail): ("upstream_silent", "the upstream connected but never answered", detail)
+        default: nil
+        }
+    }
+
     private func abandon(at position: String) -> Bool {
         emit("recovery.abandoned", detail: "reason=superseded \(position)")
         logger.log(.notice, "Recovery stopped: the routing or the listener it began under has been superseded (\(position)).", category: .network)
@@ -188,6 +198,9 @@ package final class AutoRecovery: @unchecked Sendable {
         case .unreachable(let detail):
             return ("unreachable",
                     "Automatic recovery exhausted all steps: no upstream proxy answered (\(detail)). Health checks continue and routing resumes when an upstream is reachable.")
+        case .answerTimedOut(let detail):
+            return ("answer_timed_out",
+                    "Automatic recovery exhausted all steps: an upstream accepted connections but never answered (\(detail)). Health checks continue and routing resumes when an upstream answers.")
         case .upstreamStatus(let code, let upstream):
             return ("upstream_status",
                     "Automatic recovery exhausted all steps: the upstream answered HTTP \(code) via \(upstream).")

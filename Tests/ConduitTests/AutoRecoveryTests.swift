@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import NIOConcurrencyHelpers
+import NIOCore
 import NIOPosix
 import XCTest
 @testable import ProxyKernel
@@ -236,12 +237,39 @@ final class AutoRecoveryTests: XCTestCase {
         )
         XCTAssertEqual(
             ConnectionPool.healthFailure(for: ConnectionPoolError.upstreamResponseTimedOut, detail: "timeout"),
-            .unreachable(detail: "timeout")
+            .answerTimedOut(detail: "timeout")
         )
+        XCTAssertEqual(
+            ConnectionPool.healthFailure(for: ChannelError.connectTimeout(.seconds(2)), detail: "connect"),
+            .unreachable(detail: "connect"), "a missed connect is a failed connect"
+        )
+    }
+
+    /// #197: credentials cannot make a silent upstream answer, and exhaustion names the silence, not the password.
+    @RuntimeActor func testSilentLadderSkipsReauthenticationAndNamesTheSilence() async {
+        let logger = RecordingLogSink()
+        let events = EventRecorder()
+        let service = MockRecoverableService()
+        service.closeStalledShouldSucceed = true
+        service.switchUpstreamShouldSucceed = true
+        service.recycleListenerShouldSucceed = true
+        let silent = HealthCheckFailure.answerTimedOut(detail: "Timed out waiting for the upstream proxy to respond.")
+        service.healthResults = Array(repeating: .unhealthy(silent, responseTimeMS: 45_000), count: 3)
+        let recovery = AutoRecovery(service: service, logger: logger, eventSink: events.record)
+
+        let result = await recovery.recover(trigger: silent)
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(service.reauthenticateCallCount, 0)
+        XCTAssertEqual(events.names, ["recovery.step_skipped", "recovery.exhausted"])
+        XCTAssertEqual(events.details.first, "step=reauthenticate reason=upstream_silent summary=\(silent.summary)")
+        XCTAssertTrue(events.details.last?.hasPrefix("failure=answer_timed_out ") == true)
+        XCTAssertFalse(logger.entries().contains { $0.message.localizedCaseInsensitiveContains("password") })
     }
 
     func testExhaustionMessageOnlySuggestsPasswordForCredentialOrUnknownFailures() {
         XCTAssertFalse(AutoRecovery.exhaustion(for: .unreachable(detail: "timeout")).message.contains("password"))
+        XCTAssertFalse(AutoRecovery.exhaustion(for: .answerTimedOut(detail: "timeout")).message.contains("password"))
         XCTAssertFalse(AutoRecovery.exhaustion(for: .upstreamStatus(code: 503, upstream: "proxy.example.test:8080")).message.contains("password"))
         XCTAssertTrue(AutoRecovery.exhaustion(for: .credentialUnavailable(detail: "no ticket")).message.contains("password"))
         XCTAssertTrue(AutoRecovery.exhaustion(for: .authenticationRejected(detail: "407")).message.contains("password"))

@@ -588,13 +588,14 @@ package final class ConnectionPool: @unchecked Sendable {
         config.firstUnrepresentableDuration(among: exchangeDurations)
     }
 
-    /// Recovery branches on this: only `.unreachable` skips re-authentication,
-    /// so an upstream that answered with a final 407 must not land there.
+    /// Recovery branches on this: `.unreachable` and `.answerTimedOut` skip re-authentication,
+    /// so an upstream that answered with a final 407 must land on neither.
     static func healthFailure(for error: Error, detail: String) -> HealthCheckFailure {
         if error.isCredentialUnavailable { return .credentialUnavailable(detail: detail) }
         if case ConnectionPoolError.authenticationRejected? = error as? ConnectionPoolError {
             return .authenticationRejected(detail: detail)
         }
+        if ConnectionPoolError.failureClass(error) == .inconclusive { return .answerTimedOut(detail: detail) }
         return .unreachable(detail: detail)
     }
 
