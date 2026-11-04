@@ -87,7 +87,9 @@ package enum LaunchRecoveryOutcome: Equatable, Sendable {
     /// session is running), so they were left alone.
     case declinedLiveListener
     /// A liveness probe timed out, so a session may still be serving the
-    /// settings and only be slow: left alone, and the next launch decides again.
+    /// settings and only be slow: left alone. After a crash the helper's DNS
+    /// relay keeps port 53 and answers nothing, so every launch declines again
+    /// until a DNS Start or Stop, a Quit, or a reboot that ends the relay.
     case declinedInconclusiveProbe
     /// System DNS: a resolver answers but no interface points at loopback any
     /// more, so the records describe nothing and were dropped without a write.
@@ -128,8 +130,10 @@ extension LaunchRecovery {
 
     /// The recovery every host runs, in this order: system DNS, system proxy,
     /// then legacy resolver ownership. Each step's outcome is emitted as an
-    /// event and then logged. Blocking: run it through `LaunchRecovery.init`,
-    /// or where nothing else is left to wait on.
+    /// event and then logged. Returns the system DNS outcome, which the shared
+    /// host keeps in its snapshots while it is a decline. Blocking: run it
+    /// through `LaunchRecovery.init`, or where nothing else is left to wait on.
+    @discardableResult
     nonisolated package static func recoverPlatformSurfaces(
         systemDNS: SystemDNSManager,
         systemProxy: SystemProxyManager,
@@ -137,12 +141,13 @@ extension LaunchRecovery {
         legacyResolvers: LegacyResolverInput?,
         emit: (RuntimeEvent) -> Void,
         logger: (any LogSink)?
-    ) {
-        report(systemDNS.restoreIfNeeded(logger: logger), surface: .systemDNS, emit: emit, logger: logger)
+    ) -> LaunchRecoveryOutcome {
+        let systemDNSOutcome = systemDNS.restoreIfNeeded(logger: logger)
+        report(systemDNSOutcome, surface: .systemDNS, emit: emit, logger: logger)
         report(systemProxy.restoreIfNeeded(logger: logger), surface: .systemProxy, emit: emit, logger: logger)
         guard let legacyResolvers, let resolvers else {
             report(.skipped(.configUnavailable), surface: .resolverFile, emit: emit, logger: logger)
-            return
+            return systemDNSOutcome
         }
         let outcome = resolvers.recoverLegacyOwnership(
             configs: legacyResolvers.configs,
@@ -151,6 +156,7 @@ extension LaunchRecovery {
             logger: logger
         )
         report(outcome, surface: .resolverFile, emit: emit, logger: logger)
+        return systemDNSOutcome
     }
 
     /// Emits the event for `outcome`, then logs the line derived from it.
@@ -216,7 +222,10 @@ extension LaunchRecovery {
         case .declinedLiveListener:
             return (.debug, "\(what): recorded state exists and a local listener is still serving it; left alone.")
         case .declinedInconclusiveProbe:
-            return (.notice, "\(what): recorded state exists and the liveness probe got no answer in time; left alone for the next launch to retry.")
+            let clears = surface == .systemDNS
+                ? "Start or Stop DNS, Quit Conduit, or reboot to end the helper's relay"
+                : "Start or Stop the proxy, or Quit Conduit"
+            return (.notice, "\(what): recorded state exists and the liveness probe got no answer in time; left alone. \(clears) to clear it; until then each launch declines again.")
         case .discardedStaleRecords:
             return (.notice, "\(what): saved state exists but no interface points at 127.0.0.1 any more; dropped the stale records.")
         case .adoptedLegacyFiles(let adoption):

@@ -627,7 +627,8 @@ extension RuntimeHost {
         let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
         let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
         let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
-        await platformWork.run {
+        let systemDNSWritten = await platformWork.run { () -> Bool in
+            var written = false
             if platform.manageSystemDNS {
                 systemDNS.serialized {
                     guard !token.isSuperseded else { return }
@@ -637,13 +638,14 @@ extension RuntimeHost {
                         } else {
                             try systemDNS.clear(logger: logger)
                         }
+                        written = true
                     } catch {
                         logger.log(.warning, "Could not \(forwarderRunning ? "set" : "restore") system DNS (non-fatal): \(error.localizedDescription)", category: .system)
                     }
                 }
             }
             // `applyProxySurfaces` wrote the split-DNS entry files only; the intercept files follow the forwarder here.
-            guard platform.manageDNSResolvers else { return }
+            guard platform.manageDNSResolvers else { return written }
             resolvers.serialized {
                 guard !token.isSuperseded else { return }
                 do {
@@ -657,7 +659,9 @@ extension RuntimeHost {
                     logger.log(.warning, "Could not apply intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
                 }
             }
+            return written
         }
+        if systemDNSWritten { systemDNSRecoveryDeclined = false }
         if let stop = current() { return stop }
         guard forwarderRunning else { return .failed }
         if platform.manageSystemDNS {
@@ -756,17 +760,19 @@ extension RuntimeHost {
             let systemDNS = systemDNSManager
             let resolvers = dnsManager
             stopDNSHealthTimer()
-            await platformWork.run {
-                systemDNS.serialized {
-                    guard terminal || !token.isSuperseded else { return }
-                    guard platform.manageSystemDNS || systemDNS.hasSavedState() else { return }
+            let systemDNSRestored = await platformWork.run { () -> Bool in
+                systemDNS.serialized { () -> Bool in
+                    guard terminal || !token.isSuperseded else { return false }
+                    guard platform.manageSystemDNS || systemDNS.hasSavedState() else { return false }
                     do {
                         try systemDNS.clear(logger: logger)
                     } catch {
                         logger.log(.warning, "Could not restore system DNS: \(error.localizedDescription)", category: .system)
                     }
+                    return !systemDNS.hasSavedState()
                 }
             }
+            if systemDNSRestored { systemDNSRecoveryDeclined = false }
             if goesOn(.dns) { await orchestrator.stopDNS() }
             // The proxy's own clear below removes every resolver file; a proxy that stays up keeps its entry files.
             if goesOn(.dns), !remaining.contains(.proxy), platform.manageDNSResolvers {

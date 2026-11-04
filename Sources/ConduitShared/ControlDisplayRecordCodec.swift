@@ -3,7 +3,8 @@ import Foundation
 
 // The codec of the records that display text (decision 0029). Each record encodes and decodes its own fields, so the display check runs on
 // every encode and every decode, whichever encoder the value reaches. The keys are the property names, and an absent optional is an absent
-// key, as the synthesized codec wrote it. The only wire addition is the `displayNotices` key.
+// key, as the synthesized codec wrote it. The wire additions are the `displayNotices` key and the snapshot's `systemDNSRecoveryDeclined`,
+// which is absent when false.
 
 extension ControlRuntimeSnapshot {
     private enum CodingKeys: String, CodingKey {
@@ -11,7 +12,7 @@ extension ControlRuntimeSnapshot {
         case tunnelsRunState, tunnelsError, directModeCause, vpnState, vpnInterfaceName, bindings
         case lastAuthOutcome, lastAuthOutcomeAt, lastAuthFallbackReason, metrics
         case dnsQueryCount, dnsDoHFallbackCount, dnsCacheHitCount, tunnelActiveCount, tunnelSessionCount
-        case tunnelDNSOverride, vpnFlap, collections, appliedState, displayNotices
+        case tunnelDNSOverride, vpnFlap, collections, appliedState, systemDNSRecoveryDeclined, displayNotices
     }
 
     /// The text this record displays, in the owner's canonical field order. It names every field of the owner, nil when absent.
@@ -63,6 +64,7 @@ extension ControlRuntimeSnapshot {
         vpnFlap = try container.decode(ControlVPNFlapMetrics.self, forKey: .vpnFlap)
         collections = try container.decode(ControlRuntimeCollections.self, forKey: .collections)
         appliedState = try container.decode(ControlAppliedState.self, forKey: .appliedState)
+        systemDNSRecoveryDeclined = try container.decodeIfPresent(Bool.self, forKey: .systemDNSRecoveryDeclined) ?? false
         displayNotices = try ControlDisplayCheck.decodeNotices(from: container, forKey: .displayNotices, owner: .snapshot)
         try ControlDisplayCheck.checkDecoded(
             owner: .snapshot, notices: displayNotices, values: displayValues, codingPath: decoder.codingPath
@@ -101,6 +103,7 @@ extension ControlRuntimeSnapshot {
         try container.encode(vpnFlap, forKey: .vpnFlap)
         try container.encode(collections, forKey: .collections)
         try container.encode(appliedState, forKey: .appliedState)
+        if systemDNSRecoveryDeclined { try container.encode(true, forKey: .systemDNSRecoveryDeclined) }
         try container.encode(displayNotices, forKey: .displayNotices)
     }
 }
