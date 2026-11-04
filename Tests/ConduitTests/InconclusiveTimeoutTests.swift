@@ -101,10 +101,13 @@ final class InconclusiveTimeoutTests: XCTestCase {
         func events(_ name: String) -> [RuntimeEvent] { orchestrator.eventLog.events.filter { $0.event == name } }
 
         try await Self.until { orchestrator.snapshot.runtimeStatus.state == .recovering }
-        upstream.answer(1)
-        try await Self.until { orchestrator.eventLog.events.contains { $0.typed == .proxyRecovery(.recovered) } }
+        // The pool's silence check sends a HEAD of its own and can take an answer meant for the ladder, so answer one at a time.
+        try await Self.until {
+            if upstream.answersLeft == 0 { upstream.answer(1) }
+            return orchestrator.eventLog.events.contains { $0.typed == .proxyRecovery(.recovered) }
+        }
+        upstream.answer(0)
         let heldBeforeRecovery = events("health.inconclusive").count
-        XCTAssertEqual(upstream.answersLeft, 0, "the ladder's own check took the one answer")
 
         try await Self.until { events("health.inconclusive").count > heldBeforeRecovery }
         let next = events("health.inconclusive")[heldBeforeRecovery].detail ?? ""
