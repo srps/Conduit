@@ -1438,21 +1438,36 @@ enum RuntimeHostEffectsScenario {
             let firstRefreshes = try await refreshes(changedBase + 1).count
             check("a path report after the restart reaches the host's path handling", firstRefreshes == changedBase + 1)
 
-            // A burst: each change arrives while the settle the one before it armed is still held, so none has settled.
-            var burstHeld = true
+            // A burst: three changes while the burst's one settle is held. Each invalidates as it arrives and only pushes that settle on.
+            func invalidations(reach count: Int) async throws -> [RuntimeEvent] {
+                let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+                var invalidated = try await pathEvents("network.path_invalidated")
+                while invalidated.count < count, ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                    invalidated = try await pathEvents("network.path_invalidated")
+                }
+                return invalidated
+            }
+            var burstTaken = true
             for (index, gateway) in ["192.0.2.2", "192.0.2.3", "192.0.2.4"].enumerated() {
                 path.emit(wifi(gateway: gateway))
-                let held = try await settleHeld(index + 2)
-                burstHeld = burstHeld && held
+                let taken = try await invalidations(reach: invalidatedBase + index + 2).count == invalidatedBase + index + 2
+                burstTaken = burstTaken && taken
             }
+            let burstHeld = try await settleHeld(2)
             let invalidated = try await pathEvents("network.path_invalidated")
             let refreshedDuringBurst = try await pathEvents("network.path_changed").count
-            notes.append("path burst: settles=\(settles.started) cancelled=\(settles.cancelled) invalidated=\(invalidated.count)")
+            notes.append("path burst: settles=\(settles.started) invalidated=\(invalidated.count)")
             check("each change of a path burst invalidates as it arrives, the first against the path before the burst",
-                  burstHeld && invalidated.count == invalidatedBase + 4
+                  burstTaken && invalidated.count == invalidatedBase + 4
                     && invalidated[invalidatedBase + 1].detail?.contains("gateways=192.0.2.1->192.0.2.2") == true)
+            check("the path burst has one settle wait, pushed on by its changes", burstHeld)
             check("nothing refreshes while the path burst goes on", refreshedDuringBurst == changedBase + 1)
-            check("each change of the burst replaced the settle before it", settles.cancelled == 2)
+            settles.release()
+            // Changes arrived during that wait, so a whole wait more must pass with none before the refresh.
+            let pushedHeld = try await settleHeld(3)
+            let refreshedAfterPushedWait = try await pathEvents("network.path_changed").count
+            check("a wait that saw changes does not end the burst", pushedHeld && refreshedAfterPushedWait == changedBase + 1)
             settles.release()
             let burstChanges = try await refreshes(changedBase + 2)
             check("the burst refreshes once, on its newest path",

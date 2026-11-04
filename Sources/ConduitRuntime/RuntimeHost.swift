@@ -201,10 +201,16 @@ package final class RuntimeHost {
     private let pendingNetworkPath = NIOLockedValueBox<NetworkPathState?>(nil)
     /// One owner pass for path updates at a time, and one pending behind it.
     private let networkPathUpdates = CoalescedObserverDelivery()
-    /// The one settle wait in flight, if any. A newer update or a stop of the observer cancels it.
+    /// The one settle in flight, if any: a single task that waits until the path has been quiet for a whole
+    /// interval. An update while it waits pushes its deadline on instead of starting another (#198), and a stop
+    /// of the observer cancels it.
     private var networkPathSettleWait: Task<Void, Never>?
+    /// The newest path the settle in flight will refresh on.
+    private var networkPathSettleTarget: NetworkPathState?
+    /// Whether an update arrived since the settle's current wait began, so that wait does not end the burst.
+    private var networkPathSettlePushed = false
     /// Advanced by every settle armed and every one cancelled, so a wait that finished just as it was
-    /// superseded refreshes nothing.
+    /// cancelled refreshes nothing.
     private var networkPathSettleSerial: UInt64 = 0
     /// Whether the host has its path observer started. A settle is armed only then.
     var networkPathObserving = false
@@ -1161,27 +1167,41 @@ package final class RuntimeHost {
     }
 
     /// One path update, on the owner as it arrives (#198). The leading edge runs at once: a material change resets the DoH
-    /// transports and drops the PAC answers the old path produced, and says so (`network.path_invalidated`). Then the settle is armed
-    /// again, so the refresh (`settleNetworkPath`) runs once, on the newest path, after the burst has been quiet for
-    /// `networkPathSettle.interval`. A path that keeps changing defers only the refresh; every change still invalidates when it arrives.
+    /// transports and drops the PAC answers the old path produced, and says so (`network.path_invalidated`). The refresh
+    /// (`settleNetworkPath`) runs once, on the newest path, once the burst has been quiet for `networkPathSettle.interval`. A path
+    /// that keeps changing defers only the refresh; every change still invalidates when it arrives.
+    ///
+    /// One settle task at most, whatever the update rate: an update while one waits only moves its target and pushes its deadline on,
+    /// so the burst ends between one and two intervals after its last update. The seam is a plain sleep, with no clock to read.
     private func receiveNetworkPath(_ path: NetworkPathState) {
         orchestrator.invalidateNetworkPath(path)
         // A stopped observer arms nothing: the update was claimed before the stop, and the next start reports the path afresh.
         guard networkPathObserving else { return }
-        networkPathSettleWait?.cancel()
+        networkPathSettleTarget = path
+        guard networkPathSettleWait == nil else {
+            networkPathSettlePushed = true
+            return
+        }
         networkPathSettleSerial &+= 1
         let serial = networkPathSettleSerial
         let settle = networkPathSettle
         networkPathSettleWait = deliveries.deliver { [weak self] in
-            do {
-                try await settle.sleep(settle.interval)
-            } catch {
-                // Cancelled: a newer update armed its own settle, or the observer stopped.
-                return
+            while true {
+                guard let self, self.networkPathSettleSerial == serial else { return }
+                self.networkPathSettlePushed = false
+                do {
+                    try await settle.sleep(settle.interval)
+                } catch {
+                    // Cancelled: the observer stopped, and whoever cancelled it cleared the handle.
+                    return
+                }
+                guard self.networkPathSettleSerial == serial else { return }
+                if !self.networkPathSettlePushed { break }
             }
-            guard let self, self.networkPathSettleSerial == serial else { return }
+            guard let self, let target = self.networkPathSettleTarget else { return }
             self.networkPathSettleWait = nil
-            await self.settleNetworkPath(path)
+            self.networkPathSettleTarget = nil
+            await self.settleNetworkPath(target)
         }
     }
 
@@ -1189,6 +1209,8 @@ package final class RuntimeHost {
     func cancelNetworkPathSettle() {
         networkPathSettleWait?.cancel()
         networkPathSettleWait = nil
+        networkPathSettleTarget = nil
+        networkPathSettlePushed = false
         networkPathSettleSerial &+= 1
     }
 

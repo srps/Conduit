@@ -4,7 +4,8 @@ import Foundation
 /// How long `RuntimeHost` waits for a burst of network-path updates to go quiet before it refreshes on the newest path, and the wait
 /// itself (#198). Only the refresh (the PAC refetch, the system DNS and proxy reconciles) waits: each material change drops the old
 /// path's PAC answers and DoH transports as it arrives, so the window grants nothing and revokes nothing. It bounds how often a churning
-/// path refetches the PAC.
+/// path refetches the PAC. The host keeps one wait in flight: an update during it pushes the end of the burst on by one more
+/// wait, so the refresh comes between one and two intervals after the last update.
 ///
 /// `sleep` is the one seam: production waits on the continuous clock, and a test holds the wait and releases it, so it counts settles
 /// instead of timing them. It throws only when the wait is cancelled.
