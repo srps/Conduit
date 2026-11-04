@@ -23,6 +23,14 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ### Fixed
 
+- Launch recovery no longer restores the machine's DNS or proxy settings from
+  under a session that is only slow to answer (#201). A liveness probe that
+  times out now declines the restore with `platform.launch_recovery_declined
+  reason=probe_inconclusive` and keeps the records for the next launch; only a
+  refused probe restores. After a crash the helper's DNS relay can keep port 53
+  and stay silent, so system DNS waits until a later launch finds the relay
+  gone or a new Start reapplies it.
+
 - With the proxy port set to 0 ("choose a port"), the system proxy, the shell
   profiles and the launchd `HTTP(S)_PROXY` variables now name the port the
   listener actually bound, instead of port 0 (#251). Start, config reapply,
