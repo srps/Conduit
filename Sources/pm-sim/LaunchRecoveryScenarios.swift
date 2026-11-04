@@ -39,6 +39,21 @@ enum LaunchRecoveryScenarios {
         let goneRestored = try store.snapshot().services == services
             && !journal.hasRecords(for: .systemDNS) && !journal.hasRecords(for: .systemProxy)
 
+        // Crash again, decline again, then the user's Start and Stop of DNS: the Start points the relay at its own forwarder and keeps
+        // the original record, and the Stop puts that record back.
+        try crashed.apply(kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])], config: config)
+        let again = launch(store: store, journal: journal, dns: FakeDNSProbe(timingOut: [53]), proxy: FakeLoopbackPortProbe())
+        let declinedAgain = again.contains { $0.event == "platform.launch_recovery_declined" && $0.detail == "surface=systemDNS reason=probe_inconclusive" }
+        let helper = RecordingPrivilegeClient()
+        let session = SystemDNSManager(privilegeClient: helper, journal: journal, resolverLiveness: FakeDNSProbe().liveness(onPort:),
+                                       locationRecovery: LocationSettingsRecovery(store: store, journal: journal, emit: { _ in }))
+        try session.saveCurrentDNS(logger: nil)
+        try session.apply(forwarderPort: 5354, logger: nil)
+        let startRepointed = helper.commands(matching: .startDNSRelay).last == ["5354"] && journal.hasRecords(for: .systemDNS)
+        try session.clear(logger: nil)
+        let stopRestored = try store.snapshot().services == services && !journal.hasRecords(for: .systemDNS)
+            && helper.commands(matching: .stopDNSRelay).count == 1
+
         return ScenarioResult(
             name: "launch-recovery-inconclusive-probe", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
@@ -52,8 +67,11 @@ enum LaunchRecoveryScenarios {
                     "surface=systemDNS stale=false", "surface=systemProxy stale=false",
                 ]),
                 .init("the next launch puts the prior settings back and releases the records", goneRestored),
+                .init("a silent relay after another crash is declined again", declinedAgain),
+                .init("a DNS Start after the decline points the relay at its forwarder and keeps the record", startRepointed),
+                .init("a DNS Stop after that Start puts the recorded servers back", stopRestored),
             ],
-            notes: slow.map { "\($0.event) \($0.detail ?? "")" } + gone.map { "\($0.event) \($0.detail ?? "")" }
+            notes: (slow + gone + again).map { "\($0.event) \($0.detail ?? "")" }
         )
     }
 

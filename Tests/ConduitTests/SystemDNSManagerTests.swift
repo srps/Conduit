@@ -972,6 +972,20 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertTrue(manager.hasSavedState(), "the next launch retries from the records")
     }
 
+    /// The fake's timing-out probe stands for the helper's relay after a crash: still bound, forwarding to a port nothing serves, and
+    /// dropping every query. The real probe reads that relay as inconclusive, not refused.
+    func testDNSLivenessReadsARelayWhoseForwarderIsGoneAsInconclusive() throws {
+        let listenPort = Int.random(in: 18000..<19000)
+        let deadForwarder = createUDPSocket(port: listenPort + 1)
+        guard deadForwarder >= 0 else { throw XCTSkip("Could not reserve the forwarder port \(listenPort + 1)") }
+        close(deadForwarder)
+        let relay = UDPRelay()
+        try relay.start(listenPort: listenPort, targetPort: listenPort + 1)
+        defer { relay.stop() }
+
+        XCTAssertEqual(SystemDNSManager.dnsLiveness(onPort: listenPort, timeoutMilliseconds: 300), .inconclusive)
+    }
+
     func testDNSLivenessReportsAClosedPortAsRefused() throws {
         let port = Int.random(in: 17000..<18000)
         let fd = createUDPSocket(port: port)
