@@ -1109,7 +1109,9 @@ package final class ProxyOrchestrator {
     /// The newest network path seen, settled or not: what the leading-edge
     /// invalidation compares each update with (#198). One path.
     private var networkPathSeen: NetworkPathState?
-    /// Whether a path change invalidated since the last settled report, so the settle clears the DNS answers stored in between.
+    /// What the leading edge left owed to the next settled report: whether a path change invalidated since the last one. The
+    /// one source of truth for the settle (#198): it clears the DNS answers stored in between, and it owes the refresh even when
+    /// the burst settles back on the path last acted on.
     private var networkPathInvalidatedSinceSettle = false
 
     /// When routing last changed under the proxy: stamped by every VPN
@@ -2674,18 +2676,26 @@ package final class ProxyOrchestrator {
         return true
     }
 
-    /// Tier C trailing edge, first step: when a change invalidated since the last settled report, clears the DNS response cache
-    /// again. The leading edge cleared it with the transports, but a query that started on the old path can finish on the old
-    /// transports during the settle and store its answer, for up to 300 s (30 s for NXDOMAIN). The transports are kept: those in use
-    /// now were made after the last change. A query still out when the burst settles can store after this; fencing the store by
-    /// generation is #200. Emits `dns.response_cache_cleared source=network_settled` when the forwarder runs. Returns whether it cleared.
-    @discardableResult
-    package func clearDNSAnswersStoredDuringSettle() -> Bool {
-        guard networkPathInvalidatedSinceSettle else { return false }
+    /// Tier C trailing edge: one settled path report, before its refresh. Runs the leading edge again (a no-op for a path the
+    /// updates already carried), then takes what the burst left owed (`networkPathInvalidatedSinceSettle`) and clears it:
+    ///
+    /// - The DNS response cache is cleared again. The leading edge cleared it with the transports, but a query that started on
+    ///   the old path can finish on the old transports during the settle and store its answer, for up to 300 s (30 s for NXDOMAIN).
+    ///   The transports are kept: those in use now were made after the last change. A query still out when the burst settles can
+    ///   store after this; fencing the store by generation is #200. Emits `dns.response_cache_cleared source=network_settled`.
+    /// - The report is admitted (`admitNetworkPath`) with the invalidation owed, so a burst that settles back on the path last acted
+    ///   on (A, B, A) is still a change (`changed=returned`): its changes dropped the PAC answers and superseded any fetch, and only
+    ///   the refresh fetches again. A report with nothing owed is admitted as before (#101).
+    ///
+    /// Returns the change to refresh on, for `handleNetworkChange(_:)`, or nil.
+    package func settleNetworkPath(_ path: NetworkPathState) -> NetworkPathChange? {
+        invalidateNetworkPath(path)
+        let owed = networkPathInvalidatedSinceSettle
         networkPathInvalidatedSinceSettle = false
-        guard let dropped = dnsForwarder.clearResponseCache(reason: "network_settled") else { return false }
-        emitEvent(.health, "dns.response_cache_cleared", detail: "source=network_settled entries=\(dropped)")
-        return true
+        if owed, let dropped = dnsForwarder.clearResponseCache(reason: "network_settled") {
+            emitEvent(.health, "dns.response_cache_cleared", detail: "source=network_settled entries=\(dropped)")
+        }
+        return admitNetworkPath(path, invalidatedSince: owed)
     }
 
     /// Tier C trailing edge: admission of a settled path report.
@@ -2699,8 +2709,8 @@ package final class ProxyOrchestrator {
     /// (`invalidateNetworkPath`) reset nothing for them either.
     /// The hosts' system DNS reconcile is not gated by this: it runs for
     /// every settled report (`NetworkPathReports` in PlatformMac).
-    package func admitNetworkPath(_ path: NetworkPathState) -> NetworkPathChange? {
-        switch networkPathTracker.admit(path) {
+    package func admitNetworkPath(_ path: NetworkPathState, invalidatedSince: Bool = false) -> NetworkPathChange? {
+        switch networkPathTracker.admit(path, invalidatedSince: invalidatedSince) {
         case .changed(let change):
             return change
         case .unchanged(let count, let emit):
@@ -2722,9 +2732,7 @@ package final class ProxyOrchestrator {
     /// Returns whether it refreshed.
     @discardableResult
     package func handleNetworkPath(_ path: NetworkPathState) async -> Bool {
-        invalidateNetworkPath(path)
-        clearDNSAnswersStoredDuringSettle()
-        guard let change = admitNetworkPath(path) else { return false }
+        guard let change = settleNetworkPath(path) else { return false }
         await handleNetworkChange(change)
         return true
     }
@@ -2751,7 +2759,8 @@ package final class ProxyOrchestrator {
             "changed=\(change.changedToken)", "unchanged_before=\(change.unchangedBefore)",
         ] + change.diffTokens + ["path=\(change.path.description)"]
         emitEvent(.health, "network.path_changed", detail: tokens.joined(separator: " "))
-        let what = change.diffTokens.isEmpty ? "first path" : change.diffTokens.joined(separator: " ")
+        let what = change.returned ? "returned to the path before the burst"
+            : change.diffTokens.isEmpty ? "first path" : change.diffTokens.joined(separator: " ")
         logStore.log(
             .notice,
             "Network path changed (\(what)): PAC \(pacDecision); "

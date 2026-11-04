@@ -21,11 +21,13 @@ package enum NetworkPathReports {
     /// in `act`; DNS reconciliation follows it. Both run for every report.
     /// Each host guards reconciliation with managed settings and readiness.
     ///
-    /// The leading edge runs again first. It does nothing for a path the
-    /// updates already carried, and it keeps a caller that hands in a report
-    /// with no updates before it, or one whose updates have not landed yet,
-    /// from refreshing before it invalidates. Then the DNS answers stored since a
-    /// change are cleared once more (`clearDNSAnswersStoredDuringSettle`).
+    /// `ProxyOrchestrator.settleNetworkPath` runs the leading edge again first.
+    /// It does nothing for a path the updates already carried, and it keeps a
+    /// caller that hands in a report with no updates before it, or one whose
+    /// updates have not landed yet, from refreshing before it invalidates. Then
+    /// it clears the DNS answers stored since a change, and admits the report
+    /// with what the burst left owed: a burst that settles back on the path
+    /// last acted on still refreshes (#198).
     package static func receive(
         _ path: NetworkPathState,
         orchestrator: ProxyOrchestrator,
@@ -36,9 +38,7 @@ package enum NetworkPathReports {
         // Repair a failed application or a VPN rewrite before a PAC refetch
         // can suspend the transition. Unchanged reports also retry drift.
         await reconcileSystemProxy()
-        orchestrator.invalidateNetworkPath(path)
-        orchestrator.clearDNSAnswersStoredDuringSettle()
-        if let change = orchestrator.admitNetworkPath(path) {
+        if let change = orchestrator.settleNetworkPath(path) {
             await act(change)
         }
         await reconcileSystemDNS()

@@ -2093,6 +2093,38 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
+    /// #198 review, through the host: a burst that goes offline and comes back to the settled path still refreshes once it settles
+    /// (`changed=returned`), and an update that changed nothing afterwards refreshes nothing (#101).
+    @RuntimeActor func testABurstBackToTheSettledPathRefreshesAndANoOpUpdateDoesNot() async throws {
+        let settles = HeldSettles()
+        let host = try await hostWithHeldSettles(settles)
+        func events(_ name: String) -> [RuntimeEvent] { Self.events(name, on: host) }
+        let invalidatedBefore = events("network.path_invalidated").count
+
+        harness.pathObserver.emit(NetworkPathState(status: .unsatisfied, interfaces: [], gateways: [],
+                                                   supportsIPv4: false, supportsIPv6: false, supportsDNS: false))
+        try await until("going offline is taken") { events("network.path_invalidated").count == invalidatedBefore + 1 }
+        harness.pathObserver.emit(Self.wifi(gateway: "192.0.2.1"))
+        try await until("coming back is taken") { events("network.path_invalidated").count == invalidatedBefore + 2 }
+        try await until("the settle is held") { settles.started == 2 && settles.isHolding }
+        XCTAssertEqual(settles.release(), .seconds(2))
+        try await until("the pushed wait is held") { settles.started == 3 && settles.isHolding }
+        XCTAssertEqual(settles.release(), .seconds(2))
+        await host.deliveries.drain()
+        let changes = events("network.path_changed")
+        XCTAssertEqual(changes.count, 2, "the burst back to the settled path refreshes")
+        XCTAssertEqual(changes.last?.detail?.contains("changed=returned"), true, "\(changes.map(\.detail))")
+
+        // The same path again: nothing material moved, so nothing is owed.
+        harness.pathObserver.emit(Self.wifi(gateway: "192.0.2.1"))
+        try await until("the no-op update's settle is held") { settles.started == 4 && settles.isHolding }
+        XCTAssertEqual(settles.release(), .seconds(2))
+        await host.deliveries.drain()
+        XCTAssertEqual(events("network.path_changed").count, 2, "an update that changed nothing refreshes nothing")
+        XCTAssertEqual(events("network.path_invalidated").count, invalidatedBefore + 2)
+        await host.stopRuntime()
+    }
+
     /// Waits, bounded, for `condition`; fails the test with `what` when it does not hold in time.
     @RuntimeActor private func until(_ what: String, _ condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
