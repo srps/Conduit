@@ -454,8 +454,11 @@ package final class EnvironmentManager: @unchecked Sendable {
         // after a failed write or a wiped state directory. Ask the domain
         // itself — a stale proxy URL here is harder for a user to find than
         // one in Network Settings, since it only shows up as GUI apps
-        // mysteriously failing to reach anything.
-        if journal.knowsSurfaceIsIdle(.launchdEnvironment), !loopbackResidueExists() {
+        // mysteriously failing to reach anything. A variable that cannot be
+        // read is not proof of no residue (STYLE rule 11), so only a domain
+        // read as clean skips.
+        let residue = loopbackResidue()
+        if journal.knowsSurfaceIsIdle(.launchdEnvironment), residue == .absent {
             logger?.log(
                 .debug,
                 "launchd environment teardown skipped: nothing recorded as applied and no local-proxy variables set.",
@@ -475,7 +478,7 @@ package final class EnvironmentManager: @unchecked Sendable {
         // variable is ours only when it names this machine itself. Once this
         // manager has applied, it knows what it put there, and only that is.
         let recordsPresent = journal.hasRecords(for: .launchdEnvironment)
-        let bypassResidue = !recordsPresent && loopbackResidueExists()
+        let bypassResidue = !recordsPresent && residue == .present
         for name in launchdVariableNames {
             let result: CommandResult?
             switch journal.prior(surface: .launchdEnvironment, scope: name) {
@@ -529,12 +532,6 @@ package final class EnvironmentManager: @unchecked Sendable {
         }
     }
 
-    /// Whether any managed variable currently points at this machine — the
-    /// residue Conduit leaves in the per-user launchd domain.
-    ///
-    /// The shell-profile half of teardown needs no equivalent: its marker block
-    /// identifies our region of the file directly. The launchd domain has no
-    /// such marker, so this probe stands in for one.
     /// Whether a variable the journal has no record of is ours to remove;
     /// `nil` when it cannot be read to tell, which teardown keeps as a
     /// failure to retry rather than as "not ours".
@@ -553,8 +550,29 @@ package final class EnvironmentManager: @unchecked Sendable {
         return isLoopbackProxyValue(value)
     }
 
-    private func loopbackResidueExists() -> Bool {
-        launchdVariableNames.contains { isLoopbackProxyValue(readLaunchdValue($0)) }
+    enum LaunchdResidue: Equatable {
+        case present
+        case absent
+        /// No variable points at this machine, but at least one could not be read.
+        case unreadable
+    }
+
+    /// Whether any managed variable currently points at this machine: the
+    /// residue Conduit leaves in the per-user launchd domain.
+    ///
+    /// The shell-profile half of teardown needs no equivalent: its marker block
+    /// identifies our region of the file directly. The launchd domain has no
+    /// such marker, so this probe stands in for one.
+    private func loopbackResidue() -> LaunchdResidue {
+        var unreadable = false
+        for name in launchdVariableNames {
+            switch readLaunchdVariable(name) {
+            case .present(let value) where isLoopbackProxyValue(value): return .present
+            case .present, .absent: continue
+            case .failed: unreadable = true
+            }
+        }
+        return unreadable ? .unreadable : .absent
     }
 
     private func isLoopbackProxyValue(_ value: String?) -> Bool {
@@ -582,14 +600,6 @@ package final class EnvironmentManager: @unchecked Sendable {
         else { return .failed }
         let value = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? .absent : .present(value)
-    }
-
-    /// Current value of a launchd variable, or nil when it is not set or
-    /// could not be read. For residue probing only; capture uses the strict
-    /// reader.
-    private func readLaunchdValue(_ name: String) -> String? {
-        if case .present(let value) = readLaunchdVariable(name) { return value }
-        return nil
     }
 
     private func renderBlock(config: ProxyConfig, endpoints: ClientEndpoints) -> String {

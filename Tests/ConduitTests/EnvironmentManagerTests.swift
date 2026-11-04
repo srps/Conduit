@@ -260,6 +260,35 @@ final class EnvironmentManagerTests: XCTestCase {
         XCTAssertNil(launchctl.environment["HTTP_PROXY"], "the stop's failure left the quit something to retry")
     }
 
+    /// An idle journal skips teardown only when the domain is read to hold
+    /// none of our values. A read that fails is not "no residue": teardown
+    /// runs, removes nothing it cannot judge, and keeps the name to retry.
+    func testAnIdleJournalWithAnUnreadableVariableStillTearsDown() throws {
+        launchctl.failingGetenv = ["HTTP_PROXY"]
+        let journalFile = home.appendingPathComponent("platform-state.json")
+        let journalBefore = try? Data(contentsOf: journalFile)
+        XCTAssertTrue(journal.knowsSurfaceIsIdle(.launchdEnvironment))
+        let log = RecordingLogSink()
+
+        try makeManager().clear(logger: log)
+
+        XCTAssertFalse(log.containsMessage("launchd environment teardown skipped"), "an unreadable variable is not proof of no residue")
+        XCTAssertTrue(log.containsMessage("launchctl failed for HTTP_PROXY", at: .warning), "kept as a failure to retry")
+        XCTAssertEqual(launchctl.commands.filter { $0.first == "unsetenv" }, [], "nothing it could not judge is removed")
+        XCTAssertEqual(try? Data(contentsOf: journalFile), journalBefore, "the journal is untouched")
+    }
+
+    /// The same idle journal with every variable read as absent has
+    /// nothing to tear down.
+    func testAnIdleJournalWithNoVariablesSetSkipsTeardown() throws {
+        let log = RecordingLogSink()
+
+        try makeManager().clear(logger: log)
+
+        XCTAssertTrue(log.containsMessage("launchd environment teardown skipped", at: .debug))
+        XCTAssertEqual(launchctl.commands.filter { $0.first == "unsetenv" }, [])
+    }
+
     /// Our bypass list beside our proxy URL needs no read to remove, so
     /// one that cannot be read goes with the URL rather than outliving it.
     func testAnUnreadableBypassResidueGoesWithTheProxyURL() throws {
@@ -690,6 +719,8 @@ private final class FakeLaunchctl: @unchecked Sendable {
     var failSetenv = false
     /// Names whose `getenv` fails (non-zero exit).
     var failingGetenv: Set<String> = []
+    /// Every launchctl argument list, in order.
+    private(set) var commands: [[String]] = []
     private let lock = NSLock()
 
     func run(_ launchPath: String, _ arguments: [String]) throws -> CommandResult {
@@ -698,6 +729,7 @@ private final class FakeLaunchctl: @unchecked Sendable {
         }
         lock.lock()
         defer { lock.unlock() }
+        commands.append(arguments)
 
         switch verb {
         case "setenv" where arguments.count >= 3:
