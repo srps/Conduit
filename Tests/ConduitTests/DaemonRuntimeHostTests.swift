@@ -2574,7 +2574,10 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(recovery.dropFirst().first?.detail, "surface=systemProxy stale=false")
 
         try await host.startRuntime()
-        XCTAssertEqual(harness.wifi.webProxy, FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "0"))
+        await host.awaitLifecycleIdle()
+        let bound = try XCTUnwrap(host.orchestrator.snapshot.bindings.proxyPort)
+        XCTAssertEqual(harness.wifi.webProxy, FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: String(bound)),
+                       "the bound port, not the configured 0 (#251)")
         guard case .wasPresent(let prior) = harness.journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
             return XCTFail("the start recorded a prior for Wi-Fi")
         }
@@ -3551,6 +3554,186 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(host.orchestrator.eventLog.events.filter { $0.event == "config.advertised_pac_changed" }.map(\.detail),
                        ["surfaces=system_proxy"])
         await host.stopRuntime()
+    }
+
+    // MARK: - Advertised endpoints (#251)
+
+    /// Configured port 0 means "choose a port". Every surface that tells clients where the proxy is must name the port
+    /// the listener holds, read from the live bindings: the Start, a drift repair and a config reapply alike. Stored
+    /// intent keeps its 0, SOCKS keeps its own bound port, and the stop puts back what the machine had before.
+    @RuntimeActor func testAProxyStartOnAnEphemeralPortAdvertisesTheBoundPortOnEverySurface() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.socksEnabled = true
+        config.socksPort = 0
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(
+            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .manual))
+        let corporate = FakeMachine.ProxyEndpoint(enabled: true, host: "proxy.corp.example", port: "8080")
+        harness.machine.describe("Wi-Fi") { service in
+            service.webProxy = corporate
+            service.secureWebProxy = corporate
+        }
+        harness.machine.launchdEnvironment["HTTP_PROXY"] = "http://prior.example.test:3128"
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        // "Running" is published at the bind; the surfaces land on the lane after it.
+        await host.awaitLifecycleIdle()
+
+        let bound = try XCTUnwrap(host.orchestrator.snapshot.bindings.proxyPort, "the start bound a listener")
+        XCTAssertNotEqual(bound, 0)
+        XCTAssertEqual(host.status().bindings.proxyPort, bound, "the status reports the live binding")
+        try assertAdvertised(port: bound, "the start")
+        XCTAssertEqual(host.config.localPort, 0, "the stored intent still says: choose a port")
+        let socks = try XCTUnwrap(host.orchestrator.snapshot.bindings.socksPort, "SOCKS bound its own listener")
+        XCTAssertNotEqual(socks, 0)
+        XCTAssertNotEqual(socks, bound)
+        XCTAssertEqual(host.status().bindings.socksPort, socks)
+        XCTAssertEqual(clientEndpointEvents(host), ["source=start configured_port=0 port=\(bound)"])
+
+        // A settings notification runs the system proxy reconcile and the environment drift pass. Both compare the
+        // machine with the same projection the start wrote, so neither finds drift, and neither writes port 0 back.
+        harness.locationObserver.emitSettingsChange()
+        await host.deliveries.drain()
+        try assertAdvertised(port: bound, "the drift passes")
+        XCTAssertFalse(host.orchestrator.eventLog.events.contains { $0.event == "platform.environment_drift" },
+                       "the environment the start wrote is what the drift pass expects")
+
+        // A bypass edit reapplies both surfaces without rebinding: still the bound port.
+        var edited = host.config
+        edited.noProxyHosts.append("bypass.example")
+        try ProxyConfigPersistence.save(edited, in: harness.environment)
+        await host.reloadConfiguration()
+        XCTAssertEqual(host.orchestrator.snapshot.bindings.proxyPort, bound, "a bypass edit does not rebind")
+        try assertAdvertised(port: bound, "the config reapply")
+        XCTAssertTrue(harness.wifi.bypassDomains.contains("bypass.example"))
+        XCTAssertEqual(clientEndpointEvents(host), ["source=start configured_port=0 port=\(bound)",
+                                                    "source=config_change configured_port=0 port=\(bound)"])
+
+        await host.stopRuntime()
+        await host.awaitLifecycleIdle()
+        XCTAssertEqual(harness.wifi.webProxy, corporate, "the stop restores the prior web proxy")
+        XCTAssertEqual(harness.wifi.secureWebProxy, corporate, "and the prior secure web proxy")
+        XCTAssertEqual(harness.machine.launchdEnvironment["HTTP_PROXY"], "http://prior.example.test:3128", "and the prior launchd value")
+        XCTAssertNil(harness.machine.launchdEnvironment["HTTPS_PROXY"])
+        let zshrc = try String(contentsOf: harness.homeDirectory.appendingPathComponent(".zshrc"), encoding: .utf8)
+        XCTAssertFalse(zshrc.contains(ShellProfileBlock.startMarker), "and removes the managed block")
+    }
+
+    /// The #251 witness: the shared-owner start scenario of `testAStaleStartReleasedAfterANewerStartLeavesTheNewerListenerRunning`
+    /// on configured port 0. A start held on its PAC fetch is stopped and overtaken by a newer start; once both settle, the
+    /// system proxy names the newer listener's bound port, never "0".
+    @RuntimeActor func testAProxyStartBesideAStartHeldOnItsPACAppliesTheBoundPort() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.pacURL = "https://pac.example.test/held.pac"
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        let fetch = HeldPACFetch()
+        harness.pacEvaluator = fetch
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+
+        let older = Task { try await host.startRuntime() }
+        for _ in 0..<5_000 where !fetch.isHeld {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertTrue(fetch.isHeld, "the older start is suspended before its listener binds")
+        await host.stopRuntime()
+        let newer = Task { try await host.startRuntime() }
+        for _ in 0..<5_000 where host.orchestrator.snapshot.runtimeStatus.state != .starting {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        fetch.release()
+        if case .failure(let error) = await newer.result { XCTFail("the newer start threw \(error)") }
+        await assertSuperseded(older, "the stop and the newer start overtook the older start")
+        await host.awaitLifecycleIdle()
+
+        let bound = try XCTUnwrap(host.orchestrator.snapshot.bindings.proxyPort, "the newer start binds a listener")
+        XCTAssertNotEqual(bound, 0)
+        XCTAssertEqual(harness.wifi.webProxy, FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: String(bound)))
+        XCTAssertEqual(harness.wifi.secureWebProxy, harness.wifi.webProxy)
+        await host.stopRuntime()
+        await host.awaitLifecycleIdle()
+        XCTAssertFalse(harness.wifi.routesThroughAProxy, "the stop clears the system proxy")
+    }
+
+    /// A fixed configured port is the port the listener binds, and the one every surface names. No resolution is recorded.
+    @RuntimeActor func testAProxyStartOnAFixedPortAdvertisesThatPort() async throws {
+        let configured = try reserveLoopbackPort()
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = configured
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(
+            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .manual))
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.awaitLifecycleIdle()
+
+        XCTAssertEqual(host.orchestrator.snapshot.bindings.proxyPort, configured)
+        try assertAdvertised(port: configured, "the start")
+        XCTAssertEqual(clientEndpointEvents(host), [], "nothing to resolve")
+
+        await host.stopRuntime()
+        await host.awaitLifecycleIdle()
+        XCTAssertFalse(harness.wifi.routesThroughAProxy, "the stop clears the system proxy")
+        XCTAssertNil(harness.machine.launchdEnvironment["HTTP_PROXY"], "and the launchd variables")
+    }
+
+    /// The network-location writer (the helper's scoped store) advertises the bound port too: at the start, when a
+    /// settings change drifts the field, and in the location a switch makes active. The stop puts back each location's own.
+    @RuntimeActor func testLocationReconciliationAdvertisesTheBoundPortOfAnEphemeralListener() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .manual))
+        let locations = NetworkLocationFixture.store()
+        let original = try locations.snapshot()
+        harness.locationStore = locations
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.awaitLifecycleIdle()
+        let bound = try XCTUnwrap(host.orchestrator.snapshot.bindings.proxyPort)
+        func proxies(_ index: Int) throws -> [String: NetworkSettingValue] { try locations.snapshot().services[index].proxies }
+
+        XCTAssertEqual(try proxies(0)["HTTPPort"], .number(bound), "the start")
+        XCTAssertEqual(try proxies(0)["HTTPSPort"], .number(bound))
+
+        locations.edit { $0.services[0].proxies["HTTPPort"] = .number(0) }
+        harness.locationObserver.emitSettingsChange()
+        await host.deliveries.drain()
+        XCTAssertEqual(try proxies(0)["HTTPPort"], .number(bound), "the drift repair")
+
+        locations.edit { $0.activeLocationID = NetworkLocationFixture.office }
+        harness.locationObserver.emit(NetworkLocationFixture.office)
+        await host.deliveries.drain()
+        XCTAssertEqual(try proxies(1)["HTTPPort"], .number(bound), "the location switch")
+        XCTAssertEqual(try proxies(1)["HTTPSPort"], .number(bound))
+        // Not `original`: the external edit above is kept as that location's prior, as any later external value is.
+        XCTAssertNotEqual(try proxies(0)["HTTPPort"], .number(bound), "the inactive location no longer names the listener")
+
+        await host.stopRuntime()
+        await host.awaitLifecycleIdle()
+        XCTAssertEqual(try proxies(1), original.services[1].proxies, "the stop restores the active location")
+    }
+
+    /// Every client-facing surface names `port` on the configured client host.
+    @RuntimeActor private func assertAdvertised(port: Int, _ when: String, file: StaticString = #filePath, line: UInt = #line) throws {
+        let endpoint = FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: String(port))
+        XCTAssertEqual(harness.wifi.webProxy, endpoint, "\(when): web proxy", file: file, line: line)
+        XCTAssertEqual(harness.wifi.secureWebProxy, endpoint, "\(when): secure web proxy", file: file, line: line)
+        for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            XCTAssertEqual(harness.machine.launchdEnvironment[name], "http://127.0.0.1:\(port)", "\(when): launchd \(name)", file: file, line: line)
+        }
+        let zshrc = try String(contentsOf: harness.homeDirectory.appendingPathComponent(".zshrc"), encoding: .utf8)
+        XCTAssertTrue(zshrc.contains("export HTTP_PROXY='http://127.0.0.1:\(port)'"), "\(when): shell profile\n\(zshrc)", file: file, line: line)
+    }
+
+    @RuntimeActor private func clientEndpointEvents(_ host: RuntimeHost) -> [String] {
+        host.orchestrator.eventLog.events.filter { $0.event == "config.client_endpoint_resolved" }.compactMap(\.detail)
     }
 
     @RuntimeActor private func reapplyEvents(_ host: RuntimeHost) -> [String] {

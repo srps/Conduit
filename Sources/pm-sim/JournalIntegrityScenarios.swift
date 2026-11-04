@@ -45,7 +45,7 @@ enum JournalIntegrityScenarios {
         config.localPort = 3128
         var refusal = "none"
         do {
-            _ = try manager.apply(config: config, logger: nil)
+            _ = try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         } catch NetworkSettingsError.unreadableJournal {
             refusal = "unreadable_journal"
         } catch {

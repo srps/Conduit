@@ -144,19 +144,21 @@ package final class EnvironmentManager: @unchecked Sendable {
     /// left alone and reported; the others are still written. Throws only
     /// for an unreadable journal or a failed write.
     @discardableResult
-    package func apply(config: ProxyConfig, logger: (any LogSink)?) throws -> ApplyResult {
+    /// The proxy URL comes from `endpoints`, never from `config.localPort`,
+    /// which is intent: 0 there means "choose a port" (#251).
+    package func apply(config: ProxyConfig, endpoints: ClientEndpoints, logger: (any LogSink)?) throws -> ApplyResult {
         operations.lock()
         defer { operations.unlock() }
         advanceGeneration()
         try journal.requireReadableForApply()
-        let block = renderBlock(config: config)
+        let block = renderBlock(config: config, endpoints: endpoints)
         var outcomes: [ProfileTarget: ProfileOutcome] = [:]
         for target in ProfileTarget.allCases {
             outcomes[target] = try rewrite(target, operation: "apply", logger: logger) {
                 ShellProfileBlock.applying(block, to: $0)
             }
         }
-        let launchd = applyLaunchdEnvironment(config: config, logger: logger)
+        let launchd = applyLaunchdEnvironment(config: config, endpoints: endpoints, logger: logger)
         logger?.log(.notice, "Updated shell environment proxy variables.", category: .system)
         return ApplyResult(profiles: outcomes, launchd: launchd)
     }
@@ -242,9 +244,9 @@ package final class EnvironmentManager: @unchecked Sendable {
     /// timeout must not hold up a clear at stop or quit behind it. A clear
     /// or apply that lands meanwhile advances the generation, so `repair`
     /// writes nothing from a stale reading.
-    package func inspect(config: ProxyConfig) -> Drift {
+    package func inspect(config: ProxyConfig, endpoints: ClientEndpoints) -> Drift {
         var drift = Drift()
-        let block = renderBlock(config: config)
+        let block = renderBlock(config: config, endpoints: endpoints)
         for target in ProfileTarget.allCases {
             switch readProfile(target) {
             case .missing, .unmanaged:
@@ -255,7 +257,7 @@ package final class EnvironmentManager: @unchecked Sendable {
                 drift.unsafeProfiles[target] = reason
             }
         }
-        let wanted = launchdValues(config: config)
+        let wanted = launchdValues(config: config, endpoints: endpoints)
         let clock = ContinuousClock()
         let deadline = clock.now + inspectionBudget
         for name in launchdVariableNames {
@@ -285,12 +287,12 @@ package final class EnvironmentManager: @unchecked Sendable {
     /// under the operation lock, so a disable, stop or quit that lands
     /// first wins. Nil when superseded.
     package func repair(
-        config: ProxyConfig, ifGeneration generation: UInt64, isCurrent: () -> Bool, logger: (any LogSink)?
+        config: ProxyConfig, endpoints: ClientEndpoints, ifGeneration generation: UInt64, isCurrent: () -> Bool, logger: (any LogSink)?
     ) throws -> ApplyResult? {
         operations.lock()
         defer { operations.unlock() }
         guard self.generation == generation, isCurrent() else { return nil }
-        return try apply(config: config, logger: logger)
+        return try apply(config: config, endpoints: endpoints, logger: logger)
     }
 
     /// Whether anything of ours is still on the machine: a managed block in
@@ -349,8 +351,8 @@ package final class EnvironmentManager: @unchecked Sendable {
         ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"]
     }
 
-    private func launchdValues(config: ProxyConfig) -> [String: String] {
-        let proxyURL = config.localProxyURL
+    private func launchdValues(config: ProxyConfig, endpoints: ClientEndpoints) -> [String: String] {
+        let proxyURL = endpoints.proxyURL
         let noProxy = config.noProxyHosts.joined(separator: ",")
         return [
             "HTTP_PROXY": proxyURL, "http_proxy": proxyURL,
@@ -359,8 +361,8 @@ package final class EnvironmentManager: @unchecked Sendable {
         ]
     }
 
-    private func applyLaunchdEnvironment(config: ProxyConfig, logger: (any LogSink)?) -> LaunchdOutcome {
-        let values = launchdValues(config: config)
+    private func applyLaunchdEnvironment(config: ProxyConfig, endpoints: ClientEndpoints, logger: (any LogSink)?) -> LaunchdOutcome {
+        let values = launchdValues(config: config, endpoints: endpoints)
         // Capture before overwriting. A developer with HTTP_PROXY already
         // exported into their launchd domain would otherwise have it silently
         // unset by our teardown, with nothing recording that it existed.
@@ -590,9 +592,9 @@ package final class EnvironmentManager: @unchecked Sendable {
         return nil
     }
 
-    private func renderBlock(config: ProxyConfig) -> String {
+    private func renderBlock(config: ProxyConfig, endpoints: ClientEndpoints) -> String {
         let noProxy = config.noProxyHosts.joined(separator: ",")
-        let proxyURL = config.localProxyURL.shellQuoted
+        let proxyURL = endpoints.proxyURL.shellQuoted
         return [
             ShellProfileBlock.startMarker,
             "export HTTP_PROXY=\(proxyURL)",

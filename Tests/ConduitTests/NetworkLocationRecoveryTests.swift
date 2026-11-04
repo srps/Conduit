@@ -85,7 +85,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             XCTAssertEqual(recovery.recover(kind: .proxies, config: config, listenerIsLive: false), .nothingToDo(.nothingRecorded))
             XCTAssertEqual(try store.snapshot(), original)
             for mode in [SystemProxyMode.manual, .pac] {
-                try recovery.apply(kind: .proxies, desired: SystemProxyManager.locationFields(config: config, mode: mode, localPACURL: url), config: config)
+                try recovery.apply(kind: .proxies, desired: SystemProxyManager.locationFields(config: config, mode: mode, endpoints: .configured(config, localPACURL: url)), config: config)
                 XCTAssertNotEqual(try store.snapshot().services[0].proxies, userPAC, "\(mode)")
                 try recovery.clear(kind: .proxies, config: config)
                 XCTAssertEqual(try store.snapshot().services, original.services, "\(mode)")
@@ -187,7 +187,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             let privilege = RecordingPrivilegeClient()
             let proxy = SystemProxyManager(privilegeClient: privilege, journal: journal, locationRecovery: recovery)
             let dns = SystemDNSManager(privilegeClient: privilege, journal: journal, locationRecovery: recovery)
-            try proxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
+            try proxy.reconcileLocation(config: config, mode: .manual, endpoints: .configured(config), apply: true)
             try dns.apply(forwarderPort: 15053, logger: nil)
             store.edit { $0.activeLocationID = office }
             store.refuseWrites(true)
@@ -198,7 +198,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             store.refuseWrites(false)
             store.edit { $0.activeLocationID = home }
             let relayStarts = privilege.commands(matching: .startDNSRelay).count
-            try proxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: false)
+            try proxy.reconcileLocation(config: config, mode: .manual, endpoints: .configured(config), apply: false)
             try dns.reconcileLocation(apply: false, forwarderPort: 0)
             XCTAssertEqual(try store.snapshot().services, original.services)
             XCTAssertFalse(journal.hasRecords(for: .systemProxy))
@@ -214,16 +214,16 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             config.localPACEnabled = true
             let url = "http://127.0.0.1:63145/proxy.pac"
             store.refuseWrites(true)
-            XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true))
+            XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true))
             store.refuseWrites(false)
-            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+            try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true)
             let applied = try store.snapshot().services[0].proxies
             store.refuseWrites(true)
-            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+            try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true)
             store.refuseWrites(false)
             let corporatePAC = NetworkSettingValue.text("http://corporate.example/proxy.pac")
             store.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = corporatePAC }
-            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+            try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true)
             XCTAssertEqual(try store.snapshot().services[0].proxies, applied)
             try proxy.clear(logger: nil)
             XCTAssertEqual(try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
@@ -246,9 +246,9 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             var config = ProxyConfig()
             config.localPACEnabled = true
             let url = "http://127.0.0.1:63145/proxy.pac"
-            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+            try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true)
             store.edit { $0.services[2].proxies = corporatePAC }
-            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+            try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true)
             let repaired = try store.snapshot()
             XCTAssertEqual(repaired.services[0].proxies["ProxyAutoConfigURLString"], .text(url))
             XCTAssertEqual(repaired.services[2].proxies["ProxyAutoConfigURLString"], .text(url))
@@ -275,7 +275,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         let enforced = NetworkSettingValue.text("http://enforced.example/proxy.pac")
         func rewriteAndReconcile() throws {
             store.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = enforced }
-            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+            try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true)
         }
         func count(_ name: String) -> Int { events.events.filter { $0.event == name }.count }
 
@@ -298,7 +298,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         try rewriteAndReconcile()
         XCTAssertEqual(count("platform.location_contended"), 2)
         store.edit { $0.activeLocationID = office }
-        try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+        try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true)
         XCTAssertEqual(try store.snapshot().services[1].proxies["ProxyAutoConfigURLString"], .text(url))
 
         // Stopping still restores every record; the budget only limits drift repair.
@@ -323,16 +323,16 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         let url = "http://127.0.0.1:63145/proxy.pac"
         store.refuseWrites(true)
         for _ in 0..<3 {
-            XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true))
+            XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true))
         }
         store.refuseWrites(false)
-        XCTAssertNil(try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true))
+        XCTAssertNil(try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true))
         XCTAssertEqual(try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
         XCTAssertFalse(events.events.contains { $0.event == "platform.location_contended" })
 
         clock.advance(.seconds(10))
         store.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = .text("http://enforced.example/proxy.pac") }
-        XCTAssertEqual(try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true), .seconds(50))
+        XCTAssertEqual(try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true), .seconds(50))
         let contended = try XCTUnwrap(events.events.first { $0.event == "platform.location_contended" })
         XCTAssertTrue(contended.detail?.contains("retry_seconds=50") == true, contended.detail ?? "")
         try proxy.clear(logger: nil)
@@ -358,11 +358,11 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         let url = "http://127.0.0.1:63145/proxy.pac"
 
         // Our own Wi-Fi write notifies; later passes must not re-commit the unchanged Wi-Fi settings.
-        XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true))
+        XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true))
         let afterFirstPass = store.committedWrites
         XCTAssertGreaterThan(afterFirstPass, 0)
         for _ in 0..<10 {
-            XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true))
+            XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true))
         }
         XCTAssertEqual(store.committedWrites, afterFirstPass)
 
@@ -372,7 +372,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         for _ in 0..<10 {
             let before = store.committedWrites
             store.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = enforced }
-            do { try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true) }
+            do { try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true) }
             catch { /* Ethernet keeps failing; the budget, not the error, ends the loop. */ }
             writesPerPass.append(store.committedWrites - before)
         }
@@ -390,15 +390,15 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             let config = ProxyConfig()
             let proxy = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
             let dns = SystemDNSManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
-            try proxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
+            try proxy.reconcileLocation(config: config, mode: .manual, endpoints: .configured(config), apply: true)
             try dns.apply(forwarderPort: 15053, logger: nil)
             store.edit { $0.activeLocationID = "55555555-5555-5555-5555-555555555555" }
-            XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true))
+            XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .manual, endpoints: .configured(config), apply: true))
             XCTAssertThrowsError(try dns.reconcileLocation(apply: true, forwarderPort: 15053))
             XCTAssertFalse(journal.hasRecords(for: .systemProxy))
             XCTAssertFalse(journal.hasRecords(for: .systemDNS))
             store.edit { $0.activeLocationID = office }
-            try proxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
+            try proxy.reconcileLocation(config: config, mode: .manual, endpoints: .configured(config), apply: true)
             try dns.reconcileLocation(apply: true, forwarderPort: 15053)
             XCTAssertEqual(try store.snapshot().services[1].proxies["HTTPProxy"], .text(config.effectiveClientHost))
             XCTAssertEqual(try store.snapshot().services[1].dns, localDNS)
@@ -654,7 +654,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
                 "ProxyAutoConfigEnable": .number(1), "ProxyAutoConfigURLString": .text("http://corporate.example/proxy.pac")
             ]
             store.edit { $0.services[0].proxies = corporatePAC }
-            let desired = SystemProxyManager.locationFields(config: config, mode: .pac, localPACURL: url)
+            let desired = SystemProxyManager.locationFields(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url))
             try recovery.apply(kind: .proxies, desired: desired, config: config)
             let externalBypass = NetworkSettingValue.list(["external.example"])
             store.edit { $0.services[0].proxies["ExceptionsList"] = externalBypass }
@@ -727,8 +727,8 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         try withRecovery { store, journal, recovery, events in
             let original = try store.snapshot()
             let manager = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
-            XCTAssertFalse(manager.isApplied(config: ProxyConfig(), mode: .pac))
-            XCTAssertThrowsError(try manager.apply(config: ProxyConfig(), mode: .pac, logger: nil))
+            XCTAssertFalse(manager.isApplied(config: ProxyConfig(), mode: .pac, endpoints: .configured(ProxyConfig())))
+            XCTAssertThrowsError(try manager.apply(config: ProxyConfig(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig())))
             XCTAssertEqual(try store.snapshot(), original)
             XCTAssertFalse(journal.hasRecords(for: .systemProxy))
             XCTAssertTrue(events.events.contains { $0.detail?.contains("missing_pac_url") == true })

@@ -66,25 +66,28 @@ package final class SystemProxyManager: @unchecked Sendable {
         self.configProvider = configProvider
     }
 
-    package static func locationFields(config: ProxyConfig, mode: SystemProxyMode, localPACURL: String?) -> [String: NetworkSettingValue] {
+    /// The advertised endpoint comes from `endpoints` alone, never from
+    /// `config.localPort`: that is intent, and 0 there means "choose a port"
+    /// (#251). `config` supplies the bypass list and which PAC to advertise.
+    package static func locationFields(config: ProxyConfig, mode: SystemProxyMode, endpoints: ClientEndpoints) -> [String: NetworkSettingValue] {
         switch mode {
         case .manual:
-            return ["HTTPEnable": .number(1), "HTTPProxy": .text(config.effectiveClientHost), "HTTPPort": .number(config.localPort),
-                    "HTTPSEnable": .number(1), "HTTPSProxy": .text(config.effectiveClientHost), "HTTPSPort": .number(config.localPort),
+            return ["HTTPEnable": .number(1), "HTTPProxy": .text(endpoints.proxyHost), "HTTPPort": .number(endpoints.proxyPort),
+                    "HTTPSEnable": .number(1), "HTTPSProxy": .text(endpoints.proxyHost), "HTTPSPort": .number(endpoints.proxyPort),
                     "ProxyAutoConfigEnable": .number(0), "ExceptionsList": .list(config.noProxyHosts)]
         case .pac:
             return ["HTTPEnable": .number(0), "HTTPSEnable": .number(0), "ProxyAutoConfigEnable": .number(1),
-                    "ProxyAutoConfigURLString": .text(effectivePACURL(config: config, localPACURL: localPACURL))]
+                    "ProxyAutoConfigURLString": .text(effectivePACURL(config: config, localPACURL: endpoints.localPACURL))]
         }
     }
 
     /// Returns when to retry a drift repair withheld by the contention budget.
     @discardableResult
-    package func reconcileLocation(config: ProxyConfig, mode: SystemProxyMode, localPACURL: String?, apply: Bool) throws -> Duration? {
+    package func reconcileLocation(config: ProxyConfig, mode: SystemProxyMode, endpoints: ClientEndpoints, apply: Bool) throws -> Duration? {
         try operations.withLock {
             guard let locationRecovery else { return nil }
             if apply {
-                return try locationRecovery.reconcile(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, localPACURL: localPACURL), config: config)
+                return try locationRecovery.reconcile(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, endpoints: endpoints), config: config)
             }
             try locationRecovery.restore(kind: .proxies)
             return nil
@@ -100,10 +103,10 @@ package final class SystemProxyManager: @unchecked Sendable {
         return config.pacURL
     }
 
-    package func isApplied(config: ProxyConfig, mode: SystemProxyMode, localPACURL: String? = nil) -> Bool {
-        if mode == .pac && Self.effectivePACURL(config: config, localPACURL: localPACURL).isEmpty { return false }
+    package func isApplied(config: ProxyConfig, mode: SystemProxyMode, endpoints: ClientEndpoints) -> Bool {
+        if mode == .pac && Self.effectivePACURL(config: config, localPACURL: endpoints.localPACURL).isEmpty { return false }
         if let locationRecovery {
-            return locationRecovery.isApplied(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, localPACURL: localPACURL))
+            return locationRecovery.isApplied(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, endpoints: endpoints))
         }
         guard let services = try? connectedNetworkServices(logger: nil),
               !services.isEmpty else { return false }
@@ -111,11 +114,11 @@ package final class SystemProxyManager: @unchecked Sendable {
         switch mode {
         case .manual:
             return services.allSatisfy { service in
-                proxyFieldsMatch(service: service, type: "webproxy", host: config.effectiveClientHost, port: config.localPort)
-                && proxyFieldsMatch(service: service, type: "securewebproxy", host: config.effectiveClientHost, port: config.localPort)
+                proxyFieldsMatch(service: service, type: "webproxy", host: endpoints.proxyHost, port: endpoints.proxyPort)
+                && proxyFieldsMatch(service: service, type: "securewebproxy", host: endpoints.proxyHost, port: endpoints.proxyPort)
             }
         case .pac:
-            let pacURL = Self.effectivePACURL(config: config, localPACURL: localPACURL)
+            let pacURL = Self.effectivePACURL(config: config, localPACURL: endpoints.localPACURL)
             guard !pacURL.isEmpty else { return false }
             return services.allSatisfy { service in
                 autoproxyMatches(service: service, url: pacURL)
@@ -168,11 +171,11 @@ package final class SystemProxyManager: @unchecked Sendable {
     /// marker's scope, so it can never collide with a real field.
     static let untouchedMarkerKey = "\u{0}untouched"
 
-    package func apply(config: ProxyConfig, mode: SystemProxyMode, logger: (any LogSink)?, localPACURL: String? = nil) throws {
+    package func apply(config: ProxyConfig, mode: SystemProxyMode, logger: (any LogSink)?, endpoints: ClientEndpoints) throws {
         operations.lock()
         defer { operations.unlock() }
         if let locationRecovery {
-            try locationRecovery.apply(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, localPACURL: localPACURL), config: config)
+            try locationRecovery.apply(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, endpoints: endpoints), config: config)
             return
         }
         let candidates = try connectedNetworkServices(logger: logger)
@@ -192,7 +195,7 @@ package final class SystemProxyManager: @unchecked Sendable {
         // `http://127.0.0.1:<localPACPort>/proxy.pac` as the value to restore,
         // with the corporate PAC URL it had replaced gone for good. So
         // anything pointing at our own local listener is discarded at capture.
-        let ours = LocalListenerFingerprint(config: config)
+        let ours = LocalListenerFingerprint(config: config, endpoints: endpoints)
         var services: [String] = []
         for service in candidates {
             guard let prior = capturePriorState(service: service, ours: ours) else {
@@ -220,12 +223,12 @@ package final class SystemProxyManager: @unchecked Sendable {
         }
         journal.markApplied(surface: .systemProxy)
 
-        let pacURL = Self.effectivePACURL(config: config, localPACURL: localPACURL)
+        let pacURL = Self.effectivePACURL(config: config, localPACURL: endpoints.localPACURL)
         var script = ""
         for service in services {
             let s = service.shellQuoted
-            let h = config.effectiveClientHost.shellQuoted
-            let p = String(config.localPort)
+            let h = endpoints.proxyHost.shellQuoted
+            let p = String(endpoints.proxyPort)
             // Through the shared renderer, which spells an empty list `Empty`.
             // Interpolating the joined list directly emitted a bare
             // `-setproxybypassdomains <service>` with no domains when the user
@@ -265,7 +268,7 @@ package final class SystemProxyManager: @unchecked Sendable {
             let output = [result.standardError, result.standardOutput].filter { !$0.isEmpty }.joined(separator: " | ")
             if output.contains("requires admin") || result.exitCode == 14 {
                 logger?.log(.info, "networksetup requires admin, prompting...", category: .system)
-                try applyViaPrivilegeClient(config: config, mode: mode, services: services, pacURL: pacURL, logger: logger)
+                try applyViaPrivilegeClient(config: config, endpoints: endpoints, mode: mode, services: services, pacURL: pacURL, logger: logger)
             } else {
                 throw SystemProxyManagerError.commandFailed("networksetup failed (exit \(result.exitCode)): \(output.isEmpty ? "no output" : output)")
             }
@@ -624,12 +627,12 @@ package final class SystemProxyManager: @unchecked Sendable {
         return portProbe(port)
     }
 
-    private func applyViaPrivilegeClient(config: ProxyConfig, mode: SystemProxyMode, services: [String], pacURL: String, logger: (any LogSink)?) throws {
+    private func applyViaPrivilegeClient(config: ProxyConfig, endpoints: ClientEndpoints, mode: SystemProxyMode, services: [String], pacURL: String, logger: (any LogSink)?) throws {
         for service in services {
             switch mode {
             case .manual:
                 try privilegeClient.execute(.disableAutoproxy, values: [service])
-                try privilegeClient.execute(.applySystemProxy, values: [service, config.effectiveClientHost, String(config.localPort)])
+                try privilegeClient.execute(.applySystemProxy, values: [service, endpoints.proxyHost, String(endpoints.proxyPort)])
                 // Rendered rather than assembled inline: `setProxyBypass` needs
                 // the `Empty` sentinel for a list with no domains, and a caller
                 // that hand-built `[service] + noProxyHosts` sent a single
@@ -856,8 +859,14 @@ package final class SystemProxyManager: @unchecked Sendable {
         let pacPort: String
 
         init(config: ProxyConfig) {
-            host = config.effectiveClientHost
-            port = String(config.localPort)
+            self.init(config: config, endpoints: .configured(config))
+        }
+
+        /// What `apply` is about to advertise: the bound port, which a
+        /// configured port of 0 does not name (#251).
+        init(config: ProxyConfig, endpoints: ClientEndpoints) {
+            host = endpoints.proxyHost
+            port = String(endpoints.proxyPort)
             pacPort = String(config.localPACPort)
         }
 

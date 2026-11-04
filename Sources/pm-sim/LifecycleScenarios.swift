@@ -89,7 +89,7 @@ enum LifecycleScenarios {
                 manager.serialized {
                     guard !token.isSuperseded else { return }
                     do {
-                        try manager.apply(config: config, mode: .manual, logger: nil)
+                        try manager.apply(config: config, mode: .manual, logger: nil, endpoints: .configured(config))
                     } catch {
                         failures.record(error)
                     }

@@ -41,19 +41,19 @@ enum ReapplyRetryScenarios {
         // What the hosts' attempt does for the environment: one drift pass
         // that may write after a failure, and its verdict.
         retry.attempt = { _, token in
-            let pass = repair.pass(config: config, generation: manager.generation, trigger: .retry, isCurrent: { !token.isSuperseded })
+            let pass = repair.pass(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .retry, isCurrent: { !token.isSuperseded })
             return pass.settled ? .applied : .failed(reason: pass.reason ?? "unsettled")
         }
         func names() -> [String] { events.map(\.event) }
         func reapply() throws {
-            if let shortfall = try manager.apply(config: config, logger: nil).shortfall {
+            if let shortfall = try manager.apply(config: config, endpoints: .configured(config), logger: nil).shortfall {
                 retry.failed(.environment, cause: .configChange, reason: shortfall, token: lane.observationToken)
             }
         }
 
         // Phase 1: launchd refuses one variable during the re-apply, then
         // takes it again before the retry.
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         config.localPort = 3129
         machine.failingSetenv = ["HTTP_PROXY"]
         try reapply()
@@ -63,7 +63,7 @@ enum ReapplyRetryScenarios {
         await retry.drain()
         let recovered = names().last == "config.reapply_recovered"
             && machine.launchdEnvironment["HTTP_PROXY"] == "http://127.0.0.1:3129"
-            && manager.inspect(config: config).isClean
+            && manager.inspect(config: config, endpoints: .configured(config)).isClean
 
         // Phase 2: it keeps refusing. Three attempts, then abandoned.
         events = []

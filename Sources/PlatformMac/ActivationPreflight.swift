@@ -59,7 +59,7 @@ package struct ActivationPreflightEvaluator {
         if platformConfig.manageSystemProxy {
             let alreadyApplied = isRunning
                 ? systemConduit.isCleared()
-                : systemConduit.isApplied(config: config, mode: platformConfig.systemProxyMode)
+                : systemConduit.isApplied(config: config, mode: platformConfig.systemProxyMode, endpoints: .configured(config))
             let level: PrivilegeLevel = helperAvailable ? .none : .mayRequireAdmin
             systemProxy = IntegrationStatus(enabled: true, alreadyApplied: alreadyApplied, privilegeLevel: level)
         } else {

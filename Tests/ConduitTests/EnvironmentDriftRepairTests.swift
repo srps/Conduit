@@ -52,17 +52,17 @@ final class EnvironmentDriftRepairTests: XCTestCase {
     }
 
     func testNothingDriftedIsQuiet() throws {
-        try manager.apply(config: config, logger: nil)
-        XCTAssertNil(repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { true }))
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
+        XCTAssertNil(repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { true }))
         XCTAssertEqual(events.names.filter { $0.hasPrefix("platform.environment_") }, [])
     }
 
     /// The verdict a failed re-apply's retry reads (#194): settled only
     /// when the surface holds what the config asks.
     func testAPassSaysWhetherTheSurfaceSettled() throws {
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         func pass(_ trigger: EnvironmentDriftRepair.Trigger) -> EnvironmentDriftRepair.PassOutcome {
-            repair.pass(config: config, generation: manager.generation, trigger: trigger, isCurrent: { true })
+            repair.pass(config: config, endpoints: .configured(config), generation: manager.generation, trigger: trigger, isCurrent: { true })
         }
         XCTAssertEqual(pass(.retry), .init(retry: nil, settled: true, reason: nil), "clean")
 
@@ -85,69 +85,69 @@ final class EnvironmentDriftRepairTests: XCTestCase {
     }
 
     func testAPassOvertakenByAClearIsNotSettled() throws {
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         try wipe()
         let generation = manager.generation
         try manager.clear(logger: nil)
-        XCTAssertEqual(repair.pass(config: config, generation: generation, trigger: .retry, isCurrent: { true }).reason, "superseded")
+        XCTAssertEqual(repair.pass(config: config, endpoints: .configured(config), generation: generation, trigger: .retry, isCurrent: { true }).reason, "superseded")
     }
 
     /// `apply` reports what it left instead of throwing; `shortfall` is how
     /// a caller that only catches stops reading that as success (#194).
     func testAnApplyResultNamesWhatItLeft() throws {
-        XCTAssertNil(try manager.apply(config: config, logger: nil).shortfall)
+        XCTAssertNil(try manager.apply(config: config, endpoints: .configured(config), logger: nil).shortfall)
         machine.failingSetenv = ["HTTP_PROXY", "NO_PROXY"]
         var changed = config
         changed.localPort = 3129
         changed.noProxyHosts.append("bypass.example")
-        XCTAssertEqual(try manager.apply(config: changed, logger: nil).shortfall,
+        XCTAssertEqual(try manager.apply(config: changed, endpoints: .configured(changed), logger: nil).shortfall,
                        "partial profiles_left= launchd_left=HTTP_PROXY,NO_PROXY")
     }
 
     func testAWipeIsReportedAndRepaired() throws {
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         try wipe()
 
-        repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { true })
 
         XCTAssertEqual(events.names, ["platform.environment_drift", "platform.environment_repaired"])
         XCTAssertEqual(events.details.first, "trigger=timer profiles=.zshrc:missing launchd=HTTP_PROXY")
         XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:3128")
         let text = try String(contentsOf: zshrc, encoding: .utf8)
         XCTAssertTrue(text.hasPrefix("export A=1\n") && text.contains("# >>> Conduit >>>"))
-        XCTAssertTrue(manager.inspect(config: config).isClean)
+        XCTAssertTrue(manager.inspect(config: config, endpoints: .configured(config)).isClean)
     }
 
     /// A program that keeps stripping the block gets `maximumRepairs`
     /// repairs per window, one withheld event, and a retry when it reopens.
     func testRepairsPastTheBudgetAreWithheldOnce() throws {
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         for _ in 0..<2 {
             try wipe()
-            XCTAssertNil(repair.run(config: config, generation: manager.generation, trigger: .observed, isCurrent: { true }))
+            XCTAssertNil(repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .observed, isCurrent: { true }))
             clock.advance(.seconds(60))
         }
         try wipe()
-        let retry = repair.run(config: config, generation: manager.generation, trigger: .observed, isCurrent: { true })
+        let retry = repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .observed, isCurrent: { true })
         XCTAssertEqual(retry, .seconds(480), "the first repair, at 0 s, leaves the 600 s window at 120 s + 480 s")
         XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"], "withheld")
-        XCTAssertNotNil(repair.run(config: config, generation: manager.generation, trigger: .observed, isCurrent: { true }))
+        XCTAssertNotNil(repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .observed, isCurrent: { true }))
         XCTAssertEqual(events.names.filter { $0 == "platform.environment_repair_withheld" }.count, 1, "once per episode")
         XCTAssertEqual(events.names.filter { $0 == "platform.environment_drift" }.count, 3,
                        "two repairs and the first withheld pass; the repeat stays quiet")
 
         clock.advance(.seconds(481))
-        XCTAssertNil(repair.run(config: config, generation: manager.generation, trigger: .retry, isCurrent: { true }))
+        XCTAssertNil(repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .retry, isCurrent: { true }))
         XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:3128")
     }
 
     func testAnUnsafeProfileIsReportedOnceAndTheRestIsRepaired() throws {
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         try Data([0xff]).write(to: zshrc)
         _ = try machine.run("/bin/launchctl", ["unsetenv", "HTTP_PROXY"])
 
-        repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { true })
-        repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { true })
 
         XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:3128", "the variable is repaired")
         XCTAssertEqual(try Data(contentsOf: zshrc), Data([0xff]), "the unsafe profile is not")
@@ -160,13 +160,13 @@ final class EnvironmentDriftRepairTests: XCTestCase {
     /// The host read config A and the generation, then queued the pass; B's
     /// apply landed first. The pass must not put A back.
     func testAPassQueuedBeforeANewerApplyWritesNothing() throws {
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         let generation = manager.generation
         var newer = config
         newer.localPort = 3129
-        try manager.apply(config: newer, logger: nil)
+        try manager.apply(config: newer, endpoints: .configured(newer), logger: nil)
 
-        repair.run(config: config, generation: generation, trigger: .observed, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: generation, trigger: .observed, isCurrent: { true })
 
         XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:3129")
         XCTAssertEqual(events.names, ["platform.environment_drift", "platform.environment_repair_superseded"])
@@ -174,16 +174,16 @@ final class EnvironmentDriftRepairTests: XCTestCase {
 
     /// An apply that throws after writing a profile is still an attempt.
     func testAnAttemptThatThrowsCountsAgainstTheBudget() throws {
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         // environment.d cannot be created under a regular file.
         try FileManager.default.removeItem(at: home.appendingPathComponent(".config"))
         try Data().write(to: home.appendingPathComponent(".config"))
         for _ in 0..<2 {
             try wipe()
-            XCTAssertNil(repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { true }))
+            XCTAssertNil(repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { true }))
         }
         try wipe()
-        XCTAssertNotNil(repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { true }),
+        XCTAssertNotNil(repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { true }),
                         "withheld after two attempts that threw")
         XCTAssertEqual(events.names.filter { $0 == "platform.environment_repair_withheld" }.count, 1)
     }
@@ -191,45 +191,45 @@ final class EnvironmentDriftRepairTests: XCTestCase {
     /// The budget belongs to an episode: an apply from anything else (a
     /// config change, a restart) starts a new one.
     func testAnApplyFromElsewhereStartsANewEpisode() throws {
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         for _ in 0..<2 {
             try wipe()
-            repair.run(config: config, generation: manager.generation, trigger: .observed, isCurrent: { true })
+            repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .observed, isCurrent: { true })
         }
         try wipe()
-        XCTAssertNotNil(repair.run(config: config, generation: manager.generation, trigger: .observed, isCurrent: { true }))
+        XCTAssertNotNil(repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .observed, isCurrent: { true }))
 
         var changed = config
         changed.localPort = 3129
-        try manager.apply(config: changed, logger: nil)
+        try manager.apply(config: changed, endpoints: .configured(changed), logger: nil)
         try wipe()
-        XCTAssertNil(repair.run(config: changed, generation: manager.generation, trigger: .observed, isCurrent: { true }))
+        XCTAssertNil(repair.run(config: changed, endpoints: .configured(changed), generation: manager.generation, trigger: .observed, isCurrent: { true }))
         XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:3129", "repaired in the new episode")
     }
 
     /// After a failed attempt, notifications wait for the tick: a failure
     /// that writes nothing must not spend the budget on one burst.
     func testAfterAFailedAttemptNotificationsWaitForTheTick() throws {
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         try FileManager.default.removeItem(at: home.appendingPathComponent(".config"))
         try Data().write(to: home.appendingPathComponent(".config"))
         try wipe()
-        repair.run(config: config, generation: manager.generation, trigger: .observed, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .observed, isCurrent: { true })
         let afterFailure = events.names.count
-        repair.run(config: config, generation: manager.generation, trigger: .observed, isCurrent: { true })
-        repair.run(config: config, generation: manager.generation, trigger: .observed, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .observed, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .observed, isCurrent: { true })
         XCTAssertEqual(events.names.count, afterFailure, "no reads, no attempts, no events until the tick")
 
-        repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { true })
         XCTAssertGreaterThan(events.names.count, afterFailure, "the tick tries again")
     }
 
     /// A profile left alone is reported once, however many passes look.
     func testAnUnsafeOnlyStateIsReportedOnceAcrossPasses() throws {
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         try Data([0xff]).write(to: zshrc)
         for _ in 0..<3 {
-            repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { true })
+            repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { true })
         }
         XCTAssertEqual(events.names.filter { $0 == "platform.environment_repair_failed" }.count, 1)
     }
@@ -237,10 +237,10 @@ final class EnvironmentDriftRepairTests: XCTestCase {
     /// A profile that turns unsafe between the inspection and the write is
     /// left alone, so the pass is not a repair.
     func testAProfileTurningUnsafeMidPassIsNotARepair() throws {
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         _ = try machine.run("/bin/launchctl", ["unsetenv", "HTTP_PROXY"])
         let zshrc = self.zshrc
-        repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: {
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: {
             try? Data([0xff]).write(to: zshrc)
             return true
         })
@@ -261,20 +261,20 @@ final class EnvironmentDriftRepairTests: XCTestCase {
     /// A clean inspection ends the backoff: the next wipe is repaired on its
     /// notification, not left for the tick.
     func testACleanTickEndsTheBackoff() throws {
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         try FileManager.default.removeItem(at: home.appendingPathComponent(".config"))
         try Data().write(to: home.appendingPathComponent(".config"))
         try wipe()
-        repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { true })
 
         // Recovered from outside: the obstruction is gone and a host applied.
         try FileManager.default.removeItem(at: home.appendingPathComponent(".config"))
         let generation = manager.generation
-        _ = try manager.repair(config: config, ifGeneration: generation, isCurrent: { true }, logger: nil)
-        repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { true })
+        _ = try manager.repair(config: config, endpoints: .configured(config), ifGeneration: generation, isCurrent: { true }, logger: nil)
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { true })
 
         try wipe()
-        repair.run(config: config, generation: manager.generation, trigger: .observed, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .observed, isCurrent: { true })
         XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:3128", "repaired on the notification")
     }
 
@@ -293,10 +293,10 @@ final class EnvironmentDriftRepairTests: XCTestCase {
                 return try machine.run(path, arguments)
             })
         let repair = EnvironmentDriftRepair(manager: manager, eventSink: { events.append($0) }, logger: nil)
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         try "export A=1\n".write(to: zshrc, atomically: true, encoding: .utf8)   // profile-only drift
 
-        repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: {
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: {
             _ = try? machine.run("/bin/launchctl", ["unsetenv", "HTTP_PROXY"])
             failSet.on = true
             return true
@@ -308,9 +308,9 @@ final class EnvironmentDriftRepairTests: XCTestCase {
     }
 
     func testAPassOvertakenByTheLifecycleWritesNothing() throws {
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         try wipe()
-        repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { false })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { false })
         XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"])
         XCTAssertEqual(events.names, ["platform.environment_drift", "platform.environment_repair_superseded"])
     }

@@ -607,10 +607,14 @@ enum RuntimeHostEffectsScenario {
             check("a proxy Start reports its proxy started", proxy.modules.proxy == .started)
             check("its companion starts the configured DNS", proxy.conditionalDNS == .started)
             check("the companion points system DNS at the forwarder", machine.dnsRelayRunning)
+            // Configured port 0 means "choose a port": clients are given the one the listener holds (#251).
+            check("a proxy Start on port 0 advertises its bound port", advertisesBoundPort(host, machine, home: home))
+            check("the stored proxy port stays 0", try ProxyConfigPersistence.load(in: environment, allowMissing: false).localPort == 0)
 
             let proxyStop = await host.stopProxy()
             check("a proxy Stop stops only the proxy", proxyStop.stopped == [.proxy])
             check("a proxy Stop clears the system proxy", !machine.service("Wi-Fi").routesThroughAProxy)
+            check("a proxy Stop removes the proxy environment", machine.launchdEnvironment["HTTP_PROXY"] == nil)
             check("a proxy Stop leaves DNS running", host.status().dnsRunState == "running" && machine.dnsRelayRunning)
 
             let dnsStop = await host.stopDNS()
@@ -620,6 +624,7 @@ enum RuntimeHostEffectsScenario {
             let observed = host.moduleRevisions
             let restart = try await host.restartProxy()
             check("a menu Restart brings the proxy up", restart.modules.proxy == .started && machine.service("Wi-Fi").routesThroughAProxy)
+            check("the Restart advertises its own bound port", advertisesBoundPort(host, machine, home: home))
             check("its companion finds the DNS fence and starts nothing", restart.conditionalDNS == .fenced && !machine.dnsRelayRunning)
 
             // The same Stop through the actual composition: host, service, in-memory transport and framed client. The client and its
@@ -1660,6 +1665,21 @@ enum RuntimeHostEffectsScenario {
         return try text.split(separator: "\n").map { line in
             try decoder.decode(RuntimeEvent.self, from: Data(line.utf8))
         }
+    }
+
+    /// Every client-facing surface the host writes names the port its proxy listener holds, which a configured port of 0
+    /// does not (#251): both Wi-Fi proxies, the launchd proxy variables and the managed `.zshrc` block.
+    @RuntimeActor
+    private static func advertisesBoundPort(_ host: RuntimeHost, _ machine: FakeMachine, home: URL) -> Bool {
+        guard let bound = host.status().bindings.proxyPort, bound != 0 else { return false }
+        let endpoint = FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: String(bound))
+        let url = "http://127.0.0.1:\(bound)"
+        let profile: String
+        do { profile = try String(contentsOf: home.appendingPathComponent(".zshrc"), encoding: .utf8) } catch { return false }
+        return machine.service("Wi-Fi").webProxy == endpoint
+            && machine.service("Wi-Fi").secureWebProxy == endpoint
+            && ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"].allSatisfy { machine.launchdEnvironment[$0] == url }
+            && profile.contains("export HTTP_PROXY='\(url)'")
     }
 
     /// The typed payloads in the owned events file, decoded through the canonical decoder (decision 0033). A line that does not decode

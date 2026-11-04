@@ -88,17 +88,17 @@ enum NetworkLocationScenarios {
         let retryRecovery = LocationSettingsRecovery(store: retryStore, journal: journal, emit: { events.append($0) })
         let retryProxy = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: retryRecovery)
         let retryDNS = SystemDNSManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: retryRecovery)
-        try retryProxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
+        try retryProxy.reconcileLocation(config: config, mode: .manual, endpoints: .configured(config), apply: true)
         try retryDNS.apply(forwarderPort: 15053, logger: nil)
         retryStore.edit { $0.activeLocationID = "55555555-5555-5555-5555-555555555555" }
         var emptyFailures = 0
-        do { try retryProxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true) }
+        do { try retryProxy.reconcileLocation(config: config, mode: .manual, endpoints: .configured(config), apply: true) }
         catch NetworkSettingsError.unavailable { emptyFailures += 1 }
         do { try retryDNS.reconcileLocation(apply: true, forwarderPort: 15053) }
         catch NetworkSettingsError.unavailable { emptyFailures += 1 }
         let emptyReleased = !journal.hasRecords(for: .systemProxy) && !journal.hasRecords(for: .systemDNS)
         retryStore.edit { $0.activeLocationID = office }
-        try retryProxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
+        try retryProxy.reconcileLocation(config: config, mode: .manual, endpoints: .configured(config), apply: true)
         try retryDNS.reconcileLocation(apply: true, forwarderPort: 15053)
         let retrySnapshot = try retryStore.snapshot()
         let emptyRetrySucceeded = emptyFailures == 2 && emptyReleased
@@ -111,10 +111,10 @@ enum NetworkLocationScenarios {
         let localPAC = "http://127.0.0.1:63145/proxy.pac"
         retryStore.refuseWrites(true)
         var initialPACFailureRetained = false
-        do { try retryProxy.reconcileLocation(config: localPACConfig, mode: .pac, localPACURL: localPAC, apply: true) }
+        do { try retryProxy.reconcileLocation(config: localPACConfig, mode: .pac, endpoints: .configured(localPACConfig, localPACURL: localPAC), apply: true) }
         catch { initialPACFailureRetained = journal.hasRecords(for: .systemProxy) }
         retryStore.refuseWrites(false)
-        try retryProxy.reconcileLocation(config: localPACConfig, mode: .pac, localPACURL: localPAC, apply: true)
+        try retryProxy.reconcileLocation(config: localPACConfig, mode: .pac, endpoints: .configured(localPACConfig, localPACURL: localPAC), apply: true)
         let repairedPAC = try retryStore.snapshot().services[1].proxies["ProxyAutoConfigURLString"] == .text(localPAC)
         let corporatePAC = NetworkSettingValue.text("http://corporate.example/proxy.pac")
         let settingsObserver = FakeNetworkLocationObserver()
@@ -123,7 +123,7 @@ enum NetworkLocationScenarios {
         settingsObserver.start(onChange: { _ in }, onSettingsChange: { [config = localPACConfig] in
             settingsDelivery.deliver(using: notificationDeliveries) {
                 do {
-                    try retryProxy.reconcileLocation(config: config, mode: .pac, localPACURL: localPAC, apply: true)
+                    try retryProxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: localPAC), apply: true)
                 } catch {
                     events.append(RuntimeEvent(kind: .config, event: "platform.location_failed",
                                                detail: "operation=observed_settings_reconcile reason=\(error.localizedDescription)"))
@@ -147,7 +147,7 @@ enum NetworkLocationScenarios {
         retryStore.edit { $0.services[1].proxies = services[1].proxies }
         retryStore.edit { $0.activeLocationID = home }
         let beforeStoppedRecovery = try retryStore.snapshot()
-        try retryProxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
+        try retryProxy.reconcileLocation(config: config, mode: .manual, endpoints: .configured(config), apply: true)
         try retryDNS.apply(forwarderPort: 15053, logger: nil)
         retryStore.edit { $0.activeLocationID = office }
         retryStore.refuseWrites(true)
@@ -158,7 +158,7 @@ enum NetworkLocationScenarios {
         let stoppedRecordsRetained = journal.hasRecords(for: .systemProxy) && journal.hasRecords(for: .systemDNS)
         retryStore.refuseWrites(false)
         retryStore.edit { $0.activeLocationID = home }
-        try retryProxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: false)
+        try retryProxy.reconcileLocation(config: config, mode: .manual, endpoints: .configured(config), apply: false)
         try retryDNS.reconcileLocation(apply: false, forwarderPort: 0)
         let stoppedActiveRestored = try stoppedRecordsRetained && retryStore.snapshot().services == beforeStoppedRecovery.services
             && !journal.hasRecords(for: .systemProxy) && !journal.hasRecords(for: .systemDNS)
@@ -255,7 +255,7 @@ enum NetworkLocationScenarios {
         resolverConfig.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])]
         var environmentBlocked = false
         var resolverBlocked = false
-        do { try environment.apply(config: config, logger: nil) }
+        do { try environment.apply(config: config, endpoints: .configured(config), logger: nil) }
         catch { environmentBlocked = true }
         do { try resolvers.applyEntryFiles(config: resolverConfig, logger: nil) }
         catch { resolverBlocked = true }
@@ -368,20 +368,20 @@ enum NetworkLocationScenarios {
         store.refuseWrites(true)
         var failedWrites = 0
         for _ in 0..<10 {
-            do { try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true) }
+            do { try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true) }
             catch { failedWrites += 1 }
         }
         store.refuseWrites(false)
         var retry: Duration?
         for _ in 0..<50 {
             store.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = enforced }
-            retry = try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+            retry = try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true)
         }
         let repairs = events.events.filter { $0.event == "platform.location_reconcile" }.count
         let contended = events.events.filter { $0.event == "platform.location_contended" }.count
         let yielded = try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"] == enforced
         clock.advance(.seconds(61))
-        try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+        try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true)
         let reopened = try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"] == .text(url)
         try proxy.clear(logger: nil)
         let restored = try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"] == enforced
@@ -416,7 +416,7 @@ extension NetworkLocationScenarios {
         var config = ProxyConfig()
         config.localPACEnabled = true
         let url = "http://127.0.0.1:63145/proxy.pac"
-        func pass() { do { try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true) } catch { /* Ethernet refuses. */ } }
+        func pass() { do { try proxy.reconcileLocation(config: config, mode: .pac, endpoints: .configured(config, localPACURL: url), apply: true) } catch { /* Ethernet refuses. */ } }
         pass()
         let afterFirst = store.committedWrites
         for _ in 0..<100 { pass() }

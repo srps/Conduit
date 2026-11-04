@@ -90,7 +90,7 @@ final class PlatformOperationLockTests: XCTestCase {
 
         let finishedWhileHeld = interleave(
             hold: hold,
-            first: { [config] in try manager.apply(config: config, mode: .manual, logger: nil) },
+            first: { [config] in try manager.apply(config: config, mode: .manual, logger: nil, endpoints: .configured(config)) },
             second: { try manager.clear(logger: nil) }
         )
 
@@ -150,7 +150,7 @@ final class PlatformOperationLockTests: XCTestCase {
 
         let finishedWhileHeld = interleave(
             hold: hold,
-            first: { [config] in try manager.apply(config: config, logger: nil) },
+            first: { [config] in try manager.apply(config: config, endpoints: .configured(config), logger: nil) },
             second: { try manager.clear(logger: nil) }
         )
 
