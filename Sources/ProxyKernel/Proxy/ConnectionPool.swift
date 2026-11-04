@@ -1373,9 +1373,16 @@ package final class ConnectionPool: @unchecked Sendable {
         )
         let timeout = TimeAmount.nanoseconds(DurationUnits.runtimeNanoseconds(budget))
         let start = Date()
+        let loop = group.next()
+        let settled = loop.makePromise(of: UpstreamExchangeResponse.self)
+        // The response timer starts only once the request is sent, after a fresh connection's first authentication token.
+        let deadline = loop.scheduleTask(in: timeout + timeout) { settled.fail(ConnectionPoolError.upstreamResponseTimedOut) }
         acquireConnection(for: proxy, target: url, preferFreshConnection: true, connectTimeout: timeout, selects: false)
             .flatMap { [weak self] connection -> EventLoopFuture<UpstreamExchangeResponse> in
-                guard let self else { return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse) }
+                guard let self else {
+                    connection.channel.close(mode: .all, promise: nil)
+                    return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
+                }
                 return self.attributingRetirement(
                     self.performBufferedExchange(
                         head: head, requestBody: nil, connection: connection, proxy: proxy, authSource: nil, responseTimeout: timeout
@@ -1383,31 +1390,42 @@ package final class ConnectionPool: @unchecked Sendable {
                     connection: connection
                 )
             }
-            .whenComplete { [weak self] result in
-                let outcome: UpstreamCircuitBreaker.SilenceCheckOutcome
-                switch result {
-                case .success:
-                    outcome = .answered(latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
-                case .failure(let error):
-                    switch ConnectionPoolError.failureClass(error) {
-                    case .upstream: outcome = .refused
-                    case .inconclusive: outcome = .silent
-                    case .local: outcome = .unasked
-                    }
+            .cascade(to: settled)
+        settled.futureResult.whenComplete { [weak self] result in
+            deadline.cancel()
+            let outcome: UpstreamCircuitBreaker.SilenceCheckOutcome
+            switch result {
+            case .success:
+                outcome = .answered(latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
+            case .failure(let error):
+                switch ConnectionPoolError.failureClass(error) {
+                case .upstream: outcome = .refused
+                case .inconclusive: outcome = .silent
+                case .local: outcome = .unasked
                 }
-                self?.finishSilenceCheck(of: proxy, outcome)
             }
+            self?.finishSilenceCheck(of: proxy, outcome)
+        }
     }
 
     private func finishSilenceCheck(of proxy: UpstreamProxy, _ outcome: UpstreamCircuitBreaker.SilenceCheckOutcome) {
         let config = configProvider()
-        let interval = breakerThresholds(from: config).baseOpenInterval
-        let verdict: UpstreamCircuitBreaker.SilenceCheckVerdict = lock.withLock {
+        let thresholds = breakerThresholds(from: config)
+        let interval = thresholds.baseOpenInterval
+        let (verdict, strike): (UpstreamCircuitBreaker.SilenceCheckVerdict, UpstreamCircuitBreaker.Transition?) = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
-            guard var breaker = breakers[proxy.id] else { return .superseded }
-            let verdict = breaker.finishSilenceCheck(outcome, now: Date(), interval: interval)
+            guard var breaker = breakers[proxy.id] else { return (.superseded, nil) }
+            let now = Date()
+            let verdict = breaker.finishSilenceCheck(outcome, now: now, interval: interval)
+            var strike: UpstreamCircuitBreaker.Transition?
+            if verdict == .rankedBehind, outcome == .refused {
+                strike = breaker.recordFailure(
+                    now: now, threshold: thresholds.failureThreshold, windowSeconds: thresholds.windowSeconds,
+                    baseOpenInterval: thresholds.baseOpenInterval, maxOpenInterval: thresholds.maxOpenInterval
+                )
+            }
             breakers[proxy.id] = breaker
-            return verdict
+            return (verdict, strike)
         }
         let finished = RuntimeEvent(
             kind: .health, event: "upstream.silence_check_finished",
@@ -1423,7 +1441,7 @@ package final class ConnectionPool: @unchecked Sendable {
             eventSink?(event)
             logger.log(.notice, "Upstream \(proxy.name) stopped answering; preferring upstreams that answer: \(event.detail ?? "")", category: .proxy)
         }
-        if outcome == .refused { recordFailure(for: proxy) }
+        if let strike { emitTransition(strike, for: proxy) }
     }
 
     private func failHalfOpenProbe(for proxy: UpstreamProxy) { recordFailure(for: proxy, onlyWhenHalfOpen: true) }

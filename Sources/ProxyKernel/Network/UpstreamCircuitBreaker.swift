@@ -68,7 +68,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
 
     package enum Silence: Equatable, Sendable {
         case none
-        case checking
+        case checking(answered: Bool)
         case ranksBehind(until: Date)
     }
 
@@ -172,7 +172,11 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         consecutiveFailures = 0
         firstFailureAt = nil
         silences.recordAnswer()
-        endRanking()
+        if case .checking = silence {
+            silence = .checking(answered: true)
+        } else {
+            endRanking()
+        }
 
         switch state {
         case .closed:
@@ -292,12 +296,12 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
     package mutating func recordUnanswered() -> (verdict: UnansweredStreak.Verdict, step: SilenceStep) {
         let verdict = silences.recordUnanswered()
         guard verdict.isDecisive, state == .closed, silence == .none else { return (verdict, .held) }
-        silence = .checking
+        silence = .checking(answered: false)
         return (verdict, .check)
     }
 
     package mutating func finishSilenceCheck(_ outcome: SilenceCheckOutcome, now: Date, interval: TimeInterval) -> SilenceCheckVerdict {
-        guard silence == .checking else { return .superseded }
+        guard case .checking(let answeredSince) = silence else { return .superseded }
         silence = .none
         guard state == .closed else { return .superseded }
         switch outcome {
@@ -307,7 +311,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         case .unasked:
             return .kept
         case .silent, .refused:
-            guard silences.failureStanding else { return .superseded }
+            guard !answeredSince, silences.failureStanding else { return .superseded }
             silence = .ranksBehind(until: now.addingTimeInterval(interval))
             return .rankedBehind
         }

@@ -343,7 +343,7 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         let second = breaker.recordUnanswered()
         XCTAssertTrue(second.verdict.isDecisive)
         XCTAssertEqual(second.step, .check)
-        XCTAssertEqual(breaker.silence, .checking)
+        XCTAssertEqual(breaker.silence, .checking(answered: false))
         XCTAssertEqual(breaker.recordUnanswered().step, .held, "one check per upstream at a time")
         XCTAssertFalse(breaker.ranksBehind(at: Date()), "a silence alone ranks nothing")
         XCTAssertEqual(breaker.state, .closed)
@@ -394,7 +394,7 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
     func testAnAnswerWhileTheCheckRunsSupersedesASilentCheck() {
         var breaker = decisivelySilent()
         breaker.recordSuccess(latencyMS: 10)
-        XCTAssertEqual(breaker.silence, .checking, "the check still runs, and only its outcome frees the slot")
+        XCTAssertEqual(breaker.silence, .checking(answered: true), "the check still runs, and only its outcome frees the slot")
         XCTAssertEqual(breaker.recordUnanswered().step, .held)
 
         XCTAssertEqual(breaker.finishSilenceCheck(.silent, now: Date(), interval: 30), .superseded)
