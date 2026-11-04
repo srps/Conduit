@@ -289,6 +289,18 @@ final class EnvironmentManagerTests: XCTestCase {
         XCTAssertEqual(launchctl.commands.filter { $0.first == "unsetenv" }, [])
     }
 
+    /// With records, the journal says what is ours; the domain is not asked.
+    func testATeardownWithRecordsReadsNoLaunchdVariable() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
+        let readsBeforeTeardown = launchctl.commands.filter { $0.first == "getenv" }.count
+
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(launchctl.commands.filter { $0.first == "getenv" }.count, readsBeforeTeardown)
+        XCTAssertNil(launchctl.environment["HTTP_PROXY"], "ours, recorded, removed")
+    }
+
     /// Our bypass list beside our proxy URL needs no read to remove, so
     /// one that cannot be read goes with the URL rather than outliving it.
     func testAnUnreadableBypassResidueGoesWithTheProxyURL() throws {

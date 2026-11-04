@@ -457,8 +457,19 @@ package final class EnvironmentManager: @unchecked Sendable {
         // mysteriously failing to reach anything. A variable that cannot be
         // read is not proof of no residue (STYLE rule 11), so only a domain
         // read as clean skips.
-        let residue = loopbackResidue()
-        if journal.knowsSurfaceIsIdle(.launchdEnvironment), residue == .absent {
+        //
+        // Every write is journaled first, so a name missing from the records
+        // was never written: its value is someone else's, unless it is our
+        // own address. An apply whose every capture was withheld leaves no
+        // records and wrote nothing, so "no records" alone is not "records
+        // lost". Only beside our proxy URL is an unrecorded bypass list our
+        // residue from a journal that was lost (#175); an unrecorded proxy
+        // variable is ours only when it names this machine itself. Once this
+        // manager has applied, it knows what it put there, and only that is,
+        // so the domain is read only when the journal holds no records.
+        let recordsPresent = journal.hasRecords(for: .launchdEnvironment)
+        let residue = recordsPresent ? nil : loopbackResidue()
+        if residue == .absent, journal.knowsSurfaceIsIdle(.launchdEnvironment) {
             logger?.log(
                 .debug,
                 "launchd environment teardown skipped: nothing recorded as applied and no local-proxy variables set.",
@@ -469,16 +480,7 @@ package final class EnvironmentManager: @unchecked Sendable {
 
         var restored = 0
         var failed: [String] = []
-        // Every write is journaled first, so a name missing from the records
-        // was never written: its value is someone else's, unless it is our
-        // own address. An apply whose every capture was withheld leaves no
-        // records and wrote nothing, so "no records" alone is not "records
-        // lost". Only beside our proxy URL is an unrecorded bypass list our
-        // residue from a journal that was lost (#175); an unrecorded proxy
-        // variable is ours only when it names this machine itself. Once this
-        // manager has applied, it knows what it put there, and only that is.
-        let recordsPresent = journal.hasRecords(for: .launchdEnvironment)
-        let bypassResidue = !recordsPresent && residue == .present
+        let bypassResidue = residue == .present
         for name in launchdVariableNames {
             let result: CommandResult?
             switch journal.prior(surface: .launchdEnvironment, scope: name) {
