@@ -1,7 +1,7 @@
 # 0040: Witness a port-0 session's advertised proxy endpoint in the state root
 
 - Date: 2026-11-04
-- Decision: proposed
+- Decision: accepted (owner, 2026-11-04, #271: answered “Accept” to the fixed witness file, exact host and port matching only and foreign loopback proxies never cleared, with the reused-ephemeral-port risk accepted)
 - Implementation: implemented
 - Validation: none
 - Supersedes: none
