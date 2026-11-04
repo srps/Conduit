@@ -28,6 +28,11 @@ struct ConduitCommands: Commands {
             .disabled(appState.updateStatus.availability != .available)
         }
 
+        CommandGroup(replacing: .help) {
+            Link("Conduit on GitHub", destination: ProjectLinks.repository)
+            Link("Report an Issue…", destination: ProjectLinks.newIssue)
+        }
+
         CommandGroup(replacing: .appTermination) {
             Button("Quit Conduit") {
                 NSApplication.shared.terminate(nil)

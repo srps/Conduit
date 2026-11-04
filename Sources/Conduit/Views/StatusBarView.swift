@@ -63,6 +63,7 @@ struct StatusBarView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var runtime: RuntimePresentationAdapter
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openURL) private var openURL
 
     private static let width: CGFloat = 320
     private static let cornerRadius: CGFloat = 12
@@ -283,6 +284,7 @@ struct StatusBarView: View {
             if appState.updateStatus.availability == .available {
                 commandRow("Check for Updates…") { appState.checkForUpdates() }
             }
+            commandRow("Star Conduit on GitHub…") { openURL(ProjectLinks.repository) }
             commandRow("Quit Conduit", shortcut: "⌘Q") { NSApplication.shared.terminate(nil) }
         }
         .padding(.vertical, 4)
