@@ -372,4 +372,15 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         XCTAssertFalse(reset.isSilent(at: now))
         XCTAssertEqual(reset.silences, UnansweredStreak())
     }
+
+    func testOpeningTheBreakerEndsTheSilence() {
+        var breaker = UpstreamCircuitBreaker()
+        let now = Date()
+        _ = breaker.recordUnanswered(now: now, interval: 30)
+        _ = breaker.recordUnanswered(now: now, interval: 30)
+        breaker.recordFailure(now: now, threshold: 1, windowSeconds: 0, baseOpenInterval: 30, maxOpenInterval: 300)
+
+        XCTAssertEqual(breaker.state, .open)
+        XCTAssertFalse(breaker.isSilent(at: now), "selection must see the half-open probe once the backoff ends")
+    }
 }

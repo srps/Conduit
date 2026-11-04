@@ -1338,7 +1338,11 @@ package final class ConnectionPool: @unchecked Sendable {
         let outcome: Outcome = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
-            guard breaker.state != .halfOpen else { return .halfOpenProbe }
+            switch breaker.state {
+            case .closed: break
+            case .halfOpen: return .halfOpenProbe
+            case .open: return .held
+            }
             let recorded = breaker.recordUnanswered(now: now, interval: interval)
             breakers[proxy.id] = breaker
             return recorded.becameSilent ? .silenced(recorded.verdict) : .held

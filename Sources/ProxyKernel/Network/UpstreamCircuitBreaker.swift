@@ -229,6 +229,8 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         }
 
         state = .open
+        // An open breaker is the stronger verdict, and a silence left over would hide its half-open probe from selection.
+        silentUntil = nil
         openUntil = now.addingTimeInterval(appliedInterval)
         lastOpenedAt = now
         halfOpenProbeInFlight = false

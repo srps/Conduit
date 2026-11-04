@@ -82,6 +82,27 @@ final class UpstreamSilenceTests: XCTestCase {
         try await secondary.close()
     }
 
+    func testASilenceOnAnOpenBreakerRanksNothing() async throws {
+        let released = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton).bind(host: "127.0.0.1", port: 0).get()
+        let refusedPort = try XCTUnwrap(released.localAddress?.port)
+        try await released.close().get()
+        var config = Self.config(upstreams: [UpstreamProxy(name: "a", host: "127.0.0.1", port: refusedPort, priority: 0)])
+        config.circuitFailureThreshold = 1
+        config.circuitBreakerWindowSeconds = 0
+        let events = Events()
+        let pool = makePool(config: NIOLockedValueBox(config), events: events)
+        do {
+            _ = try await pool.exchange(head: Self.head, body: nil).get()
+            XCTFail("a refused connect cannot succeed")
+        } catch {}
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open)
+
+        for _ in 0..<2 { pool.recordExchangeFailure(ConnectionPoolError.upstreamResponseTimedOut, for: config.upstreams[0]) }
+
+        XCTAssertEqual(events.details("upstream.deprioritized"), [], "late silences on an open breaker must not hide its half-open probe")
+        pool.closeAll()
+    }
+
     private static let head: HTTPRequestHead = {
         var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://example.com/")
         head.headers.add(name: "Host", value: "example.com")
