@@ -207,6 +207,7 @@ struct DevLaunchOptions: Equatable {
             environment.configFile, environment.platformStateFile, environment.platformConfigFile,
             environment.preferencesFile, environment.snapshotFile, environment.eventsFile,
             environment.logFile, environment.updateStateFile, environment.legacySavedDNSFile,
+            environment.proxyEndpointWitnessFile,
             fakeHome(in: stateDirectory), fakeResolver(in: stateDirectory),
         ]
     }

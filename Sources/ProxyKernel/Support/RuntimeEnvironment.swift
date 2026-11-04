@@ -55,8 +55,6 @@ package struct RuntimeEnvironment: Sendable, Equatable {
         configDirectory.appendingPathComponent("update-state.json")
     }
 
-    /// Where 0.1.x kept the pre-relay DNS servers before the journal existed.
-    /// Read once at launch to seed the journal, then removed.
     /// The advertised-endpoint record kept beside a journal (decision 0040): `platform-state.json` ->
     /// `platform-state.proxy-endpoint.json`, so every recovery over one journal file shares one record.
     package static func proxyEndpointWitnessFile(besideJournal journalFile: URL) -> URL {
@@ -72,6 +70,8 @@ package struct RuntimeEnvironment: Sendable, Equatable {
         Self.proxyEndpointWitnessFile(besideJournal: platformStateFile)
     }
 
+    /// Where 0.1.x kept the pre-relay DNS servers before the journal existed.
+    /// Read once at launch to seed the journal, then removed.
     package var legacySavedDNSFile: URL {
         configDirectory.appendingPathComponent("saved-dns.json")
     }
