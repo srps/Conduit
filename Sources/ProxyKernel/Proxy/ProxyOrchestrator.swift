@@ -202,6 +202,8 @@ package struct ProxyOrchestratorSnapshot: Sendable, Equatable, Codable {
 package enum ProxyOrchestratorEvent: Sendable {
     case proxyRecovered(activeUpstream: String?)
     case proxyRecoveryFailed(summary: String, authenticationLikely: Bool)
+    /// A recycle moved the running proxy listener; `snapshot.bindings` already names where it is now.
+    case proxyListenerRebound
 }
 
 private final class ProxyConfigBox: @unchecked Sendable {
@@ -1164,6 +1166,7 @@ package final class ProxyOrchestrator {
         preferProxyPathForDoH: { [vpnConnectedForDNSBox] in
             vpnConnectedForDNSBox.withLockedValue { $0 }
         },
+        localProxyPort: { [server = localProxyServer] in server.listeningPort },
         // A signal only: the hop reads the running core's counters when it runs. A stop clears them, and a later start's core counts
         // from zero, so a hop that lands after either publishes that operation's counts, never the ones it was queued with.
         onMetrics: { [weak self] in
@@ -1178,7 +1181,7 @@ package final class ProxyOrchestrator {
         eventSink: { [eventLog] event in eventLog.append(event) }
     )
 
-    private lazy var localProxyServer = LocalProxyServer(
+    lazy var localProxyServer = LocalProxyServer(
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
         directModeProvider: { [directModeBox] in
@@ -1223,6 +1226,7 @@ package final class ProxyOrchestrator {
             }
         },
         eventSink: { [eventLog] event in eventLog.append(event) },
+        onListenerRebound: { [weak self] stamp in await self?.publishReboundProxyListener(stamp) },
         portHolderProbe: portHolderProbe,
         sockets: sockets
     )
@@ -1283,7 +1287,8 @@ package final class ProxyOrchestrator {
 
     private lazy var originResolver: any OriginResolving = DoHOriginResolver(
         logger: logStore,
-        configProvider: { [configBox] in configBox.current }
+        configProvider: { [configBox] in configBox.current },
+        localProxyPort: { [server = localProxyServer] in server.listeningPort }
     )
 
     private lazy var transparentProxy = TransparentTCPProxy(
@@ -1521,11 +1526,9 @@ package final class ProxyOrchestrator {
 
             try ensureStartCurrent(epoch)
             let directCause = snapshot.directModeCause
+            let before = snapshot.bindings
             mutateSnapshot {
-                $0.bindings.proxyHost = self.localProxyServer.listeningHost
-                $0.bindings.proxyPort = self.localProxyServer.listeningPort
-                $0.bindings.socksHost = self.localProxyServer.socksListeningHost
-                $0.bindings.socksPort = self.localProxyServer.socksListeningPort
+                Self.projectProxyListener(self.localProxyServer, into: &$0.bindings)
                 $0.bindings.localPACHost = self.localPACServer.listeningHost
                 $0.bindings.localPACPort = self.localPACServer.listeningPort
                 $0.upstreamStatuses = self.localProxyServer.upstreamStatuses()
@@ -1539,6 +1542,7 @@ package final class ProxyOrchestrator {
                     $0.runtimeStatus.lastHealthSummary = directCause.healthSummary
                 }
             }
+            followProxyListenerInDNS(from: before, source: "proxy_started")
 
             reconcileConnectivityMonitors(for: directCause)
             if pacRefetchAfterStart {
@@ -2141,6 +2145,37 @@ package final class ProxyOrchestrator {
             resumeConnectivityMonitoring(summary: summary)
         }
     }
+
+    private static func projectProxyListener(_ server: LocalProxyServer, into bindings: inout ProxyOrchestratorBindings) {
+        bindings.proxyHost = server.listeningHost
+        bindings.proxyPort = server.listeningPort
+        bindings.socksHost = server.socksListeningHost
+        bindings.socksPort = server.socksListeningPort
+    }
+
+    private func publishReboundProxyListener(_ stamp: ListenerStamp) {
+        let startHasPublished = snapshot.bindings.proxyPort != nil
+        guard localProxyServer.listenerStamp == stamp, isProxyLive, startHasPublished else { return }
+        let before = snapshot.bindings
+        var projected = before
+        Self.projectProxyListener(localProxyServer, into: &projected)
+        guard projected != before else { return }
+        mutateSnapshot { $0.bindings = projected }
+        followProxyListenerInDNS(from: before, source: "listener_rebound")
+        if localPACServer.isRunning {
+            emitEvent(.routing, "local_pac.updated", detail: "reason=listener_rebound")
+            localPACServer.updateScript(localPACScript())
+        }
+        onEvent?(.proxyListenerRebound)
+    }
+
+    private func followProxyListenerInDNS(from before: ProxyOrchestratorBindings, source: String) {
+        guard dnsLifecycle.admitsRunning else { return }
+        guard config.clientProxyPort(bound: before.proxyPort) != config.clientProxyPort(bound: snapshot.bindings.proxyPort) else { return }
+        resetDNSTransportsForRecovery(source: source)
+    }
+
+    package func simulateProxyListenerLossForTesting() async { await localProxyServer.simulateListenerLossForTesting() }
 
     /// Recycle the DNS forwarder's DoH transports and emit a structured event.
     /// Single funnel for both wake- and VPN-recovery-driven session resets so

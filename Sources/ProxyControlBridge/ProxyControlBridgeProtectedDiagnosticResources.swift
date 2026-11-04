@@ -19,6 +19,7 @@ package func protectedDiagnosticResources(
     var all: [ProtectedRecordFile] = [
         ProtectedRecordFile(resource: .config, url: environment.configFile),
         ProtectedRecordFile(resource: .platformState, url: environment.platformStateFile),
+        ProtectedRecordFile(resource: .proxyEndpointWitness, url: environment.proxyEndpointWitnessFile),
         ProtectedRecordFile(resource: .platformConfig, url: environment.platformConfigFile),
         ProtectedRecordFile(resource: .preferences, url: environment.preferencesFile),
         ProtectedRecordFile(resource: .snapshot, url: environment.snapshotFile),

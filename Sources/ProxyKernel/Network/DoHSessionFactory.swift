@@ -31,13 +31,21 @@ enum DoHSessionFactory {
     ///
     /// Callers race all of these concurrently, so the order is a tiebreak among
     /// simultaneous successes rather than a sequence of fallbacks.
-    static func routes(for config: ProxyConfig) -> [Route] {
+    static func routes(for config: ProxyConfig, localProxyPort: Int?) -> [Route] {
         var routes = [Route(proxy: nil)]
         if let upstream = config.enabledUpstreams.first {
             routes.append(Route(proxy: (upstream.host, upstream.port)))
         }
-        routes.append(Route(proxy: (config.effectiveClientHost, config.localPort)))
+        if let local = localProxyRoute(config: config, boundPort: localProxyPort) {
+            routes.append(local)
+        }
         return routes
+    }
+
+    static func localProxyRoute(config: ProxyConfig, boundPort: Int?) -> Route? {
+        let port = config.clientProxyPort(bound: boundPort)
+        guard port != 0 else { return nil }
+        return Route(proxy: (config.effectiveClientHost, port))
     }
 
     /// - Important: `connectionProxyDictionary` is always set explicitly, never

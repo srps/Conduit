@@ -80,6 +80,7 @@ enum PMSim {
               upstream-silent-failover  an upstream that goes silent is held once, then fails over within 1.5I + 5R + P + 6C; its timeouts leave the breaker closed
               upstream-slow-serving   a slow-but-answering upstream neither fails over nor trips the breaker
               recovery-unreachable-ladder  unreachable upstream: ladder skips re-auth, exhaustion does not blame the password
+              recovery-ephemeral-rebind  port 0: the ladder's recycle lands on a fresh port; snapshot and DoH route follow it
               recovery-superseded-by-disconnect  a disconnect that routes DIRECT owns the status a superseded ladder left
               health-restart-superseded  a check from a health loop restarted for new settings is dropped, not applied
               websocket-upgrade       101 upgrade relayed, frames flow both ways
@@ -271,6 +272,7 @@ enum PMSim {
         "upstream-silent-failover",
         "upstream-slow-serving",
         "recovery-unreachable-ladder",
+        "recovery-ephemeral-rebind",
         "recovery-superseded-by-disconnect",
         "health-restart-superseded",
         "websocket-upgrade",
@@ -415,6 +417,8 @@ enum PMSim {
             return [try await RecoveryLadderScenarios.ladderSupersededByDisconnect(verbose: verbose)]
         case "recovery-unreachable-ladder":
             return [try await RecoveryLadderScenarios.unreachableLadder(verbose: verbose)]
+        case "recovery-ephemeral-rebind":
+            return [try await RecoveryLadderScenarios.ephemeralRebind(verbose: verbose)]
         case "health-restart-superseded":
             return [try await HealthRestartScenarios.staleCheckAfterRestart(verbose: verbose)]
         case "vpn-transition-migration":

@@ -23,6 +23,12 @@ final class ListenerRecycleTests: XCTestCase {
     private struct Harness {
         let server: LocalProxyServer
         let portBox: NIOLockedValueBox<Int>
+        let events: NIOLockedValueBox<[RuntimeEvent]>
+        let rebounds: NIOLockedValueBox<[ListenerStamp]>
+
+        func recorded(_ name: String) -> [RuntimeEvent] {
+            events.withLockedValue { $0 }.filter { $0.event == name }
+        }
     }
 
     /// `bindRetryLimit: 1` for the conflict tests — production retries a
@@ -34,6 +40,8 @@ final class ListenerRecycleTests: XCTestCase {
         config.localPort = 0
 
         let portBox = NIOLockedValueBox(0)
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let rebounds = NIOLockedValueBox<[ListenerStamp]>([])
         let server = LocalProxyServer(
             logger: DiscardingLogSink(),
             configProvider: {
@@ -51,9 +59,11 @@ final class ListenerRecycleTests: XCTestCase {
             onConnectionOpened: { _ in },
             onConnectionClosed: { _ in },
             onRequestCompleted: { _, _ in },
+            eventSink: { event in events.withLockedValue { $0.append(event) } },
+            onListenerRebound: { stamp in rebounds.withLockedValue { $0.append(stamp) } },
             bindRetryLimit: bindRetryLimit
         )
-        return Harness(server: server, portBox: portBox)
+        return Harness(server: server, portBox: portBox, events: events, rebounds: rebounds)
     }
 
     /// Configures a concrete free port *before* starting, the way production
@@ -156,6 +166,36 @@ final class ListenerRecycleTests: XCTestCase {
         )
         XCTAssertEqual(harness.server.listeningPort, port)
         XCTAssertTrue(canConnect(to: port), "listener must serve again after repair")
+    }
+
+    func testAnEphemeralRecycleReportsItsNewBinding() async throws {
+        let harness = makeHarness()
+        try await harness.server.start()
+        addTeardownBlock { await harness.server.stop() }
+        let old = try XCTUnwrap(harness.server.listeningPort)
+        await harness.server.simulateListenerLossForTesting()
+        let squatter = try await squat(on: old)
+        addTeardownBlock { _ = try? await squatter.close().get() }
+
+        let returned = try await harness.server.recycleListener(expecting: harness.server.listenerStamp)
+
+        let new = try XCTUnwrap(harness.server.listeningPort, "the recycle bound a listener")
+        XCTAssertNotEqual(new, old, "the squatter holds the old port")
+        XCTAssertEqual(harness.recorded("proxy.listener_recycled").map(\.detail), ["listener=127.0.0.1:\(new) configured_port=0"])
+        XCTAssertTrue(canConnect(to: new), "the new port accepts connections")
+        XCTAssertEqual(harness.rebounds.withLockedValue { $0 }, [returned], "the owner heard of the rebind once, under the returned stamp")
+    }
+
+    func testAFixedPortRecycleKeepsItsPort() async throws {
+        let harness = makeHarness()
+        let port = try await startOnPinnedPort(harness)
+        addTeardownBlock { await harness.server.stop() }
+        await harness.server.simulateListenerLossForTesting()
+
+        try await harness.server.recycleListener()
+
+        XCTAssertEqual(harness.server.listeningPort, port)
+        XCTAssertEqual(harness.recorded("proxy.listener_recycled").map(\.detail), ["listener=127.0.0.1:\(port) configured_port=\(port)"])
     }
 
     /// A healthy listener bound to the *wrong* address is the other case a

@@ -62,14 +62,17 @@ package final class DoHOriginResolver: OriginResolving {
 
     private let logger: any LogSink
     private let configProvider: @Sendable () -> ProxyConfig
+    private let localProxyPort: @Sendable () -> Int?
     private let cache = NIOLockedValueBox<[String: CacheEntry]>([:])
     private let negativeCache = NIOLockedValueBox(NegativeAnswerCache(ttl: 5))
 
     /// Takes the whole config, not just the provider list: reaching a DoH
     /// provider needs the proxy routes too (see `DoHSessionFactory.routes`).
-    package init(logger: any LogSink, configProvider: @escaping @Sendable () -> ProxyConfig) {
+    package init(logger: any LogSink, configProvider: @escaping @Sendable () -> ProxyConfig,
+                 localProxyPort: @escaping @Sendable () -> Int? = { nil }) {
         self.logger = logger
         self.configProvider = configProvider
+        self.localProxyPort = localProxyPort
     }
 
     package func resolveOrigin(host: String, port: Int, on eventLoop: EventLoop) -> EventLoopFuture<SocketAddress> {
@@ -169,7 +172,7 @@ package final class DoHOriginResolver: OriginResolving {
         let providers = config.dohProviders.isEmpty
             ? DNSSection.defaultDoHProviders
             : config.dohProviders
-        let routes = DoHSessionFactory.routes(for: config)
+        let routes = DoHSessionFactory.routes(for: config, localProxyPort: localProxyPort())
         let encoded = host.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? host
         let query = DNSWireFormat.buildQuery(domain: host, qtype: 1)
 

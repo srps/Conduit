@@ -221,6 +221,7 @@ final class StateRootLayoutTests: XCTestCase {
             ("platform.json", "state-writer.lock", .platformConfig, .writerLock),
             ("platform-state.json", "control.sock", .journal, .controlSocket),
             ("config.json", "ready.json", .config, .readyFile),
+            ("preferences.json", "platform-state.proxy-endpoint.json", .preferences, .proxyEndpointWitness),
         ]
         for testCase in cases {
             let fileSystem = tree()

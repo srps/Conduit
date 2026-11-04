@@ -55,6 +55,13 @@ package struct RuntimeEnvironment: Sendable, Equatable {
         configDirectory.appendingPathComponent("update-state.json")
     }
 
+    package static let proxyEndpointWitnessFileName = "platform-state.proxy-endpoint.json"
+
+    /// A fixed leaf of the root, never derived from the journal's resolved target (decision 0040).
+    package var proxyEndpointWitnessFile: URL {
+        configDirectory.appendingPathComponent(Self.proxyEndpointWitnessFileName)
+    }
+
     /// Where 0.1.x kept the pre-relay DNS servers before the journal existed.
     /// Read once at launch to seed the journal, then removed.
     package var legacySavedDNSFile: URL {

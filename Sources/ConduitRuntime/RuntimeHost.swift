@@ -182,7 +182,9 @@ package final class RuntimeHost {
         guard let store = networkLocationStoreFactory(auditedPrivilegeClient) else { return nil }
         let eventLog = orchestrator.eventLog
         let logger = logger
-        return LocationSettingsRecovery(store: store, journal: platformStateJournal, limits: networkLocationLimits) { event in
+        let witness = FileProxyEndpointWitness(fileURL: environment.proxyEndpointWitnessFile)
+        return LocationSettingsRecovery(store: store, journal: platformStateJournal, witness: witness,
+                                        limits: networkLocationLimits) { event in
             eventLog.append(event)
             logger.log(.notice, "Network location: \(event.event) \(event.detail ?? "")", category: .system)
         }
@@ -553,7 +555,12 @@ package final class RuntimeHost {
         // `onConfigChange` is not wired. The orchestrator fires it only from `applyConfigChange`, which here runs only the reconciler's
         // pushes of inputs this host already adopted, and its delivery lands later. A writer there would move `config` outside
         // `adoptHostView`, which keeps the accepted view, the flap window and `configGeneration` together.
-        // `onEvent` is not wired either: the kernel records each ladder outcome as a typed `proxy_recovery.*` event and logs it.
+        // The two ladder outcomes need no host action: the kernel records them as typed `proxy_recovery.*` events.
+        orchestrator.onEvent = { [weak self, deliveries] event in
+            guard case .proxyListenerRebound = event, let self else { return }
+            let token = self.lanes.proxy.observationToken
+            deliveries.deliver { [weak self] in await self?.readvertiseReboundProxyListener(token: token) }
+        }
         // Every update is taken on the owner as it arrives (#198). A burst coalesces into at most its first path, its first change
         // and its newest path, in arrival order, so the hops stay bounded whatever the update rate, an older update can never land
         // after a newer one, and a burst that left the path and came back still invalidates.
@@ -1752,7 +1759,8 @@ extension RuntimeHost {
         let runner = effects.commandRunner
         let journal = PlatformStateJournal(fileURL: environment.platformStateFile, logger: logger, eventSink: emit)
         let locationRecovery = effects.networkLocationStoreFactory(audited).map {
-            LocationSettingsRecovery(store: $0, journal: journal, emit: emit)
+            LocationSettingsRecovery(store: $0, journal: journal,
+                                     witness: FileProxyEndpointWitness(fileURL: environment.proxyEndpointWitnessFile), emit: emit)
         }
         let systemDNS = SystemDNSManager(
             privilegeClient: audited,
@@ -1978,7 +1986,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
                 } && !systemProxy.hasManagedState()
             }
         case .applyEnvironment:
-            return await applyEnvironmentSwitch(config: config)
+            return await applyEnvironmentSwitch(config: config, cause: .switchOn)
         case .clearEnvironment:
             let environment = environmentManager
             return await platformWork.run {
@@ -2135,7 +2143,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
 
     /// The environment switch turned on: a partial apply lands the
     /// flag, and is reported and retried like a failure (#194).
-    private func applyEnvironmentSwitch(config: ProxyConfig) async -> Bool {
+    private func applyEnvironmentSwitch(config: ProxyConfig, cause: ConfigReapplyRetry.Cause) async -> Bool {
         let environment = environmentManager, logger = self.logger, endpoints = clientEndpoints(for: config)
         let token = lanes.proxy.observationToken
         let (landed, failure) = await platformWork.run { () -> (Bool, String?) in
@@ -2146,9 +2154,24 @@ extension RuntimeHost: RuntimeReconcilerHost {
             }
         }
         if let failure {
-            reapplyRetry.failed(.environment, cause: .switchOn, reason: failure, token: token)
+            reapplyRetry.failed(.environment, cause: cause, reason: failure, token: token)
         }
         return landed
+    }
+
+    func readvertiseReboundProxyListener(token: LifecycleLane.Token) async {
+        await awaitLaunchRecovery()
+        await waitUntilIdle([.proxy])
+        guard !token.isSuperseded, runtimeState().proxyIsUp else { return }
+        guard platformConfig.manageSystemProxy || platformConfig.manageEnvironmentVariables else { return }
+        _ = advertisedEndpoints(for: heldRuntimeConfig, source: "listener_rebound", advertised: true)
+        if platformConfig.manageSystemProxy {
+            _ = await applySystemProxySwitch(config: heldRuntimeConfig, platform: platformConfig, cause: .listenerRebound)
+        }
+        // That write suspended. A Stop admitted meanwhile cleared the bindings, and a reload may have turned the environment switch
+        // off and queued its clear; a reload does not move the lane token. Both writes read the config and the switch in their own turn.
+        guard !token.isSuperseded, runtimeState().proxyIsUp, platformConfig.manageEnvironmentVariables else { return }
+        _ = await applyEnvironmentSwitch(config: heldRuntimeConfig, cause: .listenerRebound)
     }
 }
 

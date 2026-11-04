@@ -604,9 +604,11 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         let observed = Observed()
         let log = orchestrator.eventLog
         orchestrator.onEvent = { event in
-            let callback: ProxyRecoveryEvent = switch event {
-            case .proxyRecovered: .recovered
-            case .proxyRecoveryFailed(_, let authenticationLikely): .failed(authenticationLikely: authenticationLikely)
+            let callback: ProxyRecoveryEvent
+            switch event {
+            case .proxyRecovered: callback = .recovered
+            case .proxyRecoveryFailed(_, let authenticationLikely): callback = .failed(authenticationLikely: authenticationLikely)
+            case .proxyListenerRebound: return
             }
             observed.callbacks.withLockedValue {
                 $0.append(CallbackObservation(callback: callback, recordedFirst: Self.recoveryOutcomes(log)))
