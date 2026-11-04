@@ -46,6 +46,48 @@ final class UpstreamSilenceTests: XCTestCase {
         try await upstream.close()
     }
 
+    func testTwoConcurrentSlowRequestsBehindAHealthyPrimaryLeaveItServing() async throws {
+        let primary = try await CountingUpstream.start(answers: .max) { $0.contains("/slow") }
+        let secondary = try await CountingUpstream.start(answers: .max)
+        let first = UpstreamProxy(name: "primary", host: "127.0.0.1", port: primary.port, priority: 0)
+        let second = UpstreamProxy(name: "secondary", host: "127.0.0.1", port: secondary.port, priority: 1)
+        let events = Events()
+        let current = NIOLockedValueBox(Self.config(upstreams: [first]))
+        let pool = makePool(config: current, events: events)
+        let warm = try await pool.exchange(head: Self.head(path: "/fast-warm"), body: nil).get()
+        XCTAssertEqual(warm.upstream.id, first.id, "the primary answered and has a latency")
+        current.withLockedValue { $0.upstreams = [first, second] }
+
+        let slow = (0..<2).map { pool.exchange(head: Self.head(path: "/slow-\($0)"), body: nil) }
+        for (index, exchange) in slow.enumerated() {
+            do {
+                let response = try await exchange.get()
+                XCTFail("slow request \(index) was answered by \(response.upstream.name)")
+            } catch {
+                XCTAssertEqual(error as? ConnectionPoolError, .upstreamResponseTimedOut, "slow request \(index)")
+            }
+        }
+        let checked = await Self.eventually { !events.details("upstream.silence_check_finished").isEmpty }
+        var servedBy: [String] = []
+        for index in 0..<6 {
+            servedBy.append(try await pool.exchange(head: Self.head(path: "/fast-\(index)"), body: nil).get().upstream.name)
+        }
+
+        XCTAssertEqual(servedBy, Array(repeating: "primary", count: 6), "a slow origin is no reason to move traffic off a healthy primary")
+        XCTAssertEqual(events.details("upstream.deprioritized"), [])
+        XCTAssertTrue(checked, "the decisive silence asked the primary itself")
+        XCTAssertEqual(events.details("upstream.silence_check_started").count, 1)
+        XCTAssertTrue(events.details("upstream.silence_check_finished").first?.contains("outcome=answered") == true,
+                      events.details("upstream.silence_check_finished").first ?? "none")
+        XCTAssertEqual(secondary.requests, 0)
+        let status = try XCTUnwrap(pool.upstreamStatuses().first { $0.id == first.id })
+        XCTAssertEqual(status.circuitState, .closed)
+        XCTAssertEqual(status.consecutiveFailures, 0)
+        pool.closeAll()
+        try await primary.close()
+        try await secondary.close()
+    }
+
     func testASecondSilenceInARowRanksTheUpstreamBehindOneThatAnswers() async throws {
         let primary = try await CountingUpstream.start(answers: 1)
         let secondary = try await CountingUpstream.start(answers: .max)
@@ -103,11 +145,20 @@ final class UpstreamSilenceTests: XCTestCase {
         pool.closeAll()
     }
 
-    private static let head: HTTPRequestHead = {
-        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://example.com/")
+    private static let head = head(path: "/")
+
+    private static func head(path: String) -> HTTPRequestHead {
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://example.com\(path)")
         head.headers.add(name: "Host", value: "example.com")
         return head
-    }()
+    }
+
+    private static func eventually(_ condition: () -> Bool) async -> Bool {
+        for _ in 0..<200 where !condition() {
+            do { try await Task.sleep(for: .milliseconds(10)) } catch { return condition() }
+        }
+        return condition()
+    }
 
     private static func config(upstreams: [UpstreamProxy]) -> ProxyConfig {
         var config = ProxyConfig.testFixture()
@@ -130,24 +181,27 @@ final class UpstreamSilenceTests: XCTestCase {
     private final class CountingUpstream: @unchecked Sendable {
         private let answers: NIOLockedValueBox<Int>
         private let counts = NIOLockedValueBox((connections: 0, requests: 0))
+        private let lines = NIOLockedValueBox<[String]>([])
         private var listener: Channel?
         private let children = NIOLockedValueBox<[Channel]>([])
 
         var port: Int { listener?.localAddress?.port ?? 0 }
         var connections: Int { counts.withLockedValue { $0.connections } }
         var requests: Int { counts.withLockedValue { $0.requests } }
+        var requestLines: [String] { lines.withLockedValue { $0 } }
 
         private init(answers: Int) { self.answers = NIOLockedValueBox(answers) }
 
-        static func start(answers: Int) async throws -> CountingUpstream {
+        /// `silentTo` names the request lines it never answers, as a healthy proxy whose origin for them is slow.
+        static func start(answers: Int, silentTo: @escaping @Sendable (String) -> Bool = { _ in false }) async throws -> CountingUpstream {
             let upstream = CountingUpstream(answers: answers)
-            let answers = upstream.answers, counts = upstream.counts, children = upstream.children
+            let answers = upstream.answers, counts = upstream.counts, lines = upstream.lines, children = upstream.children
             upstream.listener = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
                 .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
                 .childChannelInitializer { channel in
                     counts.withLockedValue { $0.connections += 1 }
                     children.withLockedValue { $0.append(channel) }
-                    return channel.pipeline.addHandler(RequestHandler(answers: answers, counts: counts))
+                    return channel.pipeline.addHandler(RequestHandler(answers: answers, silentTo: silentTo, counts: counts, lines: lines))
                 }
                 .bind(host: "127.0.0.1", port: 0).get()
             return upstream
@@ -166,21 +220,30 @@ final class UpstreamSilenceTests: XCTestCase {
         private final class RequestHandler: ChannelInboundHandler, @unchecked Sendable {
             typealias InboundIn = ByteBuffer
             private let answers: NIOLockedValueBox<Int>
+            private let silentTo: @Sendable (String) -> Bool
             private let counts: NIOLockedValueBox<(connections: Int, requests: Int)>
+            private let lines: NIOLockedValueBox<[String]>
             private var pending = ""
 
-            init(answers: NIOLockedValueBox<Int>, counts: NIOLockedValueBox<(connections: Int, requests: Int)>) {
+            init(
+                answers: NIOLockedValueBox<Int>, silentTo: @escaping @Sendable (String) -> Bool,
+                counts: NIOLockedValueBox<(connections: Int, requests: Int)>, lines: NIOLockedValueBox<[String]>
+            ) {
                 self.answers = answers
+                self.silentTo = silentTo
                 self.counts = counts
+                self.lines = lines
             }
 
             func channelRead(context: ChannelHandlerContext, data: NIOAny) {
                 var buffer = unwrapInboundIn(data)
                 pending += buffer.readString(length: buffer.readableBytes) ?? ""
                 while let end = pending.range(of: "\r\n\r\n") {
+                    let line = pending[pending.startIndex..<end.lowerBound].components(separatedBy: "\r\n").first ?? ""
                     pending.removeSubrange(pending.startIndex..<end.upperBound)
                     counts.withLockedValue { $0.requests += 1 }
-                    let answered = answers.withLockedValue { left in
+                    lines.withLockedValue { $0.append(line) }
+                    let answered = !silentTo(line) && answers.withLockedValue { left in
                         guard left > 0 else { return false }
                         left -= 1
                         return true

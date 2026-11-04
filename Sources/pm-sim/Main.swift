@@ -80,6 +80,7 @@ enum PMSim {
               upstream-silent-failover  an upstream that goes silent is held once, then fails over within 1.5I + 5R + P + 6C; its timeouts leave the breaker closed
               upstream-slow-serving   a slow-but-answering upstream neither fails over nor trips the breaker
               upstream-served-then-silent  of two upstreams, the one serving goes silent; the other serves after two silences, no breaker
+              upstream-slow-origin    a healthy primary behind a slow origin keeps its traffic: its silences ask it once, it answers
               recovery-unreachable-ladder  unreachable upstream: ladder skips re-auth, exhaustion does not blame the password
               recovery-ephemeral-rebind  port 0: the ladder's recycle lands on a fresh port; snapshot and DoH route follow it
               recovery-superseded-by-disconnect  a disconnect that routes DIRECT owns the status a superseded ladder left
@@ -273,6 +274,7 @@ enum PMSim {
         "upstream-silent-failover",
         "upstream-slow-serving",
         "upstream-served-then-silent",
+        "upstream-slow-origin",
         "recovery-unreachable-ladder",
         "recovery-ephemeral-rebind",
         "recovery-superseded-by-disconnect",
@@ -457,6 +459,8 @@ enum PMSim {
             return [try await SilentUpstreamScenarios.slowServing(verbose: verbose)]
         case "upstream-served-then-silent":
             return [try await SilentUpstreamScenarios.servedThenSilent(verbose: verbose)]
+        case "upstream-slow-origin":
+            return [try await SilentUpstreamScenarios.slowOriginBehindAHealthyPrimary(verbose: verbose)]
         case "websocket-upgrade":
             return [try await UpgradeScenarios.websocketUpgrade(verbose: verbose)]
         case "connect-early-direct":

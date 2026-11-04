@@ -327,4 +327,78 @@ enum SilentUpstreamScenarios {
                 "last health check: \(orchestrator.snapshot.runtimeStatus.lastHealthSummary); recovery events: \(recovery.map(\.event)); direct: \(orchestrator.snapshot.directModeCause.rawValue)",
             ])
     }
+
+    @RuntimeActor
+    static func slowOriginBehindAHealthyPrimary(verbose: Bool) async throws -> ScenarioResult {
+        let started = Date(), group = MultiThreadedEventLoopGroup.singleton
+        let primary = DelayedHTTPUpstream { line in line.contains("/slow-") ? .after(.seconds(5)) : .after(.zero) }
+        let secondary = DelayedHTTPUpstream { _ in .after(.milliseconds(40)) }
+        try await primary.start(group: group)
+        try await secondary.start(group: group)
+
+        let responseTimeout: TimeInterval = 0.3, checkInterval: TimeInterval = 2
+        var config = strictConfigWithBreakerBurstWindowOff()
+        config.upstreamResponseTimeoutSeconds = responseTimeout
+        config.healthCheckIntervalSeconds = checkInterval
+        config.healthCheckURL = "http://check.test/"
+        config.upstreams = [
+            UpstreamProxy(name: "primary", host: "127.0.0.1", port: primary.port, priority: 0),
+            UpstreamProxy(name: "secondary", host: "127.0.0.1", port: secondary.port, priority: 1),
+        ]
+        let primaryEndpoint = "127.0.0.1:\(primary.port)", secondaryEndpoint = "127.0.0.1:\(secondary.port)"
+        let orchestrator = orchestrator(config: config, verbose: verbose)
+        try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
+        guard let port = orchestrator.snapshot.bindings.proxyPort else {
+            throw ScenarioExecutionError(message: "the HTTP listener did not bind")
+        }
+        func events(_ name: String) -> [RuntimeEvent] { orchestrator.eventLog.events.filter { $0.event == name } }
+        func latency(_ endpoint: String) -> Double? { orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == endpoint }?.ewmaLatencyMS }
+        func status(_ response: EventLoopFuture<String>) async -> String {
+            do { return String(try await response.get().prefix(12)) } catch { return "no answer: \(error)" }
+        }
+
+        var warm: [EventLoopFuture<String>] = []
+        for index in 0..<4 { warm.append(try await sendThroughProxy(group: group, port: port, tag: "warm-\(index)")) }
+        for response in warm { _ = await status(response) }
+        let primaryLatency = latency(primaryEndpoint), secondaryLatency = latency(secondaryEndpoint)
+        let primaryPreferred = (primaryLatency ?? .infinity) < (secondaryLatency ?? .infinity)
+
+        let slow = [try await sendThroughProxy(group: group, port: port, tag: "slow-0"), try await sendThroughProxy(group: group, port: port, tag: "slow-1")]
+        var slowStatuses: [String] = []
+        for response in slow { slowStatuses.append(await status(response)) }
+        let checked = try await until(timeout: 2 * responseTimeout + 2) { !events("upstream.silence_check_finished").isEmpty }
+        var fastStatuses: [String] = []
+        for index in 0..<6 { fastStatuses.append(await status(try await sendThroughProxy(group: group, port: port, tag: "fast-\(index)"))) }
+        let fastViaPrimary = primary.requestLines.filter { $0.contains("/fast-") }.count
+        let healthyViaPrimary = try await until(timeout: 2 * checkInterval + 2) {
+            orchestrator.snapshot.runtimeStatus.lastHealthSummary.hasPrefix("Healthy via \(primaryEndpoint) ")
+        }
+
+        let primaryStatus = orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == primaryEndpoint }
+        let finished = events("upstream.silence_check_finished").compactMap(\.detail)
+        let recovery = orchestrator.eventLog.events.filter { $0.event.hasPrefix("recovery.") }
+
+        return ScenarioResult(name: "upstream-slow-origin", clientCount: 12, clientsOpened: 12,
+            clientsWithFirstByte: fastStatuses.filter { $0.hasPrefix("HTTP/") }.count, clientsClosedEarly: 0, totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
+                .init("the primary served first with the lower latency, so selection preferred it", primaryPreferred),
+                .init("both slow requests ended with a 502 after the response budget",
+                      slowStatuses.allSatisfy { $0.hasPrefix("HTTP/1.1 502") } && events("upstream.response_timeout").count >= 2),
+                .init("the decisive silence asked the primary itself, and it answered",
+                      checked && events("upstream.silence_check_started").count == 1 && finished.allSatisfy { $0.contains(" outcome=answered ") }),
+                .init("every fast request after the slow ones was served by the primary",
+                      fastStatuses.allSatisfy { $0.hasPrefix("HTTP/1.1 200") } && fastViaPrimary == 6),
+                .init("the primary was never ranked behind", events("upstream.deprioritized").isEmpty),
+                .init("the slow requests opened no breaker and struck nothing",
+                      events("upstream.circuit_opened").isEmpty && primaryStatus?.circuitState == .closed && primaryStatus?.consecutiveFailures == 0),
+                .init("the health check stayed healthy via the primary, with no recovery ladder and no DIRECT",
+                      healthyViaPrimary && recovery.isEmpty && !orchestrator.snapshot.directModeCause.isDirect),
+            ], notes: [
+                "R=\(responseTimeout)s I=\(checkInterval)s; origin answers /slow-* after 5 s; warm latency primary=\(primaryLatency.map { String(format: "%.1f", $0) } ?? "nil") ms secondary=\(secondaryLatency.map { String(format: "%.1f", $0) } ?? "nil") ms",
+                "fast requests via the primary: \(fastViaPrimary) of 6; secondary saw \(secondary.requestLines.count) request heads",
+                "silence checks: \(finished); deprioritized: \(events("upstream.deprioritized").compactMap(\.detail))",
+                "last health check: \(orchestrator.snapshot.runtimeStatus.lastHealthSummary); recovery events: \(recovery.map(\.event)); direct: \(orchestrator.snapshot.directModeCause.rawValue)",
+            ])
+    }
 }
