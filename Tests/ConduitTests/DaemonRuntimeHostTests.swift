@@ -2125,6 +2125,29 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
+    /// #198 review: an excursion away from the settled path and back that lands before the owner takes either update still reaches
+    /// the owner as a change. Coalescing to the newest path alone would hand it the settled path, invalidate nothing and refresh nothing.
+    @RuntimeActor func testAnExcursionCoalescedBeforeTheOwnerRunsStillInvalidatesAndRefreshes() async throws {
+        let settles = HeldSettles()
+        let host = try await hostWithHeldSettles(settles)
+        func events(_ name: String) -> [RuntimeEvent] { Self.events(name, on: host) }
+        let invalidatedBefore = events("network.path_invalidated").count
+
+        // Both updates land without a suspension between them, so the owner takes them in one pass.
+        harness.pathObserver.emit(NetworkPathState(status: .unsatisfied, interfaces: [], gateways: [],
+                                                   supportsIPv4: false, supportsIPv6: false, supportsDNS: false))
+        harness.pathObserver.emit(Self.wifi(gateway: "192.0.2.1"))
+        try await until("both updates are taken") { events("network.path_invalidated").count == invalidatedBefore + 2 }
+        try await until("the settle is held") { settles.isHolding }
+        // Both updates landed before the wait began, so one quiet wait ends the burst.
+        XCTAssertEqual(settles.release(), .seconds(2))
+        await host.deliveries.drain()
+        let changes = events("network.path_changed")
+        XCTAssertEqual(changes.count, 2, "the coalesced excursion refreshes once it settles")
+        XCTAssertEqual(changes.last?.detail?.contains("changed=returned"), true, "\(changes.map(\.detail))")
+        await host.stopRuntime()
+    }
+
     /// Waits, bounded, for `condition`; fails the test with `what` when it does not hold in time.
     @RuntimeActor private func until(_ what: String, _ condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)

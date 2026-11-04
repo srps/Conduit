@@ -196,9 +196,8 @@ package final class RuntimeHost {
     let networkPathObserver: any NetworkPathObserving
     /// How long a burst of path updates must stay quiet before the refresh, and how the host waits (#198).
     private let networkPathSettle: NetworkPathSettle
-    /// The newest path update not yet taken onto the owner. One value: an update that lands before the
-    /// owner took the one before it replaces it, as the owner only ever needs the newest path.
-    private let pendingNetworkPath = NIOLockedValueBox<NetworkPathState?>(nil)
+    /// The path updates not yet taken onto the owner, coalesced so a quick excursion away and back still reaches it.
+    private let pendingNetworkPaths = NIOLockedValueBox(PendingNetworkPaths())
     /// One owner pass for path updates at a time, and one pending behind it.
     private let networkPathUpdates = CoalescedObserverDelivery()
     /// The one settle in flight, if any: a single task that waits until the path has been quiet for a whole
@@ -554,17 +553,14 @@ package final class RuntimeHost {
         // pushes of inputs this host already adopted, and its delivery lands later. A writer there would move `config` outside
         // `adoptHostView`, which keeps the accepted view, the flap window and `configGeneration` together.
         // `onEvent` is not wired either: the kernel records each ladder outcome as a typed `proxy_recovery.*` event and logs it.
-        // Every update is taken on the owner as it arrives (#198). A burst coalesces into the newest path, so the hops stay bounded
-        // whatever the update rate, and an older update can never land after a newer one.
-        self.networkPathObserver.setOnChange { [weak self, deliveries, pendingNetworkPath, networkPathUpdates] path in
-            pendingNetworkPath.withLockedValue { $0 = path }
+        // Every update is taken on the owner as it arrives (#198). A burst coalesces into at most its first path, its first change
+        // and its newest path, in arrival order, so the hops stay bounded whatever the update rate, an older update can never land
+        // after a newer one, and a burst that left the path and came back still invalidates.
+        self.networkPathObserver.setOnChange { [weak self, deliveries, pendingNetworkPaths, networkPathUpdates] path in
+            pendingNetworkPaths.withLockedValue { $0.append(path) }
             networkPathUpdates.deliver(using: deliveries) {
-                let newest = pendingNetworkPath.withLockedValue { pending -> NetworkPathState? in
-                    defer { pending = nil }
-                    return pending
-                }
-                guard let newest else { return }
-                self?.receiveNetworkPath(newest)
+                let batch = pendingNetworkPaths.withLockedValue { $0.take() }
+                for path in batch { self?.receiveNetworkPath(path) }
             }
         }
         // The interface name is read on the monitor's own delivery, not
