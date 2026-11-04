@@ -63,7 +63,9 @@ package struct FileProxyEndpointWitness: ProxyEndpointWitnessing {
             return .unreadable(reason: "undecodable")
         }
         guard endpoint.version == AdvertisedProxyEndpoint.formatVersion else { return .unreadable(reason: "unsupported_version") }
-        guard !endpoint.host.isEmpty, (1...65535).contains(endpoint.port) else { return .unreadable(reason: "invalid_endpoint") }
+        guard LocationSettingsRecovery.isLoopback(endpoint.host), (1...65535).contains(endpoint.port) else {
+            return .unreadable(reason: "invalid_endpoint")
+        }
         return .present(endpoint)
     }
 

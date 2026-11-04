@@ -222,7 +222,8 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             (Data("{broken}".utf8), "undecodable"),
             (Data(repeating: 0x20, count: FileProxyEndpointWitness.maximumBytes + 1), "oversized"),
             (Data(#"{"version":2,"host":"127.0.0.1","port":52870}"#.utf8), "unsupported_version"),
-            (Data(#"{"version":1,"host":"127.0.0.1","port":0}"#.utf8), "invalid_endpoint")
+            (Data(#"{"version":1,"host":"127.0.0.1","port":0}"#.utf8), "invalid_endpoint"),
+            (Data(#"{"version":1,"host":"proxy.example","port":52870}"#.utf8), "invalid_endpoint")
         ]
         for (bytes, reason) in cases {
             try crashedSession(desired: ephemeral, config: portConfig(0)) { store, file, _ in
@@ -311,6 +312,50 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { _ in })
             _ = recovery.recover(kind: .proxies, config: portConfig(0), listenerIsLive: false)
             XCTAssertEqual(try store.snapshot().services.first { $0.serviceID == homeService }?.proxies, localhost)
+        }
+    }
+
+    /// The record names 127.0.0.1:52870 from an earlier port-0 session, and the config now names 8080. Whoever holds
+    /// 52870 now, the configured port does not name it, so recovery behaves as it did before the record existed.
+    func testFixedPortIgnoresAStrayWitnessUnderACorruptJournal() throws {
+        try crashedSession(desired: ephemeral, config: portConfig(0)) { store, file, corrupt in
+            let witness = FileProxyEndpointWitness.beside(journalFile: file)
+            let stray = try Data(contentsOf: witness.fileURL)
+            let before = try store.snapshot().services
+            let events = RuntimeEventLog()
+            let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { events.append($0) })
+            guard case .failed = recovery.recover(kind: .proxies, config: portConfig(8080), listenerIsLive: false) else {
+                return XCTFail("Unreadable recovery must report unknown prior state")
+            }
+            XCTAssertEqual(try store.snapshot().services, before)
+            XCTAssertEqual(identityDetails(events), [])
+            XCTAssertEqual(try Data(contentsOf: witness.fileURL), stray)
+            XCTAssertEqual(try Data(contentsOf: file), corrupt)
+        }
+    }
+
+    func testAFailedWitnessRemovalIsReportedAndBlocksNoApplyReleaseOrRecovery() throws {
+        try withRecovery { store, journal, _, _ in
+            let stale = ProxyEndpointWitnessRead.present(AdvertisedProxyEndpoint(host: "127.0.0.1", port: 52870))
+            let witness = InMemoryProxyEndpointWitness(stale)
+            witness.refuseWrites(true)
+            let events = RuntimeEventLog()
+            let recovery = LocationSettingsRecovery(store: store, journal: journal, witness: witness, emit: { events.append($0) })
+            let original = try store.snapshot()
+            let fixed = SystemProxyManager.locationFields(config: portConfig(3128), mode: .manual, endpoints: .configured(portConfig(3128)))
+            try recovery.apply(kind: .proxies, desired: fixed, config: portConfig(3128))
+            XCTAssertTrue(journal.hasRecords(for: .systemProxy))
+            XCTAssertEqual(LocationSettingsRecovery(store: store, journal: journal, witness: witness, emit: { events.append($0) })
+                .recover(kind: .proxies, config: portConfig(3128), listenerIsLive: false), .restored(stale: false))
+            XCTAssertEqual(try store.snapshot().services, original.services)
+            try recovery.apply(kind: .proxies, desired: fixed, config: portConfig(3128))
+            try recovery.clear(kind: .proxies, config: portConfig(3128))
+            XCTAssertEqual(try store.snapshot().services, original.services)
+            XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+            XCTAssertEqual(witness.current, stale)
+            let failures = events.events.filter { $0.event == "platform.location_failed" }.compactMap(\.detail)
+            XCTAssertFalse(failures.isEmpty)
+            XCTAssertTrue(failures.allSatisfy { $0.hasPrefix("operation=retire_endpoint surface=proxies") }, "\(failures)")
         }
     }
 

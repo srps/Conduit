@@ -102,7 +102,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         return false
     }
 
-    private static func isLoopback(_ host: String) -> Bool {
+    static func isLoopback(_ host: String) -> Bool {
         host == "localhost" || host == "::1" || host.hasPrefix("127.")
     }
 
@@ -379,7 +379,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                 let hadRecords = journal.hasRecords(for: surface(kind))
                 try cleanLegacyAndRestore(kind: kind, config: config)
                 // Nothing of the last session is left on the machine for the record to describe.
-                if kind == .proxies && !journal.hasRecords(for: .systemProxy) { try retireWitness() }
+                if kind == .proxies && !journal.hasRecords(for: .systemProxy) { retireWitness() }
                 return hadRecords ? .restored(stale: false) : .nothingToDo(.nothingRecorded)
             } catch {
                 report("failed", "operation=recover reason=\(error.localizedDescription)")
@@ -392,7 +392,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         try operations.withLock {
             try cleanLegacyAndRestore(kind: kind, config: config)
             if !journal.hasRecords(for: surface(kind)) {
-                if kind == .proxies { try retireWitness() }
+                if kind == .proxies { retireWitness() }
                 journal.markReleased(surface: surface(kind))
             }
         }
@@ -440,7 +440,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         }
         guard !unreadable else { throw NetworkSettingsError.invalidRequest }
         // Every service the record names was just swept, so it describes nothing on the machine.
-        if ours.witnessed != nil { try retireWitness() }
+        if ours.witnessed != nil { retireWitness() }
         // Retain corrupt evidence and never overwrite it with a released marker.
         if journalUnreadable {
             report("failed", "operation=legacy_cleanup surface=\(kind.rawValue) reason=unreadable_journal prior_location=unknown")
@@ -478,7 +478,8 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
     }
 
     /// The HTTP/HTTPS endpoints a residue sweep treats as Conduit's. A configured port of 0 names no endpoint on the
-    /// machine, so only the witnessed record can name a port-0 session's; exact host and port is the only evidence.
+    /// machine, so only the witnessed record can name a port-0 session's; exact host and port is the only evidence. A
+    /// fixed port names its own endpoint, so a record left from an earlier port-0 session is not consulted.
     private struct ResidueIdentity {
         var configured: SystemProxyManager.LocalListenerFingerprint
         var record: ProxyEndpointWitnessRead
@@ -494,7 +495,8 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
     }
 
     private func residueIdentity(kind: NetworkSettingsKind, config: ProxyConfig) -> ResidueIdentity {
-        ResidueIdentity(configured: .init(config: config), record: kind == .proxies ? witness.read() : .absent)
+        ResidueIdentity(configured: .init(config: config),
+                        record: kind == .proxies && config.localPort == 0 ? witness.read() : .absent)
     }
 
     private func reportIdentity(_ identity: ResidueIdentity, config: ProxyConfig) {
@@ -517,7 +519,8 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         guard config.localPort == 0, desired["ProxyAutoConfigEnable"] != .number(1), desired["HTTPEnable"] == .number(1),
               case .text(let host) = desired["HTTPProxy"], Self.isLoopback(host),
               case .number(let port) = desired["HTTPPort"], (1...65535).contains(port) else {
-            return try retireWitness()
+            retireWitness()
+            return
         }
         let endpoint = AdvertisedProxyEndpoint(host: host, port: port)
         guard witness.read() != .present(endpoint) else { return }
@@ -528,12 +531,11 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         }
     }
 
-    private func retireWitness() throws {
+    /// A record that outlives its session is consulted only by a later port-0 sweep, which clears no more than its exact
+    /// endpoint, so a failed removal is reported and never fails the apply, release or recovery around it.
+    private func retireWitness() {
         do { try witness.retire() }
-        catch {
-            report("failed", "operation=retire_endpoint surface=proxies reason=\(error.localizedDescription)")
-            throw error
-        }
+        catch { report("failed", "operation=retire_endpoint surface=proxies reason=\(error.localizedDescription)") }
     }
 
     private func removeResidue(_ current: [String: NetworkSettingValue], kind: NetworkSettingsKind,

@@ -34,12 +34,16 @@ journal. It holds one bounded CanonicalJSON record, version 1, of the loopback
 host and port a port-0 manual apply advertises. The proxy-surface apply writes
 it before its first commit and fails, writing nothing, if it cannot. A PAC
 apply, a fixed-port apply, a release, a launch recovery that leaves no proxy
-records, and a residue sweep that used it all remove it.
+records, and a residue sweep that used it all remove it. A removal that fails is
+reported as `platform.location_failed operation=retire_endpoint` and does not
+fail the apply, release or recovery around it.
 
 A residue sweep (unreadable journal or legacy records) clears an HTTP or HTTPS
 endpoint only on an exact host and port match with the configured fingerprint
-or with that record. An absent or unreadable record adds nothing, so a foreign
-loopback proxy is never cleared on its say-so. Each sweep reports the evidence
+or, while the configured port is 0, with that record. A sweep under a fixed port
+never reads it. An absent or unreadable record, including one whose host is not
+loopback, adds nothing, so a foreign loopback proxy is never cleared on its
+say-so. Each sweep reports the evidence
 it used as `platform.location_residue_identity`. The name is reserved in the
 state-root layout and protected from every diagnostic destination.
 
@@ -62,23 +66,31 @@ A crashed port-0 session no longer strands the machine's proxy on an
 unreadable journal, and the sweep's choice is observable. The root holds one
 more fixed file of at most 1 KiB. A port-0 apply now also fails when that file
 cannot be written, the same policy the journal's capture failure sets. Fixed
-ports never write the record, so their recovery is unchanged.
+ports never write or read the record, so their recovery is unchanged even when
+a record from an earlier port-0 session is left over. The price is that a
+port-0 session that crashed, followed by a switch to a fixed port and an
+unreadable journal, leaves its ephemeral residue as it did before this
+decision.
 
 A stale record whose exact host and ephemeral port another tool later took,
-together with an unreadable journal, would clear that tool's setting. The
-record is retired at every release and recovery, which keeps that window to
-a session that crashed.
+together with an unreadable journal and a configured port of 0, would clear
+that tool's setting. The record is retired at every release and recovery, which
+keeps that window to a session that crashed. A removal that failed widens it to
+the next launch that retires it.
 
 ## Invariants and verification
 
 - Only an exact host and port match clears an HTTP or HTTPS endpoint; a foreign
   loopback proxy on another port stays.
+- A sweep consults the record only while the configured port is 0, so a fixed
+  port clears exactly what it cleared before the record existed.
 - The record exists only while a port-0 manual apply is outstanding, and is
   written before the first commit of that apply.
 - An unreadable record is reported with a closed reason and is never used.
 
 Disproved by a sweep that clears a loopback endpoint the record does not name
-while the configured port is 0, or by a port-0 session whose crash leaves
+while the configured port is 0, by a fixed-port sweep that clears an endpoint
+the configured port does not name, or by a port-0 session whose crash leaves
 ephemeral residue with no record.
 
 ## Implementation evidence
@@ -93,7 +105,8 @@ reserves the name and
 [`ProxyControlBridgeProtectedDiagnosticResources.swift`](../../Sources/ProxyControlBridge/ProxyControlBridgeProtectedDiagnosticResources.swift)
 protects it. [`NetworkLocationRecoveryTests.swift`](../../Tests/ConduitTests/NetworkLocationRecoveryTests.swift)
 covers ours cleared and foreign kept, no record, unreadable records, a refused
-write, retirement and the live-listener decline; the
+write, a refused removal, retirement, a stray record under a fixed port and the
+live-listener decline; the
 [`network-location-recovery`](../../Sources/pm-sim/NetworkLocationScenarios.swift)
 pm-sim scenario checks the same under a corrupt journal.
 
