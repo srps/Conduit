@@ -663,7 +663,7 @@ extension RuntimeHost {
             }
             return written
         }
-        if systemDNSWasWritten { systemDNSWritten() }
+        if systemDNSWasWritten { surfaceWritten(.systemDNS) }
         if let stop = current() { return stop }
         guard forwarderRunning else { return .failed }
         if platform.manageSystemDNS {
@@ -774,7 +774,7 @@ extension RuntimeHost {
                     return !systemDNS.hasSavedState()
                 }
             }
-            if systemDNSRestored { systemDNSWritten() }
+            if systemDNSRestored { surfaceWritten(.systemDNS) }
             if goesOn(.dns) { await orchestrator.stopDNS() }
             // The proxy's own clear below removes every resolver file; a proxy that stays up keeps its entry files.
             if goesOn(.dns), !remaining.contains(.proxy), platform.manageDNSResolvers {
@@ -834,15 +834,16 @@ extension RuntimeHost {
         // hand (#13). The ownership reads happen inside the block, after
         // whatever was queued ahead of it has landed.
         let stopPlace = splitDNSRepair.queue()
-        let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Observation? in
-            systemProxy.serialized {
-                guard terminal || !token.isSuperseded else { return }
-                guard platform.manageSystemProxy || systemProxy.hasManagedState() else { return }
+        let (entryFiles, systemProxyCleared) = await platformWork.run { () -> (SplitDNSEntryFileRepair.Observation?, Bool) in
+            let systemProxyCleared = systemProxy.serialized { () -> Bool in
+                guard terminal || !token.isSuperseded else { return false }
+                guard platform.manageSystemProxy || systemProxy.hasManagedState() else { return false }
                 do {
                     try systemProxy.clear(logger: logger)
                 } catch {
                     logger.log(.warning, "Could not clear system proxy settings: \(error.localizedDescription)", category: .system)
                 }
+                return !systemProxy.hasManagedState()
             }
             environment.serialized {
                 guard terminal || !token.isSuperseded else { return }
@@ -854,7 +855,7 @@ extension RuntimeHost {
                 }
             }
             // The outcome and its residue, read under the same lock against the input the clear used.
-            return resolvers.serialized { () -> SplitDNSEntryFileRepair.Observation? in
+            let entryFiles = resolvers.serialized { () -> SplitDNSEntryFileRepair.Observation? in
                 guard terminal || !token.isSuperseded else { return nil }
                 if platform.manageDNSResolvers {
                     do {
@@ -881,7 +882,9 @@ extension RuntimeHost {
                 }
                 return nil
             }
+            return (entryFiles, systemProxyCleared)
         }
+        if systemProxyCleared { surfaceWritten(.systemProxy) }
         await recordSplitDNS(entryFiles, source: .stop, startedAt: stopPlace)
         return terminal || holdsLane(effect, .proxy)
     }

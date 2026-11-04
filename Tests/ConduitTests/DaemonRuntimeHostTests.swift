@@ -1633,7 +1633,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         /// The helper status the split-DNS check reads; never the installed helper.
         let helper = FakeHelperLifecycle()
         /// The loopback listener probe the host's system proxy manager asks. It serves no port, and it records what it was asked.
-        let listenerProbe = FakeLoopbackPortProbe()
+        var listenerProbe = FakeLoopbackPortProbe()
         /// The PAC evaluator the host's orchestrator fetches through. Fails any fetch unless a test names a scripted one.
         var pacEvaluator: any PacEvaluator = FakePacEvaluator()
         /// Long, so a split-DNS helper check never lands inside a scenario
@@ -3028,6 +3028,41 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// The journal and machine a crashed run leaves: the prior proxy recorded and applied, and the machine still pointed at a dead loopback
     /// proxy. Launch recovery restores the prior settings from it.
+    /// A proxy decline has no notice, so what ends it is this run writing system proxy: a Start's apply that lands, or a Stop's clear.
+    @RuntimeActor func testAProxyStartWhoseApplyLandsEndsADeclinedSystemProxyRecovery() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        seedCrashedRunProxy()
+        harness.listenerProbe = FakeLoopbackPortProbe(timingOut: [47113])
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        XCTAssertEqual(host.declinedLaunchRecovery, [.systemProxy])
+        XCTAssertEqual(harness.wifi.webProxy.port, "47113", "a timed-out probe restores nothing")
+
+        _ = try await host.startProxy(conditionalDNS: false)
+        XCTAssertEqual(host.declinedLaunchRecovery, [], "the Start pointed system proxy at this run")
+    }
+
+    @RuntimeActor func testAProxyStopEndsADeclinedSystemProxyRecoveryAStartDidNotWrite() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        seedCrashedRunProxy()
+        harness.listenerProbe = FakeLoopbackPortProbe(timingOut: [47113])
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+
+        harness.machine.failsServiceListing = true
+        _ = try await host.startProxy(conditionalDNS: false)
+        harness.machine.failsServiceListing = false
+        XCTAssertEqual(host.declinedLaunchRecovery, [.systemProxy], "a Start whose apply failed wrote nothing")
+
+        _ = await host.stopProxy()
+        XCTAssertEqual(host.declinedLaunchRecovery, [])
+        XCTAssertEqual(harness.wifi.webProxy.host, "prior.example.test", "the Stop put the recorded proxy back")
+    }
+
     @RuntimeActor private func seedCrashedRunProxy() {
         let prior = ProxyServiceState(
             webHost: "prior.example.test", webPort: "8080", webEnabled: true,

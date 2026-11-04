@@ -236,9 +236,12 @@ package final class RuntimeHost {
     private(set) var dnsRelayUnresponsive = false {
         didSet { if dnsRelayUnresponsive != oldValue { onControlStateChange?() } }
     }
-    private(set) var systemDNSRecoveryDeclined = false {
-        didSet { if systemDNSRecoveryDeclined != oldValue { onControlStateChange?() } }
+    /// The surfaces whose launch restore a timed-out liveness probe declined (decision 0041), until this run writes that surface
+    /// (`surfaceWritten`). The location reconcile leaves their records alone meanwhile; the control snapshot shows the system DNS one.
+    private(set) var declinedLaunchRecovery: Set<PlatformSurface> = [] {
+        didSet { if systemDNSRecoveryDeclined != oldValue.contains(.systemDNS) { onControlStateChange?() } }
     }
+    var systemDNSRecoveryDeclined: Bool { declinedLaunchRecovery.contains(.systemDNS) }
     /// Whether the proxy module's surfaces are up: a proxy Start completed them, and no teardown of the proxy has begun since. Its
     /// split-DNS entry files exist only in that window, so VPN transitions and repairs must not apply them outside it.
     var runtimeStarted = false
@@ -674,7 +677,8 @@ package final class RuntimeHost {
     func awaitLaunchRecovery() async {
         guard let decisions = await launchRecovery?.join() else { return }
         launchRecovery = nil
-        systemDNSRecoveryDeclined = decisions.systemDNS == .declinedInconclusiveProbe
+        declinedLaunchRecovery = Set([(PlatformSurface.systemDNS, decisions.systemDNS), (.systemProxy, decisions.systemProxy)]
+            .filter { $0.1 == .declinedInconclusiveProbe }.map(\.0))
     }
 
     /// A decline must reach the control snapshot without waiting for the first command, so the host joins its own recovery too.
@@ -682,16 +686,17 @@ package final class RuntimeHost {
         Task { [weak self] in await self?.awaitLaunchRecovery() }
     }
 
-    /// A DNS Start, a DNS Stop or a management change wrote system DNS, so no declined recovery describes the machine any more.
-    func systemDNSWritten() {
-        systemDNSRecoveryDeclined = false
+    /// This run wrote the surface (for system DNS, a DNS Start, a DNS Stop or a management change; for system proxy, a proxy Start's
+    /// apply or a Stop's clear), so no declined recovery describes it any more.
+    func surfaceWritten(_ surface: PlatformSurface) {
+        declinedLaunchRecovery.remove(surface)
     }
 
     /// The relay system DNS points at answers this run. A reading that lands after management went off stopped its timer and relay,
     /// so it says nothing about the machine.
     private func relayAnswered() {
         guard dnsHealthTimer != nil else { return }
-        systemDNSWritten()
+        surfaceWritten(.systemDNS)
     }
 
     /// Publishes readiness: `daemon.ready`, `daemon-ready.json` and a
@@ -757,12 +762,14 @@ package final class RuntimeHost {
         let interceptReadyAtStart = orchestrator.snapshot.bindings.dnsInterceptReady
         let forwarderRunningAtStart = orchestrator.snapshot.dnsRunState == .running
         let entryPlace = splitDNSRepair.queue()
-        let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Observation? in
+        let (entryFiles, systemProxyWritten) = await platformWork.run { () -> (SplitDNSEntryFileRepair.Observation?, Bool) in
+            var systemProxyWritten = false
             if platform.manageSystemProxy {
                 systemProxy.serialized {
                     guard !token.isSuperseded else { return }
                     do {
                         try systemProxy.apply(config: config, mode: platform.systemProxyMode, logger: logger, endpoints: endpoints)
+                        systemProxyWritten = true
                     } catch {
                         logger.log(.warning, "Could not apply system proxy settings (non-fatal): \(error.localizedDescription)", category: .system)
                     }
@@ -810,8 +817,9 @@ package final class RuntimeHost {
                     entryFiles = SplitDNSEntryFileRepair.Observation.after(outcome, config: config, dnsManager: resolvers)
                 }
             }
-            return entryFiles
+            return (entryFiles, systemProxyWritten)
         }
+        if systemProxyWritten { surfaceWritten(.systemProxy) }
         await recordSplitDNS(entryFiles, source: .start, startedAt: entryPlace)
         // A stop issued while the apply was out queued its clears behind
         // it, so the machine ends cleared; what must not happen now is the
@@ -1164,12 +1172,21 @@ package final class RuntimeHost {
             let endpoints = clientEndpoints(for: config)
             let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
             let events = orchestrator.eventLog, logger = logger
+            let applyProxy = platform.manageSystemProxy && state.proxyIsUp
+            let applyDNS = platform.manageSystemDNS && state.dnsIsUp
+            // A surface that is not applied is only restored, and restoring a declined one is the restore recovery declined.
+            let keepProxy = !applyProxy && declinedLaunchRecovery.contains(.systemProxy)
+            let keepDNS = !applyDNS && declinedLaunchRecovery.contains(.systemDNS)
+            for (kind, kept) in [(NetworkSettingsKind.proxies, keepProxy), (.dns, keepDNS)] where kept {
+                recordLifecycle(RuntimeEvent(kind: .config, event: "platform.location_restore_withheld",
+                                             detail: "surface=\(kind.rawValue) reason=launch_recovery_declined"))
+            }
             let proxyRetry = await platformWork.run { () -> Duration? in
                 var retry: Duration?
                 do {
-                    if !proxyToken.isSuperseded {
+                    if !proxyToken.isSuperseded && !keepProxy {
                         retry = try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, endpoints: endpoints,
-                                                            apply: platform.manageSystemProxy && state.proxyIsUp)
+                                                            apply: applyProxy)
                     }
                 } catch {
                     let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=reconcile surface=systemProxy reason=\(error.localizedDescription)")
@@ -1177,8 +1194,8 @@ package final class RuntimeHost {
                     logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
                 }
                 do {
-                    if !dnsToken.isSuperseded {
-                        try dns.reconcileLocation(apply: platform.manageSystemDNS && state.dnsIsUp, forwarderPort: forwarderPort, logger: logger)
+                    if !dnsToken.isSuperseded && !keepDNS {
+                        try dns.reconcileLocation(apply: applyDNS, forwarderPort: forwarderPort, logger: logger)
                     }
                 } catch {
                     let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=reconcile surface=systemDNS reason=\(error.localizedDescription)")
@@ -2088,7 +2105,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
                 return saved && applied
             }
             startDNSHealthTimer(forwarderPort: forwarderPort)
-            if landed { systemDNSWritten() }
+            if landed { surfaceWritten(.systemDNS) }
             return landed
         case .clearSystemDNS:
             // Timer first: left running, its 30 s probe would restart the
@@ -2100,7 +2117,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
                     try systemDNS.clear(logger: logger)
                 } && !systemDNS.hasSavedState()
             }
-            if cleared { systemDNSWritten() }
+            if cleared { surfaceWritten(.systemDNS) }
             return cleared
         case .setLaunchAtLogin:
             return performImmediate(action, platform: platform, previousPlatform: previousPlatform)
