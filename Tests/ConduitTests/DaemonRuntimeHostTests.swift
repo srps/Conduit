@@ -3957,10 +3957,6 @@ final class DaemonRuntimeHostTests: XCTestCase {
                        ["surface=proxies source=witness host=127.0.0.1 port=52870"])
     }
 
-    // MARK: - A recycled listener (#269)
-
-    /// Configured port 0: the recovery ladder's recycle binds a fresh port. Every surface follows it, from the one projection, and
-    /// a later drift pass keeps it.
     @RuntimeActor func testARecycledEphemeralListenerIsReadvertisedOnEverySurface() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
@@ -3995,7 +3991,6 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.awaitLifecycleIdle()
     }
 
-    /// A fixed port rebinds where it was: nothing moves, and nothing is re-advertised.
     @RuntimeActor func testAFixedPortRecycleReadvertisesNothing() async throws {
         let configured = try reserveLoopbackPort()
         var config = GenericDefaults.shared.makeConfig()
@@ -4020,7 +4015,6 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.awaitLifecycleIdle()
     }
 
-    /// A stop admitted after the rebind owns the surfaces: it clears them, and the rebind's re-advertise stands down.
     @RuntimeActor func testARebindFollowedByAStopIsNotAdvertised() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
@@ -4033,10 +4027,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.awaitLifecycleIdle()
         let first = try XCTUnwrap(host.orchestrator.snapshot.bindings.proxyPort)
 
+        let stop = queueStopInTheRebindTurn(of: host)
         await host.orchestrator.localProxyServer.simulateListenerLossForTesting()
         let squatter = try await Self.squat(on: first)
         try await host.orchestrator.localProxyServer.recycleListener()
-        await host.stopRuntime()
+        let stopping = try XCTUnwrap(stop.task, "the recycle moved the listener")
+        await stopping.value
         await host.deliveries.drain()
         await host.awaitLifecycleIdle()
         _ = try? await squatter.close().get()
@@ -4046,7 +4042,22 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(clientEndpointEvents(host).contains { $0.hasPrefix("source=listener_rebound") }, "\(clientEndpointEvents(host))")
     }
 
-    /// Takes `port` on loopback so a recycle cannot land on it again.
+    @RuntimeActor private final class QueuedStop {
+        var task: Task<Void, Never>?
+    }
+
+    /// A plain stop after `recycleListener()` returns runs after the host's re-advertise delivery, because the caller's own
+    /// continuation is queued behind it. Queued from the rebind's turn, the stop is admitted first.
+    @RuntimeActor private func queueStopInTheRebindTurn(of host: RuntimeHost) -> QueuedStop {
+        let readvertise = host.orchestrator.onEvent
+        let stop = QueuedStop()
+        host.orchestrator.onEvent = { event in
+            if case .proxyListenerRebound = event { stop.task = Task { @RuntimeActor in await host.stopRuntime() } }
+            readvertise?(event)
+        }
+        return stop
+    }
+
     nonisolated private static func squat(on port: Int) async throws -> Channel {
         try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)

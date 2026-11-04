@@ -68,7 +68,6 @@ package final class DoHOriginResolver: OriginResolving {
 
     /// Takes the whole config, not just the provider list: reaching a DoH
     /// provider needs the proxy routes too (see `DoHSessionFactory.routes`).
-    /// `localProxyPort` is the port Conduit's own proxy listener holds now, read per lookup for the local-proxy route.
     package init(logger: any LogSink, configProvider: @escaping @Sendable () -> ProxyConfig,
                  localProxyPort: @escaping @Sendable () -> Int? = { nil }) {
         self.logger = logger

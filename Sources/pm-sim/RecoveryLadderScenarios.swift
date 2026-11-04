@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import NIOConcurrencyHelpers
+import NIOCore
 import NIOPosix
 import ProxyKernel
 import RuntimeEvents
@@ -116,6 +117,66 @@ enum RecoveryLadderScenarios {
                       probeHeld && cleared && clearedDetail == "reason=superseded"),
                 .init("the superseded ladder records no typed recovery outcome", outcomes == []),
             ], notes: ["refusing loopback upstream on port \(deadPort); injected reachable probe; no credentials, helper or settings"])
+    }
+
+    @RuntimeActor
+    static func ephemeralRebind(verbose: Bool) async throws -> ScenarioResult {
+        let started = Date(), group = MultiThreadedEventLoopGroup.singleton
+        let dead = FakeUpstreamProxy(group: group, originHost: "127.0.0.1", originPort: 9, requireAuth: false)
+        try await dead.start()
+        let deadPort = dead.port
+        await dead.stop()
+
+        var config = ProxyConfig()
+        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
+        config.healthCheckIntervalSeconds = 3600
+        config.dnsForwarderEnabled = true; config.dnsForwarderPort = 0
+        config.upstreams = [UpstreamProxy(name: "refusing", host: "127.0.0.1", port: deadPort, priority: 0)]
+        let logger = RecordingLogSink(minLevel: verbose ? .debug : .info)
+        let everyUpstreamReachable: @Sendable ([UpstreamProxy]) async -> UpstreamProbeSummary = { targets in
+            UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) })
+        }
+        let orchestrator = ProxyOrchestrator(config: config, logger: logger, authenticatorProvider: { _ in MockAuthenticator() },
+            connectivityProbe: everyUpstreamReachable)
+        await orchestrator.startDNS(); ScenarioCleanup.register { await orchestrator.stopDNS() }
+        try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
+        let old = orchestrator.snapshot.bindings.proxyPort ?? 0
+        await orchestrator.simulateProxyListenerLossForTesting()
+        let squatter = try await ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .bind(host: "127.0.0.1", port: old).get()
+        ScenarioCleanup.register { _ = try? await squatter.close().get() }
+
+        func events(_ name: String) -> [RuntimeEvent] { orchestrator.eventLog.events.filter { $0.event == name } }
+        let exhausted = try await until(timeout: 15) { !events("recovery.exhausted").isEmpty }
+        let recycled = events("proxy.listener_recycled").map { $0.detail ?? "" }
+        let recycledPort = recycled.first?.split(separator: " ").first?.split(separator: ":").last.flatMap { Int($0) }
+        let published = orchestrator.snapshot.bindings.proxyPort
+        var accepted = false, connectError = ""
+        if let published {
+            do {
+                let client = try await ClientBootstrap(group: group).connectTimeout(.seconds(2)).connect(host: "127.0.0.1", port: published).get()
+                accepted = true
+                _ = try? await client.close().get()
+            } catch {
+                connectError = "; connect to \(published) failed: \(error)"
+            }
+        }
+        let rebuilt = events("dns.transports_reset").filter { $0.detail == "source=listener_rebound" }.count
+        let exhaustedDetail = events("recovery.exhausted").first?.detail ?? ""
+
+        return ScenarioResult(name: "recovery-ephemeral-rebind", clientCount: 0, clientsOpened: 0,
+            clientsWithFirstByte: 0, clientsClosedEarly: 0, totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
+                .init("the ladder's recycle rebinds a port-0 listener once, with configured_port=0",
+                      recycled.count == 1 && recycled[0].hasSuffix(" configured_port=0")),
+                .init("the snapshot names the port the recycle bound, not the old one",
+                      published != nil && published == recycledPort && published != old),
+                .init("the new port accepts a connection", accepted),
+                .init("the DoH local-proxy route is rebuilt once for the moved listener", rebuilt == 1),
+                .init("the ladder still ends unreachable", exhausted && exhaustedDetail.hasPrefix("failure=unreachable ")),
+            ], notes: ["refusing loopback upstream on port \(deadPort); old listener port \(old) held by a squatter; recycled: \(recycled)\(connectError)"])
     }
 
     /// #155: a VPN disconnect lands while an exhausted ladder's probe is

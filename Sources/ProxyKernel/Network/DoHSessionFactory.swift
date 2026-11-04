@@ -36,8 +36,16 @@ enum DoHSessionFactory {
         if let upstream = config.enabledUpstreams.first {
             routes.append(Route(proxy: (upstream.host, upstream.port)))
         }
-        routes.append(Route(proxy: (config.effectiveClientHost, config.localPort)))
+        if let local = localProxyRoute(config: config, boundPort: localProxyPort) {
+            routes.append(local)
+        }
         return routes
+    }
+
+    static func localProxyRoute(config: ProxyConfig, boundPort: Int?) -> Route? {
+        let port = config.clientProxyPort(bound: boundPort)
+        guard port != 0 else { return nil }
+        return Route(proxy: (config.effectiveClientHost, port))
     }
 
     /// - Important: `connectionProxyDictionary` is always set explicitly, never

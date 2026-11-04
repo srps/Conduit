@@ -554,7 +554,12 @@ package final class RuntimeHost {
         // `onConfigChange` is not wired. The orchestrator fires it only from `applyConfigChange`, which here runs only the reconciler's
         // pushes of inputs this host already adopted, and its delivery lands later. A writer there would move `config` outside
         // `adoptHostView`, which keeps the accepted view, the flap window and `configGeneration` together.
-        // `onEvent` is not wired either: the kernel records each ladder outcome as a typed `proxy_recovery.*` event and logs it.
+        // The two ladder outcomes need no host action: the kernel records them as typed `proxy_recovery.*` events.
+        orchestrator.onEvent = { [weak self, deliveries] event in
+            guard case .proxyListenerRebound = event, let self else { return }
+            let token = self.lanes.proxy.observationToken
+            deliveries.deliver { [weak self] in await self?.readvertiseReboundProxyListener(token: token) }
+        }
         // Every update is taken on the owner as it arrives (#198). A burst coalesces into at most its first path, its first change
         // and its newest path, in arrival order, so the hops stay bounded whatever the update rate, an older update can never land
         // after a newer one, and a burst that left the path and came back still invalidates.
@@ -1956,7 +1961,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
                 } && !systemProxy.hasManagedState()
             }
         case .applyEnvironment:
-            return await applyEnvironmentSwitch(config: config)
+            return await applyEnvironmentSwitch(config: config, cause: .switchOn)
         case .clearEnvironment:
             let environment = environmentManager
             return await platformWork.run {
@@ -2113,7 +2118,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
 
     /// The environment switch turned on: a partial apply lands the
     /// flag, and is reported and retried like a failure (#194).
-    private func applyEnvironmentSwitch(config: ProxyConfig) async -> Bool {
+    private func applyEnvironmentSwitch(config: ProxyConfig, cause: ConfigReapplyRetry.Cause) async -> Bool {
         let environment = environmentManager, logger = self.logger, endpoints = clientEndpoints(for: config)
         let token = lanes.proxy.observationToken
         let (landed, failure) = await platformWork.run { () -> (Bool, String?) in
@@ -2124,9 +2129,24 @@ extension RuntimeHost: RuntimeReconcilerHost {
             }
         }
         if let failure {
-            reapplyRetry.failed(.environment, cause: .switchOn, reason: failure, token: token)
+            reapplyRetry.failed(.environment, cause: cause, reason: failure, token: token)
         }
         return landed
+    }
+
+    func readvertiseReboundProxyListener(token: LifecycleLane.Token) async {
+        await awaitLaunchRecovery()
+        await waitUntilIdle([.proxy])
+        guard !token.isSuperseded, runtimeState().proxyIsUp else { return }
+        let config = heldRuntimeConfig, platform = platformConfig
+        guard platform.manageSystemProxy || platform.manageEnvironmentVariables else { return }
+        _ = advertisedEndpoints(for: config, source: "listener_rebound", advertised: true)
+        if platform.manageSystemProxy {
+            _ = await applySystemProxySwitch(config: config, platform: platform, cause: .listenerRebound)
+        }
+        if platform.manageEnvironmentVariables {
+            _ = await applyEnvironmentSwitch(config: config, cause: .listenerRebound)
+        }
     }
 }
 

@@ -32,7 +32,6 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
     private let onRequestCompleted: @Sendable (RequestOutcome, String?) -> Void
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
-    /// A recycle rebound the accept socket under this stamp. Awaited, so the owner has published the new binding when the recycle returns.
     private let onListenerRebound: @Sendable (ListenerStamp) async -> Void
     private let authHandshakeLimiter = AuthHandshakeLimiter()
     private let group = MultiThreadedEventLoopGroup.singleton
@@ -524,7 +523,11 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
 
         let actualHost = newChannel.localAddress?.ipAddress ?? listenHost
         let actualPort = newChannel.localAddress?.port ?? config.localPort
-        logger.log(.notice, "Local proxy listener recycled on \(actualHost):\(actualPort) — pool and active connections preserved.", category: .proxy)
+        let event = RuntimeEvent(kind: .health, event: "proxy.listener_recycled",
+                                 detail: "listener=\(actualHost):\(actualPort) configured_port=\(config.localPort)")
+        eventSink?(event)
+        logger.log(.notice, "Local proxy listener recycled on \(actualHost):\(actualPort); pool and active connections preserved. \(event.event) \(event.detail ?? "")", category: .proxy)
+        await onListenerRebound(expected)
         return expected
     }
 

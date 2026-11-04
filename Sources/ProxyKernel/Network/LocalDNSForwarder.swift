@@ -82,7 +82,6 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool = { false },
-        // The port Conduit's own proxy listener holds now, for the DoH local-proxy route. Nil with no proxy beside this forwarder.
         localProxyPort: @escaping @Sendable () -> Int? = { nil },
         onMetrics: (@Sendable () -> Void)? = nil,
         // Exposed only so tests can drive the slow-lookup and idle rules
@@ -366,7 +365,7 @@ private struct DoHTransports: @unchecked Sendable {
     let upstream: URLSession?
     let localProxy: URLSession?
 
-    init(config: ProxyConfig) {
+    init(config: ProxyConfig, boundPort: Int?) {
         self.direct = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil))
 
         if let upstream = config.enabledUpstreams.first {
@@ -377,9 +376,9 @@ private struct DoHTransports: @unchecked Sendable {
             self.upstream = nil
         }
 
-        self.localProxy = DoHSessionFactory.session(
-            for: DoHSessionFactory.Route(proxy: (config.effectiveClientHost, config.localPort))
-        )
+        self.localProxy = DoHSessionFactory.localProxyRoute(config: config, boundPort: boundPort).map {
+            DoHSessionFactory.session(for: $0)
+        }
     }
 
     func invalidate() {
@@ -534,7 +533,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         self.localProxyPort = localProxyPort
         self.onMetrics = onMetrics
         self.transportsBox = NIOLockedValueBox(
-            DoHTransportsHandle(transports: DoHTransports(config: configProvider()))
+            DoHTransportsHandle(transports: DoHTransports(config: configProvider(), boundPort: localProxyPort()))
         )
     }
 
@@ -560,7 +559,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// DoH path on the very next query, so the user sees the recovery
     /// immediately instead of after the cached entry's TTL expires.
     func resetUpstreamTransports() {
-        let fresh = DoHTransportsHandle(transports: DoHTransports(config: configProvider()))
+        let fresh = DoHTransportsHandle(transports: DoHTransports(config: configProvider(), boundPort: localProxyPort()))
         let old = transportsBox.withLockedValue { current -> DoHTransportsHandle in
             let captured = current
             current = fresh

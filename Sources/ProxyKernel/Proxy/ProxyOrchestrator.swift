@@ -1176,7 +1176,6 @@ package final class ProxyOrchestrator {
         eventSink: { [eventLog] event in eventLog.append(event) }
     )
 
-    /// Internal, as `dnsForwarder` is, so a test drives the real recycle.
     lazy var localProxyServer = LocalProxyServer(
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
@@ -1222,6 +1221,7 @@ package final class ProxyOrchestrator {
             }
         },
         eventSink: { [eventLog] event in eventLog.append(event) },
+        onListenerRebound: { [weak self] stamp in await self?.publishReboundProxyListener(stamp) },
         portHolderProbe: portHolderProbe,
         sockets: sockets
     )
@@ -1520,11 +1520,9 @@ package final class ProxyOrchestrator {
 
             try ensureStartCurrent(epoch)
             let directCause = snapshot.directModeCause
+            let before = snapshot.bindings
             mutateSnapshot {
-                $0.bindings.proxyHost = self.localProxyServer.listeningHost
-                $0.bindings.proxyPort = self.localProxyServer.listeningPort
-                $0.bindings.socksHost = self.localProxyServer.socksListeningHost
-                $0.bindings.socksPort = self.localProxyServer.socksListeningPort
+                Self.projectProxyListener(self.localProxyServer, into: &$0.bindings)
                 $0.bindings.localPACHost = self.localPACServer.listeningHost
                 $0.bindings.localPACPort = self.localPACServer.listeningPort
                 $0.upstreamStatuses = self.localProxyServer.upstreamStatuses()
@@ -1538,6 +1536,7 @@ package final class ProxyOrchestrator {
                     $0.runtimeStatus.lastHealthSummary = directCause.healthSummary
                 }
             }
+            followProxyListenerInDNS(from: before, source: "proxy_started")
 
             reconcileConnectivityMonitors(for: directCause)
             if pacRefetchAfterStart {
@@ -2139,7 +2138,31 @@ package final class ProxyOrchestrator {
         }
     }
 
-    /// Test seam for pm-sim, which cannot use `@testable`: the accept socket dies without a stop, the state the ladder's recycle repairs.
+    private static func projectProxyListener(_ server: LocalProxyServer, into bindings: inout ProxyOrchestratorBindings) {
+        bindings.proxyHost = server.listeningHost
+        bindings.proxyPort = server.listeningPort
+        bindings.socksHost = server.socksListeningHost
+        bindings.socksPort = server.socksListeningPort
+    }
+
+    private func publishReboundProxyListener(_ stamp: ListenerStamp) {
+        let startHasPublished = snapshot.bindings.proxyPort != nil
+        guard localProxyServer.listenerStamp == stamp, isProxyLive, startHasPublished else { return }
+        let before = snapshot.bindings
+        var projected = before
+        Self.projectProxyListener(localProxyServer, into: &projected)
+        guard projected != before else { return }
+        mutateSnapshot { $0.bindings = projected }
+        followProxyListenerInDNS(from: before, source: "listener_rebound")
+        onEvent?(.proxyListenerRebound)
+    }
+
+    private func followProxyListenerInDNS(from before: ProxyOrchestratorBindings, source: String) {
+        guard dnsLifecycle.admitsRunning else { return }
+        guard config.clientProxyPort(bound: before.proxyPort) != config.clientProxyPort(bound: snapshot.bindings.proxyPort) else { return }
+        resetDNSTransportsForRecovery(source: source)
+    }
+
     package func simulateProxyListenerLossForTesting() async { await localProxyServer.simulateListenerLossForTesting() }
 
     /// Recycle the DNS forwarder's DoH transports and emit a structured event.
