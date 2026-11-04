@@ -294,6 +294,7 @@ enum NetworkLocationScenarios {
         try recovery.clear(kind: .proxies, config: config)
         let contention = try contendedRewritesStayBounded(services: services, home: home)
         let partialApplyBounded = try partialApplyCannotLoop(services: services, home: home)
+        let ephemeral = try ephemeralResidueUnderCorruptJournal(services: services, home: home)
         return ScenarioResult(
             name: "network-location-recovery", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
@@ -328,6 +329,9 @@ enum NetworkLocationScenarios {
                 .init("deferred proxy cleanup removes enable flags with endpoints", proxyDisabledOnDeferredCleanup),
                 .init("an enforcing external writer exhausts a fixed repair budget, reports contention once, then recovers; passes that wrote nothing do not count", contention),
                 .init("a sibling service that keeps failing cannot turn partial applies into a write loop", partialApplyBounded),
+                .init("corrupt journal with port 0 clears the witnessed ephemeral proxy and retires its record", ephemeral.ownCleared),
+                .init("corrupt journal with port 0 keeps another tool's loopback proxy", ephemeral.foreignKept),
+                .init("residue sweep reports the witnessed endpoint it used once", ephemeral.identityReported),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" }),
                 // The joined location/service scope is long enough for the log
@@ -344,6 +348,46 @@ enum NetworkLocationScenarios {
 
     /// Another program rewrites the PAC after every Conduit write. Repairs stop at
     /// the budget, one contention event explains why, and the window then reopens.
+    /// A port-0 session advertised 127.0.0.1:52870 and crashed, another tool holds 127.0.0.1:3128 on a second service,
+    /// and the journal became unreadable (#269).
+    private static func ephemeralResidueUnderCorruptJournal(services: [LocationServiceSettings], home: String) throws
+        -> (ownCleared: Bool, foreignKept: Bool, identityReported: Bool) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pm-location-ephemeral-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            do { try FileManager.default.removeItem(at: directory) }
+            catch { fputs("network-location-recovery ephemeral cleanup failed: \(error.localizedDescription)\n", stderr) }
+        }
+        let file = directory.appendingPathComponent("platform-state.json")
+        let store = FakeNetworkLocationStore(snapshot: .init(activeLocationID: home, services: services))
+        var config = ProxyConfig()
+        config.localPort = 0
+        let desired = SystemProxyManager.locationFields(config: config, mode: .manual,
+                                                        endpoints: ClientEndpoints(proxyHost: "127.0.0.1", proxyPort: 52870))
+        try LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { _ in })
+            .apply(kind: .proxies, desired: desired, config: config)
+        let foreign: [String: NetworkSettingValue] = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(3128), "HTTPEnable": .number(1)]
+        let usb = "55555555-5555-5555-5555-555555555555"
+        store.edit {
+            $0.services.append(LocationServiceSettings(locationID: home, serviceID: usb, name: "USB Ethernet", enabled: true,
+                                                       proxies: foreign, dns: [:]))
+        }
+        let corrupt = Data("{broken}".utf8)
+        try corrupt.write(to: file)
+        let events = RuntimeEventLog(capacity: 64)
+        let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { events.append($0) })
+        let failed: Bool
+        if case .failed = recovery.recover(kind: .proxies, config: config, listenerIsLive: false) { failed = true } else { failed = false }
+        let after = try store.snapshot().services
+        let wifi = after.first { $0.serviceID == services[0].serviceID }?.proxies ?? [:]
+        let ownCleared = failed && ["HTTPProxy", "HTTPPort", "HTTPSProxy", "HTTPSPort"].allSatisfy { wifi[$0] == nil }
+            && FileProxyEndpointWitness.beside(journalFile: file).read() == .absent
+        let evidenceKept = try Data(contentsOf: file) == corrupt
+        let foreignKept = evidenceKept && after.first { $0.serviceID == usb }?.proxies == foreign
+        let identities = events.events.filter { $0.event == "platform.location_residue_identity" }.map(\.detail)
+        return (ownCleared, foreignKept, identities == ["surface=proxies source=witness host=127.0.0.1 port=52870"])
+    }
+
     private static func contendedRewritesStayBounded(services: [LocationServiceSettings], home: String) throws -> Bool {
         let store = FakeNetworkLocationStore(snapshot: .init(activeLocationID: home, services: services))
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("pm-location-contended-\(UUID()).json")
