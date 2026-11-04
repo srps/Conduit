@@ -148,4 +148,45 @@ final class PACNetworkChangeInvalidationTests: XCTestCase {
         XCTAssertEqual(pac.fetches, fetchesBefore + 2, "one refetch, after the settle")
         XCTAssertEqual(count("pac.refreshed"), 1)
     }
+
+    /// #198 review: the path settles while a fetch from before its change is still held, so the settled refresh joins that fetch. The
+    /// fetch is then done again on the settled path, once, rather than ending with nothing fetched on it.
+    @RuntimeActor func testASettleThatJoinsAFetchFromBeforeTheChangeStillFetchesOnTheSettledPath() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.upstreams = []
+        config.pacRoutingEnabled = true
+        config.pacURL = "http://pac.example.test/proxy.pac"
+        let pac = StaticPAC()
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink(), pacEvaluator: pac)
+        try await orchestrator.startProxy()
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
+        await orchestrator.handleNetworkPath(Self.wifi(gateway: "192.168.1.1"))
+        let engine = try XCTUnwrap(orchestrator.pacRoutingEngine)
+        let cutoff = Date()
+        func count(_ name: String) -> Int {
+            orchestrator.eventLog.events.filter { $0.event == name && $0.timestamp >= cutoff }.count
+        }
+
+        let fetchesBefore = pac.fetches
+        pac.holdNext()
+        let early = Task { @RuntimeActor in await orchestrator.refreshPACRouting(force: true) }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while pac.fetches == fetchesBefore, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(orchestrator.invalidateNetworkPath(Self.wifi(gateway: "10.0.0.1")))
+        let settle = Task { @RuntimeActor in await orchestrator.handleNetworkPath(Self.wifi(gateway: "10.0.0.1")) }
+        while engine.refreshWaiterCount() < 2, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(engine.refreshWaiterCount(), 2, "the settled refresh joined the held fetch")
+        pac.release()
+        await early.value
+        let settled = await settle.value
+        XCTAssertTrue(settled)
+        XCTAssertEqual(pac.fetches, fetchesBefore + 2, "the held fetch, then one on the settled path")
+        XCTAssertEqual(count("pac.refreshed"), 1, "the settled path's script is installed")
+        XCTAssertEqual(count("pac.refresh_deferred"), 0)
+    }
 }

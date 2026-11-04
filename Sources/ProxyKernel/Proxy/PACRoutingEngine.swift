@@ -111,11 +111,16 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// started under an older generation computed its answer on a network
     /// that is gone: it is not cached, not handed out, and not installed.
     private var routeGeneration: UInt64 = 0
-    /// Whether an invalidation since the running fetch started asks for the
-    /// fetch to be done again at once (a VPN transition). A fetch superseded
-    /// only by path changes ends instead, and leaves the refetch to the
-    /// refresh that follows once the path settles (#198). Reset by each fetch.
+    /// Whether the running fetch, once superseded, must be done again at
+    /// once: a VPN transition invalidated since it started, or a caller
+    /// joined it after an invalidation (the settled path's refresh, say),
+    /// and a fetch from before that invalidation cannot answer that caller.
+    /// A fetch superseded only by path changes, with no such caller, ends
+    /// instead and leaves the refetch to the refresh that follows once the
+    /// path settles (#198). Reset by each fetch.
     private var fetchMustRestart = false
+    /// The `routeGeneration` the running fetch started under.
+    private var fetchGeneration: UInt64 = 0
     /// Requests waiting on an evaluation already running for the same cache
     /// key. proxy.log showed six identical "PAC evaluation took 1049ms"
     /// lines with the same millisecond timestamp: a burst of connections
@@ -212,7 +217,12 @@ package final class PACRoutingEngine: @unchecked Sendable {
         }
 
         let decision: RefreshDecision = lock.withLock {
-            if let runningRefresh { return .alreadyRunning(runningRefresh) }
+            if let runningRefresh {
+                // A caller that asks after the running fetch was superseded waits for one on the
+                // current path: the same operation fetches again rather than ending (#198).
+                if joinRunning, routeGeneration != fetchGeneration { fetchMustRestart = true }
+                return .alreadyRunning(runningRefresh)
+            }
             let needsRefresh = force || jsEvaluator == nil || !ExactText.same(cachedPACURL, config.pacURL)
                 || refreshExpired(at: lastRefreshAt)
             guard needsRefresh else { return .fresh }
@@ -223,6 +233,8 @@ package final class PACRoutingEngine: @unchecked Sendable {
             }
             let operation = PACRefreshOperation()
             runningRefresh = operation
+            fetchGeneration = routeGeneration
+            fetchMustRestart = false
             if urlChanged {
                 lastAttemptedPACURL = config.pacURL
                 consecutiveFailures = 0
@@ -259,6 +271,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
         while true {
             let generation = lock.withLock { () -> UInt64 in
                 fetchMustRestart = false
+                fetchGeneration = routeGeneration
                 return routeGeneration
             }
             let fetched: Result<(evaluator: any PacScriptEvaluating, script: String), any Error>
@@ -370,7 +383,8 @@ package final class PACRoutingEngine: @unchecked Sendable {
 
     /// Ends a refresh whose fetch path changes alone superseded (#198), and
     /// returns true; returns false, ending nothing, when a VPN transition
-    /// since the fetch started wants it done again now. The fetch installs
+    /// since the fetch started, or a caller that joined after an
+    /// invalidation, wants it done again now (`fetchMustRestart`). The fetch installs
     /// nothing and counts nothing towards the backoff: it ran on the network
     /// before the change. The loaded script and `pendingInvalidation` stay,
     /// so the forced refresh that follows the settled path fetches, and
@@ -903,6 +917,13 @@ package final class PACRoutingEngine: @unchecked Sendable {
         lock.withLock { pendingEvaluations.count }
     }
 
+    /// Callers waiting on the refresh running now; zero when none runs
+    /// (tests wait on it to know a caller joined).
+    package func refreshWaiterCount() -> Int {
+        let running = lock.withLock { runningRefresh }
+        return running?.waiterCount ?? 0
+    }
+
     private func touchRouteCacheKeyLocked(_ key: String) {
         routeCacheOrder.removeAll { $0 == key }
         routeCacheOrder.append(key)
@@ -1005,6 +1026,8 @@ private final class PACRefreshOperation: @unchecked Sendable {
         }
         return admitted
     }
+
+    var waiterCount: Int { lock.withLock { waiters.count } }
 
     func finish(_ result: Result<Void, any Error>) {
         let waiting = lock.withLock { () -> [CheckedContinuation<Void, any Error>] in

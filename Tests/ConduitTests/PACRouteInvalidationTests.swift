@@ -257,6 +257,35 @@ final class PACRouteInvalidationTests: XCTestCase {
                        ["fetch=deferred", "fetch=restarted", "fetch=restarted"])
     }
 
+    /// #198 review: a refresh asked for after a path change (the settled path's) that finds the fetch from before the change still
+    /// running joins it, and that fetch, once superseded, is done again on the current path instead of ending: the late caller never
+    /// returns on a fetch from before the change. One fetch on the settled path, and the new network's script routes.
+    func testARefreshJoiningAFetchAPathChangeSupersededGetsAFetchOnTheSettledPath() async throws {
+        let server = Server()
+        let events = RuntimeEventLog(capacity: 64)
+        let engine = makeEngine(server: server, events: events)
+        try await engine.refresh(force: true)
+        XCTAssertEqual(engine.route(for: "https://github.com/", host: "github.com"), Self.off)
+
+        // A fetch on the old path (a wake's, say) is held; the path changes; the settle's refresh joins the held fetch.
+        let early = try await heldRefresh(engine, server: server)
+        server.setOnVPN(true)
+        engine.invalidateRoutes(reason: .networkChanged)
+        let settle = Task { try await engine.refresh(force: true, honorBackoff: true) }
+        for _ in 0..<500 where engine.refreshWaiterCount() < 2 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(engine.refreshWaiterCount(), 2, "the settle's refresh joined the held fetch")
+        server.gate.signal()
+        try await early.value
+        try await settle.value
+
+        XCTAssertEqual(server.fetches, 3, "one fetch on the settled path")
+        XCTAssertEqual(engine.route(for: "https://github.com/", host: "github.com"), Self.on, "routing on the new script")
+        XCTAssertEqual(named("pac.refresh_deferred", in: events).count, 0, "a caller asked after the change, so nothing was deferred")
+        XCTAssertEqual(named("pac.refreshed", in: events).last?.detail?.contains("after=network_changed"), true)
+    }
+
     /// An evaluation of the old script still running at the invalidation:
     /// its answer is neither cached nor handed to the requests waiting on it.
     func testAnEvaluationRunningAcrossTheInvalidationIsDiscarded() async throws {

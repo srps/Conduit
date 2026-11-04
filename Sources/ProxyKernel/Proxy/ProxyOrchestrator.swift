@@ -1138,7 +1138,8 @@ package final class ProxyOrchestrator {
         )
     }()
 
-    private lazy var pacRoutingEngine: PACRoutingEngine? = {
+    /// Readable in-module so tests can see a caller join a running refresh.
+    private(set) lazy var pacRoutingEngine: PACRoutingEngine? = {
         guard let pacEvaluator else { return nil }
         return PACRoutingEngine(
             configProvider: { [configBox] in configBox.current },
