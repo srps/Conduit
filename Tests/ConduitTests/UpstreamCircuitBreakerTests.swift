@@ -323,4 +323,53 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         _ = breaker.recordSuccess(latencyMS: 200)
         XCTAssertEqual(breaker.ewmaLatencyMS!, 130, accuracy: 0.001)
     }
+
+    // MARK: - Silence
+
+    func testOneSilenceLeavesTheUpstreamRankedAndTheSecondMakesItSilentForTheInterval() {
+        var breaker = UpstreamCircuitBreaker()
+        let now = Date()
+
+        let first = breaker.recordUnanswered(now: now, interval: 30)
+        XCTAssertFalse(first.verdict.isDecisive)
+        XCTAssertFalse(breaker.isSilent(at: now))
+
+        let second = breaker.recordUnanswered(now: now, interval: 30)
+        XCTAssertTrue(second.verdict.isDecisive)
+        XCTAssertTrue(second.becameSilent)
+        XCTAssertTrue(breaker.isSilent(at: now.addingTimeInterval(29)))
+        XCTAssertFalse(breaker.recordUnanswered(now: now, interval: 30).becameSilent, "already silent: no second report")
+        XCTAssertFalse(breaker.endSilenceIfDue(now: now.addingTimeInterval(29)))
+        XCTAssertTrue(breaker.endSilenceIfDue(now: now.addingTimeInterval(30)), "it competes again after the interval")
+        XCTAssertFalse(breaker.isSilent(at: now.addingTimeInterval(30)))
+        XCTAssertTrue(breaker.recordUnanswered(now: now.addingTimeInterval(31), interval: 30).becameSilent,
+                      "the failure still stands, so the next silence is decisive at once")
+        XCTAssertEqual(breaker.state, .closed)
+        XCTAssertEqual(breaker.consecutiveFailures, 0, "a silence strikes nothing")
+    }
+
+    func testTheFirstSilenceAfterAConclusiveFailureIsDecisive() {
+        var breaker = UpstreamCircuitBreaker()
+        let now = Date()
+        breaker.recordFailure(now: now, threshold: 5, windowSeconds: 0, baseOpenInterval: 30, maxOpenInterval: 300)
+
+        XCTAssertTrue(breaker.recordUnanswered(now: now, interval: 30).becameSilent)
+    }
+
+    func testAnAnswerOrAResetEndsTheSilence() {
+        var answered = UpstreamCircuitBreaker()
+        let now = Date()
+        _ = answered.recordUnanswered(now: now, interval: 30)
+        _ = answered.recordUnanswered(now: now, interval: 30)
+        answered.recordSuccess(latencyMS: 10)
+        XCTAssertFalse(answered.isSilent(at: now))
+        XCTAssertFalse(answered.recordUnanswered(now: now, interval: 30).verdict.isDecisive, "the answer started a new streak")
+
+        var reset = UpstreamCircuitBreaker()
+        _ = reset.recordUnanswered(now: now, interval: 30)
+        _ = reset.recordUnanswered(now: now, interval: 30)
+        reset.reset(reason: .vpnFlapRecovered, baseOpenInterval: 30)
+        XCTAssertFalse(reset.isSilent(at: now))
+        XCTAssertEqual(reset.silences, UnansweredStreak())
+    }
 }

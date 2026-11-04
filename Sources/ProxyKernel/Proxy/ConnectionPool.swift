@@ -1091,19 +1091,25 @@ package final class ConnectionPool: @unchecked Sendable {
     private func selectProxy(from config: ProxyConfig) -> UpstreamProxy? {
         let proxies = config.enabledUpstreams
         guard !proxies.isEmpty else { return nil }
-        let result: (proxy: UpstreamProxy?, pending: [PendingTransitionEmission]) = lock.withLock {
+        let result: (proxy: UpstreamProxy?, pending: [PendingTransitionEmission], silenceEnded: [UpstreamProxy]) = lock.withLock {
             syncUpstreamStatesLocked(with: proxies)
-            let outcome = selectableProxiesLocked(from: proxies, now: .now)
+            let now = Date()
+            let outcome = selectableProxiesLocked(from: proxies, now: now)
             guard !outcome.candidates.isEmpty else {
                 let index = min(preferredProxyIndex, max(0, proxies.count - 1))
-                return (proxies[index], outcome.pendingEmissions)
+                return (proxies[index], outcome.pendingEmissions, [])
             }
-            let selected = chooseProxyLocked(from: outcome.candidates)
+            var silenceEnded: [UpstreamProxy] = []
+            for proxy in outcome.candidates where breakers[proxy.id]?.endSilenceIfDue(now: now) == true {
+                silenceEnded.append(proxy)
+            }
+            let answering = outcome.candidates.filter { breakers[$0.id]?.isSilent(at: now) != true }
+            let selected = chooseProxyLocked(from: answering.isEmpty ? outcome.candidates : answering)
             lastSelectedUpstreamID = selected.id
             if let selectedIndex = proxies.firstIndex(where: { $0.id == selected.id }) {
                 preferredProxyIndex = selectedIndex
             }
-            return (selected, outcome.pendingEmissions)
+            return (selected, outcome.pendingEmissions, silenceEnded)
         }
         // Emit transitions OUTSIDE the lock. selectableProxiesLocked may
         // promote a breaker to half-open via tryHalfOpen / forceHalfOpen,
@@ -1114,6 +1120,9 @@ package final class ConnectionPool: @unchecked Sendable {
         // pthread_mutex EAGAIN crash observed in `pm-sim upstream-flap`.
         for emission in result.pending {
             publishEmission(emission)
+        }
+        for proxy in result.silenceEnded {
+            publishReprioritized(proxy, reason: "interval_elapsed")
         }
         return result.proxy
     }
@@ -1290,9 +1299,11 @@ package final class ConnectionPool: @unchecked Sendable {
 
     private func recordSuccess(for proxy: UpstreamProxy, latencyMS: Int) {
         var emittedTransition: UpstreamCircuitBreaker.Transition?
+        var endedSilence = false
         lock.withLockVoid {
             syncUpstreamStatesLocked(with: configProvider().enabledUpstreams)
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
+            endedSilence = breaker.silentUntil != nil
             emittedTransition = breaker.recordSuccess(latencyMS: latencyMS)
             breakers[proxy.id] = breaker
             lastSelectedUpstreamID = proxy.id
@@ -1300,15 +1311,55 @@ package final class ConnectionPool: @unchecked Sendable {
         if let emittedTransition {
             emitTransition(emittedTransition, for: proxy)
         }
+        if endedSilence {
+            publishReprioritized(proxy, reason: "answered")
+        }
     }
 
-    /// A silence is no strike, except on the half-open probe. That breaker opened on conclusive failures, which still stand, and only an
-    /// outcome frees its probe slot.
+    private func publishReprioritized(_ proxy: UpstreamProxy, reason: String) {
+        let event = RuntimeEvent(
+            kind: .health, event: "upstream.reprioritized", detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) reason=\(reason)"
+        )
+        eventSink?(event)
+        logger.log(.notice, "Upstream \(proxy.name) competes for traffic again: \(event.detail ?? "")", category: .proxy)
+    }
+
     package func recordExchangeFailure(_ error: Error, for proxy: UpstreamProxy) {
         switch ConnectionPoolError.failureClass(error) {
         case .upstream: recordFailure(for: proxy)
-        case .inconclusive: recordFailure(for: proxy, onlyWhenHalfOpen: true)
+        case .inconclusive: recordSilence(for: proxy)
         case .local: break
+        }
+    }
+
+    /// A silence is no strike, except on the half-open probe: that breaker opened on conclusive failures, which still stand, and
+    /// only an outcome frees its probe slot. Otherwise a decisive silence ranks the upstream behind the ones that answer, for one
+    /// base open interval, the breaker's own wait before it tries an upstream again.
+    private func recordSilence(for proxy: UpstreamProxy) {
+        enum Outcome { case halfOpenProbe, held, silenced(UnansweredStreak.Verdict) }
+        let config = configProvider()
+        let interval = breakerThresholds(from: config).baseOpenInterval
+        let now = Date()
+        let outcome: Outcome = lock.withLock {
+            syncUpstreamStatesLocked(with: config.enabledUpstreams)
+            var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
+            guard breaker.state != .halfOpen else { return .halfOpenProbe }
+            let recorded = breaker.recordUnanswered(now: now, interval: interval)
+            breakers[proxy.id] = breaker
+            return recorded.becameSilent ? .silenced(recorded.verdict) : .held
+        }
+        switch outcome {
+        case .halfOpenProbe:
+            recordFailure(for: proxy, onlyWhenHalfOpen: true)
+        case .held:
+            break
+        case .silenced(let verdict):
+            let event = RuntimeEvent(
+                kind: .health, event: "upstream.deprioritized",
+                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) reason=unanswered consecutive=\(verdict.consecutive) seconds=\(Int(interval))"
+            )
+            eventSink?(event)
+            logger.log(.notice, "Upstream \(proxy.name) stopped answering; preferring upstreams that answer: \(event.detail ?? "")", category: .proxy)
         }
     }
 

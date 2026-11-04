@@ -293,7 +293,7 @@ enum SilentUpstreamScenarios {
         var waveStatuses: [String] = []
         for response in wave { waveStatuses.append(await status(response)) }
         let healthyViaSecondary = try await until(timeout: 2 * checkInterval + 2 * responseTimeout + 2) {
-            orchestrator.snapshot.runtimeStatus.lastHealthSummary == "Healthy via \(secondaryEndpoint)"
+            orchestrator.snapshot.runtimeStatus.lastHealthSummary.hasPrefix("Healthy via \(secondaryEndpoint) ")
         }
 
         let connectSlack = 0.1
@@ -323,6 +323,7 @@ enum SilentUpstreamScenarios {
                 "R=\(responseTimeout)s I=\(checkInterval)s C=\(connectSlack)s; warm latency primary=\(primaryLatency.map { String(format: "%.1f", $0) } ?? "nil") ms secondary=\(secondaryLatency.map { String(format: "%.1f", $0) } ?? "nil") ms",
                 "served \(servedAfter.map { String(format: "%.2f", $0) } ?? "never") s after the silence began (bound \(String(format: "%.2f", mainBound)) s) after \(failedBeforeServed) failed requests",
                 "primary saw \(primary.requestLines.count) request heads, secondary \(secondary.requestLines.count)",
+                "last health check: \(orchestrator.snapshot.runtimeStatus.lastHealthSummary); recovery events: \(recovery.map(\.event)); direct: \(orchestrator.snapshot.directModeCause.rawValue)",
             ])
     }
 }

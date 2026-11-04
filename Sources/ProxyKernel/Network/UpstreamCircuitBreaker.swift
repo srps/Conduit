@@ -62,6 +62,10 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
     /// unobservable to consumers — `recordFailure` overwrites it on every trip.
     package private(set) var nextOpenInterval: TimeInterval = 30
     package private(set) var ewmaLatencyMS: Double?
+    /// Exchanges in a row that connected and got no answer. They strike nothing (STYLE rule 11); a decisive streak only ranks
+    /// the upstream behind every upstream that is not silent, until `silentUntil`.
+    package private(set) var silences = UnansweredStreak()
+    package private(set) var silentUntil: Date?
 
     // MARK: - Internal state
 
@@ -138,6 +142,8 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         }
         consecutiveFailures = 0
         firstFailureAt = nil
+        silences.recordAnswer()
+        silentUntil = nil
 
         switch state {
         case .closed:
@@ -187,6 +193,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
             return nil
         }
 
+        silences.recordFailure()
         consecutiveFailures += 1
         if firstFailureAt == nil {
             firstFailureAt = now
@@ -230,6 +237,26 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         firstFailureAt = nil
         nextOpenInterval = appliedInterval
         return .opened(reason: openReason, consecutiveFailures: triggeringFailureCount, openInterval: appliedInterval)
+    }
+
+    package func isSilent(at now: Date) -> Bool { silentUntil.map { now < $0 } ?? false }
+
+    /// Clears a silence whose interval has run out, so the upstream competes again and its next exchange is the evidence.
+    /// Returns whether it cleared one.
+    package mutating func endSilenceIfDue(now: Date) -> Bool {
+        guard let silentUntil, silentUntil <= now else { return false }
+        self.silentUntil = nil
+        return true
+    }
+
+    /// Record an exchange that connected and got no answer. A decisive one keeps the upstream silent for `interval` from `now`.
+    /// Returns the verdict and whether this one made the upstream silent.
+    package mutating func recordUnanswered(now: Date, interval: TimeInterval) -> (verdict: UnansweredStreak.Verdict, becameSilent: Bool) {
+        let verdict = silences.recordUnanswered()
+        guard verdict.isDecisive else { return (verdict, false) }
+        let wasSilent = isSilent(at: now)
+        silentUntil = now.addingTimeInterval(interval)
+        return (verdict, !wasSilent)
     }
 
     /// Try to transition `.open → .halfOpen`. Succeeds if `openUntil` has
@@ -286,6 +313,8 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
             && nextOpenInterval == baseOpenInterval
             && !halfOpenProbeInFlight
         lastBaseOpenInterval = baseOpenInterval
+        silences.reset()
+        silentUntil = nil
         if alreadyClean {
             return nil
         }
