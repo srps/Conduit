@@ -543,6 +543,47 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(state.runtime.dnsRunState, .stopped, "nothing was started")
     }
 
+    /// A Start whose relay fails runs DNS on the old relay, so the decline stays and the notice offers only the restore: a second Start
+    /// would have nothing to do.
+    func testADeclinedRecoveryWhoseRelayStartFailedOffersOnlyTheRestore() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        leaveACrashedRunsDNS(harness)
+        let state = await harness.ready()
+        await harness.settle("the decline is shown") { state.runtime.systemDNSRecoveryDeclined }
+        XCTAssertTrue(state.mayStartDNSAfterDeclinedRecovery)
+
+        harness.machine.privilege.failing = [.startDNSRelay]
+        state.startDNSAfterDeclinedRecovery()
+        await harness.settle("DNS runs") { state.runtime.dnsRunState == .running }
+        XCTAssertTrue(state.runtime.systemDNSRecoveryDeclined, "the relay still forwards to the crashed run")
+        XCTAssertFalse(state.mayStartDNSAfterDeclinedRecovery, "Start DNS is not offered while DNS runs")
+
+        harness.machine.privilege.failing = []
+        state.restoreSystemDNSByStoppingDNS()
+        await harness.settle("the notice clears") { !state.runtime.systemDNSRecoveryDeclined }
+        XCTAssertEqual(wifi.dnsServers, ["192.0.2.1"])
+    }
+
+    /// Management saved off before the crash's teardown: DNS starts without touching system DNS, so the decline stays, and turning
+    /// management on writes system DNS and clears it.
+    func testTurningSystemDNSManagementOnClearsADeclinedRecovery() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: false))
+        leaveACrashedRunsDNS(harness)
+        let state = await harness.ready()
+        await harness.settle("the decline is shown") { state.runtime.systemDNSRecoveryDeclined }
+
+        state.startDNSAfterDeclinedRecovery()
+        await harness.settle("DNS runs") { state.runtime.dnsRunState == .running }
+        XCTAssertTrue(state.runtime.systemDNSRecoveryDeclined, "an unmanaged Start writes no system DNS")
+
+        try PlatformConfigPersistence.save(PlatformIntegrationConfig(manageSystemDNS: true), in: harness.environment)
+        state.reloadConfigurationFromDisk()
+        await state.reloadTask?.value
+        await harness.settle("the notice clears") { !state.runtime.systemDNSRecoveryDeclined }
+        let port = try XCTUnwrap(state.runtime.bindings.dnsPort)
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(port)], "the relay forwards to this run")
+    }
+
     /// The explicit reload runs one at a time, refusing a second with a message, and re-evaluates the launch options' hold from what it
     /// read: a file repaired outside the app to hold `--no-system-proxy` releases it, and the Start then runs without the system proxy.
     func testAReloadIsSingleFlightAndReevaluatesTheLaunchOptionsHold() async throws {

@@ -682,7 +682,7 @@ package final class RuntimeHost {
         Task { [weak self] in await self?.awaitLaunchRecovery() }
     }
 
-    /// A DNS Start, a DNS Stop or management switched off wrote system DNS, so no declined recovery describes it any more.
+    /// System DNS was written, or the relay it points at answers, so no declined recovery describes the machine any more.
     func systemDNSWritten() {
         systemDNSRecoveryDeclined = false
     }
@@ -1635,6 +1635,7 @@ package final class RuntimeHost {
         guard !token.isSuperseded, orchestrator.snapshot.dnsRunState == .running else { return }
         if alive {
             dnsRelayUnresponsive = false
+            systemDNSWritten()
             return
         }
         // The restart and the probe after it run off the owner, one at a time.
@@ -1661,6 +1662,7 @@ package final class RuntimeHost {
             return
         case .restarted:
             orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.relay_restarted", detail: "source=health_timer"))
+            systemDNSWritten()
         case .unresponsive:
             orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.pipeline_unresponsive", detail: "source=health_timer"))
         }
@@ -2079,6 +2081,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
                 return saved && applied
             }
             startDNSHealthTimer(forwarderPort: forwarderPort)
+            if landed { systemDNSWritten() }
             return landed
         case .clearSystemDNS:
             // Timer first: left running, its 30 s probe would restart the

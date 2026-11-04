@@ -93,6 +93,8 @@ final class InteractiveHostHarness {
         let hold = HeldCall()
         /// The ports the host's injected DNS probe was asked, in order. Each probe is offered to `hold` first as `("dns-probe", [port])`.
         let dnsProbes = LockedLog<Int>()
+        /// What the injected DNS probe answers; a launch-recovery test names one that times out before `makeHost()`.
+        var dnsProbe = FakeDNSProbe()
         let vpn = FakeVPNStatusObserver()
         /// The PAC evaluator the orchestrator fetches through; a test that holds a Start before its bind names a `HeldPACFetch`.
         var pacEvaluator: any PacEvaluator = FakePacEvaluator()
@@ -126,7 +128,7 @@ final class InteractiveHostHarness {
             let hold = self.hold
             let vpn = self.vpn
             let dnsProbes = self.dnsProbes
-            let dnsProbe = FakeDNSProbe()
+            let dnsProbe = self.dnsProbe
             let helperStatus = self.helperStatus.map { HoldingHelperStatus(base: $0, hold: hold) }
             let built = try await RuntimeHost.open(
                 stateSession: session,

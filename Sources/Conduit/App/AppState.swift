@@ -869,8 +869,13 @@ final class AppState: ObservableObject {
         send(.testDNS) { _ in }
     }
 
+    /// A running DNS whose relay start failed keeps the decline until its health timer restarts the relay; a Start then has nothing to do.
+    var mayStartDNSAfterDeclinedRecovery: Bool {
+        MenuBarPresentation.moduleToggleAction(for: runtime.dnsRunState) == .start
+    }
+
     func startDNSAfterDeclinedRecovery() {
-        guard MenuBarPresentation.moduleToggleAction(for: runtime.dnsRunState) == .start else { return }
+        guard mayStartDNSAfterDeclinedRecovery else { return }
         toggleDNS()
     }
 

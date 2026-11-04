@@ -21,8 +21,10 @@ struct SystemDNSRecoveryNotice: View {
                 }
             }
             HStack(spacing: 8) {
-                Button("Start DNS") { appState.startDNSAfterDeclinedRecovery() }
-                    .help("Start the DNS forwarder and point the relay at it.")
+                if appState.mayStartDNSAfterDeclinedRecovery {
+                    Button("Start DNS") { appState.startDNSAfterDeclinedRecovery() }
+                        .help("Start the DNS forwarder and point the relay at it.")
+                }
                 Button("Restore DNS Settings") { appState.restoreSystemDNSByStoppingDNS() }
                     .help("Put back the DNS servers recorded before Conduit changed them, and stop the relay.")
             }
