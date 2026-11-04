@@ -59,10 +59,15 @@ final class RuntimeHostDNSHealthTests: XCTestCase {
         host.orchestrator.snapshot.bindings.dnsPort ?? host.config.dnsForwarderPort
     }
 
-    /// A failed reading restarts the relay; its own final probe finds the pipeline unresponsive, so the host's snapshot carries the fixed
-    /// DNS error while the kernel still reports the forwarder running. A subscriber is told without asking, and a later read after the gap
-    /// reads the same. An error of the kernel's own wins. An alive reading for the same run clears it, at a newer presentation revision.
-    @RuntimeActor func testAnUnresponsiveRestartDegradesTheSnapshotAndAnAliveReadingRecoversIt() async throws {
+    @RuntimeActor private func details(_ host: RuntimeHost, _ name: String) -> [String?] {
+        host.orchestrator.eventLog.events.filter { $0.event == name }.map(\.detail)
+    }
+
+    /// A failed reading restarts the relay. One final probe without an answer is held; the second in a row finds the pipeline
+    /// unresponsive, so the host's snapshot carries the fixed DNS error while the kernel still reports the forwarder running. A subscriber
+    /// is told without asking, and a later read after the gap reads the same. An error of the kernel's own wins. An alive reading for the
+    /// same run clears it, at a newer presentation revision, and the next unanswered restart is held again.
+    @RuntimeActor func testConsecutiveUnconfirmedRestartsDegradeTheSnapshotAndAnAliveReadingRecoversIt() async throws {
         let composed = try await composeRunning()
         let host = composed.host
         let stream = try await composed.client.subscribe(.live, deadline: deadline())
@@ -74,10 +79,22 @@ final class RuntimeHostDNSHealthTests: XCTestCase {
         let token = host.lanes.dns.observationToken
         host.handleDNSHealthResult(alive: false, forwarderPort: forwarderPort(host), armedBy: token)
         await host.deliveries.drain()
+        XCTAssertFalse(host.dnsRelayUnresponsive, "one unanswered probe is not a dead pipeline")
+        XCTAssertEqual(details(host, "dns.relay_unconfirmed"), ["source=health_timer consecutive=1 decisive=false"])
+        XCTAssertEqual(details(host, "dns.pipeline_unresponsive"), [])
+        let held = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertNil(held.dnsError)
+
+        host.handleDNSHealthResult(alive: false, forwarderPort: forwarderPort(host), armedBy: token)
+        await host.deliveries.drain()
         XCTAssertTrue(host.dnsRelayUnresponsive)
-        XCTAssertTrue(host.orchestrator.eventLog.events.contains {
-            $0.event == "dns.pipeline_unresponsive" && $0.detail == "source=health_timer"
-        }, "the restart's result is recorded under a host-neutral source")
+        XCTAssertEqual(details(host, "dns.relay_unconfirmed"), [
+            "source=health_timer consecutive=1 decisive=false", "source=health_timer consecutive=2 decisive=true",
+        ])
+        XCTAssertEqual(
+            details(host, "dns.pipeline_unresponsive"), ["source=health_timer reason=consecutive_misses"],
+            "the restart's result is recorded under a host-neutral source"
+        )
 
         var pushed: ControlRuntimeSnapshot?
         for _ in 0..<32 where pushed == nil {
@@ -101,6 +118,39 @@ final class RuntimeHostDNSHealthTests: XCTestCase {
         XCTAssertNil(recovered.dnsError)
         XCTAssertEqual(recovered.dnsRunState, .running)
         XCTAssertGreaterThan(recovered.stamp.presentationRevision, degraded.stamp.presentationRevision)
+
+        host.handleDNSHealthResult(alive: false, forwarderPort: forwarderPort(host), armedBy: token)
+        await host.deliveries.drain()
+        XCTAssertFalse(host.dnsRelayUnresponsive, "the answer ended the streak")
+        XCTAssertEqual(details(host, "dns.relay_unconfirmed").last, "source=health_timer consecutive=1 decisive=false")
+    }
+
+    /// A relay start the helper refuses is a conclusive failure, reported at once. It stands until an answer, so the next unanswered
+    /// restart counts on its own; an alive reading clears both.
+    @RuntimeActor func testAFailedRelayStartIsUnresponsiveAtOnce() async throws {
+        let composed = try await composeRunning()
+        let host = composed.host
+        let token = host.lanes.dns.observationToken
+        composed.harness.machine.privilege.failing = [.startDNSRelay]
+
+        host.handleDNSHealthResult(alive: false, forwarderPort: forwarderPort(host), armedBy: token)
+        await host.deliveries.drain()
+        XCTAssertTrue(host.dnsRelayUnresponsive)
+        XCTAssertEqual(details(host, "dns.pipeline_unresponsive"), ["source=health_timer reason=start_failed"])
+        XCTAssertEqual(details(host, "dns.relay_unconfirmed"), [])
+        let degraded = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertEqual(degraded.dnsError, RuntimeHost.dnsRelayUnresponsiveError)
+
+        composed.harness.machine.privilege.failing = []
+        host.handleDNSHealthResult(alive: false, forwarderPort: forwarderPort(host), armedBy: token)
+        await host.deliveries.drain()
+        XCTAssertTrue(host.dnsRelayUnresponsive)
+        XCTAssertEqual(details(host, "dns.relay_unconfirmed"), ["source=health_timer consecutive=1 decisive=true"])
+
+        host.handleDNSHealthResult(alive: true, forwarderPort: forwarderPort(host), armedBy: token)
+        XCTAssertFalse(host.dnsRelayUnresponsive)
+        let recovered = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertNil(recovered.dnsError)
     }
 
     /// Readings belong to the run whose timer armed them. A restart for run A whose final probe is held while a Stop begins reports its
@@ -123,6 +173,7 @@ final class RuntimeHostDNSHealthTests: XCTestCase {
         await stop.value
         await host.deliveries.drain()
         XCTAssertFalse(host.dnsRelayUnresponsive, "A's late restart result is not an observation of anything running")
+        XCTAssertEqual(details(host, "dns.relay_unconfirmed"), ["source=health_timer superseded=true"], "reported, not counted")
 
         try await host.startRuntime()
         let runB = host.lanes.dns.observationToken
@@ -137,7 +188,10 @@ final class RuntimeHostDNSHealthTests: XCTestCase {
 
         host.handleDNSHealthResult(alive: false, forwarderPort: forwarderPort(host), armedBy: runB)
         await host.deliveries.drain()
-        XCTAssertTrue(host.dnsRelayUnresponsive, "B's own reading is B's observation")
+        XCTAssertFalse(host.dnsRelayUnresponsive, "B's first unanswered restart is held")
+        host.handleDNSHealthResult(alive: false, forwarderPort: forwarderPort(host), armedBy: runB)
+        await host.deliveries.drain()
+        XCTAssertTrue(host.dnsRelayUnresponsive, "B's own readings are B's observation")
         host.handleDNSHealthResult(alive: true, forwarderPort: forwarderPort(host), armedBy: runA)
         XCTAssertTrue(host.dnsRelayUnresponsive, "A's late alive reading clears nothing of B's")
         let degradedB = try await composed.client.readSnapshot(deadline: deadline())

@@ -150,17 +150,17 @@ final class SystemDNSManagerTests: XCTestCase {
         try makeManager(machine: machine, relayIsLive: true).saveCurrentDNS(logger: nil)
 
         XCTAssertEqual(makeManager(machine: machine, relayIsLive: true).restartRelayIfManaged(forwarderPort: 5353, logger: nil), .restarted)
-        XCTAssertEqual(makeManager(machine: machine, relayIsLive: false).restartRelayIfManaged(forwarderPort: 5353, logger: nil), .unresponsive)
+        XCTAssertEqual(makeManager(machine: machine, relayIsLive: false).restartRelayIfManaged(forwarderPort: 5353, logger: nil), .unconfirmed)
         XCTAssertEqual(recording.commands(matching: .startDNSRelay), [["5353"], ["5353"]])
     }
 
-    func testRelayRestartThatTheHelperRefusesIsUnresponsive() throws {
+    func testRelayRestartThatTheHelperRefusesIsAStartFailure() throws {
         let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["10.0.0.2"]])
         let manager = makeManager(machine: machine, relayIsLive: true)
         try manager.saveCurrentDNS(logger: nil)
         recording.failing = [.startDNSRelay]
 
-        XCTAssertEqual(manager.restartRelayIfManaged(forwarderPort: 5353, logger: nil), .unresponsive)
+        XCTAssertEqual(manager.restartRelayIfManaged(forwarderPort: 5353, logger: nil), .startFailed)
     }
 
     /// The restart runs off the main actor, after a probe that is already a

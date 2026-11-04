@@ -234,6 +234,8 @@ package final class RuntimeHost {
     private(set) var dnsRelayUnresponsive = false {
         didSet { if dnsRelayUnresponsive != oldValue { onControlStateChange?() } }
     }
+    /// Relay restarts whose final probe got no answer, for the run the timer armed (STYLE rule 11).
+    private var silentDNSRelay = UnansweredStreak()
     /// Whether the proxy module's surfaces are up: a proxy Start completed them, and no teardown of the proxy has begun since. Its
     /// split-DNS entry files exist only in that window, so VPN transitions and repairs must not apply them outside it.
     var runtimeStarted = false
@@ -1604,6 +1606,7 @@ package final class RuntimeHost {
         dnsHealthTimer?.cancel()
         dnsHealthTimer = nil
         dnsRelayUnresponsive = false
+        silentDNSRelay.reset()
     }
 
     /// One probe reading for the run whose timer `token` armed. Internal so the host's tests can report a reading; the probe itself asks
@@ -1612,6 +1615,7 @@ package final class RuntimeHost {
     func handleDNSHealthResult(alive: Bool, forwarderPort: Int, armedBy token: LifecycleLane.Token) {
         guard !token.isSuperseded, orchestrator.snapshot.dnsRunState == .running else { return }
         if alive {
+            silentDNSRelay.recordAnswer()
             dnsRelayUnresponsive = false
             return
         }
@@ -1629,21 +1633,46 @@ package final class RuntimeHost {
         }
     }
 
-    /// The restart's own final probe is the reading. It is reported whatever happened since, and it sets the observation only for the
-    /// run that asked for it, while the kernel still runs the forwarder.
+    /// The restart's own final probe is the reading. It is reported whatever happened since, and it counts toward the streak and sets
+    /// the observation only for the run that asked for it, while the kernel still runs the forwarder. A failed start is unresponsive at
+    /// once; an unanswered probe only when it is the second in a row or follows a failed start.
     private func finishDNSRelayRestart(_ outcome: SystemDNSManager.RelayRestart, armedBy token: LifecycleLane.Token) {
         dnsRelayRestartInFlight = false
+        let current = !token.isSuperseded && orchestrator.snapshot.dnsRunState == .running
         switch outcome {
         case .notManaged:
             // A stop finished while the restart was out.
             return
         case .restarted:
             orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.relay_restarted", detail: "source=health_timer"))
-        case .unresponsive:
-            orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.pipeline_unresponsive", detail: "source=health_timer"))
+            guard current else { return }
+            silentDNSRelay.recordAnswer()
+            dnsRelayUnresponsive = false
+        case .startFailed:
+            orchestrator.eventLog.append(RuntimeEvent(
+                kind: .health, event: "dns.pipeline_unresponsive", detail: "source=health_timer reason=start_failed"
+            ))
+            guard current else { return }
+            silentDNSRelay.recordFailure()
+            dnsRelayUnresponsive = true
+        case .unconfirmed:
+            guard current else {
+                orchestrator.eventLog.append(RuntimeEvent(
+                    kind: .health, event: "dns.relay_unconfirmed", detail: "source=health_timer superseded=true"
+                ))
+                return
+            }
+            let verdict = silentDNSRelay.recordUnanswered()
+            orchestrator.eventLog.append(RuntimeEvent(
+                kind: .health, event: "dns.relay_unconfirmed",
+                detail: "source=health_timer consecutive=\(verdict.consecutive) decisive=\(verdict.isDecisive)"
+            ))
+            guard verdict.isDecisive else { return }
+            orchestrator.eventLog.append(RuntimeEvent(
+                kind: .health, event: "dns.pipeline_unresponsive", detail: "source=health_timer reason=consecutive_misses"
+            ))
+            dnsRelayUnresponsive = true
         }
-        guard !token.isSuperseded, orchestrator.snapshot.dnsRunState == .running else { return }
-        dnsRelayUnresponsive = outcome == .unresponsive
     }
 
     /// The status is read and encoded on the owner, in this turn. The directory and the atomic replacement run on `platformWork`, so

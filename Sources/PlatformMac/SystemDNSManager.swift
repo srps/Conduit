@@ -468,7 +468,12 @@ package final class SystemDNSManager: @unchecked Sendable {
         /// since the probe that asked for the restart. Nothing was started.
         case notManaged
         case restarted
-        case unresponsive
+        /// The helper refused or failed the start: a conclusive failure.
+        case startFailed
+        /// The start went through but the probe after it got no answer
+        /// within its two seconds. Slowness is not loss (STYLE rule 11), so
+        /// the owner decides on consecutive readings.
+        case unconfirmed
     }
 
     /// Restarts the relay for a failed liveness probe and probes again. Meant
@@ -490,7 +495,7 @@ package final class SystemDNSManager: @unchecked Sendable {
                 return nil
             } catch {
                 logger?.log(.warning, "DNS relay restart failed: \(error.localizedDescription)", category: .system)
-                return .unresponsive
+                return .startFailed
             }
         }
         if let started { return started }
@@ -498,8 +503,8 @@ package final class SystemDNSManager: @unchecked Sendable {
         // the main actor should not wait that out.
         guard relayIsLive() else {
             // A stop that ran during the probe took the relay down on
-            // purpose. That is not a pipeline to report as unresponsive.
-            return operations.withLock { hasSavedInterfaces() } ? .unresponsive : .notManaged
+            // purpose. That is not a pipeline to report as unconfirmed.
+            return operations.withLock { hasSavedInterfaces() } ? .unconfirmed : .notManaged
         }
         logger?.log(.notice, "DNS relay restarted successfully.", category: .system)
         return .restarted
