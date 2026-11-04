@@ -31,6 +31,8 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   and stay silent, so every launch declines system DNS again. The app now says
   so in a notification and in a notice on the menu and Overview, with Start DNS
   and Restore DNS Settings; either one clears it, as do Quit and a reboot.
+  The network-location reconcile that runs as the app starts no longer undoes
+  the declined restore one moment later.
 
 - With the proxy port set to 0 ("choose a port"), the system proxy, the shell
   profiles and the launchd `HTTP(S)_PROXY` variables now name the port the
