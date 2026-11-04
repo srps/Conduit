@@ -15,6 +15,20 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ### Fixed
 
+- A slow upstream no longer reads as a lost one (#197). A request or CONNECT
+  that connected and got no answer within the response timeout still ends with
+  a 502 and `upstream.response_timeout`, but it no longer strikes the circuit
+  breaker; a refused or missed connect, a 5xx and a rejected credential still
+  count, one strike each. A health check or connectivity probe that connected
+  and got no answer is held once (`health.inconclusive`,
+  `connectivity.probe_inconclusive`), rechecked sooner, and counts only when it
+  is the second in a row or follows a conclusive failure, so one slow check no
+  longer starts the recovery ladder or falls to DIRECT. The DNS health tick
+  reports the pipeline unresponsive only on a failed relay start or two
+  unconfirmed restarts in a row (`dns.relay_unconfirmed`). At teardown, a launchd
+  variable that cannot be read no longer counts as absent, so the environment
+  is still cleaned up.
+
 - With the proxy port set to 0 ("choose a port"), the system proxy, the shell
   profiles and the launchd `HTTP(S)_PROXY` variables now name the port the
   listener actually bound, instead of port 0 (#251). Start, config reapply,
