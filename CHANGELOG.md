@@ -19,10 +19,12 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   that connected and got no answer within the response timeout still ends with
   a 502 and `upstream.response_timeout`, but it no longer strikes the circuit
   breaker; a refused or missed connect, a 5xx and a rejected credential still
-  count, one strike each. Of several upstreams, one that leaves two exchanges in
-  a row unanswered ranks behind the ones that answer for one breaker open
-  interval (`upstream.deprioritized`), so traffic moves to an upstream that
-  answers after two silences rather than five. A health check or connectivity probe that connected
+  count, one strike each. An upstream that leaves two exchanges in a row
+  unanswered is asked once, on a fresh connection, whether it answers
+  (`upstream.silence_check_started`). If it does, the origin was slow and the
+  upstream keeps its traffic; only if the check is silent or refused too does it
+  rank behind the upstreams that answer for one breaker open interval
+  (`upstream.deprioritized`). A health check or connectivity probe that connected
   and got no answer is held once (`health.inconclusive`,
   `connectivity.probe_inconclusive`), rechecked sooner, and counts only when it
   is the second in a row or follows a conclusive failure, so one slow check no

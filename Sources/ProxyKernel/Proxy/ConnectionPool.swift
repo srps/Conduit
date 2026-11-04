@@ -1099,10 +1099,10 @@ package final class ConnectionPool: @unchecked Sendable {
                 return (proxies[index], outcome.pendingEmissions, [])
             }
             var silenceEnded: [UpstreamProxy] = []
-            for proxy in outcome.candidates where breakers[proxy.id]?.endSilenceIfDue(now: now) == true {
+            for proxy in outcome.candidates where breakers[proxy.id]?.endRankingIfDue(now: now) == true {
                 silenceEnded.append(proxy)
             }
-            let answering = outcome.candidates.filter { breakers[$0.id]?.isSilent(at: now) != true }
+            let answering = outcome.candidates.filter { breakers[$0.id]?.ranksBehind(at: now) != true }
             let selected = chooseProxyLocked(from: answering.isEmpty ? outcome.candidates : answering)
             lastSelectedUpstreamID = selected.id
             if let selectedIndex = proxies.firstIndex(where: { $0.id == selected.id }) {
@@ -1214,7 +1214,8 @@ package final class ConnectionPool: @unchecked Sendable {
         requestBody: HTTPRequestBody?,
         connection: PooledUpstreamConnection,
         proxy: UpstreamProxy,
-        authSource: String?
+        authSource: String?,
+        responseTimeout: TimeAmount? = nil
     ) -> EventLoopFuture<UpstreamExchangeResponse> {
         let auth = connection.authenticationState()
         let promise = connection.channel.eventLoop.makePromise(of: UpstreamExchangeResponse.self)
@@ -1228,7 +1229,7 @@ package final class ConnectionPool: @unchecked Sendable {
             authHandshakeLimiter: authHandshakeLimiter,
             authLimitProvider: authHandshakeLimits,
             eventSink: eventSink,
-            responseTimeout: upstreamResponseTimeout,
+            responseTimeout: responseTimeout ?? upstreamResponseTimeout,
             responsePromise: promise
         )
 
@@ -1301,7 +1302,7 @@ package final class ConnectionPool: @unchecked Sendable {
         lock.withLockVoid {
             syncUpstreamStatesLocked(with: configProvider().enabledUpstreams)
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
-            endedSilence = breaker.silentUntil != nil
+            endedSilence = breaker.ranksBehind
             emittedTransition = breaker.recordSuccess(latencyMS: latencyMS)
             breakers[proxy.id] = breaker
             lastSelectedUpstreamID = proxy.id
@@ -1331,10 +1332,8 @@ package final class ConnectionPool: @unchecked Sendable {
     }
 
     private func recordSilence(for proxy: UpstreamProxy) {
-        enum Outcome { case halfOpenProbe, held, silenced(UnansweredStreak.Verdict) }
+        enum Outcome { case halfOpenProbe, held, check(UnansweredStreak.Verdict) }
         let config = configProvider()
-        let interval = breakerThresholds(from: config).baseOpenInterval
-        let now = Date()
         let outcome: Outcome = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
@@ -1343,23 +1342,88 @@ package final class ConnectionPool: @unchecked Sendable {
             case .halfOpen: return .halfOpenProbe
             case .open: return .held
             }
-            let recorded = breaker.recordUnanswered(now: now, interval: interval)
+            let recorded = breaker.recordUnanswered()
             breakers[proxy.id] = breaker
-            return recorded.becameSilent ? .silenced(recorded.verdict) : .held
+            return recorded.step == .check ? .check(recorded.verdict) : .held
         }
         switch outcome {
         case .halfOpenProbe:
             failHalfOpenProbe(for: proxy)
         case .held:
             break
-        case .silenced(let verdict):
+        case .check(let verdict):
+            let budget = Self.silenceCheckBudget(config)
+            let event = RuntimeEvent(
+                kind: .health, event: "upstream.silence_check_started",
+                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) consecutive=\(verdict.consecutive) budget_ms=\(Int(budget * 1_000))"
+            )
+            eventSink?(event)
+            logger.log(.info, "Upstream \(proxy.name) left exchanges unanswered; asking it directly: \(event.detail ?? "")", category: .proxy)
+            checkSilence(of: proxy, url: config.healthCheckURL, budget: budget)
+        }
+    }
+
+    private static func silenceCheckBudget(_ config: ProxyConfig) -> TimeInterval {
+        max(min(config.health.connectionCheckTimeout, config.upstreamResponseTimeoutSeconds), 0.001)
+    }
+
+    private func checkSilence(of proxy: UpstreamProxy, url: String, budget: TimeInterval) {
+        let head = HTTPRequestHead(
+            version: .http1_1, method: .HEAD, uri: url, headers: ["Host": URL(string: url)?.host ?? "example.com"]
+        )
+        let timeout = TimeAmount.nanoseconds(DurationUnits.runtimeNanoseconds(budget))
+        let start = Date()
+        acquireConnection(for: proxy, target: url, preferFreshConnection: true, connectTimeout: timeout, selects: false)
+            .flatMap { [weak self] connection -> EventLoopFuture<UpstreamExchangeResponse> in
+                guard let self else { return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse) }
+                return self.attributingRetirement(
+                    self.performBufferedExchange(
+                        head: head, requestBody: nil, connection: connection, proxy: proxy, authSource: nil, responseTimeout: timeout
+                    ),
+                    connection: connection
+                )
+            }
+            .whenComplete { [weak self] result in
+                let outcome: UpstreamCircuitBreaker.SilenceCheckOutcome
+                switch result {
+                case .success:
+                    outcome = .answered(latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
+                case .failure(let error):
+                    switch ConnectionPoolError.failureClass(error) {
+                    case .upstream: outcome = .refused
+                    case .inconclusive: outcome = .silent
+                    case .local: outcome = .unasked
+                    }
+                }
+                self?.finishSilenceCheck(of: proxy, outcome)
+            }
+    }
+
+    private func finishSilenceCheck(of proxy: UpstreamProxy, _ outcome: UpstreamCircuitBreaker.SilenceCheckOutcome) {
+        let config = configProvider()
+        let interval = breakerThresholds(from: config).baseOpenInterval
+        let verdict: UpstreamCircuitBreaker.SilenceCheckVerdict = lock.withLock {
+            syncUpstreamStatesLocked(with: config.enabledUpstreams)
+            guard var breaker = breakers[proxy.id] else { return .superseded }
+            let verdict = breaker.finishSilenceCheck(outcome, now: Date(), interval: interval)
+            breakers[proxy.id] = breaker
+            return verdict
+        }
+        let finished = RuntimeEvent(
+            kind: .health, event: "upstream.silence_check_finished",
+            detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) outcome=\(outcome.name) verdict=\(verdict.rawValue)"
+        )
+        eventSink?(finished)
+        logger.log(.info, "Silence check of upstream \(proxy.name) finished: \(finished.detail ?? "")", category: .proxy)
+        if verdict == .rankedBehind {
             let event = RuntimeEvent(
                 kind: .health, event: "upstream.deprioritized",
-                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) reason=unanswered consecutive=\(verdict.consecutive) seconds=\(Int(interval))"
+                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) reason=silence_check_\(outcome.name) seconds=\(Int(interval))"
             )
             eventSink?(event)
             logger.log(.notice, "Upstream \(proxy.name) stopped answering; preferring upstreams that answer: \(event.detail ?? "")", category: .proxy)
         }
+        if outcome == .refused { recordFailure(for: proxy) }
     }
 
     private func failHalfOpenProbe(for proxy: UpstreamProxy) { recordFailure(for: proxy, onlyWhenHalfOpen: true) }

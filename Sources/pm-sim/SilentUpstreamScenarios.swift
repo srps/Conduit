@@ -214,8 +214,8 @@ enum SilentUpstreamScenarios {
         for response in responses { statuses.append(String(try await response.get().prefix(12))) }
         // Read before the next HEAD can answer: a healthy check resets the count a timeout might have raised.
         let strikesRightAfterTheTimeouts = orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == endpoint }?.consecutiveFailures
-        // Checks run one at a time, so a fourth HEAD means three completed.
-        let threeChecks = try await until(timeout: 5 * checkInterval + 5) { heads() >= 4 }
+        func healthCheckHeads() -> Int { heads() - events("upstream.silence_check_started").count }
+        let threeChecks = try await until(timeout: 5 * checkInterval + 5) { healthCheckHeads() >= 4 }
         let fast = String(try await sendThroughProxy(group: group, port: port, tag: "fast").get().prefix(12))
         let status = orchestrator.snapshot.runtimeStatus
         let slowStatus = orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == endpoint }
@@ -311,10 +311,10 @@ enum SilentUpstreamScenarios {
                 .init("the primary served first with the lower latency, so selection preferred it", primaryPreferred),
                 .init("a request was served within threshold x (R + C), the time a breaker opened by every timeout would take",
                       servedAfter.map { $0 <= breakerPathBound } ?? false),
-                .init("only the \(decisive) silences that make a verdict failed before the secondary served",
-                      servedAfter != nil && failedBeforeServed == decisive),
-                .init("the decisive silence ranked the primary behind the secondary, once",
-                      deprioritized.count == 1 && deprioritized[0].contains("upstream=primary ") && deprioritized[0].contains(" consecutive=\(decisive) ")),
+                .init("only the \(decisive) silences that make a verdict, and the request beside the silence check, failed before the secondary served",
+                      servedAfter != nil && (decisive...(decisive + 1)).contains(failedBeforeServed)),
+                .init("the decisive silence asked the primary, and its silent check ranked it behind the secondary, once",
+                      deprioritized.count == 1 && deprioritized[0].contains("upstream=primary ") && deprioritized[0].contains(" reason=silence_check_silent ")),
                 .init("a concurrent wave after it was served in full", waveStatuses.allSatisfy { $0.hasPrefix("HTTP/1.1 200") }),
                 .init("the silences opened no breaker and struck nothing",
                       events("upstream.circuit_opened").isEmpty && primaryStatus?.circuitState == .closed && primaryStatus?.consecutiveFailures == 0),

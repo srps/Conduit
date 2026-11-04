@@ -64,7 +64,37 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
     package private(set) var ewmaLatencyMS: Double?
     /// Exchanges in a row that connected and got no answer. They never count toward `consecutiveFailures`.
     package private(set) var silences = UnansweredStreak()
-    package private(set) var silentUntil: Date?
+    package private(set) var silence: Silence = .none
+
+    package enum Silence: Equatable, Sendable {
+        case none
+        case checking
+        case ranksBehind(until: Date)
+    }
+
+    package enum SilenceStep: Equatable, Sendable { case held, check }
+
+    package enum SilenceCheckOutcome: Equatable, Sendable {
+        case answered(latencyMS: Int)
+        case silent
+        case refused
+        case unasked
+
+        package var name: String {
+            switch self {
+            case .answered: "answered"
+            case .silent: "silent"
+            case .refused: "refused"
+            case .unasked: "unasked"
+            }
+        }
+    }
+
+    package enum SilenceCheckVerdict: String, Equatable, Sendable {
+        case kept
+        case rankedBehind = "ranked_behind"
+        case superseded
+    }
 
     // MARK: - Internal state
 
@@ -142,7 +172,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         consecutiveFailures = 0
         firstFailureAt = nil
         silences.recordAnswer()
-        silentUntil = nil
+        endRanking()
 
         switch state {
         case .closed:
@@ -229,8 +259,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         }
 
         state = .open
-        // An open breaker is the stronger verdict, and a silence left over would hide its half-open probe from selection.
-        silentUntil = nil
+        endRanking()
         openUntil = now.addingTimeInterval(appliedInterval)
         lastOpenedAt = now
         halfOpenProbeInFlight = false
@@ -240,22 +269,48 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         return .opened(reason: openReason, consecutiveFailures: triggeringFailureCount, openInterval: appliedInterval)
     }
 
-    package func isSilent(at now: Date) -> Bool { silentUntil.map { now < $0 } ?? false }
+    package var ranksBehind: Bool {
+        if case .ranksBehind = silence { return true }
+        return false
+    }
 
-    /// Returns whether a silence ended.
-    package mutating func endSilenceIfDue(now: Date) -> Bool {
-        guard let silentUntil, silentUntil <= now else { return false }
-        self.silentUntil = nil
+    package func ranksBehind(at now: Date) -> Bool {
+        if case .ranksBehind(let until) = silence { return now < until }
+        return false
+    }
+
+    package mutating func endRankingIfDue(now: Date) -> Bool {
+        guard case .ranksBehind(let until) = silence, until <= now else { return false }
+        silence = .none
         return true
     }
 
-    /// A decisive verdict makes the upstream silent until `now + interval`, extending any silence already running.
-    package mutating func recordUnanswered(now: Date, interval: TimeInterval) -> (verdict: UnansweredStreak.Verdict, becameSilent: Bool) {
+    private mutating func endRanking() {
+        if ranksBehind { silence = .none }
+    }
+
+    package mutating func recordUnanswered() -> (verdict: UnansweredStreak.Verdict, step: SilenceStep) {
         let verdict = silences.recordUnanswered()
-        guard verdict.isDecisive else { return (verdict, false) }
-        let wasSilent = isSilent(at: now)
-        silentUntil = now.addingTimeInterval(interval)
-        return (verdict, !wasSilent)
+        guard verdict.isDecisive, state == .closed, silence == .none else { return (verdict, .held) }
+        silence = .checking
+        return (verdict, .check)
+    }
+
+    package mutating func finishSilenceCheck(_ outcome: SilenceCheckOutcome, now: Date, interval: TimeInterval) -> SilenceCheckVerdict {
+        guard silence == .checking else { return .superseded }
+        silence = .none
+        guard state == .closed else { return .superseded }
+        switch outcome {
+        case .answered(let latencyMS):
+            recordSuccess(latencyMS: latencyMS)
+            return .kept
+        case .unasked:
+            return .kept
+        case .silent, .refused:
+            guard silences.failureStanding else { return .superseded }
+            silence = .ranksBehind(until: now.addingTimeInterval(interval))
+            return .rankedBehind
+        }
     }
 
     /// Try to transition `.open → .halfOpen`. Succeeds if `openUntil` has
@@ -313,7 +368,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
             && !halfOpenProbeInFlight
         lastBaseOpenInterval = baseOpenInterval
         silences.reset()
-        silentUntil = nil
+        endRanking()
         if alreadyClean {
             return nil
         }

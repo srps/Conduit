@@ -88,7 +88,7 @@ final class UpstreamSilenceTests: XCTestCase {
         try await secondary.close()
     }
 
-    func testASecondSilenceInARowRanksTheUpstreamBehindOneThatAnswers() async throws {
+    func testASecondSilenceInARowWhoseCheckIsSilentRanksTheUpstreamBehindOneThatAnswers() async throws {
         let primary = try await CountingUpstream.start(answers: 1)
         let secondary = try await CountingUpstream.start(answers: .max)
         let first = UpstreamProxy(name: "primary", host: "127.0.0.1", port: primary.port, priority: 0)
@@ -108,11 +108,16 @@ final class UpstreamSilenceTests: XCTestCase {
                 XCTAssertEqual(error as? ConnectionPoolError, .upstreamResponseTimedOut, "attempt \(attempt)")
             }
         }
-        XCTAssertEqual(primary.requests, 3, "one silence left the primary first, so the second request went to it too")
+        XCTAssertEqual(primary.requestLines.filter { $0.hasPrefix("GET ") }.count, 3,
+                       "one silence left the primary first, so the second request went to it too")
+        let checked = await Self.eventually { !events.details("upstream.silence_check_finished").isEmpty }
 
         let after = try await pool.exchange(head: Self.head, body: nil).get()
 
-        XCTAssertEqual(after.upstream.id, second.id, "the second silence in a row ranked the primary behind the secondary")
+        XCTAssertTrue(checked, "the second silence in a row asked the primary itself")
+        XCTAssertEqual(events.details("upstream.silence_check_finished").first?.contains("outcome=silent verdict=ranked_behind"), true,
+                       events.details("upstream.silence_check_finished").first ?? "none")
+        XCTAssertEqual(after.upstream.id, second.id, "a silent check ranked the primary behind the secondary")
         XCTAssertEqual(events.details("upstream.deprioritized").count, 1)
         XCTAssertTrue(events.details("upstream.deprioritized").first?.contains("upstream=primary ") == true,
                       events.details("upstream.deprioritized").first ?? "none")
@@ -192,8 +197,7 @@ final class UpstreamSilenceTests: XCTestCase {
 
         private init(answers: Int) { self.answers = NIOLockedValueBox(answers) }
 
-        /// `silentTo` names the request lines it never answers, as a healthy proxy whose origin for them is slow.
-        static func start(answers: Int, silentTo: @escaping @Sendable (String) -> Bool = { _ in false }) async throws -> CountingUpstream {
+        static func start(answers: Int, neverAnswers: @escaping @Sendable (String) -> Bool = { _ in false }) async throws -> CountingUpstream {
             let upstream = CountingUpstream(answers: answers)
             let answers = upstream.answers, counts = upstream.counts, lines = upstream.lines, children = upstream.children
             upstream.listener = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
@@ -201,7 +205,7 @@ final class UpstreamSilenceTests: XCTestCase {
                 .childChannelInitializer { channel in
                     counts.withLockedValue { $0.connections += 1 }
                     children.withLockedValue { $0.append(channel) }
-                    return channel.pipeline.addHandler(RequestHandler(answers: answers, silentTo: silentTo, counts: counts, lines: lines))
+                    return channel.pipeline.addHandler(RequestHandler(answers: answers, neverAnswers: neverAnswers, counts: counts, lines: lines))
                 }
                 .bind(host: "127.0.0.1", port: 0).get()
             return upstream
@@ -220,17 +224,17 @@ final class UpstreamSilenceTests: XCTestCase {
         private final class RequestHandler: ChannelInboundHandler, @unchecked Sendable {
             typealias InboundIn = ByteBuffer
             private let answers: NIOLockedValueBox<Int>
-            private let silentTo: @Sendable (String) -> Bool
+            private let neverAnswers: @Sendable (String) -> Bool
             private let counts: NIOLockedValueBox<(connections: Int, requests: Int)>
             private let lines: NIOLockedValueBox<[String]>
             private var pending = ""
 
             init(
-                answers: NIOLockedValueBox<Int>, silentTo: @escaping @Sendable (String) -> Bool,
+                answers: NIOLockedValueBox<Int>, neverAnswers: @escaping @Sendable (String) -> Bool,
                 counts: NIOLockedValueBox<(connections: Int, requests: Int)>, lines: NIOLockedValueBox<[String]>
             ) {
                 self.answers = answers
-                self.silentTo = silentTo
+                self.neverAnswers = neverAnswers
                 self.counts = counts
                 self.lines = lines
             }
@@ -243,7 +247,7 @@ final class UpstreamSilenceTests: XCTestCase {
                     pending.removeSubrange(pending.startIndex..<end.upperBound)
                     counts.withLockedValue { $0.requests += 1 }
                     lines.withLockedValue { $0.append(line) }
-                    let answered = !silentTo(line) && answers.withLockedValue { left in
+                    let answered = !neverAnswers(line) && answers.withLockedValue { left in
                         guard left > 0 else { return false }
                         left -= 1
                         return true
