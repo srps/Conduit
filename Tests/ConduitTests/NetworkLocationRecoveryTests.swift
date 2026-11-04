@@ -125,6 +125,68 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         XCTAssertTrue(events.events.contains { $0.event == "platform.location_failed" })
     }
 
+    private let usbService = "55555555-5555-5555-5555-555555555555"
+    private let ephemeral: [String: NetworkSettingValue] = SystemProxyManager.locationFields(
+        config: ProxyConfig(), mode: .manual, endpoints: ClientEndpoints(proxyHost: "127.0.0.1", proxyPort: 52870))
+    private let foreign: [String: NetworkSettingValue] = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(3128), "HTTPEnable": .number(1)]
+
+    private func portConfig(_ port: Int) -> ProxyConfig {
+        var config = ProxyConfig()
+        config.localPort = port
+        return config
+    }
+
+    /// A session that advertised `desired` and crashed, a second home service another tool pointed at
+    /// 127.0.0.1:3128, and a journal that then became unreadable.
+    private func crashedSession(desired: [String: NetworkSettingValue], config: ProxyConfig,
+                                _ body: (FakeNetworkLocationStore, URL, Data) throws -> Void) throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("location-ephemeral-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("platform-state.json")
+        let store = machine()
+        let session = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { _ in })
+        try session.apply(kind: .proxies, desired: desired, config: config)
+        store.edit {
+            $0.services.append(.init(locationID: home, serviceID: usbService, name: "USB Ethernet", enabled: true,
+                                     proxies: foreign, dns: [:]))
+        }
+        let corrupt = Data("{broken}".utf8)
+        try corrupt.write(to: file)
+        try body(store, file, corrupt)
+    }
+
+    func testCorruptJournalClearsOwnEphemeralProxyAndKeepsForeignLoopbackProxy() throws {
+        try crashedSession(desired: ephemeral, config: portConfig(0)) { store, file, corrupt in
+            let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { _ in })
+            guard case .failed = recovery.recover(kind: .proxies, config: portConfig(0), listenerIsLive: false) else {
+                return XCTFail("Unreadable recovery must report unknown prior state")
+            }
+            let services = try store.snapshot().services
+            let wifi = try XCTUnwrap(services.first { $0.serviceID == homeService }).proxies
+            for key in ["HTTPProxy", "HTTPPort", "HTTPEnable", "HTTPSProxy", "HTTPSPort", "HTTPSEnable"] {
+                XCTAssertNil(wifi[key], "\(key) of the crashed session's ephemeral endpoint was left behind")
+            }
+            XCTAssertEqual(services.first { $0.serviceID == usbService }?.proxies, foreign)
+            XCTAssertEqual(try Data(contentsOf: file), corrupt)
+        }
+    }
+
+    func testCorruptJournalWithFixedPortClearsConfiguredResidueOnly() throws {
+        let fixed = SystemProxyManager.locationFields(config: portConfig(3128), mode: .manual, endpoints: .configured(portConfig(3128)))
+        try crashedSession(desired: fixed, config: portConfig(3128)) { store, file, corrupt in
+            store.edit { $0.services[0].proxies = self.ephemeral }
+            let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { _ in })
+            guard case .failed = recovery.recover(kind: .proxies, config: portConfig(3128), listenerIsLive: false) else {
+                return XCTFail("Unreadable recovery must report unknown prior state")
+            }
+            let services = try store.snapshot().services
+            XCTAssertEqual(services.first { $0.serviceID == homeService }?.proxies, ephemeral)
+            XCTAssertEqual(services.first { $0.serviceID == usbService }?.proxies, [:])
+            XCTAssertEqual(try Data(contentsOf: file), corrupt)
+        }
+    }
+
     func testUnreadableProtocolRetainsItsRecordAndDoesNotBlockOtherRecovery() throws {
         try withRecovery { store, journal, recovery, events in
             let original = try store.snapshot()
