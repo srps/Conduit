@@ -240,4 +240,89 @@ enum SilentUpstreamScenarios {
                       status.state == .running && status.activeUpstream == endpoint && fast.hasPrefix("HTTP/1.1 200")),
             ], notes: ["R=\(responseTimeout)s I=\(checkInterval)s; HEAD answered at R/2, GET at 1.5R; \(threshold + 1) GETs timed out, breaker threshold \(threshold)"])
     }
+
+    @RuntimeActor
+    static func servedThenSilent(verbose: Bool) async throws -> ScenarioResult {
+        let started = Date(), group = MultiThreadedEventLoopGroup.singleton
+        let answering = NIOLockedValueBox(true)
+        let primary = DelayedHTTPUpstream { _ in answering.withLockedValue { $0 } ? .after(.zero) : .never }
+        let secondary = DelayedHTTPUpstream { _ in .after(.milliseconds(40)) }
+        try await primary.start(group: group)
+        try await secondary.start(group: group)
+
+        let responseTimeout: TimeInterval = 0.5, checkInterval: TimeInterval = 2
+        var config = strictConfigWithBreakerBurstWindowOff()
+        config.upstreamResponseTimeoutSeconds = responseTimeout
+        config.healthCheckIntervalSeconds = checkInterval
+        config.healthCheckURL = "http://served-then-silent.test/"
+        config.upstreams = [
+            UpstreamProxy(name: "primary", host: "127.0.0.1", port: primary.port, priority: 0),
+            UpstreamProxy(name: "secondary", host: "127.0.0.1", port: secondary.port, priority: 1),
+        ]
+        let threshold = config.circuitFailureThreshold, decisive = UnansweredStreak.decisiveCount
+        let primaryEndpoint = "127.0.0.1:\(primary.port)", secondaryEndpoint = "127.0.0.1:\(secondary.port)"
+        let orchestrator = orchestrator(config: config, verbose: verbose)
+        try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
+        guard let port = orchestrator.snapshot.bindings.proxyPort else {
+            throw ScenarioExecutionError(message: "the HTTP listener did not bind")
+        }
+        func events(_ name: String) -> [RuntimeEvent] { orchestrator.eventLog.events.filter { $0.event == name } }
+        func latency(_ endpoint: String) -> Double? { orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == endpoint }?.ewmaLatencyMS }
+        func status(_ response: EventLoopFuture<String>) async -> String {
+            do { return String(try await response.get().prefix(12)) } catch { return "no answer: \(error)" }
+        }
+
+        // Before either upstream has a latency, ties alternate, so a concurrent wave reaches both.
+        var warm: [EventLoopFuture<String>] = []
+        for index in 0..<4 { warm.append(try await sendThroughProxy(group: group, port: port, tag: "warm-\(index)")) }
+        for response in warm { _ = await status(response) }
+        let primaryLatency = latency(primaryEndpoint), secondaryLatency = latency(secondaryEndpoint)
+        let primaryPreferred = (primaryLatency ?? .infinity) < (secondaryLatency ?? .infinity)
+
+        answering.withLockedValue { $0 = false }
+        let silentAt = Date()
+        var failedBeforeServed = 0
+        var servedAfter: TimeInterval?
+        for index in 0..<(threshold + 1) {
+            let answer = await status(try await sendThroughProxy(group: group, port: port, tag: "silent-\(index)"))
+            if answer.hasPrefix("HTTP/1.1 200") { servedAfter = Date().timeIntervalSince(silentAt); break }
+            failedBeforeServed += 1
+        }
+        var wave: [EventLoopFuture<String>] = []
+        for index in 0..<(threshold + 1) { wave.append(try await sendThroughProxy(group: group, port: port, tag: "wave-\(index)")) }
+        var waveStatuses: [String] = []
+        for response in wave { waveStatuses.append(await status(response)) }
+        let healthyViaSecondary = try await until(timeout: 2 * checkInterval + 2 * responseTimeout + 2) {
+            orchestrator.snapshot.runtimeStatus.lastHealthSummary == "Healthy via \(secondaryEndpoint)"
+        }
+
+        let connectSlack = 0.1
+        // origin/main opened the primary's breaker after `threshold` response timeouts and served the next request (2.6 s measured).
+        let mainBound = Double(threshold) * (responseTimeout + connectSlack)
+        let primaryStatus = orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == primaryEndpoint }
+        let deprioritized = events("upstream.deprioritized").compactMap(\.detail)
+        let recovery = orchestrator.eventLog.events.filter { $0.event.hasPrefix("recovery.") }
+
+        return ScenarioResult(name: "upstream-served-then-silent", clientCount: 4 + 2 * (threshold + 1), clientsOpened: 4 + 2 * (threshold + 1),
+            clientsWithFirstByte: waveStatuses.filter { $0.hasPrefix("HTTP/") }.count, clientsClosedEarly: 0, totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
+                .init("the primary served first with the lower latency, so selection preferred it", primaryPreferred),
+                .init("a request was served within threshold x (R + C), origin/main's breaker path",
+                      servedAfter.map { $0 <= mainBound } ?? false),
+                .init("only the \(decisive) silences that make a verdict failed before the secondary served",
+                      servedAfter != nil && failedBeforeServed == decisive),
+                .init("the decisive silence ranked the primary behind the secondary, once",
+                      deprioritized.count == 1 && deprioritized[0].contains("upstream=primary ") && deprioritized[0].contains(" consecutive=\(decisive) ")),
+                .init("a concurrent wave after it was served in full", waveStatuses.allSatisfy { $0.hasPrefix("HTTP/1.1 200") }),
+                .init("the silences opened no breaker and struck nothing",
+                      events("upstream.circuit_opened").isEmpty && primaryStatus?.circuitState == .closed && primaryStatus?.consecutiveFailures == 0),
+                .init("the health check went healthy via the secondary, with no recovery ladder and no DIRECT",
+                      healthyViaSecondary && recovery.isEmpty && !orchestrator.snapshot.directModeCause.isDirect),
+            ], notes: [
+                "R=\(responseTimeout)s I=\(checkInterval)s C=\(connectSlack)s; warm latency primary=\(primaryLatency.map { String(format: "%.1f", $0) } ?? "nil") ms secondary=\(secondaryLatency.map { String(format: "%.1f", $0) } ?? "nil") ms",
+                "served \(servedAfter.map { String(format: "%.2f", $0) } ?? "never") s after the silence began (bound \(String(format: "%.2f", mainBound)) s) after \(failedBeforeServed) failed requests",
+                "primary saw \(primary.requestLines.count) request heads, secondary \(secondary.requestLines.count)",
+            ])
+    }
 }
