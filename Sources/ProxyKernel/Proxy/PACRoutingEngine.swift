@@ -111,6 +111,11 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// started under an older generation computed its answer on a network
     /// that is gone: it is not cached, not handed out, and not installed.
     private var routeGeneration: UInt64 = 0
+    /// Whether an invalidation since the running fetch started asks for the
+    /// fetch to be done again at once (a VPN transition). A fetch superseded
+    /// only by path changes ends instead, and leaves the refetch to the
+    /// refresh that follows once the path settles (#198). Reset by each fetch.
+    private var fetchMustRestart = false
     /// Requests waiting on an evaluation already running for the same cache
     /// key. proxy.log showed six identical "PAC evaluation took 1049ms"
     /// lines with the same millisecond timestamp: a burst of connections
@@ -179,8 +184,10 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// One refresh runs at a time. A call that finds one running waits for it
     /// and shares its outcome (#39): on return the evaluator reflects the
     /// configured URL and the last `invalidateRoutes(reason:)`, or the failure
-    /// is thrown. A refresh that sees an invalidation fetches again before it
-    /// finishes, so no caller returns on a fetch from before one. A cancelled
+    /// is thrown. No caller returns on a fetch from before an invalidation: a
+    /// refresh that sees a VPN transition fetches again before it finishes, and
+    /// one that sees only path changes ends with the answers dropped and the
+    /// script kept, for the refresh on the settled path to fetch (#198). A cancelled
     /// caller stops waiting with `CancellationError`; the refresh itself runs
     /// on for the others.
     package func refresh(force: Bool = false, honorBackoff: Bool = false) async throws {
@@ -250,7 +257,10 @@ package final class PACRoutingEngine: @unchecked Sendable {
     private func perform(_ operation: PACRefreshOperation, url initialURL: String) async {
         var url = initialURL
         while true {
-            let generation = lock.withLock { routeGeneration }
+            let generation = lock.withLock { () -> UInt64 in
+                fetchMustRestart = false
+                return routeGeneration
+            }
             let fetched: Result<(evaluator: any PacScriptEvaluating, script: String), any Error>
             do {
                 fetched = .success(try await fetchAndCompile(url: url))
@@ -280,7 +290,9 @@ package final class PACRoutingEngine: @unchecked Sendable {
                     continue
                 }
                 // Routes invalidated while this fetch ran: the script came
-                // from the network before the transition. Fetch again.
+                // from the network before the transition. After a VPN
+                // transition, fetch again now; after path changes only, end
+                // and leave the refetch to the settled path's refresh.
                 let installedAt = now()
                 let installed = lock.withLock { () -> (installed: Bool, after: PACRouteInvalidationReason?, sameScript: Bool) in
                     guard routeGeneration == generation else { return (false, nil, false) }
@@ -306,7 +318,10 @@ package final class PACRoutingEngine: @unchecked Sendable {
                     defer { pendingInvalidation = nil }
                     return (true, pendingInvalidation, sameScript)
                 }
-                guard installed.installed else { continue }
+                guard installed.installed else {
+                    if deferSupersededFetch(operation, outcome: "fetch=succeeded") { return }
+                    continue
+                }
                 let redacted = Self.redactedURL(url)
                 let unchanged = installed.sameScript ? " script=unchanged" : ""
                 if let reason = installed.after {
@@ -327,7 +342,9 @@ package final class PACRoutingEngine: @unchecked Sendable {
             case .failure(let error):
                 // A fetch that failed on the network before an invalidation
                 // says nothing about the new one: recorded, not counted
-                // towards the backoff, and retried on the new network.
+                // towards the backoff, and retried on the new network, at once
+                // after a VPN transition and once the path settles after a
+                // path change.
                 let superseded = lock.withLock { () -> Bool in
                     if routeGeneration != generation { return true }
                     consecutiveFailures += 1
@@ -336,6 +353,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
                     return false
                 }
                 if superseded {
+                    if deferSupersededFetch(operation, outcome: "fetch=failed error=\(error.displayDescription)") { return }
                     eventSink?(RuntimeEvent(kind: .routing, event: "pac.refresh_failed",
                                             detail: "\(error.displayDescription) superseded=refetching"))
                     logger?.log(.info, "PAC fetch from before the network change failed (\(error.displayDescription)); refetching.", category: .pac)
@@ -348,6 +366,31 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 return
             }
         }
+    }
+
+    /// Ends a refresh whose fetch path changes alone superseded (#198), and
+    /// returns true; returns false, ending nothing, when a VPN transition
+    /// since the fetch started wants it done again now. The fetch installs
+    /// nothing and counts nothing towards the backoff: it ran on the network
+    /// before the change. The loaded script and `pendingInvalidation` stay,
+    /// so the forced refresh that follows the settled path fetches, and
+    /// reports its install `after=network_changed`. Its callers return as
+    /// after any refresh, with the answers dropped and the kept script
+    /// (if any) evaluating afresh.
+    private func deferSupersededFetch(_ operation: PACRefreshOperation, outcome: String) -> Bool {
+        let deferred = lock.withLock { () -> Bool in
+            guard !fetchMustRestart else { return false }
+            runningRefresh = nil
+            return true
+        }
+        guard deferred else { return false }
+        // Event first, then the derived log line.
+        eventSink?(RuntimeEvent(kind: .routing, event: "pac.refresh_deferred",
+                                detail: "reason=\(PACRouteInvalidationReason.networkChanged.rawValue) \(outcome)"))
+        logger?.log(.info, "PAC fetch from before the network change discarded (\(outcome)); "
+            + "refetching once the network settles.", category: .pac)
+        operation.finish(.success(()))
+        return true
     }
 
     private func fetchAndCompile(url: String) async throws -> (evaluator: any PacScriptEvaluating, script: String) {
@@ -394,13 +437,16 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// routes and go through the configured upstreams
     /// (`pac.no_usable_route reason=not_loaded`); with it, they are evaluated
     /// afresh. Never an answer from before the call. Follow it with
-    /// `refresh(force: true)`; a fetch already running starts over instead.
+    /// `refresh(force: true)`. A fetch already running installs nothing: after
+    /// a VPN transition it starts over, and after a path change it ends, for
+    /// the refresh on the settled path to fetch (#198).
     /// Emits one `pac.routes_invalidated` when PAC routing is on.
     package func invalidateRoutes(reason: PACRouteInvalidationReason) {
         let config = configProvider()
         guard config.pacRoutingEnabled, !config.pacURL.isEmpty else { return }
-        let (routes, hadScript, fetching) = lock.withLock { () -> (Int, Bool, Bool) in
-            let dropped = (routeCache.count, jsEvaluator != nil, runningRefresh != nil)
+        let (routes, hadScript, fetching, restarts) = lock.withLock { () -> (Int, Bool, Bool, Bool) in
+            if reason.dropsScript, runningRefresh != nil { fetchMustRestart = true }
+            let dropped = (routeCache.count, jsEvaluator != nil, runningRefresh != nil, fetchMustRestart)
             routeGeneration &+= 1
             pendingInvalidation = reason
             if reason.dropsScript {
@@ -416,10 +462,11 @@ package final class PACRoutingEngine: @unchecked Sendable {
             kind: .routing,
             event: "pac.routes_invalidated",
             detail: "reason=\(reason.rawValue) routes=\(routes) script=\(script) "
-                + "fetch=\(fetching ? "restarted" : "idle")"
+                + "fetch=\(!fetching ? "idle" : restarts ? "restarted" : "deferred")"
         ))
         let scriptNote = script == "dropped" ? " and the loaded script" : ""
-        logger?.log(.notice, "PAC answers dropped (\(reason.rawValue)): \(routes) cached route(s)\(scriptNote); refetching.", category: .pac)
+        logger?.log(.notice, "PAC answers dropped (\(reason.rawValue)): \(routes) cached route(s)\(scriptNote); "
+            + (reason.dropsScript ? "refetching." : "refetching once the network settles."), category: .pac)
     }
 
     /// Synchronous decision (tests and tools; the proxy uses `decisionFuture`).

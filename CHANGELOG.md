@@ -31,10 +31,11 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   connections as soon as it is seen, instead of 2 seconds after the network
   stops changing. While a network kept changing, as on a roam or a wake,
   answers worked out on the network it left stayed in use for as long as it
-  changed. Only the PAC refetch still waits for the network to settle, and
-  once it has, DNS answers that lookups started on the old network stored in
-  the meantime are cleared again (`dns.response_cache_cleared`). Each change
-  is recorded as `network.path_invalidated`; `network.path_changed` no longer
+  changed. Only the PAC refetch still waits for the network to settle; a PAC
+  fetch the change interrupts is not repeated until then (`pac.refresh_deferred`).
+  Once it has settled, DNS answers that lookups started on the old network
+  stored in the meantime are cleared again (`dns.response_cache_cleared`). Each
+  change is recorded as `network.path_invalidated`; `network.path_changed` no longer
   carries `dns=`. (#198)
 
 ## 0.6.1

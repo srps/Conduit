@@ -168,6 +168,95 @@ final class PACRouteInvalidationTests: XCTestCase {
                       "detail: \(failed.first?.detail ?? "nil")")
     }
 
+    /// Starts a forced refresh whose fetch the server holds, and waits, bounded, until the fetch has started.
+    private func heldRefresh(_ engine: PACRoutingEngine, server: Server) async throws -> Task<Void, any Error> {
+        let before = server.fetches
+        server.holdNext.withLockedValue { $0 = true }
+        let refresh = Task { try await engine.refresh(force: true) }
+        for _ in 0..<100 where server.fetches == before {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(server.fetches, before + 1)
+        return refresh
+    }
+
+    /// #198: a fetch that path changes alone supersede, however many, installs nothing and does not fetch again at once: the refresh
+    /// on the settled path does, once. The script loaded before stays in place meanwhile, and the install reports the path change.
+    func testAFetchPathChangesSupersedeEndsAndTheSettledRefreshFetchesOnce() async throws {
+        let server = Server()
+        let events = RuntimeEventLog(capacity: 64)
+        let engine = makeEngine(server: server, events: events)
+        try await engine.refresh(force: true)
+        XCTAssertEqual(server.fetches, 1)
+
+        let refresh = try await heldRefresh(engine, server: server)
+        server.setOnVPN(true)
+        for _ in 0..<3 { engine.invalidateRoutes(reason: .networkChanged) }
+        server.gate.signal()
+        try await refresh.value
+
+        XCTAssertEqual(server.fetches, 2, "no refetch before the path settles")
+        XCTAssertEqual(engine.route(for: "https://github.com/", host: "github.com"), Self.off,
+                       "the script loaded before the changes stays, evaluating afresh")
+        XCTAssertEqual(named("pac.refreshed", in: events).count, 1, "the superseded fetch installed nothing")
+        XCTAssertEqual(named("pac.refresh_deferred", in: events).map(\.detail), ["reason=network_changed fetch=succeeded"])
+        XCTAssertEqual(named("pac.routes_invalidated", in: events).map(\.detail).last, "reason=network_changed routes=0 script=kept fetch=deferred")
+
+        // The path settles: its forced refresh fetches, once, and installs the new network's script.
+        try await engine.refresh(force: true, honorBackoff: true)
+        XCTAssertEqual(server.fetches, 3)
+        XCTAssertEqual(engine.route(for: "https://github.com/", host: "github.com"), Self.on)
+        XCTAssertEqual(named("pac.refreshed", in: events).last?.detail?.contains("after=network_changed"), true)
+    }
+
+    /// #198: a fetch that failed on the network before a path change neither counts towards the backoff nor fetches again at once;
+    /// the settled refresh, which honours the backoff, finds none in force and fetches once.
+    func testAFailedFetchPathChangesSupersedeIsNotCountedAndWaitsForTheSettle() async throws {
+        let server = Server()
+        server.setFailing(true)
+        let events = RuntimeEventLog(capacity: 64)
+        let engine = makeEngine(server: server, events: events)
+
+        let refresh = try await heldRefresh(engine, server: server)
+        engine.invalidateRoutes(reason: .networkChanged)
+        engine.invalidateRoutes(reason: .networkChanged)
+        server.setFailing(false)
+        server.gate.signal()
+        try await refresh.value
+
+        XCTAssertEqual(server.fetches, 1, "no refetch before the path settles")
+        XCTAssertNil(engine.backoffRemaining(), "the failure from before the change does not start a backoff")
+        XCTAssertEqual(named("pac.refresh_failed", in: events).count, 0)
+        XCTAssertEqual(named("pac.refresh_deferred", in: events).first?.detail?.hasPrefix("reason=network_changed fetch=failed error="), true,
+                       "\(named("pac.refresh_deferred", in: events).map(\.detail))")
+
+        try await engine.refresh(force: true, honorBackoff: true)
+        XCTAssertEqual(server.fetches, 2)
+        XCTAssertEqual(named("pac.refresh_backoff", in: events).count, 0)
+        XCTAssertEqual(engine.route(for: "https://github.com/", host: "github.com"), Self.off)
+    }
+
+    /// A VPN transition during a fetch still has it done again at once, path changes alongside it or not.
+    func testAVPNTransitionAmongPathChangesStillRefetchesAtOnce() async throws {
+        let server = Server()
+        let events = RuntimeEventLog(capacity: 64)
+        let engine = makeEngine(server: server, events: events)
+
+        let refresh = try await heldRefresh(engine, server: server)
+        engine.invalidateRoutes(reason: .networkChanged)
+        server.setOnVPN(true)
+        engine.invalidateRoutes(reason: .vpnConnected)
+        engine.invalidateRoutes(reason: .networkChanged)
+        server.gate.signal()
+        try await refresh.value
+
+        XCTAssertEqual(server.fetches, 2, "fetched again at once for the VPN")
+        XCTAssertEqual(engine.route(for: "https://github.com/", host: "github.com"), Self.on)
+        XCTAssertEqual(named("pac.refresh_deferred", in: events).count, 0)
+        XCTAssertEqual(named("pac.routes_invalidated", in: events).compactMap(\.detail).map { $0.components(separatedBy: " ").last },
+                       ["fetch=deferred", "fetch=restarted", "fetch=restarted"])
+    }
+
     /// An evaluation of the old script still running at the invalidation:
     /// its answer is neither cached nor handed to the requests waiting on it.
     func testAnEvaluationRunningAcrossTheInvalidationIsDiscarded() async throws {
