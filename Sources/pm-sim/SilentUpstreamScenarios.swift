@@ -123,7 +123,7 @@ enum SilentUpstreamScenarios {
         }
         func events(_ name: String) -> [RuntimeEvent] { orchestrator.eventLog.events.filter { $0.event == name } }
         let servedFirst = try await until(timeout: 10) {
-            orchestrator.snapshot.runtimeStatus.state == .running && upstream.requestLines.contains { $0.hasPrefix("HEAD ") }
+            orchestrator.snapshot.runtimeStatus.state == .running && orchestrator.snapshot.runtimeStatus.lastHealthSummary.hasPrefix("Healthy via ")
         }
 
         answering.withLockedValue { $0 = false }
@@ -136,7 +136,7 @@ enum SilentUpstreamScenarios {
         for response in responses { statuses.append(String(try await response.get().prefix(12))) }
 
         let connectSlack = 0.1, silentCheck = responseTimeout + connectSlack
-        let nextCheckDue = checkInterval, heldCheck = silentCheck, recheckDue = checkInterval / 2, decisiveCheck = silentCheck
+        let nextCheckDue = checkInterval, heldCheck = silentCheck, recheckDue = max(checkInterval / 2, 1), decisiveCheck = silentCheck
         let ladderChecks = 3 * silentCheck, postLadderProbe = probeDeadline + connectSlack
         let bound = nextCheckDue + heldCheck + recheckDue + decisiveCheck + ladderChecks + postLadderProbe
         let fell = try await until(timeout: bound + 5) { orchestrator.snapshot.directModeCause.isDirect }
@@ -212,11 +212,17 @@ enum SilentUpstreamScenarios {
         }
         var statuses: [String] = []
         for response in responses { statuses.append(String(try await response.get().prefix(12))) }
-        let threeChecks = try await until(timeout: 4 * checkInterval + 5) { heads() >= 3 }
+        // Read before the next HEAD can answer: a healthy check resets the count a timeout might have raised.
+        let strikesRightAfterTheTimeouts = orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == endpoint }?.consecutiveFailures
+        // Checks run one at a time, so a fourth HEAD means three completed.
+        let threeChecks = try await until(timeout: 5 * checkInterval + 5) { heads() >= 4 }
         let fast = String(try await sendThroughProxy(group: group, port: port, tag: "fast").get().prefix(12))
         let status = orchestrator.snapshot.runtimeStatus
         let slowStatus = orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == endpoint }
-        let recovery = orchestrator.eventLog.events.filter { $0.event.hasPrefix("recovery.") || $0.event.hasPrefix("proxy_recovery.") }
+        let recovery = orchestrator.eventLog.events.filter { event in
+            if case .proxyRecovery? = event.typed { return true }
+            return event.event.hasPrefix("recovery.")
+        }
 
         return ScenarioResult(name: "upstream-slow-serving", clientCount: threshold + 2, clientsOpened: threshold + 2,
             clientsWithFirstByte: statuses.filter { !$0.isEmpty }.count + (fast.isEmpty ? 0 : 1), clientsClosedEarly: 0, totalBytes: 0,
@@ -225,9 +231,9 @@ enum SilentUpstreamScenarios {
                 .init("every slow request ended with a 502 after the response budget",
                       statuses.count == threshold + 1 && statuses.allSatisfy { $0.hasPrefix("HTTP/1.1 502") }
                         && events("upstream.response_timeout").count >= threshold + 1),
-                .init("\(threshold + 1) response timeouts left the breaker closed",
-                      events("upstream.circuit_opened").isEmpty && slowStatus?.consecutiveFailures == 0),
-                .init("three health checks answered within the budget and none was inconclusive",
+                .init("\(threshold + 1) response timeouts left the breaker closed and struck nothing",
+                      events("upstream.circuit_opened").isEmpty && strikesRightAfterTheTimeouts == 0 && slowStatus?.consecutiveFailures == 0),
+                .init("three health checks completed within the budget and none was inconclusive",
                       threeChecks && events("health.inconclusive").isEmpty),
                 .init("no recovery ladder ran", recovery.isEmpty),
                 .init("the runtime stayed running on the same upstream and a fast request still succeeds through it",
