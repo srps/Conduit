@@ -1375,13 +1375,25 @@ package final class ConnectionPool: @unchecked Sendable {
         let start = Date()
         let loop = group.next()
         let settled = loop.makePromise(of: UpstreamExchangeResponse.self)
+        let dialed = NIOLockedValueBox<(expired: Bool, channel: Channel?)>((false, nil))
         // The response timer starts only once the request is sent, after a fresh connection's first authentication token.
-        let deadline = loop.scheduleTask(in: timeout + timeout) { settled.fail(ConnectionPoolError.upstreamResponseTimedOut) }
+        let deadline = loop.scheduleTask(in: timeout + timeout) {
+            let channel = dialed.withLockedValue { state -> Channel? in
+                state.expired = true
+                return state.channel
+            }
+            channel?.close(mode: .all, promise: nil)
+            settled.fail(ConnectionPoolError.upstreamResponseTimedOut)
+        }
         acquireConnection(for: proxy, target: url, preferFreshConnection: true, connectTimeout: timeout, selects: false)
             .flatMap { [weak self] connection -> EventLoopFuture<UpstreamExchangeResponse> in
-                guard let self else {
+                let expired = dialed.withLockedValue { state -> Bool in
+                    state.channel = connection.channel
+                    return state.expired
+                }
+                guard let self, !expired else {
                     connection.channel.close(mode: .all, promise: nil)
-                    return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
+                    return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.upstreamResponseTimedOut)
                 }
                 return self.attributingRetirement(
                     self.performBufferedExchange(

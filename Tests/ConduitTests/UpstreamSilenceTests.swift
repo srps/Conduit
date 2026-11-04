@@ -111,6 +111,8 @@ final class UpstreamSilenceTests: XCTestCase {
         XCTAssertTrue(finished, "a check stuck in authentication would hold the slot and stop every later check")
         XCTAssertTrue(events.details("upstream.silence_check_finished").first?.contains("outcome=silent") == true,
                       events.details("upstream.silence_check_finished").first ?? "none")
+        let released = await Self.eventually { pool.allConnectionSnapshot.isEmpty }
+        XCTAssertTrue(released, "the stalled check's connection is closed, or checks would pile up behind a hung authenticator")
         pool.closeAll()
         try await upstream.close()
     }
