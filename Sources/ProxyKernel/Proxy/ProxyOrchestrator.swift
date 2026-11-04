@@ -1109,6 +1109,8 @@ package final class ProxyOrchestrator {
     /// The newest network path seen, settled or not: what the leading-edge
     /// invalidation compares each update with (#198). One path.
     private var networkPathSeen: NetworkPathState?
+    /// Whether a path change invalidated since the last settled report, so the settle clears the DNS answers stored in between.
+    private var networkPathInvalidatedSinceSettle = false
 
     /// When routing last changed under the proxy: stamped by every VPN
     /// transition and direct-mode change, read by the strict-mode hint probe
@@ -2659,6 +2661,7 @@ package final class ProxyOrchestrator {
                 + "the PAC refresh waits for the path to settle. Path: \(path.description)",
             category: .network
         )
+        networkPathInvalidatedSinceSettle = true
         if resetsDNS {
             resetDNSTransportsForRecovery(source: "network_change")
         }
@@ -2667,6 +2670,20 @@ package final class ProxyOrchestrator {
         if dropsRoutes {
             invalidatePACRoutes(reason: .networkChanged)
         }
+        return true
+    }
+
+    /// Tier C trailing edge, first step: when a change invalidated since the last settled report, clears the DNS response cache
+    /// again. The leading edge cleared it with the transports, but a query that started on the old path can finish on the old
+    /// transports during the settle and store its answer, for up to 300 s (30 s for NXDOMAIN). The transports are kept: those in use
+    /// now were made after the last change. A query still out when the burst settles can store after this; fencing the store by
+    /// generation is #200. Emits `dns.response_cache_cleared source=network_settled` when the forwarder runs. Returns whether it cleared.
+    @discardableResult
+    package func clearDNSAnswersStoredDuringSettle() -> Bool {
+        guard networkPathInvalidatedSinceSettle else { return false }
+        networkPathInvalidatedSinceSettle = false
+        guard let dropped = dnsForwarder.clearResponseCache(reason: "network_settled") else { return false }
+        emitEvent(.health, "dns.response_cache_cleared", detail: "source=network_settled entries=\(dropped)")
         return true
     }
 
@@ -2705,6 +2722,7 @@ package final class ProxyOrchestrator {
     @discardableResult
     package func handleNetworkPath(_ path: NetworkPathState) async -> Bool {
         invalidateNetworkPath(path)
+        clearDNSAnswersStoredDuringSettle()
         guard let change = admitNetworkPath(path) else { return false }
         await handleNetworkChange(change)
         return true

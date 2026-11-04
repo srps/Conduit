@@ -314,6 +314,17 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         logger.log(.notice, "DNS forwarder transports reset (reason=\(reason)).", category: .network)
     }
 
+    /// Drops every cached response and keeps the transports. A network-path change resets the transports and the cache as it
+    /// arrives; a query that started before it can still finish on the old transports and store its answer. Clearing again once the
+    /// path has settled keeps such an answer from outliving the settle (#198); fencing the store itself is #200. Returns the entries
+    /// dropped, or nil when the forwarder is not running.
+    package func clearResponseCache(reason: String) -> Int? {
+        guard let core else { return nil }
+        let dropped = core.clearResponseCache()
+        logger.log(.info, "DNS forwarder response cache cleared (reason=\(reason), entries=\(dropped)).", category: .network)
+        return dropped
+    }
+
     /// Number of cached DNS response entries. Test-only accessor — production
     /// code must not depend on the absolute count (the cache is allowed to
     /// evict opportunistically). Used to verify `resetUpstreamTransports`
@@ -557,6 +568,13 @@ private final class DNSResolutionCore: @unchecked Sendable {
 
     var cachedResponseCount: Int {
         responseCache.entryCount
+    }
+
+    /// Drops every cached response; returns how many there were.
+    func clearResponseCache() -> Int {
+        let dropped = responseCache.entryCount
+        responseCache.clear()
+        return dropped
     }
 
     /// Non-blocking admission check. **Call this on the event loop, before

@@ -24,7 +24,8 @@ package enum NetworkPathReports {
     /// The leading edge runs again first. It does nothing for a path the
     /// updates already carried, and it keeps a caller that hands in a report
     /// with no updates before it, or one whose updates have not landed yet,
-    /// from refreshing before it invalidates.
+    /// from refreshing before it invalidates. Then the DNS answers stored since a
+    /// change are cleared once more (`clearDNSAnswersStoredDuringSettle`).
     package static func receive(
         _ path: NetworkPathState,
         orchestrator: ProxyOrchestrator,
@@ -36,6 +37,7 @@ package enum NetworkPathReports {
         // can suspend the transition. Unchanged reports also retry drift.
         await reconcileSystemProxy()
         orchestrator.invalidateNetworkPath(path)
+        orchestrator.clearDNSAnswersStoredDuringSettle()
         if let change = orchestrator.admitNetworkPath(path) {
             await act(change)
         }
