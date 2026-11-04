@@ -853,6 +853,10 @@ package final class ProxyOrchestrator {
             }
         }
 
+        if diff.upstreamEndpointsChanged {
+            upstreamSilences.reset()
+        }
+
         // Re-checked via `isProxyLive` rather than a captured flag: a failed restart
         // above will have put the proxy in `.failed` / `.stopped`, and a stop in flight
         // still reads active until its teardown ends. Probing then would publish over the
@@ -2931,6 +2935,7 @@ package final class ProxyOrchestrator {
                 self.logStore.log(.notice, "Automatic recovery paused for \(seconds)s; health checks continue.", category: .network)
             }
             if recovered {
+                self.upstreamSilences.recordAnswer()
                 self.emitRecoveryOutcome(.recovered)
                 self.mutateSnapshot {
                     $0.runtimeStatus.state = .running
@@ -2972,6 +2977,14 @@ package final class ProxyOrchestrator {
                     self.mutateSnapshot {
                         $0.runtimeStatus.activeUpstream = connSummary.bestReachableUpstream?.endpoint ?? $0.runtimeStatus.activeUpstream
                         $0.runtimeStatus.state = .running
+                    }
+                    self.startHealthLoop()
+                    return
+                } else if connSummary.isInconclusive {
+                    // A held probe is no verdict; the health loop supplies the next observation.
+                    self.mutateSnapshot {
+                        guard $0.runtimeStatus.state == .recovering else { return }
+                        $0.runtimeStatus.state = .degraded
                     }
                     self.startHealthLoop()
                     return

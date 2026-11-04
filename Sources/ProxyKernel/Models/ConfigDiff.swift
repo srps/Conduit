@@ -5,6 +5,8 @@ package struct ConfigDiff: Sendable {
     package let proxyChanged: Bool
     package let authChanged: Bool
     package let upstreamsChanged: Bool
+    /// The enabled upstreams name a different set of host:port endpoints; a rename, reorder or reprioritisation does not.
+    package let upstreamEndpointsChanged: Bool
     /// Routing inputs other than `pacUsableRouteLimit`, which is applied
     /// when each PAC answer is handed out and needs no PAC refresh.
     package let routingChanged: Bool
@@ -59,6 +61,7 @@ package struct ConfigDiff: Sendable {
             || !ExactText.same(old.auth.domain, new.auth.domain)
             || !ExactText.same(old.auth.workstation, new.auth.workstation)
         upstreamsChanged = old.upstreams != new.upstreams
+        upstreamEndpointsChanged = Set(old.enabledUpstreams.map(\.endpoint)) != Set(new.enabledUpstreams.map(\.endpoint))
         var oldRouting = old.routing
         oldRouting.pacUsableRouteLimit = new.routing.pacUsableRouteLimit
         routingChanged = oldRouting != new.routing || !ExactText.same(old.routing.pacURL, new.routing.pacURL)
