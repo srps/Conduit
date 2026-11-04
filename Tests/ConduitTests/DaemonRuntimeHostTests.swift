@@ -1645,7 +1645,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         /// slot: a second unconfirmed shutdown never overwrites it, and no new harness is built while it is occupied.
         private static var retainedUnconfirmed: DaemonHarness?
 
-        init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) throws {
+        /// `linkedJournal` seeds the journal at `journal/actual.json` and makes the root's `platform-state.json` a link to it.
+        init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig, linkedJournal: Data? = nil) throws {
             guard DaemonHarness.retainedUnconfirmed == nil else { throw HarnessHostOwnershipError.retainedUnconfirmed }
             let stateDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("pm-daemon-harness-\(UUID().uuidString)", isDirectory: true)
@@ -1660,6 +1661,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
             try ProxyConfigPersistence.save(config, in: fixture)
             try PlatformConfigPersistence.save(platformConfig, in: fixture)
             try AppPreferencesPersistence.save(AppPreferences(), in: fixture)
+            if let linkedJournal {
+                let target = stateDirectory.appendingPathComponent("journal/actual.json")
+                try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try linkedJournal.write(to: target)
+                try FileManager.default.createSymbolicLink(at: fixture.platformStateFile, withDestinationURL: target)
+            }
             stateSession = try acquireScratchStateRoot(fixture)
             environment = stateSession.environment
             machine = FakeMachine(resolverDirectory: stateDirectory.appendingPathComponent("resolver", isDirectory: true))
@@ -3889,6 +3896,63 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
         await host.awaitLifecycleIdle()
         XCTAssertEqual(try proxies(1), original.services[1].proxies, "the stop restores the active location")
+    }
+
+    /// A port-0 start records its bound endpoint at the root's fixed witness leaf, and the stop retires it (decision 0040).
+    @RuntimeActor func testAnEphemeralStartWitnessesItsBoundEndpointAtTheRootLeafUntilTheStop() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .manual))
+        harness.locationStore = NetworkLocationFixture.store()
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.awaitLifecycleIdle()
+        let bound = try XCTUnwrap(host.orchestrator.snapshot.bindings.proxyPort)
+        let witness = FileProxyEndpointWitness(fileURL: harness.environment.configDirectory
+            .appendingPathComponent("platform-state.proxy-endpoint.json"))
+        XCTAssertEqual(witness.read(), .present(AdvertisedProxyEndpoint(host: "127.0.0.1", port: bound)))
+
+        await host.stopRuntime()
+        await host.awaitLifecycleIdle()
+        XCTAssertEqual(witness.read(), .absent)
+    }
+
+    /// A port-0 run crashed with its proxy on Wi-Fi, and the journal it reached through a link is now unreadable. Launch
+    /// recovery reads the root's fixed witness leaf, not one beside the link's target, clears that endpoint, keeps another
+    /// tool's loopback proxy on the second service, and retires the record.
+    @RuntimeActor func testLaunchClearsAWitnessedEphemeralProxyUnderALinkedUnreadableJournal() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        let corrupt = Data("{".utf8)
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .manual),
+                                    linkedJournal: corrupt)
+        let ephemeral: [String: NetworkSettingValue] = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(52870), "HTTPEnable": .number(1),
+                                                        "HTTPSProxy": .text("127.0.0.1"), "HTTPSPort": .number(52870), "HTTPSEnable": .number(1)]
+        let foreign: [String: NetworkSettingValue] = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(3128), "HTTPEnable": .number(1)]
+        let locations = NetworkLocationFixture.store()
+        locations.edit {
+            $0.services[0].proxies = ephemeral
+            $0.services.append(.init(locationID: NetworkLocationFixture.home, serviceID: "55555555-5555-5555-5555-555555555555",
+                                     name: "USB Ethernet", enabled: true, proxies: foreign, dns: [:]))
+        }
+        harness.locationStore = locations
+        let witness = FileProxyEndpointWitness(fileURL: harness.environment.configDirectory
+            .appendingPathComponent("platform-state.proxy-endpoint.json"))
+        XCTAssertNotEqual(harness.environment.platformStateFile.deletingLastPathComponent().standardizedFileURL,
+                          witness.fileURL.deletingLastPathComponent().standardizedFileURL, "the session names the link's target")
+        try witness.record(AdvertisedProxyEndpoint(host: "127.0.0.1", port: 52870))
+
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        let services = try locations.snapshot().services
+        for key in ephemeral.keys { XCTAssertNil(services[0].proxies[key], "\(key) of the crashed run was left behind") }
+        XCTAssertEqual(services[2].proxies, foreign)
+        XCTAssertEqual(witness.read(), .absent)
+        XCTAssertEqual(try Data(contentsOf: harness.environment.platformStateFile), corrupt, "the unreadable journal is kept as evidence")
+        XCTAssertEqual(host.orchestrator.eventLog.events.filter { $0.event == "platform.location_residue_identity" }.compactMap(\.detail),
+                       ["surface=proxies source=witness host=127.0.0.1 port=52870"])
     }
 
     /// Every client-facing surface names `port` on the configured client host.
