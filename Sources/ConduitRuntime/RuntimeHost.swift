@@ -2144,6 +2144,8 @@ extension RuntimeHost: RuntimeReconcilerHost {
         if platform.manageSystemProxy {
             _ = await applySystemProxySwitch(config: config, platform: platform, cause: .listenerRebound)
         }
+        // A Stop admitted during that write cleared the bindings; the environment would be written with port 0 behind its clear.
+        guard !token.isSuperseded, runtimeState().proxyIsUp else { return }
         if platform.manageEnvironmentVariables {
             _ = await applyEnvironmentSwitch(config: config, cause: .listenerRebound)
         }

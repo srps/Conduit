@@ -2154,6 +2154,10 @@ package final class ProxyOrchestrator {
         guard projected != before else { return }
         mutateSnapshot { $0.bindings = projected }
         followProxyListenerInDNS(from: before, source: "listener_rebound")
+        if localPACServer.isRunning {
+            emitEvent(.routing, "local_pac.updated", detail: "reason=listener_rebound")
+            localPACServer.updateScript(localPACScript())
+        }
         onEvent?(.proxyListenerRebound)
     }
 

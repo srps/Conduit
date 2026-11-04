@@ -72,11 +72,15 @@ final class ProxyListenerRebindTests: XCTestCase {
         try await orchestrator.startProxy()
         await orchestrator.startDNS()
         XCTAssertEqual(orchestrator.snapshot.dnsRunState, .running, "DNS forwarder must bind for this test")
-        let (_, squatter) = try await loseAndRecycle(orchestrator)
+        XCTAssertEqual(orchestrator.dnsForwarder.doHLocalProxyPort, orchestrator.snapshot.bindings.proxyPort, "DNS started beside the listener")
+        let (old, squatter) = try await loseAndRecycle(orchestrator)
         defer { Task { @RuntimeActor in _ = try? await squatter.close().get(); await orchestrator.stopDNS(); await orchestrator.stopProxy() } }
 
         XCTAssertEqual(transportResets(orchestrator).filter { $0 == "source=listener_rebound" }.count, 1,
                        "the DoH route is rebuilt once for the moved listener: \(transportResets(orchestrator))")
+        let port = try XCTUnwrap(orchestrator.localProxyServer.listeningPort)
+        XCTAssertNotEqual(port, old)
+        XCTAssertEqual(orchestrator.dnsForwarder.doHLocalProxyPort, port, "the forwarder's local-proxy route dials the rebound listener")
     }
 
     @RuntimeActor func testAFixedPortNeverResetsTheDoHRouteForTheListener() async throws {
@@ -94,6 +98,7 @@ final class ProxyListenerRebindTests: XCTestCase {
         XCTAssertEqual(events("proxy.listener_recycled", in: orchestrator).count, 1, "the recycle ran")
         XCTAssertEqual(transportResets(orchestrator).filter { $0 == "source=proxy_started" || $0 == "source=listener_rebound" }, [],
                        "a fixed port never moves the DoH route")
+        XCTAssertEqual(orchestrator.dnsForwarder.doHLocalProxyPort, orchestrator.snapshot.bindings.proxyPort, "and keeps dialling it")
     }
 
     @RuntimeActor func testAPortZeroStartWhileDNSRunsRebuildsTheRoute() async throws {
@@ -101,9 +106,41 @@ final class ProxyListenerRebindTests: XCTestCase {
         await orchestrator.startDNS()
         XCTAssertEqual(orchestrator.snapshot.dnsRunState, .running, "DNS forwarder must bind for this test")
         defer { Task { @RuntimeActor in await orchestrator.stopDNS(); await orchestrator.stopProxy() } }
+        XCTAssertNil(orchestrator.dnsForwarder.doHLocalProxyPort, "no listener, no local-proxy route")
 
         try await orchestrator.startProxy()
 
         XCTAssertEqual(transportResets(orchestrator), ["source=proxy_started"], "the route DNS was built without now has a port")
+        XCTAssertEqual(orchestrator.dnsForwarder.doHLocalProxyPort, orchestrator.snapshot.bindings.proxyPort)
+    }
+
+    @RuntimeActor func testTheServedPACScriptNamesTheReboundListener() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.upstreams = []
+        config.dnsForwarderEnabled = false
+        config.localPACEnabled = true
+        config.localPACPort = 0
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
+        try await orchestrator.startProxy()
+        let pacPort = try XCTUnwrap(orchestrator.snapshot.bindings.localPACPort, "the local PAC server is up")
+        let (old, squatter) = try await loseAndRecycle(orchestrator)
+        defer { Task { @RuntimeActor in _ = try? await squatter.close().get(); await orchestrator.stopProxy() } }
+        let port = try XCTUnwrap(orchestrator.localProxyServer.listeningPort)
+
+        let script = try await Self.fetchServedPAC(port: pacPort)
+
+        XCTAssertEqual(events("local_pac.updated", in: orchestrator).map(\.detail), ["reason=listener_rebound"])
+        XCTAssertTrue(script.contains("127.0.0.1:\(port)"), "the script names the rebound listener: \(script)")
+        XCTAssertFalse(script.contains("127.0.0.1:\(old)"), "and not the port the squatter holds")
+    }
+
+    /// A direct fetch: the session's proxy dictionary is set empty, so the machine's system proxy is not consulted.
+    nonisolated private static func fetchServedPAC(port: Int) async throws -> String {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)\(LocalPACServer.pacPath)"))
+        let (data, _) = try await URLSession(configuration: configuration).data(from: url)
+        return String(decoding: data, as: UTF8.self)
     }
 }

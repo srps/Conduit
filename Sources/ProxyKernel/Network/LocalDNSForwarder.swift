@@ -310,6 +310,9 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     ///
     /// No-op when the forwarder is stopped (handler is nil). Safe to call
     /// from any actor context.
+    /// The port the DoH local-proxy route dials now, nil without a route or while stopped.
+    var doHLocalProxyPort: Int? { core?.doHLocalProxyPort }
+
     package func resetUpstreamTransports(reason: String) {
         guard let core else {
             logger.log(.debug, "DNS forwarder transports reset skipped (forwarder not running). reason=\(reason)", category: .network)
@@ -364,6 +367,7 @@ private struct DoHTransports: @unchecked Sendable {
     let direct: URLSession
     let upstream: URLSession?
     let localProxy: URLSession?
+    let localProxyPort: Int?
 
     init(config: ProxyConfig, boundPort: Int?) {
         self.direct = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil))
@@ -376,9 +380,9 @@ private struct DoHTransports: @unchecked Sendable {
             self.upstream = nil
         }
 
-        self.localProxy = DoHSessionFactory.localProxyRoute(config: config, boundPort: boundPort).map {
-            DoHSessionFactory.session(for: $0)
-        }
+        let localRoute = DoHSessionFactory.localProxyRoute(config: config, boundPort: boundPort)
+        self.localProxyPort = localRoute?.proxy?.port
+        self.localProxy = localRoute.map { DoHSessionFactory.session(for: $0) }
     }
 
     func invalidate() {
@@ -540,6 +544,8 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private func currentHandle() -> DoHTransportsHandle {
         transportsBox.withLockedValue { $0 }
     }
+
+    var doHLocalProxyPort: Int? { currentHandle().transports.localProxyPort }
 
     func invalidateSessions() {
         // Retire, don't invalidate directly: a `resolveViaDoH` call that
