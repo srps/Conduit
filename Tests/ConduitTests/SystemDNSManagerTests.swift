@@ -125,6 +125,17 @@ final class SystemDNSManagerTests: XCTestCase {
         )
     }
 
+    func testALocationReconcileReportsWhetherItPointedSystemDNSAtTheRelay() throws {
+        XCTAssertFalse(try makeManager().reconcileLocation(apply: true, forwarderPort: 5354), "no location store, no write")
+
+        let locations = NetworkLocationFixture.store()
+        let manager = SystemDNSManager(privilegeClient: recording, journal: journal,
+                                       locationRecovery: LocationSettingsRecovery(store: locations, journal: journal, emit: { _ in }))
+        XCTAssertTrue(try manager.reconcileLocation(apply: true, forwarderPort: 5354))
+        XCTAssertEqual(recording.commands(matching: .startDNSRelay).last, ["5354"])
+        XCTAssertFalse(try manager.reconcileLocation(apply: false, forwarderPort: 5354), "a restore points nothing at the relay")
+    }
+
     /// Manager under test on a described machine, so the launch-time recovery
     /// decision can be pinned without depending on what this host's interfaces
     /// happen to hold.

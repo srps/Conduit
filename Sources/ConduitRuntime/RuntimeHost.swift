@@ -1195,8 +1195,7 @@ package final class RuntimeHost {
                 }
                 do {
                     if !dnsToken.isSuperseded && !withholdDNSRestore {
-                        try dns.reconcileLocation(apply: applyDNS, forwarderPort: forwarderPort, logger: logger)
-                        systemDNSApplied = applyDNS
+                        systemDNSApplied = try dns.reconcileLocation(apply: applyDNS, forwarderPort: forwarderPort, logger: logger)
                     }
                 } catch {
                     let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=reconcile surface=systemDNS reason=\(error.localizedDescription)")

@@ -94,9 +94,11 @@ package final class SystemDNSManager: @unchecked Sendable {
         self.configProvider = configProvider
     }
 
-    package func reconcileLocation(apply: Bool, forwarderPort: Int, logger: (any LogSink)? = nil) throws {
+    /// Returns whether it started the relay and pointed system DNS at it.
+    @discardableResult
+    package func reconcileLocation(apply: Bool, forwarderPort: Int, logger: (any LogSink)? = nil) throws -> Bool {
         try operations.withLock {
-            guard let locationRecovery else { return }
+            guard let locationRecovery else { return false }
             // Old locations must recover even if relay readiness fails.
             try locationRecovery.restore(kind: .dns, inactiveOnly: apply)
             if apply {
@@ -105,6 +107,7 @@ package final class SystemDNSManager: @unchecked Sendable {
                 // relay started. Its idempotent start must succeed first.
                 try self.apply(forwarderPort: forwarderPort, logger: logger)
             }
+            return apply
         }
     }
 
