@@ -343,7 +343,7 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         let second = breaker.recordUnanswered()
         XCTAssertTrue(second.verdict.isDecisive)
         XCTAssertEqual(second.step, .check)
-        XCTAssertEqual(breaker.silence, .checking(answered: false))
+        XCTAssertEqual(breaker.silence, .checking(superseded: false))
         XCTAssertEqual(breaker.recordUnanswered().step, .held, "one check per upstream at a time")
         XCTAssertFalse(breaker.ranksBehind(at: Date()), "a silence alone ranks nothing")
         XCTAssertEqual(breaker.state, .closed)
@@ -394,7 +394,7 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
     func testAnAnswerWhileTheCheckRunsSupersedesASilentCheck() {
         var breaker = decisivelySilent()
         breaker.recordSuccess(latencyMS: 10)
-        XCTAssertEqual(breaker.silence, .checking(answered: true), "the check still runs, and only its outcome frees the slot")
+        XCTAssertEqual(breaker.silence, .checking(superseded: true), "the check still runs, and only its outcome frees the slot")
         XCTAssertEqual(breaker.recordUnanswered().step, .held)
 
         XCTAssertEqual(breaker.finishSilenceCheck(.silent, now: Date(), interval: 30), .superseded)
@@ -411,6 +411,17 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
                        "the check began before the answer, so it is older evidence")
         XCTAssertFalse(breaker.ranksBehind(at: Date()))
         XCTAssertEqual(breaker.recordUnanswered().step, .check, "the silences after the answer still stand, so the next one asks")
+    }
+
+    func testAResetWhileTheCheckRunsSupersedesIt() {
+        var breaker = decisivelySilent()
+        breaker.reset(reason: .vpnFlapRecovered, baseOpenInterval: 30)
+        _ = breaker.recordUnanswered()
+        XCTAssertEqual(breaker.recordUnanswered().step, .held, "the first check still runs")
+
+        XCTAssertEqual(breaker.finishSilenceCheck(.silent, now: Date(), interval: 30), .superseded,
+                       "the check asked over the path the flap replaced")
+        XCTAssertFalse(breaker.ranksBehind(at: Date()))
     }
 
     func testAnAnswerOrAResetEndsARanking() {

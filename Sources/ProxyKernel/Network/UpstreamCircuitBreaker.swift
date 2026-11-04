@@ -68,7 +68,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
 
     package enum Silence: Equatable, Sendable {
         case none
-        case checking(answered: Bool)
+        case checking(superseded: Bool)
         case ranksBehind(until: Date)
     }
 
@@ -172,11 +172,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         consecutiveFailures = 0
         firstFailureAt = nil
         silences.recordAnswer()
-        if case .checking = silence {
-            silence = .checking(answered: true)
-        } else {
-            endRanking()
-        }
+        supersedeSilence()
 
         switch state {
         case .closed:
@@ -293,15 +289,23 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         if ranksBehind { silence = .none }
     }
 
+    private mutating func supersedeSilence() {
+        if case .checking = silence {
+            silence = .checking(superseded: true)
+        } else {
+            endRanking()
+        }
+    }
+
     package mutating func recordUnanswered() -> (verdict: UnansweredStreak.Verdict, step: SilenceStep) {
         let verdict = silences.recordUnanswered()
         guard verdict.isDecisive, state == .closed, silence == .none else { return (verdict, .held) }
-        silence = .checking(answered: false)
+        silence = .checking(superseded: false)
         return (verdict, .check)
     }
 
     package mutating func finishSilenceCheck(_ outcome: SilenceCheckOutcome, now: Date, interval: TimeInterval) -> SilenceCheckVerdict {
-        guard case .checking(let answeredSince) = silence else { return .superseded }
+        guard case .checking(let superseded) = silence else { return .superseded }
         silence = .none
         guard state == .closed else { return .superseded }
         switch outcome {
@@ -311,7 +315,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         case .unasked:
             return .kept
         case .silent, .refused:
-            guard !answeredSince, silences.failureStanding else { return .superseded }
+            guard !superseded, silences.failureStanding else { return .superseded }
             silence = .ranksBehind(until: now.addingTimeInterval(interval))
             return .rankedBehind
         }
@@ -372,7 +376,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
             && !halfOpenProbeInFlight
         lastBaseOpenInterval = baseOpenInterval
         silences.reset()
-        endRanking()
+        supersedeSilence()
         if alreadyClean {
             return nil
         }
