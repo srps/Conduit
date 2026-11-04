@@ -3026,9 +3026,6 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy), "and releases the surface it restored")
     }
 
-    /// The journal and machine a crashed run leaves: the prior proxy recorded and applied, and the machine still pointed at a dead loopback
-    /// proxy. Launch recovery restores the prior settings from it.
-    /// A proxy decline has no notice, so what ends it is this run writing system proxy: a Start's apply that lands, or a Stop's clear.
     @RuntimeActor func testAProxyStartWhoseApplyLandsEndsADeclinedSystemProxyRecovery() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
@@ -3063,6 +3060,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(harness.wifi.webProxy.host, "prior.example.test", "the Stop put the recorded proxy back")
     }
 
+    /// The journal and machine a crashed run leaves: the prior proxy recorded and applied, and the machine still pointed at a dead loopback
+    /// proxy. Launch recovery restores the prior settings from it.
     @RuntimeActor private func seedCrashedRunProxy() {
         let prior = ProxyServiceState(
             webHost: "prior.example.test", webPort: "8080", webEnabled: true,

@@ -236,8 +236,6 @@ package final class RuntimeHost {
     private(set) var dnsRelayUnresponsive = false {
         didSet { if dnsRelayUnresponsive != oldValue { onControlStateChange?() } }
     }
-    /// The surfaces whose launch restore a timed-out liveness probe declined (decision 0041), until this run writes that surface
-    /// (`surfaceWritten`). The location reconcile leaves their records alone meanwhile; the control snapshot shows the system DNS one.
     private(set) var declinedLaunchRecovery: Set<PlatformSurface> = [] {
         didSet { if systemDNSRecoveryDeclined != oldValue.contains(.systemDNS) { onControlStateChange?() } }
     }
@@ -686,8 +684,6 @@ package final class RuntimeHost {
         Task { [weak self] in await self?.awaitLaunchRecovery() }
     }
 
-    /// This run wrote the surface (for system DNS, a DNS Start, a DNS Stop or a management change; for system proxy, a proxy Start's
-    /// apply or a Stop's clear), so no declined recovery describes it any more.
     func surfaceWritten(_ surface: PlatformSurface) {
         declinedLaunchRecovery.remove(surface)
     }
@@ -1174,17 +1170,16 @@ package final class RuntimeHost {
             let events = orchestrator.eventLog, logger = logger
             let applyProxy = platform.manageSystemProxy && state.proxyIsUp
             let applyDNS = platform.manageSystemDNS && state.dnsIsUp
-            // A surface that is not applied is only restored, and restoring a declined one is the restore recovery declined.
-            let keepProxy = !applyProxy && declinedLaunchRecovery.contains(.systemProxy)
-            let keepDNS = !applyDNS && declinedLaunchRecovery.contains(.systemDNS)
-            for (kind, kept) in [(NetworkSettingsKind.proxies, keepProxy), (.dns, keepDNS)] where kept {
+            let withholdProxyRestore = !applyProxy && declinedLaunchRecovery.contains(.systemProxy)
+            let withholdDNSRestore = !applyDNS && declinedLaunchRecovery.contains(.systemDNS)
+            for (kind, withheld) in [(NetworkSettingsKind.proxies, withholdProxyRestore), (.dns, withholdDNSRestore)] where withheld {
                 recordLifecycle(RuntimeEvent(kind: .config, event: "platform.location_restore_withheld",
                                              detail: "surface=\(kind.rawValue) reason=launch_recovery_declined"))
             }
             let proxyRetry = await platformWork.run { () -> Duration? in
                 var retry: Duration?
                 do {
-                    if !proxyToken.isSuperseded && !keepProxy {
+                    if !proxyToken.isSuperseded && !withholdProxyRestore {
                         retry = try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, endpoints: endpoints,
                                                             apply: applyProxy)
                     }
@@ -1194,7 +1189,7 @@ package final class RuntimeHost {
                     logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
                 }
                 do {
-                    if !dnsToken.isSuperseded && !keepDNS {
+                    if !dnsToken.isSuperseded && !withholdDNSRestore {
                         try dns.reconcileLocation(apply: applyDNS, forwarderPort: forwarderPort, logger: logger)
                     }
                 } catch {

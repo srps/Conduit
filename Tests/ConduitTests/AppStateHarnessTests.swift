@@ -587,8 +587,7 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(port)], "the relay forwards to this run")
     }
 
-    /// A crashed run's location settings, written and journaled as its apply wrote them, with its listener's probe timing out.
-    private func leaveACrashedRunsLocationSettings(_ harness: AppStateHarness, kind: NetworkSettingsKind,
+    private func leaveACrashedRunsLocationSettingsBehindASlowListener(_ harness: AppStateHarness, kind: NetworkSettingsKind,
                                                    desired: [String: NetworkSettingValue]) throws -> FakeNetworkLocationStore {
         let locations = NetworkLocationFixture.store()
         harness.locationStore = locations
@@ -605,7 +604,6 @@ final class AppStateHarnessTests: XCTestCase {
         return home
     }
 
-    /// The location reconcile the observer's first report runs, whichever way it went for `kind`.
     private func settleTheFirstLocationReconcile(_ harness: AppStateHarness, kind: NetworkSettingsKind) async {
         await harness.settle("the first location report is reconciled") {
             harness.hostEventsText.split(separator: "\n").contains {
@@ -614,11 +612,9 @@ final class AppStateHarnessTests: XCTestCase {
         }
     }
 
-    /// The location observer reports the current location as it starts, which is right after launch recovery declined: the reconcile
-    /// that report runs must not restore what recovery left alone.
     func testTheFirstLocationReportKeepsADeclinedSystemDNSRecovery() async throws {
         let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
-        let locations = try leaveACrashedRunsLocationSettings(harness, kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])])
+        let locations = try leaveACrashedRunsLocationSettingsBehindASlowListener(harness, kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])])
         let state = await harness.ready()
         await harness.settle("the decline is shown") { state.runtime.systemDNSRecoveryDeclined }
         await settleTheFirstLocationReconcile(harness, kind: .dns)
@@ -635,7 +631,7 @@ final class AppStateHarnessTests: XCTestCase {
 
     func testTheFirstLocationReportKeepsADeclinedSystemProxyRecovery() async throws {
         let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemProxy: true))
-        let locations = try leaveACrashedRunsLocationSettings(harness, kind: .proxies, desired: [
+        let locations = try leaveACrashedRunsLocationSettingsBehindASlowListener(harness, kind: .proxies, desired: [
             "HTTPEnable": .number(1), "HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(47113),
             "HTTPSEnable": .number(1), "HTTPSProxy": .text("127.0.0.1"), "HTTPSPort": .number(47113),
             "ProxyAutoConfigEnable": .number(0),

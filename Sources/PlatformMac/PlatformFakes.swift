@@ -766,7 +766,6 @@ package final class FakeNetworkLocationObserver: NetworkLocationObserving, @unch
     private var settingsCallback: (@Sendable () -> Void)?
     private var store: FakeNetworkLocationStore?
     package init() {}
-    /// Each start then reports `store`'s active location before any change, as `NetworkLocationMonitor.start` reports the current set.
     package func reportsActiveLocation(of store: FakeNetworkLocationStore?) { lock.withLock { self.store = store } }
     package func start(onChange: @escaping @Sendable (Result<String, NetworkSettingsError>) -> Void,
                        onSettingsChange: @escaping @Sendable () -> Void) {

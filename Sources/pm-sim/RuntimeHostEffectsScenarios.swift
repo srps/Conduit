@@ -1295,9 +1295,6 @@ enum RuntimeHostEffectsScenario {
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
     }
 
-    /// A crashed run's system DNS and system proxy settings under network locations, with both liveness probes timing out (#201,
-    /// decision 0041). The host's launch recovery declines both, and the location observer's report at start, which runs the location
-    /// reconcile right after, withholds both restores with an event: the settings and their records stay for the user or a later launch.
     @RuntimeActor
     private static func exerciseDeclinedRecoveryLocationReport(
         session: StateRootSession,
@@ -1374,10 +1371,9 @@ enum RuntimeHostEffectsScenario {
                 "surface=proxies reason=launch_recovery_declined", "surface=dns reason=launch_recovery_declined",
             ])
             check("the declined settings stay as the crashed run left them", try locations.snapshot() == crashed)
-            // A fresh reader, as the next launch reads the file.
-            let recorded = PlatformStateJournal(fileURL: environment.platformStateFile)
+            let nextLaunchJournal = PlatformStateJournal(fileURL: environment.platformStateFile)
             check("the declined records stay for the user or a later launch",
-                  recorded.hasRecords(for: .systemDNS) && recorded.hasRecords(for: .systemProxy))
+                  nextLaunchJournal.hasRecords(for: .systemDNS) && nextLaunchJournal.hasRecords(for: .systemProxy))
             await host.shutdown()
             quiesced = await settledAndFlushed()
             check("the declined-recovery host settles and its observability flush is confirmed", quiesced)
