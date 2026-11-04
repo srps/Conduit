@@ -63,10 +63,6 @@ final class RuntimeHostDNSHealthTests: XCTestCase {
         host.orchestrator.eventLog.events.filter { $0.event == name }.map(\.detail)
     }
 
-    /// A failed reading restarts the relay. One final probe without an answer is held; the second in a row finds the pipeline
-    /// unresponsive, so the host's snapshot carries the fixed DNS error while the kernel still reports the forwarder running. A subscriber
-    /// is told without asking, and a later read after the gap reads the same. An error of the kernel's own wins. An alive reading for the
-    /// same run clears it, at a newer presentation revision, and the next unanswered restart is held again.
     @RuntimeActor func testConsecutiveUnconfirmedRestartsDegradeTheSnapshotAndAnAliveReadingRecoversIt() async throws {
         let composed = try await composeRunning()
         let host = composed.host
@@ -125,8 +121,6 @@ final class RuntimeHostDNSHealthTests: XCTestCase {
         XCTAssertEqual(details(host, "dns.relay_unconfirmed").last, "source=health_timer consecutive=1 decisive=false")
     }
 
-    /// A relay start the helper refuses is a conclusive failure, reported at once. It stands until an answer, so the next unanswered
-    /// restart counts on its own; an alive reading clears both.
     @RuntimeActor func testAFailedRelayStartIsUnresponsiveAtOnce() async throws {
         let composed = try await composeRunning()
         let host = composed.host

@@ -260,9 +260,6 @@ final class EnvironmentManagerTests: XCTestCase {
         XCTAssertNil(launchctl.environment["HTTP_PROXY"], "the stop's failure left the quit something to retry")
     }
 
-    /// An idle journal skips teardown only when the domain is read to hold
-    /// none of our values. A read that fails is not "no residue": teardown
-    /// runs, removes nothing it cannot judge, and keeps the name to retry.
     func testAnIdleJournalWithAnUnreadableVariableStillTearsDown() throws {
         launchctl.failingGetenv = ["HTTP_PROXY"]
         let journalFile = home.appendingPathComponent("platform-state.json")
@@ -278,8 +275,6 @@ final class EnvironmentManagerTests: XCTestCase {
         XCTAssertEqual(try? Data(contentsOf: journalFile), journalBefore, "the journal is untouched")
     }
 
-    /// The same idle journal with every variable read as absent has
-    /// nothing to tear down.
     func testAnIdleJournalWithNoVariablesSetSkipsTeardown() throws {
         let log = RecordingLogSink()
 
@@ -289,7 +284,6 @@ final class EnvironmentManagerTests: XCTestCase {
         XCTAssertEqual(launchctl.commands.filter { $0.first == "unsetenv" }, [])
     }
 
-    /// With records, the journal says what is ours; the domain is not asked.
     func testATeardownWithRecordsReadsNoLaunchdVariable() throws {
         let manager = makeManager()
         try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
@@ -731,7 +725,6 @@ private final class FakeLaunchctl: @unchecked Sendable {
     var failSetenv = false
     /// Names whose `getenv` fails (non-zero exit).
     var failingGetenv: Set<String> = []
-    /// Every launchctl argument list, in order.
     private(set) var commands: [[String]] = []
     private let lock = NSLock()
 

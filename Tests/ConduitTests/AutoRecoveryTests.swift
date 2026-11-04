@@ -245,7 +245,6 @@ final class AutoRecoveryTests: XCTestCase {
         )
     }
 
-    /// #197: credentials cannot make a silent upstream answer, and exhaustion names the silence, not the password.
     @RuntimeActor func testSilentLadderSkipsReauthenticationAndNamesTheSilence() async {
         let logger = RecordingLogSink()
         let events = EventRecorder()

@@ -29,16 +29,9 @@ package enum CloseScope: Sendable, Equatable {
     case all
 }
 
-/// Whose fact an upstream-path failure is. Only `.upstream` feeds the
-/// breaker; the retry policy and the error-rate alarm ask whether it is `.local`.
 package enum UpstreamFailureClass: Equatable, Sendable {
-    /// The pool or the runtime refused or closed it; the upstream did nothing.
     case local
-    /// Connected, and no response bytes came within `upstreamResponseTimeout`.
-    /// Slowness is not loss (STYLE rule 11).
     case inconclusive
-    /// Refused, missed the connect budget, reset, 5xx, rejected the credential
-    /// or answered nonsense.
     case upstream
 }
 
@@ -139,9 +132,6 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
         return false
     }
 
-    /// Exhaustive over this enum, so a new case picks its class before it
-    /// compiles. Every other error (a NIO connect timeout, an `IOError`) is the
-    /// upstream's: a connect that misses its budget is a failed connect.
     package static func failureClass(_ error: Error) -> UpstreamFailureClass {
         guard let error = error as? ConnectionPoolError else { return .upstream }
         switch error {
@@ -478,10 +468,6 @@ package final class ConnectionPool: @unchecked Sendable {
                 return connection.channel.eventLoop.makeSucceededFuture(result)
             }
         }
-        // Mirror the buffered path: acquire-time failures (e.g. immediate
-        // connect-refused on a dead upstream) are upstream health signals and
-        // must feed the breaker. Local capacity signals and response
-        // timeouts are not upstream failures and are excluded below (#197).
         // A client that hung up after the upstream answered in full is a
         // success for the upstream, not a breaker signal.
         return attempt.flatMapError { [weak self] (error: Error) -> EventLoopFuture<StreamingExchangeResult> in
@@ -588,8 +574,6 @@ package final class ConnectionPool: @unchecked Sendable {
         config.firstUnrepresentableDuration(among: exchangeDurations)
     }
 
-    /// Recovery branches on this: `.unreachable` and `.answerTimedOut` skip re-authentication,
-    /// so an upstream that answered with a final 407 must land on neither.
     static func healthFailure(for error: Error, detail: String) -> HealthCheckFailure {
         if error.isCredentialUnavailable { return .credentialUnavailable(detail: detail) }
         if case ConnectionPoolError.authenticationRejected? = error as? ConnectionPoolError {

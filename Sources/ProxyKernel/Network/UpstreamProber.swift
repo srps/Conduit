@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
-import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 
-/// What one probe saw. A connect that failed or missed its budget is
-/// `.unreachable`; one that connected and got no answer in time is `.silent`,
-/// which says nothing on its own (STYLE rule 11).
 package enum ProbeOutcome: Equatable, Sendable {
     case answered, unreachable, silent
 }
@@ -17,7 +13,6 @@ package struct ProbeResult: Identifiable, Sendable {
     package     let latencyMS: Int
     package     let outcome: ProbeOutcome
 
-    /// What the control protocol carries.
     package var reachable: Bool { outcome == .answered }
 
     package init(proxy: UpstreamProxy, latencyMS: Int, outcome: ProbeOutcome) {
@@ -45,7 +40,6 @@ package struct UpstreamProbeSummary: Sendable {
         results.first(where: { $0.reachable })?.proxy
     }
 
-    /// No upstream answered, and at least one connected and stayed silent.
     package var isInconclusive: Bool {
         !hasReachableUpstream && results.contains { $0.outcome == .silent }
     }
@@ -60,7 +54,9 @@ package final class UpstreamProber: @unchecked Sendable {
     private let logger: any LogSink
     private let timeoutSeconds: TimeInterval
 
-    package init(group: EventLoopGroup, logger: any LogSink, timeoutSeconds: TimeInterval = 3) {
+    package static let defaultTimeoutSeconds: TimeInterval = 3
+
+    package init(group: EventLoopGroup, logger: any LogSink, timeoutSeconds: TimeInterval = defaultTimeoutSeconds) {
         self.group = group
         self.logger = logger
         self.timeoutSeconds = timeoutSeconds
@@ -91,11 +87,7 @@ package final class UpstreamProber: @unchecked Sendable {
         let totalBudgetNanos = UInt64(max(0, timeoutSeconds) * 1_000_000_000)
         let deadlineUptimeNanos = start.uptimeNanoseconds &+ totalBudgetNanos
         let eventLoop = group.next()
-        // Both the caller's catch path and the handler's lifecycle callbacks
-        // can race to resolve the probe outcome; funnel both through a single
-        // idempotent completion so we never double-succeed the underlying
-        // promise (which is a NIO fatal). See `ProbeCompletion`.
-        let completion = ProbeCompletion(promise: eventLoop.makePromise(of: ProbeOutcome.self))
+        let outcomePromise = eventLoop.makePromise(of: ProbeOutcome.self)
         let channel: Channel
         do {
             channel = try await ClientBootstrap(group: group)
@@ -105,21 +97,21 @@ package final class UpstreamProber: @unchecked Sendable {
                     channel.pipeline.addHandler(
                         UpstreamProxyProbeHandler(
                             deadlineUptimeNanos: deadlineUptimeNanos,
-                            completion: completion
+                            outcome: outcomePromise
                         )
                     )
                 }
                 .connect(host: proxy.host, port: proxy.port)
                 .get()
         } catch {
-            completion.complete(.unreachable)
+            outcomePromise.succeed(.unreachable)
             let elapsed = Int((DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000)
             return ProbeResult(proxy: proxy, latencyMS: elapsed, outcome: .unreachable)
         }
 
         let outcome: ProbeOutcome
         do {
-            outcome = try await completion.future.get()
+            outcome = try await outcomePromise.futureResult.get()
         } catch {
             logger.log(.warning, "Probe of \(proxy.endpoint) ended without an outcome: \(error.displayDescription)", category: .network)
             outcome = .unreachable
@@ -127,39 +119,6 @@ package final class UpstreamProber: @unchecked Sendable {
         let elapsed = Int((DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000)
         channel.close(mode: .all, promise: nil)
         return ProbeResult(proxy: proxy, latencyMS: elapsed, outcome: outcome)
-    }
-}
-
-/// Idempotent one-shot wrapper around an `EventLoopPromise<ProbeOutcome>` shared
-/// between the probe's `async` caller and its NIO `ChannelHandler`.
-///
-/// NIO fatal-errors on double-success, and the catch path (connect failed) and
-/// the handler's lifecycle callbacks (`channelInactive`, `errorCaught`, timer)
-/// can both reach the promise on a failed connect. In practice NIO only fires
-/// `channelInactive` after `channelActive`, so the race rarely materializes,
-/// but relying on that lifecycle invariant is fragile. The lock-guarded
-/// `completed` flag here removes the assumption: the first caller wins and
-/// any subsequent `complete(_:)` calls are no-ops.
-private final class ProbeCompletion: @unchecked Sendable {
-    private let lock = NIOLock()
-    private var completed = false
-    private let promise: EventLoopPromise<ProbeOutcome>
-
-    init(promise: EventLoopPromise<ProbeOutcome>) {
-        self.promise = promise
-    }
-
-    var future: EventLoopFuture<ProbeOutcome> { promise.futureResult }
-
-    func complete(_ outcome: ProbeOutcome) {
-        let shouldSucceed: Bool = lock.withLock {
-            guard !completed else { return false }
-            completed = true
-            return true
-        }
-        if shouldSucceed {
-            promise.succeed(outcome)
-        }
     }
 }
 
@@ -173,13 +132,13 @@ private final class UpstreamProxyProbeHandler: ChannelInboundHandler, @unchecked
     static let maxAccumulatedBytes = 64 * 1024
 
     private let deadlineUptimeNanos: UInt64
-    private let completion: ProbeCompletion
+    private let outcome: EventLoopPromise<ProbeOutcome>
     private var accumulated = ByteBufferAllocator().buffer(capacity: 512)
     private var timeoutTask: Scheduled<Void>?
 
-    init(deadlineUptimeNanos: UInt64, completion: ProbeCompletion) {
+    init(deadlineUptimeNanos: UInt64, outcome: EventLoopPromise<ProbeOutcome>) {
         self.deadlineUptimeNanos = deadlineUptimeNanos
-        self.completion = completion
+        self.outcome = outcome
     }
 
     func channelActive(context: ChannelHandlerContext) {
@@ -244,7 +203,7 @@ private final class UpstreamProxyProbeHandler: ChannelInboundHandler, @unchecked
     private func complete(_ outcome: ProbeOutcome, context: ChannelHandlerContext, close: Bool = true) {
         timeoutTask?.cancel()
         timeoutTask = nil
-        completion.complete(outcome)
+        self.outcome.succeed(outcome)
         if close {
             context.close(promise: nil)
         }

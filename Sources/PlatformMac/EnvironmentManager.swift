@@ -454,19 +454,7 @@ package final class EnvironmentManager: @unchecked Sendable {
         // after a failed write or a wiped state directory. Ask the domain
         // itself — a stale proxy URL here is harder for a user to find than
         // one in Network Settings, since it only shows up as GUI apps
-        // mysteriously failing to reach anything. A variable that cannot be
-        // read is not proof of no residue (STYLE rule 11), so only a domain
-        // read as clean skips.
-        //
-        // Every write is journaled first, so a name missing from the records
-        // was never written: its value is someone else's, unless it is our
-        // own address. An apply whose every capture was withheld leaves no
-        // records and wrote nothing, so "no records" alone is not "records
-        // lost". Only beside our proxy URL is an unrecorded bypass list our
-        // residue from a journal that was lost (#175); an unrecorded proxy
-        // variable is ours only when it names this machine itself. Once this
-        // manager has applied, it knows what it put there, and only that is,
-        // so the domain is read only when the journal holds no records.
+        // mysteriously failing to reach anything.
         let recordsPresent = journal.hasRecords(for: .launchdEnvironment)
         let residue = recordsPresent ? nil : loopbackResidue()
         if residue == .absent, journal.knowsSurfaceIsIdle(.launchdEnvironment) {
@@ -555,16 +543,9 @@ package final class EnvironmentManager: @unchecked Sendable {
     enum LaunchdResidue: Equatable {
         case present
         case absent
-        /// No variable points at this machine, but at least one could not be read.
         case unreadable
     }
 
-    /// Whether any managed variable currently points at this machine: the
-    /// residue Conduit leaves in the per-user launchd domain.
-    ///
-    /// The shell-profile half of teardown needs no equivalent: its marker block
-    /// identifies our region of the file directly. The launchd domain has no
-    /// such marker, so this probe stands in for one.
     private func loopbackResidue() -> LaunchdResidue {
         var unreadable = false
         for name in launchdVariableNames {

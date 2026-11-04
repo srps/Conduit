@@ -6,11 +6,7 @@ import NIOPosix
 import XCTest
 @testable import ProxyKernel
 
-/// #197 through a running orchestrator: one silence from an upstream that
-/// connected is held, the second in a row counts. A conclusive failure
-/// counts at once.
 final class InconclusiveTimeoutTests: XCTestCase {
-    /// Hands each probe the next scripted outcome; with the script empty it answers.
     private final class ProbeScript: @unchecked Sendable {
         private let outcomes = NIOLockedValueBox<[ProbeOutcome]>([])
         func then(_ outcome: ProbeOutcome) { outcomes.withLockedValue { $0.append(outcome) } }
@@ -50,9 +46,8 @@ final class InconclusiveTimeoutTests: XCTestCase {
     @RuntimeActor
     func testOneSilentProbeKeepsRoutingAndTheSecondGrantsDirect() async throws {
         let silent = try await Self.silentServer()
-        // The health check the disconnect restarts stays out for the whole test, so only probes write the streak.
         var config = Self.config(upstreamPort: try XCTUnwrap(silent.localAddress?.port))
-        config.upstreamResponseTimeoutSeconds = 600
+        config.upstreamResponseTimeoutSeconds = Self.healthCheckOutlivesTheTest
         let script = ProbeScript()
         let orchestrator = Self.orchestrator(config: config, probe: script)
         try await orchestrator.startProxy()
@@ -81,7 +76,7 @@ final class InconclusiveTimeoutTests: XCTestCase {
     func testAnUnreachableProbeGrantsDirectAtOnce() async throws {
         let silent = try await Self.silentServer()
         var config = Self.config(upstreamPort: try XCTUnwrap(silent.localAddress?.port))
-        config.upstreamResponseTimeoutSeconds = 600
+        config.upstreamResponseTimeoutSeconds = Self.healthCheckOutlivesTheTest
         let script = ProbeScript()
         let orchestrator = Self.orchestrator(config: config, probe: script)
         try await orchestrator.startProxy()
@@ -94,6 +89,9 @@ final class InconclusiveTimeoutTests: XCTestCase {
         await orchestrator.stopProxy()
         try await silent.close().get()
     }
+
+    /// With the check this long, only probes write the streak.
+    private static let healthCheckOutlivesTheTest: TimeInterval = 600
 
     private static func silentServer() async throws -> Channel {
         try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
@@ -119,7 +117,6 @@ final class InconclusiveTimeoutTests: XCTestCase {
         )
     }
 
-    /// Polls a count; the deadline only guards against a hang.
     @RuntimeActor
     private static func until(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
         let deadline = ContinuousClock.now + .seconds(15)

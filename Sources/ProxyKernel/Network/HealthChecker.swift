@@ -15,7 +15,6 @@ package enum HealthCheckFailure: Error, Equatable, Sendable {
     /// No usable answer: refused, missed the connect budget, reset, or the proxy is stopped.
     case unreachable(detail: String)
     /// Connected (or reused a pooled connection) and the answer wait ran out.
-    /// Inconclusive on its own (STYLE rule 11); the orchestrator decides when it counts.
     case answerTimedOut(detail: String)
     /// The check did not run: a configured duration is one the runtime cannot hold. This says
     /// nothing about any upstream, so it feeds neither the breaker nor recovery.
@@ -28,6 +27,15 @@ package enum HealthCheckFailure: Error, Equatable, Sendable {
             return detail
         case .upstreamStatus(let code, let upstream):
             return "HTTP \(code) via \(upstream)"
+        }
+    }
+
+    /// Set when re-authenticating cannot help: no credential reaches an upstream that never answered.
+    package var reauthenticationSkip: (reason: String, why: String)? {
+        switch self {
+        case .unreachable: ("upstream_unreachable", "no upstream answered")
+        case .answerTimedOut: ("upstream_silent", "the upstream connected but never answered")
+        case .credentialUnavailable, .upstreamStatus, .authenticationRejected, .configurationRefused: nil
         }
     }
 }

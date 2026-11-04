@@ -95,9 +95,9 @@ package final class AutoRecovery: @unchecked Sendable {
 
         for step in RecoveryStep.allCases {
             guard isCurrent(), service.listenerStamp == expected else { return abandon(at: "next_step=\(step.rawValue)") }
-            if step == .reauthenticate, let skip = Self.reauthenticationSkip(latestFailure) {
-                emit("recovery.step_skipped", detail: "step=\(step.rawValue) reason=\(skip.reason) summary=\(skip.detail)")
-                logger.log(.notice, "Recovery step skipped: \(step.description) (\(skip.why): \(skip.detail)).", category: .network)
+            if step == .reauthenticate, let failure = latestFailure, let skip = failure.reauthenticationSkip {
+                emit("recovery.step_skipped", detail: "step=\(step.rawValue) reason=\(skip.reason) summary=\(failure.summary)")
+                logger.log(.notice, "Recovery step skipped: \(step.description) (\(skip.why): \(failure.summary)).", category: .network)
                 continue
             }
             do {
@@ -144,16 +144,6 @@ package final class AutoRecovery: @unchecked Sendable {
         emit("recovery.exhausted", detail: "failure=\(exhausted.failure) summary=\(latestFailure?.summary ?? "unknown")")
         logger.log(.error, exhausted.message, category: .network)
         return false
-    }
-
-    /// Credentials cannot help an upstream that never answered: one that refused or missed the connect, or one that connected and
-    /// stayed silent.
-    private static func reauthenticationSkip(_ failure: HealthCheckFailure?) -> (reason: String, why: String, detail: String)? {
-        switch failure {
-        case .unreachable(let detail): ("upstream_unreachable", "no upstream answered", detail)
-        case .answerTimedOut(let detail): ("upstream_silent", "the upstream connected but never answered", detail)
-        default: nil
-        }
     }
 
     private func abandon(at position: String) -> Bool {

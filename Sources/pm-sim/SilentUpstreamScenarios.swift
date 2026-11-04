@@ -6,23 +6,16 @@ import NIOPosix
 import ProxyKernel
 import RuntimeEvents
 
-/// #197: a timeout counts against an upstream only when the timeout is the
-/// measurement. An upstream that goes silent while serving still fails over,
-/// through the health loop, the ladder and the post-ladder probe, within a
-/// bound computed from the schedule; an upstream that answers, slowly,
-/// neither fails over nor trips the breaker, however many requests run past
-/// the response budget.
 enum SilentUpstreamScenarios {
-    /// A plain-HTTP upstream proxy that answers every request head with a
-    /// `200` after the delay `delayFor` picks from its request line; `nil`
-    /// means never. Keeps the request lines it saw.
     private final class DelayedHTTPUpstream: @unchecked Sendable {
-        private let delayFor: @Sendable (String) -> TimeAmount?
+        enum Answer { case after(TimeAmount), never }
+
+        private let answerTo: @Sendable (String) -> Answer
         private var channel: (any Channel)?
         private let lines = NIOLockedValueBox<[String]>([])
 
-        init(delayFor: @escaping @Sendable (String) -> TimeAmount?) {
-            self.delayFor = delayFor
+        init(answerTo: @escaping @Sendable (String) -> Answer) {
+            self.answerTo = answerTo
         }
 
         var port: Int { channel?.localAddress?.port ?? 0 }
@@ -30,13 +23,13 @@ enum SilentUpstreamScenarios {
 
         @RuntimeActor
         func start(group: EventLoopGroup) async throws {
-            let delayFor = self.delayFor, lines = self.lines
+            let answerTo = self.answerTo, lines = self.lines
             let channel = try await ServerBootstrap(group: group)
                 .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
                 .childChannelInitializer { channel in
                     channel.pipeline.addHandler(RequestHandler { channel, requestLine in
                         lines.withLockedValue { $0.append(requestLine) }
-                        guard let delay = delayFor(requestLine) else { return }
+                        guard case .after(let delay) = answerTo(requestLine) else { return }
                         channel.eventLoop.scheduleTask(in: delay) {
                             let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
                             channel.writeAndFlush(channel.allocator.buffer(string: response), promise: nil)
@@ -48,7 +41,6 @@ enum SilentUpstreamScenarios {
             ScenarioCleanup.register { do { try await channel.close().get() } catch ChannelError.alreadyClosed {} catch { SilentUpstreamScenarios.reportCleanupFailure(error) } }
         }
 
-        /// Calls `onRequest` once per request head with its request line.
         private final class RequestHandler: ChannelInboundHandler, @unchecked Sendable {
             typealias InboundIn = ByteBuffer
             private let onRequest: (any Channel, String) -> Void
@@ -77,11 +69,7 @@ enum SilentUpstreamScenarios {
         return condition()
     }
 
-    /// Strict routing to one upstream list, no PAC, and the breaker's burst
-    /// window off: with the window on, five failures within it never trip the
-    /// breaker, which would hide what these scenarios measure. Before #197,
-    /// `circuitFailureThreshold` response timeouts opened it under this config.
-    private static func baseConfig() -> ProxyConfig {
+    private static func strictConfigWithBreakerBurstWindowOff() -> ProxyConfig {
         var config = ProxyConfig()
         config.localHost = "127.0.0.1"
         config.localPort = 0
@@ -95,9 +83,6 @@ enum SilentUpstreamScenarios {
         return config
     }
 
-    /// `GET` of a never-dialed origin through the local proxy. In strict mode the
-    /// request goes to the selected upstream and comes back as whatever that
-    /// upstream's fate was.
     private static func sendThroughProxy(group: EventLoopGroup, port: Int, tag: String) async throws -> EventLoopFuture<String> {
         let origin = "127.0.0.1:9"
         return try await RawClient.send(
@@ -106,7 +91,6 @@ enum SilentUpstreamScenarios {
         )
     }
 
-    /// With `probe` nil the real `UpstreamProber` runs, deadline P = 3 s.
     @RuntimeActor
     private static func orchestrator(
         config: ProxyConfig, verbose: Bool, probe: (@Sendable ([UpstreamProxy]) async -> UpstreamProbeSummary)? = nil
@@ -117,25 +101,15 @@ enum SilentUpstreamScenarios {
         )
     }
 
-    /// One upstream that answers, then goes silent while the proxy runs. R =
-    /// upstreamResponseTimeout, I = healthCheckInterval, P = the prober's
-    /// answer deadline, C = loopback connect slack. From the silence on: the
-    /// next check comes within I and ends held at R + C; the adaptive schedule
-    /// rechecks I/2 later, decisive at R + C; the ladder's three checks take
-    /// 3(R + C), re-authentication skipped; the post-ladder probe takes P + C
-    /// and is decisive because a failure stands, so routing falls to DIRECT.
-    /// Bound: T <= 1.5I + 5R + P + 6C. Before #197 one silent check started
-    /// the ladder and one silent probe fell to DIRECT, and the requests that
-    /// timed out meanwhile opened the breaker.
     @RuntimeActor
     static func silentFailover(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let answering = NIOLockedValueBox(true)
-        let upstream = DelayedHTTPUpstream { _ in answering.withLockedValue { $0 } ? .zero : nil }
+        let upstream = DelayedHTTPUpstream { _ in answering.withLockedValue { $0 } ? .after(.zero) : .never }
         try await upstream.start(group: group)
 
-        let responseTimeout: TimeInterval = 0.5, checkInterval: TimeInterval = 2, probeDeadline: TimeInterval = 3
-        var config = baseConfig()
+        let responseTimeout: TimeInterval = 0.5, checkInterval: TimeInterval = 2, probeDeadline = UpstreamProber.defaultTimeoutSeconds
+        var config = strictConfigWithBreakerBurstWindowOff()
         config.upstreamResponseTimeoutSeconds = responseTimeout
         config.healthCheckIntervalSeconds = checkInterval
         config.healthCheckURL = "http://silent-failover.test/"
@@ -154,7 +128,6 @@ enum SilentUpstreamScenarios {
 
         answering.withLockedValue { $0 = false }
         let silentAt = Date()
-        // Past the threshold, all on the now-silent upstream, before any check can decide.
         var responses: [EventLoopFuture<String>] = []
         for index in 0..<(threshold + 1) {
             responses.append(try await sendThroughProxy(group: group, port: port, tag: "silent-\(index)"))
@@ -162,8 +135,10 @@ enum SilentUpstreamScenarios {
         var statuses: [String] = []
         for response in responses { statuses.append(String(try await response.get().prefix(12))) }
 
-        let connectSlack = 0.1
-        let bound = 1.5 * checkInterval + 5 * responseTimeout + probeDeadline + 6 * connectSlack
+        let connectSlack = 0.1, silentCheck = responseTimeout + connectSlack
+        let nextCheckDue = checkInterval, heldCheck = silentCheck, recheckDue = checkInterval / 2, decisiveCheck = silentCheck
+        let ladderChecks = 3 * silentCheck, postLadderProbe = probeDeadline + connectSlack
+        let bound = nextCheckDue + heldCheck + recheckDue + decisiveCheck + ladderChecks + postLadderProbe
         let fell = try await until(timeout: bound + 5) { orchestrator.snapshot.directModeCause.isDirect }
         let fellAt = Date().timeIntervalSince(silentAt)
         let status = orchestrator.snapshot.runtimeStatus
@@ -203,28 +178,24 @@ enum SilentUpstreamScenarios {
             ])
     }
 
-    /// One upstream that answers the health HEAD within the response budget and
-    /// answers client GETs only after it. Six requests run past the budget; the
-    /// breaker stays closed, the health loop stays healthy, nothing fails over.
     @RuntimeActor
     static func slowServing(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let responseTimeout: TimeInterval = 0.4, checkInterval: TimeInterval = 1
         let slow = DelayedHTTPUpstream { line in
-            if line.hasPrefix("HEAD ") { return .milliseconds(Int64(responseTimeout * 500)) }
-            if line.contains("/fast") { return .zero }
-            return .milliseconds(Int64(responseTimeout * 1500))
+            if line.hasPrefix("HEAD ") { return .after(.milliseconds(Int64(responseTimeout * 500))) }
+            if line.contains("/fast") { return .after(.zero) }
+            return .after(.milliseconds(Int64(responseTimeout * 1500)))
         }
         try await slow.start(group: group)
 
-        var config = baseConfig()
+        var config = strictConfigWithBreakerBurstWindowOff()
         config.upstreamResponseTimeoutSeconds = responseTimeout
         config.healthCheckIntervalSeconds = checkInterval
         config.healthCheckURL = "http://slow-serving.test/"
         config.upstreams = [UpstreamProxy(name: "slow", host: "127.0.0.1", port: slow.port, priority: 0)]
         let threshold = config.circuitFailureThreshold
         let endpoint = "127.0.0.1:\(slow.port)"
-        // The reachability probe answers yes, so the health loop alone owns the verdict.
         let orchestrator = orchestrator(config: config, verbose: verbose, probe: { targets in
             UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) })
         })

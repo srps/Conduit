@@ -7,10 +7,6 @@ import NIOPosix
 import XCTest
 @testable import ProxyKernel
 
-/// #197: an upstream that connected and then said nothing within
-/// `upstreamResponseTimeout` is inconclusive, so it never feeds the breaker.
-/// A refused or missed connect still does. Strikes are read from the
-/// breaker's count: its burst window keeps it from opening within a test.
 final class UpstreamFailureClassTests: XCTestCase {
     private final class Events: @unchecked Sendable {
         private let box = NIOLockedValueBox<[RuntimeEvent]>([])
