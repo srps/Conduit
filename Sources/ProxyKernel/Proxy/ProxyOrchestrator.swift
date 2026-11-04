@@ -1103,6 +1103,9 @@ package final class ProxyOrchestrator {
     private var errorRateAlarmAt: Date?
     /// One warning per credential outage.
     private var credentialOutageReported = false
+    /// Silences from upstreams that connected and never answered, from health checks and probes alike: both measure the same
+    /// upstreams (#197). Reset where routing or the lifecycle moves on.
+    private var silentUpstreams = UnansweredStreak()
     /// The last network path acted on, and the count of updates since that
     /// changed nothing material (#101). One path and one counter.
     private var networkPathTracker = NetworkPathTracker()
@@ -1452,6 +1455,7 @@ package final class ProxyOrchestrator {
         guard (state != .starting && state != .running) || stopsInFlight > 0 else { return }
         // Admitted and published as starting in one turn, so a stop admitted after it always publishes over it.
         let epoch = proxyLifecycle.admit(running: true)
+        silentUpstreams.reset()
         emitEvent(.lifecycle, "proxy.starting")
         mutateSnapshot {
             $0.runtimeStatus.state = .starting
@@ -1574,6 +1578,7 @@ package final class ProxyOrchestrator {
         defer { stopsInFlight -= 1 }
         emitEvent(.lifecycle, "proxy.stopping")
         healthChecker.stop()
+        silentUpstreams.reset()
         stopDirectModeReprobeTimer()
         // Superseded before its teardown ran: the newer operation owns the listeners and the snapshot, so this stop has nothing left to publish.
         guard await runTeardown(epoch: epoch, scope: scope) else { return }
@@ -2112,6 +2117,8 @@ package final class ProxyOrchestrator {
         // the upstream rotated DNS while we were asleep). Tier B will catch
         // any utun changes independently; this probe covers the upstream side.
         await refreshPACRouting(force: true)
+        // What was heard before the sleep measured a network that may be gone.
+        silentUpstreams.reset()
         // nil: a VPN report during the probe owns routing now.
         guard let summary = await refreshConnectivityMode(), isProxyActive else { return }
         let cause = snapshot.directModeCause
@@ -2243,6 +2250,7 @@ package final class ProxyOrchestrator {
         defer { routingTransitions.end() }
         routingGeneration &+= 1
         let generation = routingGeneration
+        silentUpstreams.reset()
 
         vpnConnectedForDNSBox.withLockedValue { $0 = state == .connected }
         mutateSnapshot {
@@ -2827,6 +2835,7 @@ package final class ProxyOrchestrator {
         }
 
         if result.healthy {
+            silentUpstreams.recordAnswer()
             recoveryGate.reset()
             credentialOutageReported = false
             mutateSnapshot {
@@ -2839,6 +2848,23 @@ package final class ProxyOrchestrator {
             }
             refreshUpstreamStatuses()
             return
+        }
+
+        switch result.failure {
+        case .answerTimedOut(let detail):
+            let verdict = silentUpstreams.recordUnanswered()
+            let event = RuntimeEvent(
+                kind: .health, event: "health.inconclusive",
+                detail: "reason=answer_timed_out consecutive=\(verdict.consecutive) decisive=\(verdict.isDecisive) summary=\(detail)"
+            )
+            eventLog.append(event)
+            logStore.log(.notice, "Health check inconclusive: \(event.detail ?? "")", category: .network)
+            guard verdict.isDecisive else { return }
+        case .configurationRefused:
+            // The check did not run, so it says nothing about the upstreams.
+            break
+        default:
+            silentUpstreams.recordFailure()
         }
 
         mutateSnapshot {
@@ -3035,6 +3061,29 @@ package final class ProxyOrchestrator {
             // Same network, fresher evidence already committed: answer with it.
             reportSupersededProbe(by: "newer_probe", probedUnder: probedUnder, summary: summary)
             return newer.summary
+        }
+        if summary.isInconclusive {
+            let verdict = silentUpstreams.recordUnanswered()
+            // A held verdict keeps proxy routing, and keeps a DIRECT cause DIRECT under the cause its row gives a lost upstream.
+            let kept = snapshot.directModeCause.isDirect ? deriveDirectModeCause(probeSummary: summary) : snapshot.directModeCause
+            let event = RuntimeEvent(
+                kind: .health, event: "connectivity.probe_inconclusive",
+                detail: "silent=\(summary.silentEndpoints.joined(separator: ",")) consecutive=\(verdict.consecutive) "
+                    + "decisive=\(verdict.isDecisive) vpn=\(snapshot.vpnState.eventLabel)"
+                    + (verdict.isDecisive ? "" : " kept=\(kept.rawValue)")
+            )
+            eventLog.append(event)
+            logStore.log(.notice, "Connectivity probe inconclusive: \(event.detail ?? "")", category: .network)
+            if !verdict.isDecisive {
+                committedProbe = (serial, summary)
+                if snapshot.directModeCause.isDirect { setDirectMode(kept) }
+                refreshUpstreamStatuses()
+                return summary
+            }
+        } else if summary.hasReachableUpstream {
+            silentUpstreams.recordAnswer()
+        } else {
+            silentUpstreams.recordFailure()
         }
         committedProbe = (serial, summary)
         setDirectMode(deriveDirectModeCause(probeSummary: summary))
