@@ -7,9 +7,20 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
+### Added
+
 - The status menu, the Help menu and General settings link to the project on
   GitHub, so people who find Conduit useful can star it or report an issue.
   They are plain links; nothing is counted or remembered.
+
+### Fixed
+
+- With the proxy port set to 0 ("choose a port"), the system proxy, the shell
+  profiles and the launchd `HTTP(S)_PROXY` variables now name the port the
+  listener actually bound, instead of port 0 (#251). Start, config reapply,
+  drift repair, retries and network-location reconciliation all take the
+  advertised endpoint from the live bindings, and `config.client_endpoint_resolved`
+  records the port chosen. The saved port stays 0, and fixed ports are unchanged.
 
 ## 0.6.1
 

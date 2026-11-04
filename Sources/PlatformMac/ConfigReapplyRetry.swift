@@ -226,7 +226,7 @@ package enum SystemProxyReapplyRetry {
         work: PlatformWork,
         config: ProxyConfig,
         mode: SystemProxyMode,
-        localPACURL: String?,
+        endpoints: ClientEndpoints,
         token: LifecycleLane.Token,
         fence: PlatformRequestFence,
         events: RuntimeEventLog,
@@ -244,7 +244,7 @@ package enum SystemProxyReapplyRetry {
                 }
                 let retry: Duration?
                 do {
-                    retry = try manager.reconcileLocation(config: config, mode: mode, localPACURL: localPACURL, apply: true)
+                    retry = try manager.reconcileLocation(config: config, mode: mode, endpoints: endpoints, apply: true)
                 } catch {
                     let event = RuntimeEvent(kind: .config, event: "platform.location_failed",
                                              detail: "operation=reconcile surface=systemProxy reason=\(error.localizedDescription)")
@@ -252,7 +252,7 @@ package enum SystemProxyReapplyRetry {
                     logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
                     return (.failed(reason: error.localizedDescription), nil)
                 }
-                if manager.isApplied(config: config, mode: mode, localPACURL: localPACURL) { return (.applied, nil) }
+                if manager.isApplied(config: config, mode: mode, endpoints: endpoints) { return (.applied, nil) }
                 return (.failed(reason: retry == nil ? "not_applied" : "repair_withheld"), retry)
             }
         }

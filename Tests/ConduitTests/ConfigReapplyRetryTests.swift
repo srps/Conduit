@@ -195,7 +195,7 @@ final class ConfigReapplyRetryTests: XCTestCase {
 
         let fence = PlatformRequestFence(off)
         let (outcome, retryAfter) = await SystemProxyReapplyRetry.run(
-            manager: manager, work: work, config: config, mode: .manual, localPACURL: nil,
+            manager: manager, work: work, config: config, mode: .manual, endpoints: .configured(config),
             token: lane.observationToken, fence: fence, events: eventLog, logger: DiscardingLogSink())
         XCTAssertEqual(outcome, .notWanted(reason: "switch_changed"))
         XCTAssertNil(retryAfter)
@@ -204,7 +204,7 @@ final class ConfigReapplyRetryTests: XCTestCase {
         var pac = on
         pac.systemProxyMode = .pac
         let (moved, _) = await SystemProxyReapplyRetry.run(
-            manager: manager, work: work, config: config, mode: .manual, localPACURL: nil,
+            manager: manager, work: work, config: config, mode: .manual, endpoints: .configured(config),
             token: lane.observationToken, fence: PlatformRequestFence(pac), events: eventLog, logger: DiscardingLogSink())
         XCTAssertEqual(moved, .notWanted(reason: "switch_changed"), "the mode moved since")
         XCTAssertTrue(machine.privilege.commands.isEmpty, "nothing written")

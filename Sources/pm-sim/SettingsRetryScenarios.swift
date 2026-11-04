@@ -57,7 +57,7 @@ enum SettingsRetryScenarios {
             do {
                 switch action {
                 case .applySystemProxy:
-                    try manager.apply(config: config, mode: platform.systemProxyMode, logger: nil)
+                    try manager.apply(config: config, mode: platform.systemProxyMode, logger: nil, endpoints: .configured(config))
                 case .clearSystemProxy:
                     // As `AppState.perform`: a partial teardown keeps its
                     // journal records instead of throwing, so the journal
@@ -115,7 +115,7 @@ enum SettingsRetryScenarios {
         let on = PlatformIntegrationConfig(manageSystemProxy: true)
         var off = on
         off.manageSystemProxy = false
-        try manager.apply(config: config, mode: on.systemProxyMode, logger: nil)
+        try manager.apply(config: config, mode: on.systemProxyMode, logger: nil, endpoints: .configured(config))
         let host = Host(manager: manager)
         let reconciler = RuntimeReconciler(config: config, platformConfig: on, host: host)
         var notes: [String] = []

@@ -119,8 +119,8 @@ package final class EnvironmentDriftRepair: @unchecked Sendable {
     /// One pass. Returns when to retry a repair the budget withheld; `pass`
     /// says more.
     @discardableResult
-    package func run(config: ProxyConfig, generation: UInt64, trigger: Trigger, isCurrent: () -> Bool) -> Duration? {
-        pass(config: config, generation: generation, trigger: trigger, isCurrent: isCurrent).retry
+    package func run(config: ProxyConfig, endpoints: ClientEndpoints, generation: UInt64, trigger: Trigger, isCurrent: () -> Bool) -> Duration? {
+        pass(config: config, endpoints: endpoints, generation: generation, trigger: trigger, isCurrent: isCurrent).retry
     }
 
     /// One pass, and its verdict. `generation` is the manager's, read by the
@@ -128,7 +128,7 @@ package final class EnvironmentDriftRepair: @unchecked Sendable {
     /// apply that lands first supersedes it. `isCurrent` is the host's
     /// lifecycle check, evaluated under the manager's lock immediately
     /// before any write.
-    package func pass(config: ProxyConfig, generation: UInt64, trigger: Trigger, isCurrent: () -> Bool) -> PassOutcome {
+    package func pass(config: ProxyConfig, endpoints: ClientEndpoints, generation: UInt64, trigger: Trigger, isCurrent: () -> Bool) -> PassOutcome {
         let backingOff: Bool = lock.withLock {
             if episodeGeneration != generation {
                 episodeGeneration = generation
@@ -140,7 +140,7 @@ package final class EnvironmentDriftRepair: @unchecked Sendable {
             return lastAttemptFailed && trigger == .observed
         }
         guard !backingOff else { return .unsettled("backing_off") }
-        let drift = manager.inspect(config: config)
+        let drift = manager.inspect(config: config, endpoints: endpoints)
         guard drift.hasDrift else {
             if drift.isClean {
                 lock.withLock { reportedFailure = nil; withheldReported = false; lastAttemptFailed = false }
@@ -171,7 +171,7 @@ package final class EnvironmentDriftRepair: @unchecked Sendable {
 
         let result: EnvironmentManager.ApplyResult?
         do {
-            result = try manager.repair(config: config, ifGeneration: generation, isCurrent: isCurrent, logger: logger)
+            result = try manager.repair(config: config, endpoints: endpoints, ifGeneration: generation, isCurrent: isCurrent, logger: logger)
         } catch {
             // It may have written a profile before it threw: an attempt.
             chargeAttempt(failed: true)

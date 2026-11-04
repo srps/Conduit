@@ -662,6 +662,28 @@ package final class RuntimeHost {
         return status
     }
 
+    /// Where clients must reach this runtime (#251): every writer of the system proxy and the shell environment, at
+    /// Start, config reapply, repair, retry and location reconciliation, takes its endpoint from here and nowhere else.
+    /// Read in the turn the caller queues its write, from the snapshot `mutateSnapshot` updates synchronously, so a
+    /// listener that rebound in this turn is the one advertised. `config` keeps its intent: port 0 stays "choose a port".
+    private func clientEndpoints(for config: ProxyConfig) -> ClientEndpoints {
+        ClientEndpoints.applied(config: config, bindings: orchestrator.snapshot.bindings)
+    }
+
+    /// `clientEndpoints(for:)`, at the two decisions that newly advertise a listener: Start and a config reapply.
+    /// When the configured port named no port (0), the event records which one the surfaces are given instead.
+    private func advertisedEndpoints(for config: ProxyConfig, source: String, advertised: Bool) -> ClientEndpoints {
+        let endpoints = clientEndpoints(for: config)
+        if advertised, endpoints.proxyPort != config.localPort {
+            // Event first: what clients are pointed at is a config decision.
+            let event = RuntimeEvent(kind: .config, event: "config.client_endpoint_resolved",
+                                     detail: "source=\(source) configured_port=\(config.localPort) port=\(endpoints.proxyPort)")
+            orchestrator.eventLog.append(event)
+            logger.log(.info, "Advertising the bound proxy port \(endpoints.proxyPort) for configured port \(config.localPort). \(event.event) \(event.detail ?? "")", category: .system)
+        }
+        return endpoints
+    }
+
     /// The proxy module's surfaces, once its listener is up: the system proxy, the environment, and the split-DNS entry files with a sweep
     /// of stranded intercept files. One `platformWork` block under the proxy's token, so a proxy Stop issued while it is out queues its
     /// clears behind it. The DNS module captures the prior DNS servers it restores itself (`startDNSModule`).
@@ -671,7 +693,8 @@ package final class RuntimeHost {
         let environment = environmentManager
         let resolvers = dnsManager
         let logger = self.logger
-        let localPACURL = orchestrator.snapshot.bindings.localPACURL
+        let endpoints = advertisedEndpoints(for: config, source: "start",
+                                            advertised: platform.manageSystemProxy || platform.manageEnvironmentVariables)
         let vpnConnected = splitDNSGate.entriesWanted
         let gateReportSeen = splitDNSGateOrder.applied
         let interceptReadyAtStart = orchestrator.snapshot.bindings.dnsInterceptReady
@@ -682,7 +705,7 @@ package final class RuntimeHost {
                 systemProxy.serialized {
                     guard !token.isSuperseded else { return }
                     do {
-                        try systemProxy.apply(config: config, mode: platform.systemProxyMode, logger: logger, localPACURL: localPACURL)
+                        try systemProxy.apply(config: config, mode: platform.systemProxyMode, logger: logger, endpoints: endpoints)
                     } catch {
                         logger.log(.warning, "Could not apply system proxy settings (non-fatal): \(error.localizedDescription)", category: .system)
                     }
@@ -692,7 +715,7 @@ package final class RuntimeHost {
                 environment.serialized {
                     guard !token.isSuperseded else { return }
                     do {
-                        try environment.apply(config: config, logger: logger)
+                        try environment.apply(config: config, endpoints: endpoints, logger: logger)
                     } catch {
                         logger.log(.warning, "Could not apply environment variables (non-fatal): \(error.localizedDescription)", category: .system)
                     }
@@ -1081,14 +1104,14 @@ package final class RuntimeHost {
             let dnsToken = lanes.dns.observationToken
             let proxy = systemConduit, dns = systemDNSManager
             let config = heldRuntimeConfig, platform = platformConfig
-            let pacURL = orchestrator.snapshot.bindings.localPACURL
+            let endpoints = clientEndpoints(for: config)
             let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
             let events = orchestrator.eventLog, logger = logger
             let proxyRetry = await platformWork.run { () -> Duration? in
                 var retry: Duration?
                 do {
                     if !proxyToken.isSuperseded {
-                        retry = try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, localPACURL: pacURL,
+                        retry = try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, endpoints: endpoints,
                                                             apply: platform.manageSystemProxy && state.proxyIsUp)
                     }
                 } catch {
@@ -1315,12 +1338,12 @@ package final class RuntimeHost {
             guard platformConfig.manageSystemProxy, runtimeState().proxyIsUp else { return }
             let token = lanes.proxy.observationToken
             let proxy = systemConduit, config = heldRuntimeConfig, platform = platformConfig
-            let pacURL = orchestrator.snapshot.bindings.localPACURL
+            let endpoints = clientEndpoints(for: config)
             let events = orchestrator.eventLog, logger = logger
             let retry = await platformWork.run { () -> Duration? in
                 guard !token.isSuperseded else { return nil }
                 do {
-                    return try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, localPACURL: pacURL, apply: true)
+                    return try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, endpoints: endpoints, apply: true)
                 } catch {
                     let event = RuntimeEvent(kind: .config, event: "platform.location_failed",
                                              detail: "operation=reconcile surface=systemProxy reason=\(error.localizedDescription)")
@@ -1362,9 +1385,10 @@ package final class RuntimeHost {
             guard platformConfig.manageEnvironmentVariables, runtimeState().proxyIsUp else { return }
             let token = lanes.proxy.observationToken
             let repair = environmentDriftRepair, config = heldRuntimeConfig
+            let endpoints = clientEndpoints(for: config)
             let generation = environmentManager.generation, passTrigger = trigger
             let retry = await platformWork.run {
-                repair.run(config: config, generation: generation, trigger: passTrigger, isCurrent: { !token.isSuperseded })
+                repair.run(config: config, endpoints: endpoints, generation: generation, trigger: passTrigger, isCurrent: { !token.isSuperseded })
             }
             if let retry { scheduleEnvironmentRepairRetry(after: retry) }
             guard let next = environmentDriftPending else { break }
@@ -1410,15 +1434,16 @@ package final class RuntimeHost {
             guard platform.manageSystemProxy else { return .notWanted(reason: "switch_off") }
             let (outcome, retry) = await SystemProxyReapplyRetry.run(
                 manager: systemConduit, work: platformWork, config: config, mode: platform.systemProxyMode,
-                localPACURL: orchestrator.snapshot.bindings.localPACURL, token: token,
+                endpoints: clientEndpoints(for: config), token: token,
                 fence: reconciler.platformRequest, events: orchestrator.eventLog, logger: logger)
             if let retry { scheduleProxyRepairRetry(after: retry) }
             return outcome
         case .environment:
             guard platform.manageEnvironmentVariables else { return .notWanted(reason: "switch_off") }
             let repair = environmentDriftRepair, generation = environmentManager.generation
+            let endpoints = clientEndpoints(for: config)
             let pass = await platformWork.run {
-                repair.pass(config: config, generation: generation, trigger: .retry, isCurrent: { !token.isSuperseded })
+                repair.pass(config: config, endpoints: endpoints, generation: generation, trigger: .retry, isCurrent: { !token.isSuperseded })
             }
             if let retry = pass.retry { scheduleEnvironmentRepairRetry(after: retry) }
             return pass.settled ? .applied : .failed(reason: pass.reason ?? "unsettled")
@@ -1781,20 +1806,21 @@ extension RuntimeHost: RuntimeReconcilerHost {
         // Off the owner, and a failure, partial environment applies
         // included, is reported and retried.
         let systemProxy = systemConduit, environment = environmentManager, log = logger
-        let mode = platform.systemProxyMode, pacURL = orchestrator.snapshot.bindings.localPACURL
+        let mode = platform.systemProxyMode
+        let endpoints = advertisedEndpoints(for: new, source: "config_change", advertised: true)
         let token = lanes.proxy.observationToken
         let failures = await platformWork.run { () -> [(ConfigReapplyRetry.Surface, String)] in
             var failures: [(ConfigReapplyRetry.Surface, String)] = []
             if reapplySystemProxy {
                 do {
-                    try systemProxy.apply(config: new, mode: mode, logger: log, localPACURL: pacURL)
+                    try systemProxy.apply(config: new, mode: mode, logger: log, endpoints: endpoints)
                 } catch {
                     failures.append((.systemProxy, error.localizedDescription))
                 }
             }
             if reapplyEnvironment {
                 do {
-                    if let shortfall = try environment.apply(config: new, logger: log).shortfall {
+                    if let shortfall = try environment.apply(config: new, endpoints: endpoints, logger: log).shortfall {
                         failures.append((.environment, shortfall))
                     }
                 } catch {
@@ -1990,11 +2016,11 @@ extension RuntimeHost: RuntimeReconcilerHost {
     private func applySystemProxySwitch(config: ProxyConfig, platform: PlatformIntegrationConfig,
                                         cause: ConfigReapplyRetry.Cause) async -> Bool {
         let systemProxy = systemConduit, logger = self.logger
-        let mode = platform.systemProxyMode, localPACURL = orchestrator.snapshot.bindings.localPACURL
+        let mode = platform.systemProxyMode, endpoints = clientEndpoints(for: config)
         let token = lanes.proxy.observationToken
         let failure = await platformWork.run { () -> String? in
             do {
-                try systemProxy.apply(config: config, mode: mode, logger: logger, localPACURL: localPACURL)
+                try systemProxy.apply(config: config, mode: mode, logger: logger, endpoints: endpoints)
                 return nil
             } catch {
                 return error.localizedDescription
@@ -2008,11 +2034,11 @@ extension RuntimeHost: RuntimeReconcilerHost {
     /// The environment switch turned on: a partial apply lands the
     /// flag, and is reported and retried like a failure (#194).
     private func applyEnvironmentSwitch(config: ProxyConfig) async -> Bool {
-        let environment = environmentManager, logger = self.logger
+        let environment = environmentManager, logger = self.logger, endpoints = clientEndpoints(for: config)
         let token = lanes.proxy.observationToken
         let (landed, failure) = await platformWork.run { () -> (Bool, String?) in
             do {
-                return (true, try environment.apply(config: config, logger: logger).shortfall)
+                return (true, try environment.apply(config: config, endpoints: endpoints, logger: logger).shortfall)
             } catch {
                 return (false, "apply_error error=\(error.localizedDescription)")
             }
@@ -2032,12 +2058,5 @@ private func attemptFlagStep(_ failure: String, logger: any LogSink, _ body: () 
     } catch {
         logger.log(.warning, "\(failure): \(error.localizedDescription)", category: .system)
         return false
-    }
-}
-
-private extension ProxyOrchestratorBindings {
-    var localPACURL: String? {
-        guard let host = localPACHost, let port = localPACPort else { return nil }
-        return "http://\(host):\(port)/proxy.pac"
     }
 }

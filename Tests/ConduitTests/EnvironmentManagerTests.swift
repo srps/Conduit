@@ -51,7 +51,7 @@ final class EnvironmentManagerTests: XCTestCase {
         try corrupt.write(to: file)
         launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
         let manager = makeManager()
-        XCTAssertThrowsError(try manager.apply(config: makeConfig(), logger: nil))
+        XCTAssertThrowsError(try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil))
         XCTAssertEqual(launchctl.environment, ["HTTP_PROXY": "http://corp.example:8080"])
         XCTAssertTrue(manager.targetFiles.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
         XCTAssertEqual(try Data(contentsOf: file), corrupt)
@@ -63,7 +63,7 @@ final class EnvironmentManagerTests: XCTestCase {
         var config = makeConfig()
         config.localHost = "localhost"
         let manager = makeManager()
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://127.0.0.1:3128")
         XCTAssertEqual(launchctl.environment["HTTPS_PROXY"], "http://127.0.0.1:3128")
         try manager.clear(logger: nil)
@@ -76,7 +76,7 @@ final class EnvironmentManagerTests: XCTestCase {
         launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
 
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://127.0.0.1:3128")
 
         try manager.clear(logger: nil)
@@ -96,7 +96,7 @@ final class EnvironmentManagerTests: XCTestCase {
         launchctl.failingGetenv = ["HTTP_PROXY"]
 
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://corp.example:8080", "not overwritten")
         XCTAssertEqual(launchctl.environment["HTTPS_PROXY"], "http://127.0.0.1:3128", "the readable ones are")
         XCTAssertEqual(
@@ -116,11 +116,11 @@ final class EnvironmentManagerTests: XCTestCase {
         launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
         launchctl.failingGetenv = ["HTTP_PROXY"]
         let manager = makeManager()
-        let first = try manager.apply(config: makeConfig(), logger: nil)
+        let first = try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         XCTAssertEqual(first.launchd.unreadable, ["HTTP_PROXY"])
 
         launchctl.failingGetenv = []
-        let second = try manager.apply(config: makeConfig(), logger: nil)
+        let second = try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         XCTAssertTrue(second.launchd.written.contains("HTTP_PROXY"))
         XCTAssertEqual(journal.prior(surface: .launchdEnvironment, scope: "HTTP_PROXY"),
                        .wasPresent(["value": "http://corp.example:8080"]), "the real prior replaced the marker")
@@ -144,7 +144,7 @@ final class EnvironmentManagerTests: XCTestCase {
         let manager = EnvironmentManager(journal: PlatformStateJournal(fileURL: readOnly.appendingPathComponent("platform-state.json")),
                                          homeDirectory: home, commandRunner: launchctl.run, eventSink: recorder.sink)
 
-        let result = try manager.apply(config: makeConfig(), logger: nil)
+        let result = try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
 
         XCTAssertEqual(Set(result.launchd.withheld), ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"])
         XCTAssertEqual(launchctl.environment, ["NO_PROXY": "user.example"], "nothing written without a record")
@@ -169,7 +169,7 @@ final class EnvironmentManagerTests: XCTestCase {
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: readOnly.path) }
         let manager = EnvironmentManager(journal: PlatformStateJournal(fileURL: readOnly.appendingPathComponent("platform-state.json")),
                                          homeDirectory: home, commandRunner: launchctl.run)
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
 
         try manager.clear(logger: nil)
 
@@ -181,7 +181,7 @@ final class EnvironmentManagerTests: XCTestCase {
     func testAHungInspectionReadDoesNotHoldUpAClear() throws {
         let manager = makeManager()
         let config = makeConfig()
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         let reached = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
         let held = NIOLockedValueBox(true)
         let run = launchctl.run
@@ -204,7 +204,7 @@ final class EnvironmentManagerTests: XCTestCase {
             }
         }
         DispatchQueue.global().async {
-            _ = blocking.inspect(config: config)
+            _ = blocking.inspect(config: config, endpoints: .configured(config))
             inspected.signal()
         }
         XCTAssertEqual(reached.wait(timeout: .now() + 5), .success)
@@ -233,7 +233,7 @@ final class EnvironmentManagerTests: XCTestCase {
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: readOnly.path) }
         let manager = EnvironmentManager(journal: PlatformStateJournal(fileURL: readOnly.appendingPathComponent("platform-state.json")),
                                          homeDirectory: home, commandRunner: launchctl.run)
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
 
         launchctl.failingGetenv = ["HTTP_PROXY"]
         try manager.clear(logger: nil)
@@ -276,7 +276,7 @@ final class EnvironmentManagerTests: XCTestCase {
     /// ours, but a value changed since is not.
     func testTeardownAfterALostJournalRemovesOnlyWhatIsStillOurs() throws {
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         journal.forgetAll(surface: .launchdEnvironment)
         launchctl.environment["no_proxy"] = "user.example"
 
@@ -292,7 +292,7 @@ final class EnvironmentManagerTests: XCTestCase {
         let list = config.noProxyHosts.joined(separator: ",")
         launchctl.environment = ["NO_PROXY": list, "no_proxy": list]
         let manager = makeManager()
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
 
         try manager.clear(logger: nil)
 
@@ -301,7 +301,7 @@ final class EnvironmentManagerTests: XCTestCase {
 
     func testTeardownLeavesAnUnrecordedForeignValueAloneBesideRecords() throws {
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         journal.forgetAll(surface: .launchdEnvironment)
         journal.recordPrior(surface: .launchdEnvironment, scope: "HTTP_PROXY", value: nil)
         launchctl.environment["NO_PROXY"] = "user.example"
@@ -319,7 +319,7 @@ final class EnvironmentManagerTests: XCTestCase {
     func testValuesThatAreAlreadyOursAreRecordedAsResidue() throws {
         launchctl.environment["HTTP_PROXY"] = makeConfig().localProxyURL
         launchctl.environment["NO_PROXY"] = makeConfig().noProxyHosts.joined(separator: ",")
-        let result = try makeManager().apply(config: makeConfig(), logger: nil)
+        let result = try makeManager().apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         XCTAssertFalse(result.launchd.written.contains("HTTP_PROXY"))
         XCTAssertFalse(result.launchd.written.contains("NO_PROXY"))
         XCTAssertEqual(journal.prior(surface: .launchdEnvironment, scope: "NO_PROXY"), .wasAbsent)
@@ -334,7 +334,7 @@ final class EnvironmentManagerTests: XCTestCase {
     /// a dead proxy.
     func testTeardownUnsetsVariablesThatDidNotExistBefore() throws {
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         try manager.clear(logger: nil)
 
         XCTAssertNil(launchctl.environment["HTTP_PROXY"])
@@ -347,8 +347,8 @@ final class EnvironmentManagerTests: XCTestCase {
         launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
 
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         try manager.clear(logger: nil)
 
         XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://corp.example:8080")
@@ -362,7 +362,7 @@ final class EnvironmentManagerTests: XCTestCase {
         launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
 
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         try manager.clear(logger: nil)
         XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://corp.example:8080")
 
@@ -382,7 +382,7 @@ final class EnvironmentManagerTests: XCTestCase {
         launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
 
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
 
         launchctl.failSetenv = true
         try manager.clear(logger: nil)
@@ -436,7 +436,7 @@ final class EnvironmentManagerTests: XCTestCase {
         try "export EDITOR=vim\nalias ll='ls -la'\n".write(to: zshrc, atomically: true, encoding: .utf8)
 
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
 
         let applied = try String(contentsOf: zshrc, encoding: .utf8)
         XCTAssertTrue(applied.contains("export EDITOR=vim"))
@@ -462,7 +462,7 @@ final class EnvironmentManagerTests: XCTestCase {
         let manager = makeManager()
         XCTAssertFalse(manager.hasManagedState(), "a fresh home and an empty journal hold nothing of ours")
 
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         XCTAssertTrue(manager.hasManagedState())
 
         try manager.clear(logger: nil)
@@ -474,7 +474,7 @@ final class EnvironmentManagerTests: XCTestCase {
     /// or no journal.
     func testHasManagedStateSeesAStrandedShellBlockWithoutAJournal() throws {
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         try FileManager.default.removeItem(at: home.appendingPathComponent("platform-state.json"))
 
         XCTAssertTrue(
@@ -489,7 +489,7 @@ final class EnvironmentManagerTests: XCTestCase {
     func testHasManagedStateStaysTrueAfterAFailedLaunchdRestore() throws {
         launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
 
         launchctl.failSetenv = true
         try manager.clear(logger: nil)
@@ -519,7 +519,7 @@ final class EnvironmentManagerTests: XCTestCase {
         let manager = EnvironmentManager(journal: journal, homeDirectory: home, commandRunner: launchctl.run,
                                          eventSink: recorder.sink)
 
-        let outcomes = try manager.apply(config: makeConfig(), logger: nil).profiles
+        let outcomes = try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil).profiles
 
         XCTAssertEqual(try Data(contentsOf: zshrc), bytes, "the user's file is untouched")
         XCTAssertEqual(outcomes[.zshrc], .skipped(.notUTF8))
@@ -536,7 +536,7 @@ final class EnvironmentManagerTests: XCTestCase {
         for text in ["# <<< Conduit <<<\nexport A=1\n# >>> Conduit >>>\n",
                      "export A=1\n# >>> Conduit >>>\nexport HTTP_PROXY=x\n"] {
             try text.write(to: zshrc, atomically: true, encoding: .utf8)
-            XCTAssertEqual(try manager.apply(config: makeConfig(), logger: nil).profiles[.zshrc], .skipped(.ambiguousMarkers))
+            XCTAssertEqual(try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil).profiles[.zshrc], .skipped(.ambiguousMarkers))
             XCTAssertEqual(try manager.clear(logger: nil)[.zshrc], .skipped(.ambiguousMarkers))
             XCTAssertEqual(try String(contentsOf: zshrc, encoding: .utf8), text)
         }
@@ -557,7 +557,7 @@ final class EnvironmentManagerTests: XCTestCase {
         try text.write(to: zshrc, atomically: true, encoding: .utf8)
         let manager = makeManager()
 
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         try manager.clear(logger: nil)
 
         XCTAssertEqual(try String(contentsOf: zshrc, encoding: .utf8), text)
@@ -565,15 +565,15 @@ final class EnvironmentManagerTests: XCTestCase {
 
     func testReapplyingTheSameConfigWritesNoProfile() throws {
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
-        let outcomes = try manager.apply(config: makeConfig(), logger: nil).profiles
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
+        let outcomes = try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil).profiles
         XCTAssertTrue(outcomes.values.allSatisfy { $0 == .unchanged }, "\(outcomes)")
     }
 
     func testAnOversizedProfileIsLeftAlone() throws {
         let big = Data(repeating: 0x61, count: ShellProfileBlock.maximumFileBytes + 1)
         try big.write(to: zshrc)
-        XCTAssertEqual(try makeManager().apply(config: makeConfig(), logger: nil).profiles[.zshrc], .skipped(.oversized))
+        XCTAssertEqual(try makeManager().apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil).profiles[.zshrc], .skipped(.oversized))
         XCTAssertEqual(try Data(contentsOf: zshrc).count, big.count)
     }
 
@@ -581,14 +581,14 @@ final class EnvironmentManagerTests: XCTestCase {
 
     func testInspectionFindsNothingRightAfterApply() throws {
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
-        XCTAssertTrue(manager.inspect(config: makeConfig()).isClean)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
+        XCTAssertTrue(manager.inspect(config: makeConfig(), endpoints: .configured(makeConfig())).isClean)
     }
 
     /// The wipe that motivated #175: blocks stripped, variables unset.
     func testInspectionNamesEveryDriftedSurface() throws {
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         try "export A=1\n".write(to: zshrc, atomically: true, encoding: .utf8)
         try FileManager.default.removeItem(at: home.appendingPathComponent(".zprofile"))
         launchctl.environment["HTTP_PROXY"] = nil
@@ -596,13 +596,13 @@ final class EnvironmentManagerTests: XCTestCase {
 
         var edited = makeConfig()
         edited.noProxyHosts = ["localhost", "*.internal"]
-        let drift = manager.inspect(config: edited)
+        let drift = manager.inspect(config: edited, endpoints: .configured(edited))
         XCTAssertEqual(drift.profiles, [.zshrc: .missing, .zprofile: .missing])
         XCTAssertEqual(Set(drift.launchd), ["HTTP_PROXY", "NO_PROXY"])
 
         var changed = makeConfig()
         changed.noProxyHosts.append("new.example")
-        XCTAssertEqual(manager.inspect(config: changed).profiles[.environmentD], .stale, "a block for another config")
+        XCTAssertEqual(manager.inspect(config: changed, endpoints: .configured(changed)).profiles[.environmentD], .stale, "a block for another config")
     }
 
     /// `launchctl getenv` prints nothing for an unset name and an empty one
@@ -611,15 +611,15 @@ final class EnvironmentManagerTests: XCTestCase {
         var config = makeConfig()
         config.noProxyHosts = []
         let manager = makeManager()
-        try manager.apply(config: config, logger: nil)
-        XCTAssertTrue(manager.inspect(config: config).isClean)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
+        XCTAssertTrue(manager.inspect(config: config, endpoints: .configured(config)).isClean)
     }
 
     func testAnUnreadableVariableIsReportedNotDrifted() throws {
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         launchctl.failingGetenv = ["NO_PROXY"]
-        let drift = manager.inspect(config: makeConfig())
+        let drift = manager.inspect(config: makeConfig(), endpoints: .configured(makeConfig()))
         XCTAssertFalse(drift.hasDrift)
         XCTAssertEqual(drift.unreadableLaunchd, ["NO_PROXY"])
     }
@@ -628,11 +628,11 @@ final class EnvironmentManagerTests: XCTestCase {
     /// the generation wins: the repair from the older snapshot writes nothing.
     func testARepairOvertakenByAClearWritesNothing() throws {
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         let generation = manager.generation
         try manager.clear(logger: nil)
 
-        XCTAssertNil(try manager.repair(config: makeConfig(), ifGeneration: generation, isCurrent: { true }, logger: nil))
+        XCTAssertNil(try manager.repair(config: makeConfig(), endpoints: .configured(makeConfig()), ifGeneration: generation, isCurrent: { true }, logger: nil))
         XCTAssertNil(launchctl.environment["HTTP_PROXY"])
         XCTAssertFalse(try String(contentsOf: zshrc, encoding: .utf8).contains("Conduit"))
     }
@@ -640,7 +640,7 @@ final class EnvironmentManagerTests: XCTestCase {
     func testARepairForAStaleLifecycleWritesNothing() throws {
         let manager = makeManager()
         let generation = manager.generation
-        XCTAssertNil(try manager.repair(config: makeConfig(), ifGeneration: generation, isCurrent: { false }, logger: nil))
+        XCTAssertNil(try manager.repair(config: makeConfig(), endpoints: .configured(makeConfig()), ifGeneration: generation, isCurrent: { false }, logger: nil))
         XCTAssertTrue(launchctl.environment.isEmpty)
     }
 
@@ -650,22 +650,22 @@ final class EnvironmentManagerTests: XCTestCase {
         let recorder = recordingSink()
         let manager = EnvironmentManager(journal: journal, homeDirectory: home, commandRunner: launchctl.run,
                                          eventSink: recorder.sink)
-        try manager.apply(config: makeConfig(), logger: nil)
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         XCTAssertEqual(recorder.events().filter { $0.event == "platform.environment_file_skipped" }.count, 1)
 
         try "export A=1\n".write(to: zshrc, atomically: true, encoding: .utf8)
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         try Data([0xff]).write(to: zshrc)
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
         XCTAssertEqual(recorder.events().filter { $0.event == "platform.environment_file_skipped" }.count, 2,
                        "a new episode after the file was fine again")
     }
 
     func testRepeatedApplyDoesNotAccumulateBlocks() throws {
         let manager = makeManager()
-        try manager.apply(config: makeConfig(), logger: nil)
-        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
+        try manager.apply(config: makeConfig(), endpoints: .configured(makeConfig()), logger: nil)
 
         let contents = try String(contentsOf: home.appendingPathComponent(".zshrc"), encoding: .utf8)
         let blockCount = contents.components(separatedBy: "# >>> Conduit >>>").count - 1

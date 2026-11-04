@@ -40,35 +40,35 @@ enum EnvironmentDriftScenarios {
         }
 
         // Phase 1: applied, wiped behind Conduit's back, repaired.
-        try manager.apply(config: config, logger: nil)
+        try manager.apply(config: config, endpoints: .configured(config), logger: nil)
         try wipe()
-        repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { true })
         let repaired = count("platform.environment_drift") == 1 && count("platform.environment_repaired") == 1
             && machine.launchdEnvironment["HTTP_PROXY"] == "http://127.0.0.1:3128"
-            && manager.inspect(config: config).isClean
+            && manager.inspect(config: config, endpoints: .configured(config)).isClean
         let userTextKept = (try String(contentsOf: zshrc, encoding: .utf8)).hasPrefix("export A=1\n")
 
         // Phase 2: a program that keeps wiping it. The budget allows two
         // repairs in the window; the third is withheld once, with a retry.
         instant.withLockedValue { $0 += .seconds(60) }
         try wipe()
-        repair.run(config: config, generation: manager.generation, trigger: .observed, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .observed, isCurrent: { true })
         instant.withLockedValue { $0 += .seconds(60) }
         try wipe()
-        let retry = repair.run(config: config, generation: manager.generation, trigger: .observed, isCurrent: { true })
-        repair.run(config: config, generation: manager.generation, trigger: .observed, isCurrent: { true })
+        let retry = repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .observed, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .observed, isCurrent: { true })
         let withheld = retry != nil && count("platform.environment_repair_withheld") == 1
             && count("platform.environment_drift") == 3
             && machine.launchdEnvironment["HTTP_PROXY"] == nil
         instant.withLockedValue { $0 += .seconds(600) }
-        repair.run(config: config, generation: manager.generation, trigger: .retry, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .retry, isCurrent: { true })
         let reopened = machine.launchdEnvironment["HTTP_PROXY"] == "http://127.0.0.1:3128"
 
         // Phase 3: a profile that is not UTF-8 is left alone, reported once.
         let foreign = Data([0x65, 0xff, 0x0a])
         try foreign.write(to: zshrc)
-        repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { true })
-        repair.run(config: config, generation: manager.generation, trigger: .timer, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { true })
+        repair.run(config: config, endpoints: .configured(config), generation: manager.generation, trigger: .timer, isCurrent: { true })
         // Nothing else drifted, so no repair runs: the pass itself reports
         // the profile it cannot edit, once.
         let unsafeLeftAlone = (try Data(contentsOf: zshrc)) == foreign
@@ -81,7 +81,7 @@ enum EnvironmentDriftScenarios {
         repair.reset()
         let generation = manager.generation
         try manager.clear(logger: nil)
-        let superseded = try manager.repair(config: config, ifGeneration: generation, isCurrent: { true }, logger: nil) == nil
+        let superseded = try manager.repair(config: config, endpoints: .configured(config), ifGeneration: generation, isCurrent: { true }, logger: nil) == nil
             && machine.launchdEnvironment["HTTP_PROXY"] == nil
             && !(try String(contentsOf: zshrc, encoding: .utf8)).contains("Conduit")
 
@@ -99,7 +99,7 @@ enum EnvironmentDriftScenarios {
         for (name, value) in theirs { _ = try other.run("/bin/launchctl", ["setenv", name, value]) }
         let withheldManager = EnvironmentManager(journal: PlatformStateJournal(fileURL: lockedState.appendingPathComponent("platform-state.json")),
                                                  homeDirectory: home, commandRunner: other.run)
-        let withheldApply = try withheldManager.apply(config: config, logger: nil)
+        let withheldApply = try withheldManager.apply(config: config, endpoints: .configured(config), logger: nil)
         try withheldManager.clear(logger: nil)
         let foreignKept = withheldApply.launchd.written.isEmpty && other.launchdEnvironment == theirs
 

@@ -62,7 +62,7 @@ final class SystemProxyManagerTests: XCTestCase {
             commandRunner: runner.run
         )
 
-        try manager.apply(config: config, mode: .pac, logger: nil)
+        try manager.apply(config: config, mode: .pac, logger: nil, endpoints: .configured(config))
 
         let script = try XCTUnwrap(runner.shellScripts.last)
         let webOff = try XCTUnwrap(script.range(of: "-setwebproxystate 'Wi-Fi' off"))
@@ -83,7 +83,7 @@ final class SystemProxyManagerTests: XCTestCase {
         let privilegeClient = RecordingPrivilegeClient()
         let manager = SystemProxyManager(privilegeClient: privilegeClient, journal: makeJournal(), commandRunner: runner.run)
 
-        try manager.apply(config: config, mode: .pac, logger: nil)
+        try manager.apply(config: config, mode: .pac, logger: nil, endpoints: .configured(config))
 
         XCTAssertEqual(privilegeClient.commands.map(\.command), [.setAutoproxyURL, .clearSystemProxy, .setAutoproxyURL])
         XCTAssertEqual(privilegeClient.commands[0].values, ["Wi-Fi", "https://proxy.example.com/proxy.pac"])
@@ -103,14 +103,14 @@ final class SystemProxyManagerTests: XCTestCase {
         runner.secureWebProxyEnabled = false
         let manager = SystemProxyManager(journal: makeJournal(), commandRunner: runner.run)
 
-        XCTAssertTrue(manager.isApplied(config: config, mode: .pac))
+        XCTAssertTrue(manager.isApplied(config: config, mode: .pac, endpoints: .configured(config)))
 
         runner.webProxyEnabled = true
-        XCTAssertFalse(manager.isApplied(config: config, mode: .pac))
+        XCTAssertFalse(manager.isApplied(config: config, mode: .pac, endpoints: .configured(config)))
 
         runner.webProxyEnabled = false
         runner.secureWebProxyEnabled = true
-        XCTAssertFalse(manager.isApplied(config: config, mode: .pac))
+        XCTAssertFalse(manager.isApplied(config: config, mode: .pac, endpoints: .configured(config)))
     }
 
     func testIsClearedReturnsFalseWhenAutoproxyEnabled() {
@@ -142,7 +142,7 @@ final class SystemProxyManagerTests: XCTestCase {
         runner.autoProxyEnabled = true
         let manager = SystemProxyManager(journal: makeJournal(), commandRunner: runner.run)
 
-        XCTAssertFalse(manager.isApplied(config: config, mode: .pac))
+        XCTAssertFalse(manager.isApplied(config: config, mode: .pac, endpoints: .configured(config)))
     }
 }
 
@@ -169,7 +169,7 @@ extension SystemProxyManagerTests {
 
         var config = ProxyConfig.testFixture()
         config.localPACEnabled = true
-        try manager.apply(config: config, mode: .pac, logger: nil, localPACURL: "http://127.0.0.1:63145/proxy.pac")
+        try manager.apply(config: config, mode: .pac, logger: nil, endpoints: .configured(config, localPACURL: "http://127.0.0.1:63145/proxy.pac"))
         try manager.clear(logger: nil)
 
         let script = try XCTUnwrap(runner.shellScripts.last)
@@ -191,7 +191,7 @@ extension SystemProxyManagerTests {
             commandRunner: runner.run
         )
 
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         try manager.clear(logger: nil)
         let script = try XCTUnwrap(runner.shellScripts.last)
@@ -225,7 +225,7 @@ extension SystemProxyManagerTests {
         XCTAssertFalse(manager.isCleared(), "the user's own proxy is enabled")
         XCTAssertFalse(manager.hasManagedState(), "...but nothing of it is ours")
 
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
         XCTAssertTrue(manager.hasManagedState())
 
         try manager.clear(logger: nil)
@@ -270,11 +270,11 @@ extension SystemProxyManagerTests {
         var config = ProxyConfig.testFixture()
         config.localPACEnabled = true
         let ours = "http://127.0.0.1:63145/proxy.pac"
-        try manager.apply(config: config, mode: .pac, logger: nil, localPACURL: ours)
+        try manager.apply(config: config, mode: .pac, logger: nil, endpoints: .configured(config, localPACURL: ours))
 
         // The machine now reports our own setting, as it would on a reload.
         runner.autoProxyURL = ours
-        try manager.apply(config: config, mode: .pac, logger: nil, localPACURL: ours)
+        try manager.apply(config: config, mode: .pac, logger: nil, endpoints: .configured(config, localPACURL: ours))
 
         try manager.clear(logger: nil)
         let script = try XCTUnwrap(runner.shellScripts.last)
@@ -305,7 +305,7 @@ extension SystemProxyManagerTests {
             journal: journal,
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
         XCTAssertEqual(Set(journal.scopes(for: .systemProxy)), ["Wi-Fi", "Ethernet"])
 
         runner.disconnectedServices = ["Ethernet"]
@@ -333,7 +333,7 @@ extension SystemProxyManagerTests {
                 commandRunner: runner.run
             )
 
-            XCTAssertThrowsError(try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil), failing) { error in
+            XCTAssertThrowsError(try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture())), failing) { error in
                 guard case SystemProxyManagerError.priorStateUnreadable = error else {
                     return XCTFail("\(failing): unexpected \(error)")
                 }
@@ -361,7 +361,7 @@ extension SystemProxyManagerTests {
         )
 
         // Manual mode: the PAC script is empty when the fixture has no PAC URL.
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         XCTAssertEqual(Set(journal.scopes(for: .systemProxy)), ["Wi-Fi", "Ethernet"])
         XCTAssertEqual(
@@ -391,7 +391,7 @@ extension SystemProxyManagerTests {
                 return try runner.run(launchPath, arguments)
             }
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
         runner.invocations.removeAll()
 
         try manager.clear(logger: nil)
@@ -412,7 +412,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyURL = "http://corp.example.com/proxy.pac"
         let journal = makeJournal()
         let manager = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, commandRunner: runner.run)
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         runner.disabledServices = ["Ethernet"]
         runner.invocations.removeAll()
@@ -431,7 +431,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyURL = "http://corp.example.com/proxy.pac"
         let journal = makeJournal()
         let manager = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, commandRunner: runner.run)
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         runner.disconnectedServices = ["Ethernet"]
         runner.listingFailuresRemaining = 1  // the first listing (all services) fails; the connected one succeeds
@@ -454,7 +454,7 @@ extension SystemProxyManagerTests {
 
         // Stands in for a service that was present at apply and is gone by clear.
         journal.recordPrior(surface: .systemProxy, scope: "FakeVPN_utun99", value: ["autoURL": "http://old"])
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         try manager.clear(logger: nil)
 
@@ -483,7 +483,7 @@ extension SystemProxyManagerTests {
             commandRunner: runner.run
         )
 
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
         try manager.clear(logger: nil)
         let scriptsAfterFirstClear = runner.shellScripts.count
 
@@ -536,7 +536,7 @@ extension SystemProxyManagerTests {
             commandRunner: runner.run
         )
 
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
         try manager.clear(logger: nil)
 
         let script = try XCTUnwrap(runner.shellScripts.last)
@@ -565,7 +565,7 @@ extension SystemProxyManagerTests {
             journal: journal,
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
         try manager.clear(logger: nil)
 
         let script = try XCTUnwrap(runner.shellScripts.last)
@@ -637,7 +637,7 @@ extension SystemProxyManagerTests {
             commandRunner: runner.run
         )
 
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
         try manager.clear(logger: nil)
 
         let script = try XCTUnwrap(runner.shellScripts.last)
@@ -667,7 +667,7 @@ extension SystemProxyManagerTests {
             journal: makeJournal(),
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         runner.shellResult = CommandResult(exitCode: 3, standardOutput: "", standardError: "boom")
         try manager.clear(logger: nil)
@@ -690,7 +690,7 @@ extension SystemProxyManagerTests {
             journal: journal,
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         runner.shellResult = CommandResult(exitCode: 3, standardOutput: "", standardError: "boom")
         try manager.clear(logger: logger)
@@ -752,7 +752,7 @@ extension SystemProxyManagerTests {
             journal: journal,
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
         try manager.clear(logger: nil)
@@ -792,7 +792,7 @@ extension SystemProxyManagerTests {
             journal: journal,
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
         try manager.clear(logger: nil)
@@ -840,7 +840,7 @@ extension SystemProxyManagerTests {
             journal: makeJournal(),
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
         try manager.clear(logger: nil)
@@ -864,7 +864,7 @@ extension SystemProxyManagerTests {
             journal: journal,
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
         privilegeClient.atLoginwindow = true
@@ -888,7 +888,7 @@ extension SystemProxyManagerTests {
             journal: makeJournal(),
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
         try manager.clear(logger: nil)
 
         let script = try XCTUnwrap(runner.shellScripts.last)
@@ -918,7 +918,7 @@ extension SystemProxyManagerTests {
             commandRunner: runner.run
         )
 
-        try manager.apply(config: config, mode: .manual, logger: nil)
+        try manager.apply(config: config, mode: .manual, logger: nil, endpoints: .configured(config))
 
         let bypass = try XCTUnwrap(recorder.commands.last { $0.command == .setProxyBypass })
         XCTAssertEqual(bypass.values, ["Wi-Fi", "Empty"])
@@ -943,7 +943,7 @@ extension SystemProxyManagerTests {
             commandRunner: runner.run
         )
 
-        try manager.apply(config: config, mode: .manual, logger: nil)
+        try manager.apply(config: config, mode: .manual, logger: nil, endpoints: .configured(config))
 
         let script = try XCTUnwrap(runner.shellScripts.last)
         XCTAssertTrue(
@@ -967,7 +967,7 @@ extension SystemProxyManagerTests {
             journal: journal,
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
         try manager.clear(logger: nil)
 
         XCTAssertNotEqual(
@@ -992,7 +992,7 @@ extension SystemProxyManagerTests {
             journal: makeJournal(),
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
         try manager.clear(logger: nil)
         let scriptsAfterFirstClear = runner.shellScripts.count
 
@@ -1027,7 +1027,7 @@ extension SystemProxyManagerTests {
             journal: makeJournal(),
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
         try manager.clear(logger: nil)
 
         let script = try XCTUnwrap(runner.shellScripts.last)
@@ -1056,7 +1056,7 @@ extension SystemProxyManagerTests {
             journal: makeJournal(),
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
         try manager.clear(logger: nil)
@@ -1115,7 +1115,7 @@ extension SystemProxyManagerTests {
             journal: makeJournal(),
             commandRunner: runner.run
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
         try manager.clear(logger: nil)
 
         let script = try XCTUnwrap(runner.shellScripts.last)
@@ -1151,7 +1151,7 @@ extension SystemProxyManagerTests {
             commandRunner: runner.run
         )
 
-        try manager.apply(config: config, mode: .pac, logger: nil, localPACURL: "http://127.0.0.1:63145/proxy.pac")
+        try manager.apply(config: config, mode: .pac, logger: nil, endpoints: .configured(config, localPACURL: "http://127.0.0.1:63145/proxy.pac"))
 
         guard case .wasPresent(let prior) = journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
             return XCTFail("expected a recorded prior")
@@ -1183,7 +1183,7 @@ extension SystemProxyManagerTests {
             commandRunner: runner.run
         )
 
-        try manager.apply(config: config, mode: .pac, logger: nil)
+        try manager.apply(config: config, mode: .pac, logger: nil, endpoints: .configured(config))
 
         guard case .wasPresent(let prior) = journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
             return XCTFail("expected a recorded prior")
@@ -1211,7 +1211,7 @@ extension SystemProxyManagerTests {
             commandRunner: runner.run
         )
 
-        try manager.apply(config: config, mode: .manual, logger: nil)
+        try manager.apply(config: config, mode: .manual, logger: nil, endpoints: .configured(config))
 
         guard case .wasPresent(let prior) = journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
             return XCTFail("expected a recorded prior")
@@ -1239,7 +1239,7 @@ extension SystemProxyManagerTests {
             commandRunner: runner.run
         )
 
-        try manager.apply(config: config, mode: .pac, logger: nil, localPACURL: "http://127.0.0.1:63145/proxy.pac")
+        try manager.apply(config: config, mode: .pac, logger: nil, endpoints: .configured(config, localPACURL: "http://127.0.0.1:63145/proxy.pac"))
 
         guard case .wasPresent(let prior) = journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
             return XCTFail("expected a recorded prior")
@@ -1267,7 +1267,7 @@ extension SystemProxyManagerTests {
             commandRunner: runner.run
         )
 
-        try manager.apply(config: config, mode: .manual, logger: nil)
+        try manager.apply(config: config, mode: .manual, logger: nil, endpoints: .configured(config))
 
         guard case .wasPresent(let prior) = journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
             return XCTFail("expected a recorded prior")
@@ -1297,7 +1297,7 @@ extension SystemProxyManagerTests {
             commandRunner: runner.run,
             portProbe: { _ in false }
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         // The crash: our own PAC is on the machine, the records survive, and
         // nothing is serving the port.
@@ -1331,7 +1331,7 @@ extension SystemProxyManagerTests {
             commandRunner: runner.run,
             portProbe: { _ in true }
         )
-        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"
         runner.invocations.removeAll()
