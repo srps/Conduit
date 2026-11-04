@@ -1081,16 +1081,19 @@ package final class ProxyOrchestrator {
     /// snapshot). Updated in `handleVPNStateChange`.
     private let vpnConnectedForDNSBox = NIOLockedValueBox(false)
 
-    /// Phase 4: Timestamp of the most recent `.connected → .reasserting`
-    /// transition. Used to compute flap duration for the `vpn.flap.recovered`
-    /// event detail. Cleared when we leave the reasserting state (either by
-    /// recovery or by the grace window expiring into `.disconnected`).
+    /// Phase 4: Monotonic instant of the most recent `.connected → .reasserting`
+    /// transition, read from `flapClock.elapsedNow` so a wall-clock step cannot
+    /// make the duration negative (#252). Used to compute flap duration for the
+    /// `vpn.flap.recovered` event detail and the flap metrics. Cleared when we
+    /// leave the reasserting state (either by recovery or by the grace window
+    /// expiring into `.disconnected`).
     ///
     /// Phase 6 (revised): rapid-flap coalescing moved to the fuser
     /// (`vpnFlapMinVisibleSeconds` debounce). The orchestrator no longer
     /// tracks `lastFlapRecoveredAt` / `reassertingSuppressed` — sub-window
     /// flaps simply don't reach this layer.
-    private var flapStartedAt: Date?
+    private var flapStartedAt: ContinuousClock.Instant?
+    private let flapClock: VPNFlapClock
     private var directModeReprobeTimer: DispatchSourceTimer?
     /// Advanced by every stop of `directModeReprobeTimer`, a restart's included; a tick acts only under the generation it was armed with.
     private var directModeReprobeGeneration: UInt64 = 0
@@ -1310,9 +1313,11 @@ package final class ProxyOrchestrator {
         socketPaths: any SocketPathChecking = SystemSocketPaths(),
         strandedResweepDelays: [Duration] = [.seconds(2), .seconds(10)],
         strandedResweepSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
-        directReprobeInterval: @escaping @Sendable (DirectModeCause) -> TimeInterval = ProxyOrchestrator.directReprobeInterval(for:)
+        directReprobeInterval: @escaping @Sendable (DirectModeCause) -> TimeInterval = ProxyOrchestrator.directReprobeInterval(for:),
+        flapClock: VPNFlapClock = .system
     ) {
         self.reprobeInterval = directReprobeInterval
+        self.flapClock = flapClock
         self.connectivityProbe = connectivityProbe
         self.socketPaths = socketPaths
         self.strandedResweepDelays = strandedResweepDelays
@@ -2135,14 +2140,19 @@ package final class ProxyOrchestrator {
         emitEvent(.health, "dns.transports_reset", detail: "source=\(source)")
     }
 
+    /// Ends the current flap and returns its monotonic duration in seconds, or 0 when no flap start was recorded.
+    private func takeFlapDuration() -> TimeInterval {
+        defer { flapStartedAt = nil }
+        return flapStartedAt.map(flapClock.secondsSince) ?? 0
+    }
+
     private func recoverStaleReassertingAfterWake(summary: UpstreamProbeSummary) {
         let activeTunnels = snapshot.activeConnections.ordered.filter { $0.tunnel }.count
-        let recoveredAt = Date()
-        let durationSeconds = flapStartedAt.map { recoveredAt.timeIntervalSince($0) } ?? 0
+        let recoveredAt = flapClock.wallNow()
+        let durationSeconds = takeFlapDuration()
         let durationMS = Int(durationSeconds * 1_000)
 
         mutateSnapshot { $0.vpnState = .connected }
-        flapStartedAt = nil
         // A recovery like a monitor's `.connected`: the sweeps the flap held,
         // or the address-only pass, run from here, since the monitor's own
         // `.connected` will now find nothing changed.
@@ -2266,7 +2276,7 @@ package final class ProxyOrchestrator {
             // Silent grace window. Active streams stay alive — that's the whole
             // point. The kernel preserves TCP across the underlying network
             // change; our control plane just needs to not panic.
-            flapStartedAt = Date()
+            flapStartedAt = flapClock.elapsedNow()
             healthChecker.stop()
             stopDirectModeReprobeTimer()
             // Direct-mode transition without a probe. The cause derivation below
@@ -2326,10 +2336,9 @@ package final class ProxyOrchestrator {
                 // Phase 6 (revised): every .reasserting -> .connected we see
                 // here is a real (super-min-visible) flap recovery; the fuser
                 // already absorbed sub-window blips. No suppression needed.
-                let recoveredAt = Date()
-                let durationSeconds = flapStartedAt.map { recoveredAt.timeIntervalSince($0) } ?? 0
+                let recoveredAt = flapClock.wallNow()
+                let durationSeconds = takeFlapDuration()
                 let durationMS = Int(durationSeconds * 1_000)
-                flapStartedAt = nil
                 // nil: a newer VPN report owns routing and reports its own outcome.
                 guard let summary = await refreshConnectivityMode() else { return }
                 resumeConnectivityMonitoring(summary: summary)

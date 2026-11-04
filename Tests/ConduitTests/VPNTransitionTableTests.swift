@@ -4,6 +4,8 @@ import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 import XCTest
+import ConduitShared
+import ProxyControlBridge
 @testable import ProxyAuth
 @testable import ProxyKernel
 
@@ -32,6 +34,38 @@ final class VPNTransitionTableTests: XCTestCase {
     /// startup events (proxy.starting, etc.) leaking into assertions.
     @RuntimeActor private func event(named name: String, in log: RuntimeEventLog, since: Date) -> RuntimeEvent? {
         log.events.last { $0.event == name && $0.timestamp >= since }
+    }
+
+    /// The production control projection the status path uses; it refuses a negative flap duration.
+    private func projectToControl(_ snapshot: ProxyOrchestratorSnapshot) throws -> ControlRuntimeSnapshot {
+        try RuntimeSnapshotControlProjection.snapshot(
+            snapshot,
+            stamp: ControlRuntimeStamp(
+                incarnation: ControlHostIncarnation(rawValue: UUID()),
+                presentationRevision: try XCTUnwrap(ControlPresentationRevision(rawValue: 1)),
+                configRevision: try XCTUnwrap(ControlConfigRevision(rawValue: 1)),
+                lifecycleRevision: try XCTUnwrap(ControlLifecycleRevision(rawValue: 1))
+            ),
+            profileName: "Default",
+            collectionRevisions: ControlCollectionRevisions()
+        )
+    }
+
+    /// An upstream that answers every request with a Negotiate 407, which the probe counts as a reachable proxy.
+    private static func bindNegotiateChallengingUpstream() async throws -> Channel {
+        try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(StaticRawHTTPResponseHandler(
+                    response:
+                        "HTTP/1.1 407 Proxy Authentication Required\r\n" +
+                        "Proxy-Authenticate: Negotiate\r\n" +
+                        "Content-Length: 0\r\n" +
+                        "\r\n"
+                ))
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
     }
 
     @RuntimeActor private func vpnEvents(in log: RuntimeEventLog, since: Date) -> [RuntimeEvent] {
@@ -166,19 +200,7 @@ final class VPNTransitionTableTests: XCTestCase {
     }
 
     @RuntimeActor func testSystemWakeRecoversStaleReassertingWhenUpstreamIsReachable() async throws {
-        let serverChannel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
-            .childChannelInitializer { channel in
-                channel.pipeline.addHandler(StaticRawHTTPResponseHandler(
-                    response:
-                        "HTTP/1.1 407 Proxy Authentication Required\r\n" +
-                        "Proxy-Authenticate: Negotiate\r\n" +
-                        "Content-Length: 0\r\n" +
-                        "\r\n"
-                ))
-            }
-            .bind(host: "127.0.0.1", port: 0)
-            .get()
+        let serverChannel = try await Self.bindNegotiateChallengingUpstream()
         let port = try XCTUnwrap(serverChannel.localAddress?.port)
 
         var config = GenericDefaults.shared.makeConfig()
@@ -211,6 +233,90 @@ final class VPNTransitionTableTests: XCTestCase {
             try? await serverChannel.close()
             throw error
         }
+    }
+
+    // MARK: - Monotonic flap duration (#252)
+
+    /// The wall clock steps back an hour during the flap while the monotonic clock advances two seconds. The duration is the monotonic
+    /// two seconds, `lastVpnFlapAt` is the displayed wall time, and the control projection accepts the snapshot.
+    @RuntimeActor func testFlapDurationIgnoresABackwardWallClockStep() async throws {
+        let clock = SteppableFlapClock()
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.upstreams = []
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink(), flapClock: clock.flapClock)
+        try await orchestrator.startProxy()
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
+
+        await orchestrator.handleVPNStateChange(.connected)
+        await orchestrator.handleVPNStateChange(.reasserting)
+        clock.step(wall: -3_600, elapsed: .seconds(2))
+        await orchestrator.handleVPNStateChange(.connected)
+
+        let metrics = orchestrator.snapshot.runtimeStatus.metrics
+        XCTAssertEqual(metrics.vpnFlapCount, 1)
+        XCTAssertEqual(metrics.vpnFlapTotalDuration, 2, "The duration is the monotonic elapsed time, not the wall-clock difference")
+        XCTAssertEqual(metrics.lastVpnFlapAt, clock.wall, "lastVpnFlapAt stays the displayed wall-clock recovery time")
+        XCTAssertEqual(event(named: "vpn.flap.recovered", in: orchestrator.eventLog, since: .distantPast)?.detail,
+                       "duration=2000ms streamsPreserved=0")
+        let projected = try projectToControl(orchestrator.snapshot)
+        XCTAssertEqual(projected.vpnFlap.totalDurationSeconds.rawValue, 2)
+        XCTAssertEqual(projected.vpnFlap.count.rawValue, 1)
+    }
+
+    /// The after-wake recovery of a stale `.reasserting` measures the same way: a wall clock stepped back across sleep leaves the
+    /// monotonic duration, which `ContinuousClock` counts through sleep, and the projection accepts it.
+    @RuntimeActor func testWakeRecoveryFlapDurationIgnoresABackwardWallClockStep() async throws {
+        let serverChannel = try await Self.bindNegotiateChallengingUpstream()
+        let port = try XCTUnwrap(serverChannel.localAddress?.port)
+        let clock = SteppableFlapClock()
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.upstreams = [UpstreamProxy(name: "Wake Recovered", host: "127.0.0.1", port: port, priority: 0)]
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink(), flapClock: clock.flapClock)
+        // Teardown blocks run last-in first-out: the proxy stops before its upstream closes.
+        addTeardownBlock { try await serverChannel.close() }
+        addTeardownBlock { await orchestrator.stopProxy() }
+
+        try await orchestrator.startProxy()
+        await orchestrator.handleVPNStateChange(.connected)
+        await orchestrator.handleVPNStateChange(.reasserting)
+        clock.step(wall: -86_400, elapsed: .seconds(90))
+        await orchestrator.handleSystemWake()
+
+        XCTAssertEqual(orchestrator.snapshot.vpnState, .connected)
+        let metrics = orchestrator.snapshot.runtimeStatus.metrics
+        XCTAssertEqual(metrics.vpnFlapCount, 1)
+        XCTAssertEqual(metrics.vpnFlapTotalDuration, 90)
+        XCTAssertEqual(metrics.lastVpnFlapAt, clock.wall)
+        XCTAssertEqual(event(named: "vpn.flap.recovered", in: orchestrator.eventLog, since: .distantPast)?.detail,
+                       "duration=90000ms streamsPreserved=0 source=system_wake")
+        let projected = try projectToControl(orchestrator.snapshot)
+        XCTAssertEqual(projected.vpnFlap.totalDurationSeconds.rawValue, 90)
+    }
+
+    /// Successive flaps accumulate monotonic durations however the wall clock moves between and during them.
+    @RuntimeActor func testFlapDurationsAccumulateMonotonicallyAcrossWallClockSteps() async throws {
+        let clock = SteppableFlapClock()
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.upstreams = []
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink(), flapClock: clock.flapClock)
+        try await orchestrator.startProxy()
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
+
+        await orchestrator.handleVPNStateChange(.connected)
+        for (wall, elapsed) in [(-7_200.0, Duration.milliseconds(500)), (3_600, .seconds(1)), (-60, .milliseconds(250))] {
+            await orchestrator.handleVPNStateChange(.reasserting)
+            clock.step(wall: wall, elapsed: elapsed)
+            await orchestrator.handleVPNStateChange(.connected)
+            clock.step(wall: -30, elapsed: .seconds(5))
+        }
+
+        let metrics = orchestrator.snapshot.runtimeStatus.metrics
+        XCTAssertEqual(metrics.vpnFlapCount, 3)
+        XCTAssertEqual(metrics.vpnFlapTotalDuration, 1.75, accuracy: 1e-9)
+        XCTAssertEqual(try projectToControl(orchestrator.snapshot).vpnFlap.totalDurationSeconds.rawValue, 1.75, accuracy: 1e-9)
     }
 
     // MARK: - .disconnected(.userInitiated)
@@ -698,6 +804,33 @@ final class VPNTransitionTableTests: XCTestCase {
         XCTAssertFalse(fired.isEmpty)
         XCTAssertTrue(fired.allSatisfy { $0.event == "vpn.tunnels_migrated" && ($0.detail?.contains("phase=paths") ?? false) },
                       "VPN events must not fire while proxy is stopped (no listener to react): \(fired.compactMap(\.detail))")
+    }
+}
+
+/// A flap clock whose wall and monotonic readings a test steps by hand. The monotonic base is one real `ContinuousClock` reading, so
+/// every instant is a valid one; only offsets from it are chosen by the test.
+private final class SteppableFlapClock: Sendable {
+    private struct Readings {
+        var wall: Date
+        var elapsed: ContinuousClock.Instant
+    }
+
+    private let readings = NIOLockedValueBox(Readings(wall: Date(timeIntervalSince1970: 1_800_000_000), elapsed: ContinuousClock.now))
+
+    var wall: Date { readings.withLockedValue { $0.wall } }
+
+    var flapClock: VPNFlapClock {
+        VPNFlapClock(
+            wallNow: { [readings] in readings.withLockedValue { $0.wall } },
+            elapsedNow: { [readings] in readings.withLockedValue { $0.elapsed } }
+        )
+    }
+
+    func step(wall seconds: TimeInterval, elapsed: Duration) {
+        readings.withLockedValue {
+            $0.wall += seconds
+            $0.elapsed = $0.elapsed.advanced(by: elapsed)
+        }
     }
 }
 
