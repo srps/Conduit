@@ -105,11 +105,34 @@ final class UpstreamProberTests: XCTestCase {
         let elapsedSeconds = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
 
         XCTAssertFalse(summary.hasReachableUpstream)
+        XCTAssertEqual(summary.results.map(\.outcome), [.silent], "connected, never answered: inconclusive, not unreachable")
+        XCTAssertTrue(summary.isInconclusive)
+        XCTAssertEqual(summary.silentEndpoints, ["127.0.0.1:\(port)"])
         XCTAssertLessThan(
             elapsedSeconds,
             timeoutSeconds * 2,
             "Probe should be bounded by timeoutSeconds, not connectTimeout + responseTimeout"
         )
+    }
+
+    @MainActor func testClosedPortIsUnreachableNotSilent() async throws {
+        let released = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .bind(host: "127.0.0.1", port: 0).get()
+        let port = try XCTUnwrap(released.localAddress?.port)
+        try await released.close().get()
+        let prober = UpstreamProber(group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(), timeoutSeconds: 1)
+
+        let summary = await prober.summarize([UpstreamProxy(name: "Closed", host: "127.0.0.1", port: port, priority: 0)])
+
+        XCTAssertEqual(summary.results.map(\.outcome), [.unreachable])
+        XCTAssertFalse(summary.isInconclusive)
+    }
+
+    func testTheReachableInitializerMapsToAnsweredOrUnreachable() {
+        let proxy = UpstreamProxy(name: "P", host: "127.0.0.1", port: 1, priority: 0)
+        XCTAssertEqual(ProbeResult(proxy: proxy, latencyMS: 0, reachable: true).outcome, .answered)
+        XCTAssertEqual(ProbeResult(proxy: proxy, latencyMS: 0, reachable: false).outcome, .unreachable)
+        XCTAssertFalse(ProbeResult(proxy: proxy, latencyMS: 0, outcome: .silent).reachable)
     }
 
     @MainActor func testOversizedResponseDoesNotAccumulateUnbounded() async throws {
