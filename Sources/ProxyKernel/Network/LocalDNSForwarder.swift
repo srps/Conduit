@@ -47,6 +47,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
     private let preferProxyPathForDoH: @Sendable () -> Bool
+    private let localProxyPort: @Sendable () -> Int?
     private let onMetrics: (@Sendable () -> Void)?
     private let tuning: DNSForwarderTuning
     private let tcpMaximumConnections: Int
@@ -81,6 +82,8 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool = { false },
+        // The port Conduit's own proxy listener holds now, for the DoH local-proxy route. Nil with no proxy beside this forwarder.
+        localProxyPort: @escaping @Sendable () -> Int? = { nil },
         onMetrics: (@Sendable () -> Void)? = nil,
         // Exposed only so tests can drive the slow-lookup and idle rules
         // without waiting out the production timeouts.
@@ -96,6 +99,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         self.logger = logger
         self.configProvider = configProvider
         self.preferProxyPathForDoH = preferProxyPathForDoH
+        self.localProxyPort = localProxyPort
         self.onMetrics = onMetrics
         self.tuning = tuning
         self.tcpMaximumConnections = tcpMaximumConnections
@@ -127,6 +131,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             logger: logger,
             configProvider: configProvider,
             preferProxyPathForDoH: { false },
+            localProxyPort: { nil },
             onMetrics: nil,
             tuning: DNSForwarderTuning()
         )
@@ -163,6 +168,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             logger: logger,
             configProvider: configProvider,
             preferProxyPathForDoH: preferProxyPathForDoH,
+            localProxyPort: localProxyPort,
             onMetrics: onMetrics,
             tuning: tuning
         )
@@ -467,6 +473,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
     private let preferProxyPathForDoH: @Sendable () -> Bool
+    private let localProxyPort: @Sendable () -> Int?
     private let onMetrics: (@Sendable () -> Void)?
     private let tuning: DNSForwarderTuning
     private let lock = NSLock()
@@ -515,6 +522,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool,
+        localProxyPort: @escaping @Sendable () -> Int?,
         onMetrics: (@Sendable () -> Void)? = nil,
         tuning: DNSForwarderTuning
     ) {
@@ -523,6 +531,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         self.logger = logger
         self.configProvider = configProvider
         self.preferProxyPathForDoH = preferProxyPathForDoH
+        self.localProxyPort = localProxyPort
         self.onMetrics = onMetrics
         self.transportsBox = NIOLockedValueBox(
             DoHTransportsHandle(transports: DoHTransports(config: configProvider()))

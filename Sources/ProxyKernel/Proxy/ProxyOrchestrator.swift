@@ -202,6 +202,8 @@ package struct ProxyOrchestratorSnapshot: Sendable, Equatable, Codable {
 package enum ProxyOrchestratorEvent: Sendable {
     case proxyRecovered(activeUpstream: String?)
     case proxyRecoveryFailed(summary: String, authenticationLikely: Bool)
+    /// A recycle moved the running proxy listener; `snapshot.bindings` already names where it is now.
+    case proxyListenerRebound
 }
 
 private final class ProxyConfigBox: @unchecked Sendable {
@@ -1159,6 +1161,7 @@ package final class ProxyOrchestrator {
         preferProxyPathForDoH: { [vpnConnectedForDNSBox] in
             vpnConnectedForDNSBox.withLockedValue { $0 }
         },
+        localProxyPort: { [server = localProxyServer] in server.listeningPort },
         // A signal only: the hop reads the running core's counters when it runs. A stop clears them, and a later start's core counts
         // from zero, so a hop that lands after either publishes that operation's counts, never the ones it was queued with.
         onMetrics: { [weak self] in
@@ -1173,7 +1176,8 @@ package final class ProxyOrchestrator {
         eventSink: { [eventLog] event in eventLog.append(event) }
     )
 
-    private lazy var localProxyServer = LocalProxyServer(
+    /// Internal, as `dnsForwarder` is, so a test drives the real recycle.
+    lazy var localProxyServer = LocalProxyServer(
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
         directModeProvider: { [directModeBox] in
@@ -1278,7 +1282,8 @@ package final class ProxyOrchestrator {
 
     private lazy var originResolver: any OriginResolving = DoHOriginResolver(
         logger: logStore,
-        configProvider: { [configBox] in configBox.current }
+        configProvider: { [configBox] in configBox.current },
+        localProxyPort: { [server = localProxyServer] in server.listeningPort }
     )
 
     private lazy var transparentProxy = TransparentTCPProxy(
@@ -2133,6 +2138,9 @@ package final class ProxyOrchestrator {
             resumeConnectivityMonitoring(summary: summary)
         }
     }
+
+    /// Test seam for pm-sim, which cannot use `@testable`: the accept socket dies without a stop, the state the ladder's recycle repairs.
+    package func simulateProxyListenerLossForTesting() async { await localProxyServer.simulateListenerLossForTesting() }
 
     /// Recycle the DNS forwarder's DoH transports and emit a structured event.
     /// Single funnel for both wake- and VPN-recovery-driven session resets so

@@ -623,6 +623,10 @@ package struct ProxyConfig: Codable, Equatable {
         return "\(authorityHost):\(localPort)"
     }
 
+    /// Where clients reach this runtime's proxy: the port the listener holds while it holds one, else the configured one.
+    /// 0 means nothing is reachable ("choose a port" with no listener). `ClientEndpoints` and the DoH routes read this.
+    package func clientProxyPort(bound: Int?) -> Int { bound ?? localPort }
+
     /// Pin the compatibility name in client settings as well as listeners.
     /// Gateway listeners bind a wildcard; clients retain their configured host.
     package var effectiveClientHost: String {

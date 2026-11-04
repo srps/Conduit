@@ -31,7 +31,7 @@ enum DoHSessionFactory {
     ///
     /// Callers race all of these concurrently, so the order is a tiebreak among
     /// simultaneous successes rather than a sequence of fallbacks.
-    static func routes(for config: ProxyConfig) -> [Route] {
+    static func routes(for config: ProxyConfig, localProxyPort: Int?) -> [Route] {
         var routes = [Route(proxy: nil)]
         if let upstream = config.enabledUpstreams.first {
             routes.append(Route(proxy: (upstream.host, upstream.port)))

@@ -32,6 +32,8 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
     private let onRequestCompleted: @Sendable (RequestOutcome, String?) -> Void
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
+    /// A recycle rebound the accept socket under this stamp. Awaited, so the owner has published the new binding when the recycle returns.
+    private let onListenerRebound: @Sendable (ListenerStamp) async -> Void
     private let authHandshakeLimiter = AuthHandshakeLimiter()
     private let group = MultiThreadedEventLoopGroup.singleton
     private let inboundBudget = InboundConnectionBudget()
@@ -176,6 +178,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void = { _ in },
         onRequestCompleted: @Sendable @escaping (RequestOutcome, String?) -> Void,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
+        onListenerRebound: @escaping @Sendable (ListenerStamp) async -> Void = { _ in },
         bindRetryLimit: Int = 10,
         socksHandshakeTimeout: TimeAmount = .seconds(10),
         portHolderProbe: (any ListenerPortHolderProbing)? = nil,
@@ -197,6 +200,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         self.onConnectionActivity = onConnectionActivity
         self.onRequestCompleted = onRequestCompleted
         self.eventSink = eventSink
+        self.onListenerRebound = onListenerRebound
         self.connectFailureLog = ConnectFailureLog(
             logger: logger, eventSink: eventSink,
             scheduleFlush: ConnectFailureLog.eventLoopScheduler(MultiThreadedEventLoopGroup.singleton)

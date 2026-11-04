@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import NIOConcurrencyHelpers
+import NIOCore
+import NIOPosix
 import XCTest
 import ConduitShared
 import ProxyAuth
@@ -3953,6 +3955,103 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: harness.environment.platformStateFile), corrupt, "the unreadable journal is kept as evidence")
         XCTAssertEqual(host.orchestrator.eventLog.events.filter { $0.event == "platform.location_residue_identity" }.compactMap(\.detail),
                        ["surface=proxies source=witness host=127.0.0.1 port=52870"])
+    }
+
+    // MARK: - A recycled listener (#269)
+
+    /// Configured port 0: the recovery ladder's recycle binds a fresh port. Every surface follows it, from the one projection, and
+    /// a later drift pass keeps it.
+    @RuntimeActor func testARecycledEphemeralListenerIsReadvertisedOnEverySurface() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(
+            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .manual))
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.awaitLifecycleIdle()
+        let first = try XCTUnwrap(host.orchestrator.snapshot.bindings.proxyPort)
+        try assertAdvertised(port: first, "the start")
+
+        await host.orchestrator.localProxyServer.simulateListenerLossForTesting()
+        let squatter = try await Self.squat(on: first)
+        try await host.orchestrator.localProxyServer.recycleListener()
+        await host.deliveries.drain()
+        await host.awaitLifecycleIdle()
+
+        let second = try XCTUnwrap(host.orchestrator.snapshot.bindings.proxyPort)
+        XCTAssertNotEqual(second, first, "the squatter holds the old port")
+        try assertAdvertised(port: second, "the rebind")
+        XCTAssertEqual(clientEndpointEvents(host).last, "source=listener_rebound configured_port=0 port=\(second)")
+        XCTAssertEqual(reapplyEvents(host), [])
+
+        harness.locationObserver.emitSettingsChange()
+        await host.deliveries.drain()
+        try assertAdvertised(port: second, "the drift passes after the rebind")
+
+        _ = try? await squatter.close().get()
+        await host.stopRuntime()
+        await host.awaitLifecycleIdle()
+    }
+
+    /// A fixed port rebinds where it was: nothing moves, and nothing is re-advertised.
+    @RuntimeActor func testAFixedPortRecycleReadvertisesNothing() async throws {
+        let configured = try reserveLoopbackPort()
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = configured
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(
+            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .manual))
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.awaitLifecycleIdle()
+
+        await host.orchestrator.localProxyServer.simulateListenerLossForTesting()
+        try await host.orchestrator.localProxyServer.recycleListener()
+        await host.deliveries.drain()
+        await host.awaitLifecycleIdle()
+
+        XCTAssertEqual(host.orchestrator.snapshot.bindings.proxyPort, configured)
+        try assertAdvertised(port: configured, "after the recycle")
+        XCTAssertEqual(clientEndpointEvents(host), [])
+        await host.stopRuntime()
+        await host.awaitLifecycleIdle()
+    }
+
+    /// A stop admitted after the rebind owns the surfaces: it clears them, and the rebind's re-advertise stands down.
+    @RuntimeActor func testARebindFollowedByAStopIsNotAdvertised() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(
+            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .manual))
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.awaitLifecycleIdle()
+        let first = try XCTUnwrap(host.orchestrator.snapshot.bindings.proxyPort)
+
+        await host.orchestrator.localProxyServer.simulateListenerLossForTesting()
+        let squatter = try await Self.squat(on: first)
+        try await host.orchestrator.localProxyServer.recycleListener()
+        await host.stopRuntime()
+        await host.deliveries.drain()
+        await host.awaitLifecycleIdle()
+        _ = try? await squatter.close().get()
+
+        XCTAssertFalse(harness.wifi.routesThroughAProxy, "the stop clears the system proxy")
+        XCTAssertNil(harness.machine.launchdEnvironment["HTTP_PROXY"], "and the launchd variables")
+        XCTAssertFalse(clientEndpointEvents(host).contains { $0.hasPrefix("source=listener_rebound") }, "\(clientEndpointEvents(host))")
+    }
+
+    /// Takes `port` on loopback so a recycle cannot land on it again.
+    nonisolated private static func squat(on port: Int) async throws -> Channel {
+        try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .bind(host: "127.0.0.1", port: port)
+            .get()
     }
 
     /// Every client-facing surface names `port` on the configured client host.
