@@ -88,6 +88,33 @@ final class UpstreamSilenceTests: XCTestCase {
         try await secondary.close()
     }
 
+    func testASilenceCheckWhoseAuthenticationStallsStillFinishesWithinItsBudget() async throws {
+        let upstream = try await CountingUpstream.start(answers: .max) { $0.contains("/slow") }
+        let proxy = UpstreamProxy(name: "a", host: "127.0.0.1", port: upstream.port, priority: 0)
+        let events = Events()
+        let authenticator = StallingAuthenticator(stallFromCall: 3)
+        let pool = ConnectionPool(
+            group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(),
+            configProvider: { Self.config(upstreams: [proxy]) }, authenticatorProvider: { _ in authenticator }, eventSink: events.record
+        )
+        defer { authenticator.release() }
+        _ = try await pool.exchange(head: Self.head(path: "/warm"), body: nil).get()
+        for index in 0..<2 {
+            do {
+                _ = try await pool.exchange(head: Self.head(path: "/slow-\(index)"), body: nil).get()
+                XCTFail("slow request \(index) was answered")
+            } catch {}
+        }
+
+        let finished = await Self.eventually { !events.details("upstream.silence_check_finished").isEmpty }
+
+        XCTAssertTrue(finished, "a check stuck in authentication would hold the slot and stop every later check")
+        XCTAssertTrue(events.details("upstream.silence_check_finished").first?.contains("outcome=silent") == true,
+                      events.details("upstream.silence_check_finished").first ?? "none")
+        pool.closeAll()
+        try await upstream.close()
+    }
+
     func testASecondSilenceInARowWhoseCheckIsSilentRanksTheUpstreamBehindOneThatAnswers() async throws {
         let primary = try await CountingUpstream.start(answers: 1)
         let secondary = try await CountingUpstream.start(answers: .max)
@@ -181,6 +208,26 @@ final class UpstreamSilenceTests: XCTestCase {
             group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(), configProvider: { config.withLockedValue { $0 } },
             authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "dGVzdA==") }, eventSink: events.record
         )
+    }
+
+    private final class StallingAuthenticator: ProxyAuthenticator, @unchecked Sendable {
+        let scheme = "Basic"
+        private let stallFromCall: Int
+        private let calls = NIOLockedValueBox(0)
+        private let gate = DispatchSemaphore(value: 0)
+
+        init(stallFromCall: Int) { self.stallFromCall = stallFromCall }
+
+        func initialToken(for host: String) throws -> String {
+            let call = calls.withLockedValue { $0 += 1; return $0 }
+            if call >= stallFromCall { gate.wait() }
+            return "Basic dGVzdA=="
+        }
+
+        func processChallenge(headerValues: [String], host: String) throws -> String? { nil }
+        func canHandle(scheme: String) -> Bool { scheme.caseInsensitiveCompare("Basic") == .orderedSame }
+        func reset() {}
+        func release() { for _ in 0..<8 { gate.signal() } }
     }
 
     private final class CountingUpstream: @unchecked Sendable {

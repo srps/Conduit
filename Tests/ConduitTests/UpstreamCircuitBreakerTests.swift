@@ -401,6 +401,18 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         XCTAssertFalse(breaker.ranksBehind(at: Date()), "the answer is newer evidence than the check")
     }
 
+    func testAnAnswerWhileTheCheckRunsSupersedesItEvenAfterANewDecisiveSilence() {
+        var breaker = decisivelySilent()
+        breaker.recordSuccess(latencyMS: 10)
+        _ = breaker.recordUnanswered()
+        XCTAssertEqual(breaker.recordUnanswered().step, .held, "the first check still runs")
+
+        XCTAssertEqual(breaker.finishSilenceCheck(.silent, now: Date(), interval: 30), .superseded,
+                       "the check began before the answer, so it is older evidence")
+        XCTAssertFalse(breaker.ranksBehind(at: Date()))
+        XCTAssertEqual(breaker.recordUnanswered().step, .check, "the silences after the answer still stand, so the next one asks")
+    }
+
     func testAnAnswerOrAResetEndsARanking() {
         let now = Date()
         var answered = decisivelySilent()
