@@ -278,6 +278,33 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testAFailedSwitchAwayFromAnEphemeralEndpointKeepsItsWitness() throws {
+        try withRecovery { store, journal, _, _ in
+            let witness = InMemoryProxyEndpointWitness()
+            let recovery = LocationSettingsRecovery(store: store, journal: journal, witness: witness, emit: { _ in })
+            try recovery.apply(kind: .proxies, desired: ephemeral, config: portConfig(0))
+            let recorded = witness.current
+            store.refuseWrites(true)
+            let fixed = SystemProxyManager.locationFields(config: portConfig(3128), mode: .manual, endpoints: .configured(portConfig(3128)))
+            XCTAssertThrowsError(try recovery.apply(kind: .proxies, desired: fixed, config: portConfig(3128)))
+            XCTAssertEqual(try store.snapshot().services.first { $0.serviceID == homeService }?.proxies["HTTPPort"], .number(52870))
+            XCTAssertEqual(witness.current, recorded)
+        }
+    }
+
+    func testARestoreThatLeavesNoProxyRecordsRetiresTheWitness() throws {
+        try withRecovery { store, journal, _, _ in
+            let witness = InMemoryProxyEndpointWitness()
+            let recovery = LocationSettingsRecovery(store: store, journal: journal, witness: witness, emit: { _ in })
+            try recovery.apply(kind: .proxies, desired: ephemeral, config: portConfig(0))
+            try recovery.restore(kind: .proxies, inactiveOnly: true)
+            XCTAssertNotEqual(witness.current, .absent)
+            try recovery.restore(kind: .proxies)
+            XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+            XCTAssertEqual(witness.current, .absent)
+        }
+    }
+
     func testReadableRecoveryThatRestoresEveryRecordRetiresTheWitness() throws {
         try withRecovery { store, journal, _, _ in
             let witness = InMemoryProxyEndpointWitness()

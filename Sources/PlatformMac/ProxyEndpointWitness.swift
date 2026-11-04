@@ -41,7 +41,8 @@ package struct FileProxyEndpointWitness: ProxyEndpointWitnessing {
     }
 
     package static func beside(journalFile: URL) -> FileProxyEndpointWitness {
-        FileProxyEndpointWitness(fileURL: RuntimeEnvironment.proxyEndpointWitnessFile(besideJournal: journalFile))
+        FileProxyEndpointWitness(fileURL: journalFile.deletingLastPathComponent()
+            .appendingPathComponent(journalFile.deletingPathExtension().lastPathComponent + ".proxy-endpoint.json"))
     }
 
     package func read() -> ProxyEndpointWitnessRead {

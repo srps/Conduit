@@ -182,7 +182,9 @@ package final class RuntimeHost {
         guard let store = networkLocationStoreFactory(auditedPrivilegeClient) else { return nil }
         let eventLog = orchestrator.eventLog
         let logger = logger
-        return LocationSettingsRecovery(store: store, journal: platformStateJournal, limits: networkLocationLimits) { event in
+        let witness = FileProxyEndpointWitness(fileURL: environment.proxyEndpointWitnessFile)
+        return LocationSettingsRecovery(store: store, journal: platformStateJournal, witness: witness,
+                                        limits: networkLocationLimits) { event in
             eventLog.append(event)
             logger.log(.notice, "Network location: \(event.event) \(event.detail ?? "")", category: .system)
         }
@@ -1727,7 +1729,8 @@ extension RuntimeHost {
         let runner = effects.commandRunner
         let journal = PlatformStateJournal(fileURL: environment.platformStateFile, logger: logger, eventSink: emit)
         let locationRecovery = effects.networkLocationStoreFactory(audited).map {
-            LocationSettingsRecovery(store: $0, journal: journal, emit: emit)
+            LocationSettingsRecovery(store: $0, journal: journal,
+                                     witness: FileProxyEndpointWitness(fileURL: environment.proxyEndpointWitnessFile), emit: emit)
         }
         let systemDNS = SystemDNSManager(
             privilegeClient: audited,

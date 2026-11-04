@@ -55,17 +55,11 @@ package struct RuntimeEnvironment: Sendable, Equatable {
         configDirectory.appendingPathComponent("update-state.json")
     }
 
-    package static func proxyEndpointWitnessFile(besideJournal journalFile: URL) -> URL {
-        journalFile.deletingLastPathComponent()
-            .appendingPathComponent(journalFile.deletingPathExtension().lastPathComponent + ".proxy-endpoint.json")
-    }
+    package static let proxyEndpointWitnessFileName = "platform-state.proxy-endpoint.json"
 
-    package static var proxyEndpointWitnessFileName: String {
-        proxyEndpointWitnessFile(besideJournal: URL(fileURLWithPath: platformStateFileName)).lastPathComponent
-    }
-
+    /// A fixed leaf of the root, never derived from the journal's resolved target (decision 0040).
     package var proxyEndpointWitnessFile: URL {
-        Self.proxyEndpointWitnessFile(besideJournal: platformStateFile)
+        configDirectory.appendingPathComponent(Self.proxyEndpointWitnessFileName)
     }
 
     /// Where 0.1.x kept the pre-relay DNS servers before the journal existed.

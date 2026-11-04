@@ -227,7 +227,8 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                 report("failed", "operation=apply surface=\(kind.rawValue) reason=unsupported_settings")
                 throw NetworkSettingsError.invalidRequest
             }
-            if kind == .proxies { try witnessAdvertisedEndpoint(desired: desired, config: config) }
+            let advertised = kind == .proxies ? Self.advertisedEndpoint(desired: desired, config: config) : nil
+            if let advertised { try recordWitness(advertised) }
             for service in active {
                 let current = fields(service, kind)
                 let scope = service.locationID + "/" + service.serviceID
@@ -283,6 +284,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                     throw error
                 }
             }
+            if kind == .proxies && advertised == nil { retireWitness() }
         }
     }
 
@@ -297,6 +299,9 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                     report("failed", "operation=restore \(Self.identity(record)) reason=\(error.localizedDescription)")
                     if firstError == nil { firstError = error }
                 }
+            }
+            if kind == .proxies && !inactiveOnly && journal.fileState != .unreadable && !journal.hasRecords(for: .systemProxy) {
+                retireWitness()
             }
             if let firstError { throw firstError }
         }
@@ -377,7 +382,6 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                 }
                 let hadRecords = journal.hasRecords(for: surface(kind))
                 try cleanLegacyAndRestore(kind: kind, config: config)
-                if kind == .proxies && !journal.hasRecords(for: .systemProxy) { retireWitness() }
                 return hadRecords ? .restored(stale: false) : .nothingToDo(.nothingRecorded)
             } catch {
                 report("failed", "operation=recover reason=\(error.localizedDescription)")
@@ -389,10 +393,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
     package func clear(kind: NetworkSettingsKind, config: ProxyConfig) throws {
         try operations.withLock {
             try cleanLegacyAndRestore(kind: kind, config: config)
-            if !journal.hasRecords(for: surface(kind)) {
-                if kind == .proxies { retireWitness() }
-                journal.markReleased(surface: surface(kind))
-            }
+            if !journal.hasRecords(for: surface(kind)) { journal.markReleased(surface: surface(kind)) }
         }
     }
 
@@ -507,14 +508,14 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         report("residue_identity", "surface=proxies " + detail)
     }
 
-    private func witnessAdvertisedEndpoint(desired: [String: NetworkSettingValue], config: ProxyConfig) throws {
+    private static func advertisedEndpoint(desired: [String: NetworkSettingValue], config: ProxyConfig) -> AdvertisedProxyEndpoint? {
         guard config.localPort == 0, desired["ProxyAutoConfigEnable"] != .number(1), desired["HTTPEnable"] == .number(1),
-              case .text(let host) = desired["HTTPProxy"], Self.isLoopback(host),
-              case .number(let port) = desired["HTTPPort"], (1...65535).contains(port) else {
-            retireWitness()
-            return
-        }
-        let endpoint = AdvertisedProxyEndpoint(host: host, port: port)
+              case .text(let host) = desired["HTTPProxy"], isLoopback(host),
+              case .number(let port) = desired["HTTPPort"], (1...65535).contains(port) else { return nil }
+        return AdvertisedProxyEndpoint(host: host, port: port)
+    }
+
+    private func recordWitness(_ endpoint: AdvertisedProxyEndpoint) throws {
         guard witness.read() != .present(endpoint) else { return }
         do { try witness.record(endpoint) }
         catch {

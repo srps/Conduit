@@ -1,4 +1,4 @@
-# 0040: Witness a port-0 session's advertised proxy endpoint beside the journal
+# 0040: Witness a port-0 session's advertised proxy endpoint in the state root
 
 - Date: 2026-11-04
 - Decision: proposed
@@ -29,12 +29,17 @@ authority, which rules out reading `snapshot.json` for the bound port.
 
 ## Decision
 
-Keep a fifth fixed leaf, `platform-state.proxy-endpoint.json`, beside the
-journal. It holds one bounded CanonicalJSON record, version 1, of the loopback
-host and port a port-0 manual apply advertises. The proxy-surface apply writes
-it before its first commit and fails, writing nothing, if it cannot. A PAC
-apply, a fixed-port apply, a release, a launch recovery that leaves no proxy
-records, and a residue sweep that used it all remove it. A removal that fails is
+Keep a fifth fixed leaf, `platform-state.proxy-endpoint.json`, in the state
+root. Its path is the root plus that name, never derived from the journal's
+resolved target, so a linked journal cannot steer it onto another file. It
+holds one bounded CanonicalJSON record, version 1, of the loopback host and
+port a port-0 manual apply advertises. The proxy-surface apply writes it before
+its first commit and fails, writing nothing, if it cannot. A PAC or fixed-port
+apply removes it once every commit of that apply succeeded, so a failed switch
+keeps the record for the endpoint still on the machine. A restore that leaves
+no proxy records over a readable journal (a release, a stopped reconciliation,
+a launch recovery) and a residue sweep that used it also remove it. A removal
+that fails is
 reported as `platform.location_failed operation=retire_endpoint` and does not
 fail the apply, release or recovery around it.
 
@@ -77,6 +82,16 @@ together with an unreadable journal and a configured port of 0, would clear
 that tool's setting. The record is retired at every release and recovery, which
 keeps that window to a session that crashed. A removal that failed widens it to
 the next launch that retires it.
+
+The record holds one endpoint. A port-0 apply that moves from one ephemeral
+port to another overwrites it before its first commit, so if that commit fails
+and the session then crashes over an unreadable journal, the old port's
+residue stays, as it did before this decision.
+
+Launch recovery still declines when any loopback listener the services name is
+live and Conduit's residue is present, the policy fixed ports already follow.
+A live foreign proxy on another service therefore keeps a dead witnessed
+endpoint in place until a launch where it is not listening.
 
 ## Invariants and verification
 
