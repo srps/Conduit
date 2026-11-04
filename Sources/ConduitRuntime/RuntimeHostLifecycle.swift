@@ -305,6 +305,7 @@ extension RuntimeHost {
     /// The runtime's observers follow the modules that are up: started by any Start that brought one up, stopped once none is left.
     func startObservers() {
         startLocationObserver()
+        networkPathObserving = true
         networkPathObserver.start()
         vpnStatusMonitor.start()
     }
@@ -740,6 +741,8 @@ extension RuntimeHost {
             vpnStatusMonitor.stop()
             networkLocationObserver.stop()
             networkPathObserver.stop()
+            networkPathObserving = false
+            cancelNetworkPathSettle()
         }
         if remaining.contains(.proxy) { runtimeStarted = false }
 

@@ -205,8 +205,7 @@ final class SleepRecoveryTests: XCTestCase {
     // MARK: - NetworkMonitor fires on path changes
 
     func testNetworkMonitorCallsOnChange() async throws {
-        // No debounce: the test waits for the initial path report, not a burst.
-        let monitor = NetworkMonitor(debounceInterval: 0)
+        let monitor = NetworkMonitor()
         let expectation = XCTestExpectation(description: "onChange called")
         monitor.onChange = { _ in
             expectation.fulfill()

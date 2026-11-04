@@ -887,8 +887,8 @@ package final class HeldPACFetch: PacEvaluator, @unchecked Sendable {
 /// synthetic path report only between `start()` and `stop()`, as the
 /// production observer gates its callbacks. The callback runs on the caller's
 /// thread. A delivery already selected when `stop()` runs still completes
-/// after it, as a debounced callback already queued on `NetworkMonitor`'s
-/// queue does in production; `stop()` does not wait for it, so the host must
+/// after it, as a callback already claimed on `NetworkMonitor`'s queue does
+/// in production; `stop()` does not wait for it, so the host must
 /// gate such a report on its own state.
 package final class FakeNetworkPathObserver: NetworkPathObserving, @unchecked Sendable {
     private let lock = NSLock()

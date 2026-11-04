@@ -124,7 +124,7 @@ extension AppComposition {
                 loopbackPortProbe: { LoopbackPortProbe.isServed(port: $0) },
                 commandRunner: CommandRunner.host,
                 dnsResponds: { SystemDNSManager.dnsResponds(onPort: $0) },
-                networkPath: NetworkMonitor(debounceInterval: NetworkMonitor.defaultDebounceInterval),
+                networkPath: NetworkMonitor(),
                 networkLocation: NetworkLocationMonitor(),
                 networkLocationStoreFactory: { SystemNetworkLocationStore(privilegeClient: $0) },
                 vpnStatusMonitor: { graceSeconds, minVisibleSeconds in

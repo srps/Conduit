@@ -228,6 +228,7 @@ enum NetworkTransitionScenarios {
         let churnResets = events("dns.transports_reset", since: churnCutoff).count
         let churnChanged = events("network.path_changed", since: churnCutoff)
         let churnPACRefetches = churnChanged.filter { $0.detail?.contains("pac=refresh") == true }.count
+        let churnInvalidations = events("network.path_invalidated", since: churnCutoff).count
         let unchangedCounts = events("network.path_unchanged", since: churnCutoff)
             .compactMap { $0.detail?.split(separator: " ").first.map(String.init) }
         notes.append(
@@ -242,7 +243,26 @@ enum NetworkTransitionScenarios {
         let roamActed = acted == 1
         let roamResets = events("dns.transports_reset", since: roamCutoff).count
         let roamDetail = events("network.path_changed", since: roamCutoff).first?.detail ?? ""
+        let roamInvalidation = events("network.path_invalidated", since: roamCutoff).first?.detail ?? ""
         notes.append("roam: acted=\(roamActed) resets=\(roamResets) reconciles=\(reconciles) detail=\(roamDetail)")
+        notes.append("roam invalidation: \(roamInvalidation)")
+
+        // #198: a burst of two roams, each taken on its leading edge as it arrives, then one settled report.
+        let burstCutoff = Date()
+        acted = 0
+        reconciles = 0
+        orchestrator.invalidateNetworkPath(wifi(gateway: "10.0.0.1"))
+        let burstFirstResets = events("dns.transports_reset", since: burstCutoff).count
+        orchestrator.invalidateNetworkPath(wifi(gateway: "10.0.0.2"))
+        let burstInvalidations = events("network.path_invalidated", since: burstCutoff).count
+        let burstEarlyChanges = events("network.path_changed", since: burstCutoff).count
+        await report(wifi(gateway: "10.0.0.2"))
+        let burstResets = events("dns.transports_reset", since: burstCutoff).count
+        let burstChanges = events("network.path_changed", since: burstCutoff)
+        notes.append(
+            "burst: first_resets=\(burstFirstResets) invalidations=\(burstInvalidations) early_changes=\(burstEarlyChanges) "
+                + "resets=\(burstResets) changes=\(burstChanges.count) acted=\(acted) reconciles=\(reconciles)"
+        )
 
         let wakeCutoff = Date()
         await orchestrator.handleSystemWake()
@@ -252,7 +272,7 @@ enum NetworkTransitionScenarios {
         let assertions: [ScenarioAssertion] = [
             .init("DNS forwarder running, so resets are observable", dnsRunning),
             .init("20 identical updates: 0 resets, 0 PAC refetches",
-                  churnActed == 0 && churnResets == 0 && churnPACRefetches == 0 && churnChanged.isEmpty),
+                  churnActed == 0 && churnResets == 0 && churnPACRefetches == 0 && churnChanged.isEmpty && churnInvalidations == 0),
             .init("20 identical updates: system DNS reconcile still asked for 20 times", churnReconciles == 20),
             .init("identical updates coalesced into path_unchanged",
                   unchangedCounts == ["count=1", "count=2", "count=4", "count=8", "count=16"]),
@@ -260,6 +280,13 @@ enum NetworkTransitionScenarios {
             .init("gateway change names the field and the absorbed count",
                   roamDetail.contains("changed=gateways") && roamDetail.contains("unchanged_before=20")
                     && roamDetail.contains("gateways=192.168.1.1,fe80::1%en0->192.168.1.254,fe80::1%en0")),
+            .init("gateway change is invalidated on its leading edge: DNS reset, PAC routing off",
+                  roamInvalidation.hasPrefix("dns=reset pac_routes=off changed=gateways ")),
+            .init("a burst invalidates at its first change, before anything refreshes",
+                  burstFirstResets == 1 && burstEarlyChanges == 0),
+            .init("a burst invalidates at each change and refreshes once, after it settles",
+                  burstInvalidations == 2 && burstResets == 2 && burstChanges.count == 1 && acted == 1 && reconciles == 1
+                    && burstChanges.first?.detail?.contains("gateways=192.168.1.254,fe80::1%en0->10.0.0.2") == true),
             .init("system wake still resets", wakeResets == 1),
         ]
         notes.append(assertions.allSatisfy(\.passed) ? "PASS" : "FAIL")

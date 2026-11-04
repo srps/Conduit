@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import ProxyKernel
 
-/// Producer interface for debounced network-path reports. The production
+/// Producer interface for network-path updates, each reported as it arrives:
+/// the consumer decides what a burst means (#198). The production
 /// observer is `NetworkMonitor` (`NWPathMonitor`). `FakeNetworkPathObserver`
 /// in `PlatformFakes.swift` is the injection point, so a host test never reads
 /// the machine's network. Mirrors `VPNStatusObserving`.

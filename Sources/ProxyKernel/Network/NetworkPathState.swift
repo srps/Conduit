@@ -8,8 +8,8 @@ import Foundation
 /// `NWPathMonitor` reports updates in which nothing the proxy depends on has
 /// moved (#101: a pair every ~75 s for hours, with the VPN off). Only the
 /// `Field`s decide whether the orchestrator resets DNS transports and
-/// refetches PAC; the hosts' system DNS reconcile runs for every report
-/// (`NetworkPathReports`). `isExpensive` and `isConstrained` are carried for the log
+/// refetches PAC; the hosts' system DNS reconcile runs for every settled
+/// report (`NetworkPathReports`). `isExpensive` and `isConstrained` are carried for the log
 /// line but are not material: they are cost hints (hotspot, Low Data Mode)
 /// that change no route, resolver or gateway, and a switch to a hotspot that
 /// does change the route also changes the interfaces and gateways.
@@ -32,9 +32,10 @@ package struct NetworkPathState: Sendable, Equatable {
     }
 
     /// The fields whose change drives a reset. Raw values are the
-    /// `changed=` tokens of `network.path_changed`, and each is also the key
-    /// of that field's `old->new` token, so none may collide with the event's
-    /// other keys (`satisfied`, `dns`, `pac`, `path`).
+    /// `changed=` tokens of `network.path_invalidated` and `network.path_changed`,
+    /// and each is also the key of that field's `old->new` token, so none may
+    /// collide with the events' other keys (`satisfied`, `dns`, `pac`,
+    /// `pac_routes`, `unchanged_before`, `path`).
     package enum Field: String, Sendable, Equatable, CaseIterable {
         case status
         case interfaces
@@ -135,10 +136,15 @@ package struct NetworkPathChange: Sendable, Equatable {
     package let changedFields: [NetworkPathState.Field]
     /// Updates that changed nothing material since the last change.
     package let unchangedBefore: Int
+    /// A burst that changed the path and settled back on the one last acted on
+    /// (A, B, A; #198). Nothing differs from `previous`, but the burst's changes
+    /// dropped what the path had produced, so the refresh is still owed.
+    package var returned = false
 
-    /// `changed=` token value: the field names, or `initial`.
+    /// `changed=` token value: the field names, `returned`, or `initial`.
     package var changedToken: String {
-        changedFields.isEmpty ? "initial" : changedFields.map(\.rawValue).joined(separator: ",")
+        if returned { return "returned" }
+        return changedFields.isEmpty ? "initial" : changedFields.map(\.rawValue).joined(separator: ",")
     }
 
     /// One `field=old->new` token per changed field, space-separated.
@@ -171,7 +177,10 @@ package struct NetworkPathTracker: Sendable {
 
     package init() {}
 
-    package mutating func admit(_ path: NetworkPathState) -> Decision {
+    /// `invalidatedSince`: whether a path change was acted on (invalidated) since
+    /// the last admitted change. A path that matches the last one acted on is then
+    /// still a change (`returned`), since the burst dropped what it had produced.
+    package mutating func admit(_ path: NetworkPathState, invalidatedSince: Bool = false) -> Decision {
         guard let previous = current else {
             current = path
             return .changed(NetworkPathChange(path: path, previous: nil, changedFields: [], unchangedBefore: 0))
@@ -186,6 +195,13 @@ package struct NetworkPathTracker: Sendable {
         // The non-material fields (`isExpensive`, `isConstrained`) follow the
         // newest report, so the next log line describes the path as it is.
         current = path
+        if invalidatedSince {
+            let before = unchangedCount
+            unchangedCount = 0
+            return .changed(NetworkPathChange(
+                path: path, previous: previous, changedFields: [], unchangedBefore: before, returned: true
+            ))
+        }
         unchangedCount += 1
         return .unchanged(count: unchangedCount, emit: Self.isDue(unchangedCount))
     }

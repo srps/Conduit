@@ -1106,6 +1106,13 @@ package final class ProxyOrchestrator {
     /// The last network path acted on, and the count of updates since that
     /// changed nothing material (#101). One path and one counter.
     private var networkPathTracker = NetworkPathTracker()
+    /// The newest network path seen, settled or not: what the leading-edge
+    /// invalidation compares each update with (#198). One path.
+    private var networkPathSeen: NetworkPathState?
+    /// What the leading edge left owed to the next settled report: whether a path change invalidated since the last one. The
+    /// one source of truth for the settle (#198): it clears the DNS answers stored in between, and it owes the refresh even when
+    /// the burst settles back on the path last acted on.
+    private var networkPathInvalidatedSinceSettle = false
 
     /// When routing last changed under the proxy: stamped by every VPN
     /// transition and direct-mode change, read by the strict-mode hint probe
@@ -1133,7 +1140,8 @@ package final class ProxyOrchestrator {
         )
     }()
 
-    private lazy var pacRoutingEngine: PACRoutingEngine? = {
+    /// Readable in-module so tests can see a caller join a running refresh.
+    private(set) lazy var pacRoutingEngine: PACRoutingEngine? = {
         guard let pacEvaluator else { return nil }
         return PACRoutingEngine(
             configProvider: { [configBox] in configBox.current },
@@ -2613,20 +2621,96 @@ package final class ProxyOrchestrator {
         reconcileConnectivityMonitors(for: snapshot.directModeCause)
     }
 
-    /// Tier C network-change admission. `NWPathMonitor` reports updates in
+    /// Tier C leading edge (#198), for every path update as it arrives, before
+    /// the burst it belongs to has settled. An update whose material fields
+    /// differ from the newest one seen drops what the old path produced at
+    /// once: the DoH transports are reset and the cached PAC answers dropped
+    /// (`myIpAddress`, `dnsResolve` and `isInNet` may answer differently now,
+    /// and an answer lives up to ten minutes, #34). Only the refresh waits for
+    /// the burst to settle (`admitNetworkPath`, `handleNetworkChange`). When
+    /// both waited, a path that kept changing kept the old answers in use for
+    /// as long as it changed.
+    ///
+    /// Every material change invalidates, not only the first of a burst: an
+    /// answer computed on an intermediate path is as stale as one from the
+    /// path before the burst, and both actions are cheap. An update that
+    /// changed nothing material does nothing, so the periodic no-op updates
+    /// of #101 still reset nothing. The first path resets the transports and
+    /// drops no answers, as it has nothing to compare with.
+    ///
+    /// Synchronous, so the host runs it in the turn the update arrives in.
+    /// A path already seen does nothing, so a settled report repeats it
+    /// safely. Returns whether it acted.
+    @discardableResult
+    package func invalidateNetworkPath(_ path: NetworkPathState) -> Bool {
+        let previous = networkPathSeen
+        networkPathSeen = path
+        let fields = previous.map { path.changedFields(from: $0) } ?? []
+        guard previous == nil || !fields.isEmpty else { return false }
+        let change = NetworkPathChange(path: path, previous: previous, changedFields: fields, unchangedBefore: 0)
+        let resetsDNS = snapshot.dnsRunState == .running
+        let dnsDecision = resetsDNS ? "reset" : "idle"
+        let dropsRoutes = previous != nil
+        // As the engine judges it: with no PAC routing there are no answers to drop.
+        let pacRouting = pacRoutingEngine != nil && config.pacRoutingEnabled && !config.pacURL.isEmpty
+        let routesDecision = !pacRouting ? "off" : dropsRoutes ? "dropped" : "kept"
+        let tokens = ["dns=\(dnsDecision)", "pac_routes=\(routesDecision)", "changed=\(change.changedToken)"]
+            + change.diffTokens + ["path=\(path.description)"]
+        emitEvent(.health, "network.path_invalidated", detail: tokens.joined(separator: " "))
+        let what = change.diffTokens.isEmpty ? "first path" : change.diffTokens.joined(separator: " ")
+        logStore.log(
+            .notice,
+            "Network path moved (\(what)): DNS transports \(dnsDecision), PAC answers \(routesDecision); "
+                + "the PAC refresh waits for the path to settle. Path: \(path.description)",
+            category: .network
+        )
+        networkPathInvalidatedSinceSettle = true
+        if resetsDNS {
+            resetDNSTransportsForRecovery(source: "network_change")
+        }
+        // The script is kept, so an unsatisfied path or a backed-off fetch
+        // does not leave requests without PAC routes.
+        if dropsRoutes {
+            invalidatePACRoutes(reason: .networkChanged)
+        }
+        return true
+    }
+
+    /// Tier C trailing edge: one settled path report, before its refresh. Runs the leading edge again (a no-op for a path the
+    /// updates already carried), then takes what the burst left owed (`networkPathInvalidatedSinceSettle`) and clears it:
+    ///
+    /// - The DNS response cache is cleared again. The leading edge cleared it with the transports, but a query that started on
+    ///   the old path can finish on the old transports during the settle and store its answer, for up to 300 s (30 s for NXDOMAIN).
+    ///   The transports are kept: those in use now were made after the last change. A query still out when the burst settles can
+    ///   store after this; fencing the store by generation is #200. Emits `dns.response_cache_cleared source=network_settled`.
+    /// - The report is admitted (`admitNetworkPath`) with the invalidation owed, so a burst that settles back on the path last acted
+    ///   on (A, B, A) is still a change (`changed=returned`): its changes dropped the PAC answers and superseded any fetch, and only
+    ///   the refresh fetches again. A report with nothing owed is admitted as before (#101).
+    ///
+    /// Returns the change to refresh on, for `handleNetworkChange(_:)`, or nil.
+    package func settleNetworkPath(_ path: NetworkPathState) -> NetworkPathChange? {
+        invalidateNetworkPath(path)
+        let owed = networkPathInvalidatedSinceSettle
+        networkPathInvalidatedSinceSettle = false
+        if owed, let dropped = dnsForwarder.clearResponseCache(reason: "network_settled") {
+            emitEvent(.health, "dns.response_cache_cleared", detail: "source=network_settled entries=\(dropped)")
+        }
+        return admitNetworkPath(path, invalidatedSince: owed)
+    }
+
+    /// Tier C trailing edge: admission of a settled path report.
+    /// `NWPathMonitor` reports updates in
     /// which nothing the proxy depends on moved; acting on each one reset the
     /// DoH transports (dropping in-flight queries) and refetched the PAC every
     /// ~75 s for hours (#101). Only an update whose material fields differ
     /// from the last one acted on is returned, for `handleNetworkChange(_:)`.
     /// The rest are counted and reported as a coalesced
-    /// `network.path_unchanged`, with no transport reset and no PAC refetch.
+    /// `network.path_unchanged`, with no PAC refetch; the leading edge
+    /// (`invalidateNetworkPath`) reset nothing for them either.
     /// The hosts' system DNS reconcile is not gated by this: it runs for
-    /// every report (`NetworkPathReports` in PlatformMac).
-    ///
-    /// Synchronous, so the app host can start the reaction in the turn the
-    /// update arrives in. Both hosts come through here and dedupe alike.
-    package func admitNetworkPath(_ path: NetworkPathState) -> NetworkPathChange? {
-        switch networkPathTracker.admit(path) {
+    /// every settled report (`NetworkPathReports` in PlatformMac).
+    package func admitNetworkPath(_ path: NetworkPathState, invalidatedSince: Bool = false) -> NetworkPathChange? {
+        switch networkPathTracker.admit(path, invalidatedSince: invalidatedSince) {
         case .changed(let change):
             return change
         case .unchanged(let count, let emit):
@@ -2643,54 +2727,46 @@ package final class ProxyOrchestrator {
         }
     }
 
-    /// Admits `path` and, if it changed, acts on it. Returns whether it acted.
+    /// Takes `path` as a report that has already settled: its leading edge,
+    /// then, if it changed since the last report acted on, the refresh.
+    /// Returns whether it refreshed.
     @discardableResult
     package func handleNetworkPath(_ path: NetworkPathState) async -> Bool {
-        guard let change = admitNetworkPath(path) else { return false }
+        guard let change = settleNetworkPath(path) else { return false }
         await handleNetworkChange(change)
         return true
     }
 
-    /// Tier C network-change reaction: refresh PAC, log the new path. Does NOT
+    /// Tier C network-change reaction, once a burst of path updates has
+    /// settled: refresh PAC, log the new path. The DoH transports and the PAC
+    /// answers were dropped as each change arrived (`invalidateNetworkPath`),
+    /// so this resets nothing. Does NOT
     /// re-probe upstreams or flip direct mode — those are Tier B's
     /// (`handleVPNStateChange`) responsibility now. Splitting general network
     /// events from VPN events eliminates the historical per-`NWPathMonitor`-event
     /// upstream-reprobe storm (Wi-Fi roams, IPv6 RAs, captive-portal checks all
     /// triggered redundant 3-second probe cycles). See `docs/design-vpn-flap-resilience.md`.
     ///
-    /// An unsatisfied path still recycles the DoH transports but has nothing
-    /// to fetch the PAC over. The fetch honours the engine's failure backoff.
-    /// One `network.path_changed` event records which fields changed and both
-    /// decisions; the NOTICE line derives from it, so proxy.log says why.
+    /// An unsatisfied path has nothing to fetch the PAC over. The fetch
+    /// honours the engine's failure backoff. One `network.path_changed` event
+    /// records which fields changed and the decision; the NOTICE line derives
+    /// from it, so proxy.log says why.
     package func handleNetworkChange(_ change: NetworkPathChange) async {
-        let resetsDNS = snapshot.dnsRunState == .running
         let pathSatisfied = change.path.satisfied
-        let dnsDecision = resetsDNS ? "reset" : "idle"
         let pacDecision = pathSatisfied ? "refresh" : "skipped_unsatisfied"
         let tokens = [
-            "satisfied=\(pathSatisfied)", "dns=\(dnsDecision)", "pac=\(pacDecision)",
+            "satisfied=\(pathSatisfied)", "pac=\(pacDecision)",
             "changed=\(change.changedToken)", "unchanged_before=\(change.unchangedBefore)",
         ] + change.diffTokens + ["path=\(change.path.description)"]
         emitEvent(.health, "network.path_changed", detail: tokens.joined(separator: " "))
-        let what = change.diffTokens.isEmpty ? "first path" : change.diffTokens.joined(separator: " ")
+        let what = change.returned ? "returned to the path before the burst"
+            : change.diffTokens.isEmpty ? "first path" : change.diffTokens.joined(separator: " ")
         logStore.log(
             .notice,
-            "Network path changed (\(what)): DNS transports \(dnsDecision), PAC \(pacDecision); "
+            "Network path changed (\(what)): PAC \(pacDecision); "
                 + "\(change.unchangedBefore) unchanged updates before it. Path: \(change.path.description)",
             category: .network
         )
-        if resetsDNS {
-            resetDNSTransportsForRecovery(source: "network_change")
-        }
-        // The cached PAC answers were computed on the old path (`myIpAddress`,
-        // `dnsResolve`, `isInNet`), and live up to ten minutes (#34); the
-        // refresh below would drop them only if it fetched a new script. The
-        // script is kept, so an unsatisfied path or a backed-off fetch does
-        // not leave requests without PAC routes. The first path has nothing
-        // to compare with.
-        if change.previous != nil {
-            invalidatePACRoutes(reason: .networkChanged)
-        }
         guard pathSatisfied else { return }
         await refreshPACRouting(force: true, honorBackoff: true)
     }

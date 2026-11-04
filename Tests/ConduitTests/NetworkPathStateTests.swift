@@ -124,4 +124,20 @@ final class NetworkPathStateTests: XCTestCase {
         XCTAssertEqual(tracker.admit(path(expensive: true)), .unchanged(count: 1, emit: true))
         XCTAssertEqual(tracker.current?.isExpensive, true)
     }
+
+    /// #198: a path that matches the last one acted on is still a change when a burst invalidated since it (A, B, A), as
+    /// `changed=returned` with no diff; without an invalidation it is unchanged as before (#101).
+    func testAPathBackWhereItWasIsAChangeOnlyWhenABurstInvalidatedSince() {
+        var tracker = NetworkPathTracker()
+        _ = tracker.admit(path())
+        XCTAssertEqual(tracker.admit(path()), .unchanged(count: 1, emit: true))
+        guard case .changed(let back) = tracker.admit(path(), invalidatedSince: true) else {
+            return XCTFail("a burst back to the settled path owes the refresh")
+        }
+        XCTAssertTrue(back.returned)
+        XCTAssertEqual(back.changedToken, "returned")
+        XCTAssertEqual(back.diffTokens, [])
+        XCTAssertEqual(back.unchangedBefore, 1)
+        XCTAssertEqual(tracker.admit(path()), .unchanged(count: 1, emit: true), "the count starts again after it")
+    }
 }

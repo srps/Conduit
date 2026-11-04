@@ -69,14 +69,21 @@ final class DNSTransportRecoveryTests: XCTestCase {
         XCTAssertEqual(resets.count, 1)
         XCTAssertEqual(resets.first?.detail, "source=network_change")
 
+        let invalidation = try XCTUnwrap(orchestrator.eventLog.events.last { $0.event == "network.path_invalidated" })
+        XCTAssertEqual(invalidation.kind, .health)
+        XCTAssertEqual(
+            invalidation.detail,
+            "dns=reset pac_routes=off changed=initial "
+                + "path=satisfied; interfaces en0/wifi; gateways 192.168.1.1; supports ipv4,ipv6,dns"
+        )
+        XCTAssertLessThanOrEqual(invalidation.timestamp, resets[0].timestamp, "the path event precedes what it decided")
         let change = try XCTUnwrap(orchestrator.eventLog.events.last { $0.event == "network.path_changed" })
         XCTAssertEqual(change.kind, .health)
         XCTAssertEqual(
             change.detail,
-            "satisfied=true dns=reset pac=refresh changed=initial unchanged_before=0 "
+            "satisfied=true pac=refresh changed=initial unchanged_before=0 "
                 + "path=satisfied; interfaces en0/wifi; gateways 192.168.1.1; supports ipv4,ipv6,dns"
         )
-        XCTAssertLessThanOrEqual(change.timestamp, resets[0].timestamp, "the path event precedes what it decided")
     }
 
     /// #101: `NWPathMonitor` delivered an update every ~75 s for hours with
@@ -96,6 +103,7 @@ final class DNSTransportRecoveryTests: XCTestCase {
         let since = orchestrator.eventLog.events.filter { $0.timestamp >= cutoff }
         XCTAssertEqual(acted, 0)
         XCTAssertEqual(transportResetEvents(in: orchestrator.eventLog, since: cutoff).count, 0)
+        XCTAssertEqual(since.filter { $0.event == "network.path_invalidated" }.count, 0, "nothing material moved")
         XCTAssertEqual(since.filter { $0.event == "network.path_changed" }.count, 0,
                        "no path_changed, so no pac=refresh")
         let unchanged = since.filter { $0.event == "network.path_unchanged" }
@@ -126,12 +134,19 @@ final class DNSTransportRecoveryTests: XCTestCase {
 
         XCTAssertTrue(acted)
         XCTAssertEqual(transportResetEvents(in: orchestrator.eventLog, since: cutoff).count, 1)
+        let invalidation = try XCTUnwrap(orchestrator.eventLog.events.last { $0.event == "network.path_invalidated" })
+        XCTAssertEqual(
+            invalidation.detail,
+            "dns=reset pac_routes=off changed=gateways gateways=192.168.1.1->10.0.0.1 "
+                + "path=satisfied; interfaces en0/wifi; gateways 10.0.0.1; supports ipv4,ipv6,dns"
+        )
         let change = try XCTUnwrap(orchestrator.eventLog.events.last { $0.event == "network.path_changed" })
         XCTAssertEqual(
             change.detail,
-            "satisfied=true dns=reset pac=refresh changed=gateways unchanged_before=3 gateways=192.168.1.1->10.0.0.1 "
+            "satisfied=true pac=refresh changed=gateways unchanged_before=3 gateways=192.168.1.1->10.0.0.1 "
                 + "path=satisfied; interfaces en0/wifi; gateways 10.0.0.1; supports ipv4,ipv6,dns"
         )
+        XCTAssertLessThanOrEqual(invalidation.timestamp, change.timestamp, "the leading edge runs before the refresh")
         let line = try XCTUnwrap(logger.entries().last { $0.message.hasPrefix("Network path changed") })
         XCTAssertEqual(line.level, .notice, "proxy.log keeps NOTICE and above")
         XCTAssertTrue(line.message.contains("gateways=192.168.1.1->10.0.0.1"), line.message)
@@ -156,7 +171,7 @@ final class DNSTransportRecoveryTests: XCTestCase {
         XCTAssertEqual(change.kind, .health)
         XCTAssertEqual(
             change.detail,
-            "satisfied=false dns=idle pac=skipped_unsatisfied changed=status unchanged_before=0 "
+            "satisfied=false pac=skipped_unsatisfied changed=status unchanged_before=0 "
                 + "status=satisfied->unsatisfied path=unsatisfied; interfaces en0/wifi; gateways 192.168.1.1; supports ipv4,ipv6,dns"
         )
         let line = try XCTUnwrap(logger.entries().last { $0.message.hasPrefix("Network path changed (status=satisfied->unsatisfied)") })
@@ -167,6 +182,75 @@ final class DNSTransportRecoveryTests: XCTestCase {
             "the skip is a token on the path event, not a second event"
         )
         XCTAssertTrue(transportResetEvents(in: orchestrator.eventLog, since: cutoff).isEmpty, "DNS was not running")
+    }
+
+    /// #198 review: a query that started on the old path and is answered during the settle stores its answer after the leading edge
+    /// cleared the cache. The settle clears it again, so that answer does not outlive the settle (#200 fences the store itself).
+    @RuntimeActor func testAnAnswerAQueryFromTheOldPathStoresDuringTheSettleDoesNotOutliveIt() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let upstream = HeldDNSUpstream()
+        let server = try await DatagramBootstrap(group: group)
+            .channelInitializer { $0.pipeline.addHandler(upstream) }
+            .bind(host: "127.0.0.1", port: 0).get()
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.upstreams = []
+        config.dnsForwarderEnabled = true
+        config.dnsForwarderPort = 0
+        // The forwarder asks its first internal server for every name before DoH: here, the held local socket.
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.internal.test", servers: ["127.0.0.1"])]
+        var tuning = DNSForwarderTuning()
+        tuning.internalServerPort = try XCTUnwrap(server.localAddress?.port)
+        tuning.internalAttemptTimeout = .seconds(5)
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
+        orchestrator.dnsForwarder = LocalDNSForwarder(
+            group: group, logger: DiscardingLogSink(), configProvider: { [config] in config }, tuning: tuning
+        )
+        try await orchestrator.startProxy()
+        await orchestrator.startDNS()
+        let client = try await DatagramBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
+        addTeardownBlock {
+            try await client.close().get()
+            try await server.close().get()
+            await orchestrator.stopDNS()
+            await orchestrator.stopProxy()
+        }
+        XCTAssertEqual(orchestrator.snapshot.dnsRunState, .running, "DNS forwarder must bind for this test")
+        let forwarderPort = try XCTUnwrap(orchestrator.dnsForwarder.listeningPort)
+        await orchestrator.handleNetworkPath(Self.wifi(gateway: "192.168.1.1"))
+
+        // A query on the old path, held at the upstream.
+        let query = DNSWireFormat.buildQuery(domain: "held.example.com", txID: 0x1234)
+        var buffer = client.allocator.buffer(capacity: query.count)
+        buffer.writeBytes(query)
+        try await client.writeAndFlush(AddressedEnvelope(
+            remoteAddress: try SocketAddress(ipAddress: "127.0.0.1", port: forwarderPort), data: buffer
+        )).get()
+        let held = try await upstream.waitForQuery()
+
+        // The path changes while the query is out: its leading edge clears the cache. Then the old query is answered and stored.
+        XCTAssertTrue(orchestrator.invalidateNetworkPath(Self.wifi(gateway: "10.0.0.1")))
+        var answer = server.allocator.buffer(capacity: 64)
+        answer.writeBytes(try XCTUnwrap(DNSWireFormat.synthesizeDirectResponse(originalQuery: held.query, ip: "192.0.2.80")))
+        try await server.writeAndFlush(AddressedEnvelope(remoteAddress: held.from, data: answer)).get()
+        let deadline = ContinuousClock.now + .seconds(5)
+        while orchestrator.dnsForwarder.cachedResponseCount == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(orchestrator.dnsForwarder.cachedResponseCount, 1, "the old path's answer was stored during the settle")
+
+        // The burst settles.
+        let cutoff = Date()
+        await orchestrator.handleNetworkPath(Self.wifi(gateway: "10.0.0.1"))
+        XCTAssertEqual(orchestrator.dnsForwarder.cachedResponseCount, 0, "the settle drops it")
+        let cleared = orchestrator.eventLog.events.filter { $0.event == "dns.response_cache_cleared" && $0.timestamp >= cutoff }
+        XCTAssertEqual(cleared.map(\.detail), ["source=network_settled entries=1"])
+        XCTAssertEqual(transportResetEvents(in: orchestrator.eventLog, since: cutoff).count, 0, "the settle keeps the transports")
+
+        // A settle with no change since the last one clears nothing.
+        let quiet = Date()
+        await orchestrator.handleNetworkPath(Self.wifi(gateway: "10.0.0.1"))
+        XCTAssertTrue(orchestrator.eventLog.events.filter { $0.event == "dns.response_cache_cleared" && $0.timestamp >= quiet }.isEmpty)
     }
 
     // MARK: - handleSystemWake
@@ -300,5 +384,34 @@ final class DNSTransportRecoveryTests: XCTestCase {
             "source=vpn_flap_recovered",
             "source=vpn_reconnected"
         ], "Each phase must carry its distinct source tag")
+    }
+}
+
+/// An upstream DNS server on a loopback socket that answers nothing by itself: it keeps the first query it receives, and where from,
+/// for the test to answer when it chooses.
+private final class HeldDNSUpstream: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = AddressedEnvelope<ByteBuffer>
+    struct Held: Sendable {
+        let query: [UInt8]
+        let from: SocketAddress
+    }
+    private let lock = NSLock()
+    private var held: Held?
+    struct NoQueryReached: Error {}
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let envelope = unwrapInboundIn(data)
+        let bytes = Array(envelope.data.readableBytesView)
+        lock.withLock { if held == nil { held = Held(query: bytes, from: envelope.remoteAddress) } }
+    }
+
+    /// Waits, bounded, for the first query.
+    func waitForQuery() async throws -> Held {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline {
+            if let held = lock.withLock({ held }) { return held }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        throw NoQueryReached()
     }
 }
