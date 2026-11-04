@@ -2138,17 +2138,15 @@ extension RuntimeHost: RuntimeReconcilerHost {
         await awaitLaunchRecovery()
         await waitUntilIdle([.proxy])
         guard !token.isSuperseded, runtimeState().proxyIsUp else { return }
-        let config = heldRuntimeConfig, platform = platformConfig
-        guard platform.manageSystemProxy || platform.manageEnvironmentVariables else { return }
-        _ = advertisedEndpoints(for: config, source: "listener_rebound", advertised: true)
-        if platform.manageSystemProxy {
-            _ = await applySystemProxySwitch(config: config, platform: platform, cause: .listenerRebound)
+        guard platformConfig.manageSystemProxy || platformConfig.manageEnvironmentVariables else { return }
+        _ = advertisedEndpoints(for: heldRuntimeConfig, source: "listener_rebound", advertised: true)
+        if platformConfig.manageSystemProxy {
+            _ = await applySystemProxySwitch(config: heldRuntimeConfig, platform: platformConfig, cause: .listenerRebound)
         }
-        // A Stop admitted during that write cleared the bindings; the environment would be written with port 0 behind its clear.
-        guard !token.isSuperseded, runtimeState().proxyIsUp else { return }
-        if platform.manageEnvironmentVariables {
-            _ = await applyEnvironmentSwitch(config: config, cause: .listenerRebound)
-        }
+        // That write suspended. A Stop admitted meanwhile cleared the bindings, and a reload may have turned the environment switch
+        // off and queued its clear; a reload does not move the lane token. Both writes read the config and the switch in their own turn.
+        guard !token.isSuperseded, runtimeState().proxyIsUp, platformConfig.manageEnvironmentVariables else { return }
+        _ = await applyEnvironmentSwitch(config: heldRuntimeConfig, cause: .listenerRebound)
     }
 }
 
