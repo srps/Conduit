@@ -206,6 +206,7 @@ package final class PooledUpstreamConnection: @unchecked Sendable {
         var inUse = false
         var lastUsedAt = Date()
         var isDedicatedTunnel = false
+        var hasIdled = false
     }
 
     package let id = UUID()
@@ -226,6 +227,8 @@ package final class PooledUpstreamConnection: @unchecked Sendable {
         get { metadata.withLockedValue { $0.lastUsedAt } }
         set { metadata.withLockedValue { $0.lastUsedAt = newValue } }
     }
+    /// It waited in the idle list, so the upstream may have dropped it without a word.
+    var hasIdled: Bool { metadata.withLockedValue { $0.hasIdled } }
     /// Set by the pool before it publishes a dedicated tunnel, never after.
     /// Package-settable so tests can build synthetic states for the pure
     /// filters.
@@ -544,7 +547,7 @@ package final class ConnectionPool: @unchecked Sendable {
         do {
             let response = try await bufferedExchange(
                 head: head, requestBody: nil, forcedProxy: nil, allowRetry: true,
-                preferFreshConnection: false, authSource: nil, connectTimeout: probeTimeout
+                preferFreshConnection: false, authSource: nil, connectTimeout: probeTimeout, asksAFreshConnectionAfterIdleSilence: true
             ).get()
             let elapsed = Int(Date().timeIntervalSince(start) * 1_000)
             let code = Int(response.head.status.code)
@@ -894,6 +897,7 @@ package final class ConnectionPool: @unchecked Sendable {
             // A connection retired while it was in use (`closeAll`, a close
             // that already landed) stays out: idle means a pool member.
             guard self.allConnections[connection.id] != nil else { return false }
+            connection.update { $0.hasIdled = true }
             self.idleConnections[connection.proxy.id, default: []].append(connection)
             return true
         }
@@ -1121,7 +1125,8 @@ package final class ConnectionPool: @unchecked Sendable {
         allowRetry: Bool,
         preferFreshConnection: Bool,
         authSource: String?,
-        connectTimeout: TimeAmount? = nil
+        connectTimeout: TimeAmount? = nil,
+        asksAFreshConnectionAfterIdleSilence: Bool = false
     ) -> EventLoopFuture<UpstreamExchangeResponse> {
         let config = configProvider()
         guard let proxy = forcedProxy ?? selectProxy(from: config) else {
@@ -1129,6 +1134,7 @@ package final class ConnectionPool: @unchecked Sendable {
         }
 
         let start = Date()
+        let ranOnAnIdledConnection = NIOLockedValueBox(false)
         let attempt: EventLoopFuture<UpstreamExchangeResponse> = acquireConnection(
             for: proxy,
             target: head.uri,
@@ -1138,6 +1144,7 @@ package final class ConnectionPool: @unchecked Sendable {
             guard let self else {
                 return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
             }
+            ranOnAnIdledConnection.withLockedValue { $0 = connection.hasIdled }
             return self.attributingRetirement(
                 self.performBufferedExchange(head: head, requestBody: requestBody, connection: connection, proxy: proxy, authSource: authSource),
                 connection: connection
@@ -1163,11 +1170,23 @@ package final class ConnectionPool: @unchecked Sendable {
             // (which is already in a failed state because we got here via
             // `flatMapError`). Simplifying makes the intent obvious.
             guard let self else { return attempt }
+            // A silence on a socket that sat idle may be the socket, not the upstream; a fresh connect measures.
+            let idleSilence = asksAFreshConnectionAfterIdleSilence && ranOnAnIdledConnection.withLockedValue { $0 }
+                && ConnectionPoolError.failureClass(error) == .inconclusive
             let shouldRetry = allowRetry
                 && Self.isIdempotentMethod(head.method)
-                && Self.isRetryableConnectionError(error)
+                && (Self.isRetryableConnectionError(error) || idleSilence)
             if shouldRetry {
-                self.logger.log(.debug, "Retrying idempotent request via fresh connection after upstream reset (\(proxy.endpoint)).", category: .proxy)
+                if idleSilence {
+                    let event = RuntimeEvent(
+                        kind: .health, event: "health.idle_connection_silent",
+                        detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) retry=fresh_connection"
+                    )
+                    self.eventSink?(event)
+                    self.logger.log(.info, "Health check got no answer on an idle connection; asking a fresh one: \(event.detail ?? "")", category: .network)
+                } else {
+                    self.logger.log(.debug, "Retrying idempotent request via fresh connection after upstream reset (\(proxy.endpoint)).", category: .proxy)
+                }
                 return self.bufferedExchange(
                     head: head,
                     requestBody: requestBody,
