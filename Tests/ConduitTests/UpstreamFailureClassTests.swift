@@ -75,6 +75,55 @@ final class UpstreamFailureClassTests: XCTestCase {
         pool.closeAll()
     }
 
+    func testASilentHalfOpenProbeReopensTheBreaker() async throws {
+        let released = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .bind(host: "127.0.0.1", port: 0).get()
+        let refusedPort = try XCTUnwrap(released.localAddress?.port)
+        try await released.close().get()
+        let silent = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { $0.eventLoop.makeSucceededVoidFuture() }
+            .bind(host: "127.0.0.1", port: 0).get()
+        let events = Events()
+        var config = ProxyConfig.testFixture()
+        config.upstreamResponseTimeoutSeconds = 0.1
+        config.circuitFailureThreshold = Self.attempts
+        config.circuitBreakerWindowSeconds = 0
+        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: refusedPort, priority: 0)]
+        let current = NIOLockedValueBox(config)
+        let pool = ConnectionPool(
+            group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(), configProvider: { current.withLockedValue { $0 } },
+            authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "dGVzdA==") }, eventSink: events.record
+        )
+        let coordinator = CONNECTCoordinator(pool: pool, authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "dGVzdA==") }, logger: DiscardingLogSink())
+
+        for _ in 0..<Self.attempts {
+            do {
+                _ = try await pool.exchange(head: Self.head, body: nil).get()
+                XCTFail("a refused connect cannot succeed")
+            } catch {}
+        }
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open)
+        XCTAssertEqual(events.count("upstream.circuit_opened"), 1)
+
+        let silentPort = try XCTUnwrap(silent.localAddress?.port)
+        current.withLockedValue { $0.upstreams[0].port = silentPort }
+        await assertFails(with: .upstreamResponseTimedOut) {
+            _ = try await pool.exchange(head: Self.head, body: nil).get()
+        }
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open, "the silent exchange was the half-open probe")
+        XCTAssertEqual(events.count("upstream.circuit_opened"), 2)
+
+        await assertFails(with: .upstreamResponseTimedOut) {
+            _ = try await coordinator.connectUpstreamTunnel(target: "example.com:443").get()
+        }
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open, "the silent tunnel was the half-open probe")
+        XCTAssertEqual(events.count("upstream.circuit_half_opened"), 2)
+        XCTAssertEqual(events.count("upstream.circuit_opened"), 3)
+        pool.closeAll()
+        try await silent.close().get()
+    }
+
     private static let head: HTTPRequestHead = {
         var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://example.com/")
         head.headers.add(name: "Host", value: "example.com")

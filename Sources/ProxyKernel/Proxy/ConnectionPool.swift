@@ -474,8 +474,8 @@ package final class ConnectionPool: @unchecked Sendable {
             guard let self else { return attempt }
             if ConnectionPoolError.isClientClosedDuringResponse(error) {
                 self.recordSuccess(for: proxy, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
-            } else if ConnectionPoolError.failureClass(error) == .upstream {
-                self.recordFailure(for: proxy)
+            } else {
+                self.recordExchangeFailure(error, for: proxy)
             }
             return self.group.next().makeFailedFuture(error)
         }
@@ -627,7 +627,7 @@ package final class ConnectionPool: @unchecked Sendable {
                             self.release(connection, keepAlive: true)
                             self.logger.log(.debug, "Prewarmed upstream connection for \(proxy.endpoint).", category: .proxy)
                         } catch {
-                            if ConnectionPoolError.failureClass(error) == .upstream { self.recordFailure(for: proxy) }
+                            self.recordExchangeFailure(error, for: proxy)
                             self.logger.log(.debug, "Prewarm failed for \(proxy.endpoint): \(error.displayDescription)", category: .proxy)
                         }
                     }
@@ -1178,9 +1178,7 @@ package final class ConnectionPool: @unchecked Sendable {
                     connectTimeout: connectTimeout
                 )
             }
-            if ConnectionPoolError.failureClass(error) == .upstream {
-                self.recordFailure(for: proxy)
-            }
+            self.recordExchangeFailure(error, for: proxy)
             return self.group.next().makeFailedFuture(error)
         }
     }
@@ -1285,7 +1283,17 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    private func recordFailure(for proxy: UpstreamProxy) {
+    /// A silence is no strike, except on the half-open probe. That breaker opened on conclusive failures, which still stand, and only an
+    /// outcome frees its probe slot.
+    package func recordExchangeFailure(_ error: Error, for proxy: UpstreamProxy) {
+        switch ConnectionPoolError.failureClass(error) {
+        case .upstream: recordFailure(for: proxy)
+        case .inconclusive: recordFailure(for: proxy, onlyWhenHalfOpen: true)
+        case .local: break
+        }
+    }
+
+    private func recordFailure(for proxy: UpstreamProxy, onlyWhenHalfOpen: Bool = false) {
         let config = configProvider()
         let proxies = config.enabledUpstreams
         let thresholds = breakerThresholds(from: config)
@@ -1293,6 +1301,7 @@ package final class ConnectionPool: @unchecked Sendable {
         lock.withLockVoid {
             syncUpstreamStatesLocked(with: proxies)
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
+            guard !onlyWhenHalfOpen || breaker.state == .halfOpen else { return }
             emittedTransition = breaker.recordFailure(
                 now: Date(),
                 threshold: thresholds.failureThreshold,
