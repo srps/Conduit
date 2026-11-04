@@ -20,6 +20,7 @@ package enum RecordFileDiagnosticSink: String, Sendable {
 package enum ProtectedRecordResource: String, Sendable, CaseIterable {
     case config
     case platformState = "platform_state"
+    case proxyEndpointWitness = "proxy_endpoint_witness"
     case platformConfig = "platform_config"
     case preferences
     case snapshot

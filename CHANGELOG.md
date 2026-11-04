@@ -22,6 +22,14 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   advertised endpoint from the live bindings, and `config.client_endpoint_resolved`
   records the port chosen. The saved port stays 0, and fixed ports are unchanged.
 
+- If a session with the proxy port set to 0 crashed and the recovery journal
+  was then unreadable, the next launch left the system proxy pointing at the
+  dead ephemeral port (#269). Conduit now keeps the advertised endpoint in
+  `platform-state.proxy-endpoint.json` while such a session runs, and recovery
+  clears only that exact host and port, so another tool's proxy on 127.0.0.1
+  stays. `platform.location_residue_identity` records which endpoint recovery
+  treated as Conduit's.
+
 - VPN flap durations are measured on a monotonic clock, so a wall-clock change
   during a flap can no longer make the total flap time negative and leave the
   control status unavailable (#252). The recovery time shown for the last flap

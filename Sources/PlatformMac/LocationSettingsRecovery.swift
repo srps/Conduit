@@ -7,6 +7,7 @@ import ConduitShared
 package final class LocationSettingsRecovery: @unchecked Sendable {
     private let store: any NetworkLocationStoring
     private let journal: PlatformStateJournal
+    private let witness: any ProxyEndpointWitnessing
     private let limits: NetworkLocationLimits
     private let emit: @Sendable (RuntimeEvent) -> Void
     private let operations = NSRecursiveLock()
@@ -23,11 +24,13 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
     }
 
     package init(store: any NetworkLocationStoring, journal: PlatformStateJournal,
+                 witness: (any ProxyEndpointWitnessing)? = nil,
                  limits: NetworkLocationLimits = .init(),
                  now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
                  emit: @escaping @Sendable (RuntimeEvent) -> Void) {
         self.store = store
         self.journal = journal
+        self.witness = witness ?? FileProxyEndpointWitness.beside(journalFile: journal.fileURL)
         self.limits = limits
         self.now = now
         self.emit = emit
@@ -98,7 +101,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         return false
     }
 
-    private static func isLoopback(_ host: String) -> Bool {
+    static func isLoopback(_ host: String) -> Bool {
         host == "localhost" || host == "::1" || host.hasPrefix("127.")
     }
 
@@ -224,6 +227,8 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                 report("failed", "operation=apply surface=\(kind.rawValue) reason=unsupported_settings")
                 throw NetworkSettingsError.invalidRequest
             }
+            let advertised = kind == .proxies ? Self.advertisedEndpoint(desired: desired, config: config) : nil
+            if let advertised { try recordWitness(advertised) }
             for service in active {
                 let current = fields(service, kind)
                 let scope = service.locationID + "/" + service.serviceID
@@ -279,6 +284,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                     throw error
                 }
             }
+            if kind == .proxies && advertised == nil { retireWitness() }
         }
     }
 
@@ -293,6 +299,9 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                     report("failed", "operation=restore \(Self.identity(record)) reason=\(error.localizedDescription)")
                     if firstError == nil { firstError = error }
                 }
+            }
+            if kind == .proxies && !inactiveOnly && journal.fileState != .unreadable && !journal.hasRecords(for: .systemProxy) {
+                retireWitness()
             }
             if let firstError { throw firstError }
         }
@@ -364,9 +373,10 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
             do {
                 if listenerIsLive {
                     let snapshot = try store.snapshot()
+                    let ours = residueIdentity(kind: kind, config: config)
                     let residue = snapshot.services.contains {
                         let current = fields($0, kind)
-                        return current != removeResidue(current, kind: kind, config: config)
+                        return current != removeResidue(current, kind: kind, ours: ours)
                     }
                     if journal.hasRecords(for: surface(kind)) || residue { return .declinedLiveListener }
                 }
@@ -402,6 +412,8 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         let journalUnreadable = journal.fileState == .unreadable
         // A released surface contains the user's own settings; never sweep it again.
         guard !legacy.isEmpty || journalUnreadable else { return }
+        let ours = residueIdentity(kind: kind, config: config)
+        if kind == .proxies { reportIdentity(ours, config: config) }
         let snapshot = try store.snapshot()
         let scoped = Set(journal.records(for: surface(kind)).filter { $0.locationID != nil }.map(\.scope))
         var unreadable = false
@@ -412,7 +424,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                 continue
             }
             let current = fields(member, kind)
-            let replacement = removeResidue(current, kind: kind, config: config)
+            let replacement = removeResidue(current, kind: kind, ours: ours)
             let couldHoldLegacyState = legacy.contains { record in
                 record.scope == member.name || !snapshot.services.contains { $0.name == record.scope }
             }
@@ -426,6 +438,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                                                              kind: kind, expected: current, replacement: replacement, requireActive: false))
         }
         guard !unreadable else { throw NetworkSettingsError.invalidRequest }
+        if ours.witnessed != nil { retireWitness() }
         // Retain corrupt evidence and never overwrite it with a released marker.
         if journalUnreadable {
             report("failed", "operation=legacy_cleanup surface=\(kind.rawValue) reason=unreadable_journal prior_location=unknown")
@@ -462,21 +475,74 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         return false
     }
 
+    private struct ResidueIdentity {
+        var configured: SystemProxyManager.LocalListenerFingerprint
+        var record: ProxyEndpointWitnessRead
+
+        var witnessed: AdvertisedProxyEndpoint? {
+            if case .present(let endpoint) = record { return endpoint }
+            return nil
+        }
+
+        func ownsEndpoint(host: String, port: Int) -> Bool {
+            configured.matchesEndpoint(host: host, port: String(port)) || witnessed == AdvertisedProxyEndpoint(host: host, port: port)
+        }
+    }
+
+    private func residueIdentity(kind: NetworkSettingsKind, config: ProxyConfig) -> ResidueIdentity {
+        ResidueIdentity(configured: .init(config: config),
+                        record: kind == .proxies && config.localPort == 0 ? witness.read() : .absent)
+    }
+
+    private func reportIdentity(_ identity: ResidueIdentity, config: ProxyConfig) {
+        let detail: String
+        switch identity.record {
+        case .present(let endpoint):
+            detail = "source=witness host=\(endpoint.host) port=\(endpoint.port)"
+        case .unreadable(let reason):
+            detail = "source=none reason=record_unreadable record_reason=\(reason.rawValue)"
+        case .absent:
+            guard config.localPort == 0 else { return }
+            detail = "source=none reason=no_record"
+        }
+        report("residue_identity", "surface=proxies " + detail)
+    }
+
+    private static func advertisedEndpoint(desired: [String: NetworkSettingValue], config: ProxyConfig) -> AdvertisedProxyEndpoint? {
+        guard config.localPort == 0, desired["ProxyAutoConfigEnable"] != .number(1), desired["HTTPEnable"] == .number(1),
+              case .text(let host) = desired["HTTPProxy"], isLoopback(host),
+              case .number(let port) = desired["HTTPPort"], (1...65535).contains(port) else { return nil }
+        return AdvertisedProxyEndpoint(host: host, port: port)
+    }
+
+    private func recordWitness(_ endpoint: AdvertisedProxyEndpoint) throws {
+        guard witness.read() != .present(endpoint) else { return }
+        do { try witness.record(endpoint) }
+        catch {
+            report("failed", "operation=record_endpoint surface=proxies reason=\(error.localizedDescription)")
+            throw error
+        }
+    }
+
+    private func retireWitness() {
+        do { try witness.retire() }
+        catch { report("failed", "operation=retire_endpoint surface=proxies reason=\(error.localizedDescription)") }
+    }
+
     private func removeResidue(_ current: [String: NetworkSettingValue], kind: NetworkSettingsKind,
-                               config: ProxyConfig) -> [String: NetworkSettingValue] {
+                               ours: ResidueIdentity) -> [String: NetworkSettingValue] {
         var replacement = current
         if kind == .dns {
             if current["ServerAddresses"] == .list(["127.0.0.1"]) { replacement.removeValue(forKey: "ServerAddresses") }
         } else {
-            let ours = SystemProxyManager.LocalListenerFingerprint(config: config)
             for prefix in ["HTTP", "HTTPS"] {
                 if case .text(let host) = current[prefix + "Proxy"],
                    case .number(let port) = current[prefix + "Port"],
-                   ours.matchesEndpoint(host: host, port: String(port)) {
+                   ours.ownsEndpoint(host: host, port: port) {
                     for suffix in ["Proxy", "Port", "Enable"] { replacement.removeValue(forKey: prefix + suffix) }
                 }
             }
-            if case .text(let url) = current["ProxyAutoConfigURLString"], ours.matchesPACURL(url) {
+            if case .text(let url) = current["ProxyAutoConfigURLString"], ours.configured.matchesPACURL(url) {
                 replacement.removeValue(forKey: "ProxyAutoConfigURLString")
                 replacement.removeValue(forKey: "ProxyAutoConfigEnable")
             }

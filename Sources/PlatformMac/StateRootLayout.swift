@@ -42,6 +42,7 @@ package enum StateRootReservedName: Sendable, Equatable, CaseIterable {
     case controlSocket
     case readyFile
     case daemonReadyFile
+    case proxyEndpointWitness
 
     package var fileName: String {
         switch self {
@@ -49,6 +50,7 @@ package enum StateRootReservedName: Sendable, Equatable, CaseIterable {
         case .controlSocket: ControlSocket.fileName
         case .readyFile: "ready.json"
         case .daemonReadyFile: "daemon-ready.json"
+        case .proxyEndpointWitness: RuntimeEnvironment.proxyEndpointWitnessFileName
         }
     }
 }

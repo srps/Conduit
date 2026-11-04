@@ -652,6 +652,33 @@ package final class InMemorySecretStore: SecretStore, @unchecked Sendable {
 
 // MARK: - Network locations
 
+package final class InMemoryProxyEndpointWitness: ProxyEndpointWitnessing, @unchecked Sendable {
+    package struct Refused: Error {}
+    private let lock = NSLock()
+    private var state: ProxyEndpointWitnessRead
+    private var refusing = false
+
+    package init(_ state: ProxyEndpointWitnessRead = .absent) { self.state = state }
+    package var current: ProxyEndpointWitnessRead { lock.withLock { state } }
+    package func refuseWrites(_ refuse: Bool) { lock.withLock { refusing = refuse } }
+
+    package func read() -> ProxyEndpointWitnessRead { current }
+
+    package func record(_ endpoint: AdvertisedProxyEndpoint) throws {
+        try lock.withLock {
+            guard !refusing else { throw Refused() }
+            state = .present(endpoint)
+        }
+    }
+
+    package func retire() throws {
+        try lock.withLock {
+            guard !refusing else { throw Refused() }
+            state = .absent
+        }
+    }
+}
+
 package final class FakeNetworkLocationStore: NetworkLocationStoring, @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private var state: NetworkLocationSnapshot
