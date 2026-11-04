@@ -300,10 +300,18 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
         }
     }
 
+    private var _failsServiceListing = false
+    /// `networksetup -listallnetworkservices` fails, as it can mid-teardown, while every other command still runs.
+    package var failsServiceListing: Bool {
+        get { lock.withLock { _failsServiceListing } }
+        set { lock.withLock { _failsServiceListing = newValue } }
+    }
+
     private func runNetworksetup(_ arguments: [String]) -> CommandResult {
         guard let command = arguments.first else { return Self.failure("networksetup: no command") }
         return lock.withLock {
             if command == "-listallnetworkservices" {
+                guard !_failsServiceListing else { return Self.failure("networksetup: could not list network services") }
                 let lines = ["An asterisk (*) denotes that a network service is disabled."] + serviceNames
                 return Self.success(lines.joined(separator: "\n"))
             }

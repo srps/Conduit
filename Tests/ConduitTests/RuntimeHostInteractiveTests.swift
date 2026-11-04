@@ -486,6 +486,30 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         XCTAssertEqual(harness.savedDNSEnabled, false)
     }
 
+    /// After a declined recovery, a DNS Start whose forwarder cannot bind restores system DNS. A restore that could not list the network
+    /// services returns normally but keeps the record, so the Mac still points at the relay and the decline stays.
+    @RuntimeActor func testAFailedDNSStartWhoseRestoreKeptTheRecordKeepsTheDecline() async throws {
+        let held = try HeldUDPPort()
+        let harness = try makeHarness(platform: proxyAndDNS, dnsForwarderEnabled: true, dnsForwarderPort: held.port)
+        self.harness = harness
+        let journal = PlatformStateJournal(fileURL: harness.environment.platformStateFile)
+        journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "192.0.2.1"])
+        journal.markApplied(surface: .systemDNS)
+        harness.machine.describe("Wi-Fi") { $0.dnsServers = ["127.0.0.1"] }
+        harness.dnsProbe = FakeDNSProbe(timingOut: [53])
+        let host = try await harness.makeHost()
+        XCTAssertTrue(host.systemDNSRecoveryDeclined)
+
+        harness.machine.failsServiceListing = true
+        let dns = try await host.startDNS()
+        harness.machine.failsServiceListing = false
+        XCTAssertEqual(dns.modules.dns, .failed)
+        XCTAssertTrue(journal.hasRecords(for: .systemDNS), "the restore kept the record for retry")
+        XCTAssertEqual(harness.machine.service("Wi-Fi").dnsServers, ["127.0.0.1"])
+        XCTAssertTrue(host.systemDNSRecoveryDeclined, "nothing put the recorded servers back")
+        withExtendedLifetime(held) {}
+    }
+
     /// A companion whose forwarder cannot bind reports its own failure: the proxy stays up, the system DNS it captured is restored, and
     /// DNS's configured intent and fence are left as they were, so a later explicit Start is not refused or replayed.
     @RuntimeActor func testAFailedCompanionLeavesTheProxyUpAndRestoresSystemDNS() async throws {

@@ -635,10 +635,12 @@ extension RuntimeHost {
                     do {
                         if forwarderRunning {
                             try systemDNS.apply(forwarderPort: forwarderPort, logger: logger)
+                            written = true
                         } else {
+                            // A clear that restored only some interfaces returns normally and keeps the record for retry.
                             try systemDNS.clear(logger: logger)
+                            written = !systemDNS.hasSavedState()
                         }
-                        written = true
                     } catch {
                         logger.log(.warning, "Could not \(forwarderRunning ? "set" : "restore") system DNS (non-fatal): \(error.localizedDescription)", category: .system)
                     }
