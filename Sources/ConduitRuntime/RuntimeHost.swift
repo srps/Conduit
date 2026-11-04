@@ -682,9 +682,16 @@ package final class RuntimeHost {
         Task { [weak self] in await self?.awaitLaunchRecovery() }
     }
 
-    /// System DNS was written, or the relay it points at answers, so no declined recovery describes the machine any more.
+    /// A DNS Start, a DNS Stop or a management change wrote system DNS, so no declined recovery describes the machine any more.
     func systemDNSWritten() {
         systemDNSRecoveryDeclined = false
+    }
+
+    /// The relay system DNS points at answers this run. A reading that lands after management went off stopped its timer and relay,
+    /// so it says nothing about the machine.
+    private func relayAnswered() {
+        guard dnsHealthTimer != nil else { return }
+        systemDNSWritten()
     }
 
     /// Publishes readiness: `daemon.ready`, `daemon-ready.json` and a
@@ -1635,7 +1642,7 @@ package final class RuntimeHost {
         guard !token.isSuperseded, orchestrator.snapshot.dnsRunState == .running else { return }
         if alive {
             dnsRelayUnresponsive = false
-            systemDNSWritten()
+            relayAnswered()
             return
         }
         // The restart and the probe after it run off the owner, one at a time.
@@ -1662,12 +1669,12 @@ package final class RuntimeHost {
             return
         case .restarted:
             orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.relay_restarted", detail: "source=health_timer"))
-            systemDNSWritten()
         case .unresponsive:
             orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.pipeline_unresponsive", detail: "source=health_timer"))
         }
         guard !token.isSuperseded, orchestrator.snapshot.dnsRunState == .running else { return }
         dnsRelayUnresponsive = outcome == .unresponsive
+        if outcome == .restarted { relayAnswered() }
     }
 
     /// The status is read and encoded on the owner, in this turn. The directory and the atomic replacement run on `platformWork`, so
