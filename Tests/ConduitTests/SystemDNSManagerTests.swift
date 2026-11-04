@@ -949,6 +949,29 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)
     }
 
+    /// A session whose resolver is slow to answer is not a dead one (#201). The real probe asks a socket that is
+    /// bound but never replies, so it times out: recovery must leave the machine's DNS and its records alone.
+    func testRestoreIfNeededLeavesASlowSessionAlone() throws {
+        let port = Int.random(in: 17000..<18000)
+        let silentFD = createUDPSocket(port: port)
+        guard silentFD >= 0 else { throw XCTSkip("Could not bind a silent socket on port \(port)") }
+        defer { close(silentFD) }
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+        writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
+        let manager = SystemDNSManager(
+            privilegeClient: recording,
+            journal: journal,
+            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            respondsOnPort: { _ in SystemDNSManager.dnsResponds(onPort: port, timeoutMilliseconds: 50) }
+        )
+
+        let outcome = manager.restoreIfNeeded(logger: nil)
+
+        XCTAssertNotEqual(outcome, .restored(stale: false), "a timed-out probe is no evidence the session is gone")
+        XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)
+        XCTAssertTrue(manager.hasSavedState(), "the next launch retries from the records")
+    }
+
     // MARK: - Liveness probe
 
     func testProbeLivenessReturnsFalseWhenNoListener() {
