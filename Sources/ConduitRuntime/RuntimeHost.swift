@@ -1180,8 +1180,9 @@ package final class RuntimeHost {
                 recordLifecycle(RuntimeEvent(kind: .config, event: "platform.location_restore_withheld",
                                              detail: "surface=\(kind.rawValue) reason=launch_recovery_declined"))
             }
-            let proxyRetry = await platformWork.run { () -> Duration? in
+            let (proxyRetry, systemDNSApplied) = await platformWork.run { () -> (Duration?, Bool) in
                 var retry: Duration?
+                var systemDNSApplied = false
                 do {
                     if !proxyToken.isSuperseded && !withholdProxyRestore {
                         retry = try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, endpoints: endpoints,
@@ -1195,14 +1196,17 @@ package final class RuntimeHost {
                 do {
                     if !dnsToken.isSuperseded && !withholdDNSRestore {
                         try dns.reconcileLocation(apply: applyDNS, forwarderPort: forwarderPort, logger: logger)
+                        systemDNSApplied = applyDNS
                     }
                 } catch {
                     let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=reconcile surface=systemDNS reason=\(error.localizedDescription)")
                     events.append(event)
                     logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
                 }
-                return retry
+                return (retry, systemDNSApplied)
             }
+            // The apply restarted the relay at this run's forwarder before writing, so the machine is this run's.
+            if systemDNSApplied { surfaceWritten(.systemDNS) }
             if let proxyRetry { scheduleProxyRepairRetry(after: proxyRetry) }
         } while locationReconcileWanted
     }

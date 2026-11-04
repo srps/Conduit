@@ -629,6 +629,24 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
     }
 
+    func testALocationReconcileThatRepointsTheRelayClearsADeclinedSystemDNSRecovery() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        let locations = try leaveACrashedRunsLocationSettingsBehindASlowListener(harness, kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])])
+        let state = await harness.ready()
+        await harness.settle("the decline is shown") { state.runtime.systemDNSRecoveryDeclined }
+        harness.machine.privilege.failing = [.startDNSRelay]
+        state.startDNSAfterDeclinedRecovery()
+        await harness.settle("DNS runs") { state.runtime.dnsRunState == .running }
+        XCTAssertTrue(state.runtime.systemDNSRecoveryDeclined, "the relay still forwards to the crashed run")
+
+        harness.machine.privilege.failing = []
+        locations.edit { $0.activeLocationID = NetworkLocationFixture.office }
+        harness.locationObserver.emit(NetworkLocationFixture.office)
+        await harness.settle("the notice clears") { !state.runtime.systemDNSRecoveryDeclined }
+        let port = try XCTUnwrap(state.runtime.bindings.dnsPort)
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(port)], "the relay forwards to this run")
+    }
+
     func testTheFirstLocationReportKeepsSystemDNSThatALiveListenerServes() async throws {
         let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
         let locations = try leaveACrashedRunsLocationSettingsBehindASlowListener(harness, kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])])
