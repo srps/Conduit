@@ -51,6 +51,7 @@ final class AppStateHarness {
     /// Fetches no PAC from the network; a scenario that plans PAC work injects its own before `launch()`.
     var pacEvaluator: any PacEvaluator = FakePacEvaluator()
     var dnsProbe = FakeDNSProbe()
+    var loopbackPortProbe = FakeLoopbackPortProbe()
     /// The host store's file access; a scenario that holds or refuses a store step names its own before `launch()`.
     var stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem()
     private(set) var appState: AppState?
@@ -102,6 +103,8 @@ final class AppStateHarness {
         let locationStore = self.locationStore
         let appLogHold = self.appLogHold
         let dnsProbe = self.dnsProbe
+        let loopbackPortProbe = self.loopbackPortProbe
+        locationObserver.reportsActiveLocation(of: locationStore)
         return AppComposition(
             effects: RuntimeHostEffects(
                 privilege: { _ in RuntimePrivilegeAdapters(client: HoldingPrivilegeClient(base: machine, hold: hold), helperStatus: helper) },
@@ -110,7 +113,7 @@ final class AppStateHarness {
                 gss: .injected { HarnessRefusingGSS() },
                 pacEvaluator: pacEvaluator,
                 portHolderProbe: FakeListenerPortHolderProbe(),
-                loopbackPortProbe: FakeLoopbackPortProbe().liveness(port:),
+                loopbackPortProbe: loopbackPortProbe.liveness(port:),
                 commandRunner: { launchPath, arguments in
                     hold.pass(launchPath, arguments)
                     return try machine.run(launchPath, arguments)
@@ -582,6 +585,73 @@ final class AppStateHarnessTests: XCTestCase {
         await harness.settle("the notice clears") { !state.runtime.systemDNSRecoveryDeclined }
         let port = try XCTUnwrap(state.runtime.bindings.dnsPort)
         XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(port)], "the relay forwards to this run")
+    }
+
+    /// A crashed run's location settings, written and journaled as its apply wrote them, with its listener's probe timing out.
+    private func leaveACrashedRunsLocationSettings(_ harness: AppStateHarness, kind: NetworkSettingsKind,
+                                                   desired: [String: NetworkSettingValue]) throws -> FakeNetworkLocationStore {
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        try LocationSettingsRecovery(store: locations, journal: harness.journal, emit: { _ in })
+            .apply(kind: kind, desired: desired, config: makeConfig())
+        harness.dnsProbe = FakeDNSProbe(timingOut: [53])
+        harness.loopbackPortProbe = FakeLoopbackPortProbe(timingOut: [47113])
+        return locations
+    }
+
+    private func homeService(_ locations: FakeNetworkLocationStore) -> LocationServiceSettings? {
+        var home: LocationServiceSettings?
+        locations.edit { home = $0.services.first { $0.locationID == NetworkLocationFixture.home } }
+        return home
+    }
+
+    /// The location reconcile the observer's first report runs, whichever way it went for `kind`.
+    private func settleTheFirstLocationReconcile(_ harness: AppStateHarness, kind: NetworkSettingsKind) async {
+        await harness.settle("the first location report is reconciled") {
+            harness.hostEventsText.split(separator: "\n").contains {
+                $0.contains("platform.location_restore") && $0.contains("surface=\(kind.rawValue)")
+            }
+        }
+    }
+
+    /// The location observer reports the current location as it starts, which is right after launch recovery declined: the reconcile
+    /// that report runs must not restore what recovery left alone.
+    func testTheFirstLocationReportKeepsADeclinedSystemDNSRecovery() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        let locations = try leaveACrashedRunsLocationSettings(harness, kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])])
+        let state = await harness.ready()
+        await harness.settle("the decline is shown") { state.runtime.systemDNSRecoveryDeclined }
+        await settleTheFirstLocationReconcile(harness, kind: .dns)
+
+        XCTAssertEqual(homeService(locations)?.dns["ServerAddresses"], .list(["127.0.0.1"]), "a timed-out probe restores nothing")
+        XCTAssertTrue(harness.journal.hasRecords(for: .systemDNS))
+        XCTAssertTrue(state.runtime.systemDNSRecoveryDeclined, "the notice still describes the machine")
+
+        state.restoreSystemDNSByStoppingDNS()
+        await harness.settle("the notice clears") { !state.runtime.systemDNSRecoveryDeclined }
+        XCTAssertEqual(homeService(locations)?.dns["ServerAddresses"], .list(["192.0.2.1"]), "the user's restore puts the servers back")
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+    }
+
+    func testTheFirstLocationReportKeepsADeclinedSystemProxyRecovery() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemProxy: true))
+        let locations = try leaveACrashedRunsLocationSettings(harness, kind: .proxies, desired: [
+            "HTTPEnable": .number(1), "HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(47113),
+            "HTTPSEnable": .number(1), "HTTPSProxy": .text("127.0.0.1"), "HTTPSPort": .number(47113),
+            "ProxyAutoConfigEnable": .number(0),
+        ])
+        let state = await harness.ready()
+        await settleTheFirstLocationReconcile(harness, kind: .proxies)
+
+        XCTAssertEqual(homeService(locations)?.proxies["HTTPProxy"], .text("127.0.0.1"), "a timed-out probe restores nothing")
+        XCTAssertTrue(harness.journal.hasRecords(for: .systemProxy))
+
+        state.toggleProxy()
+        await harness.settle("the proxy runs") { state.runtime.runtimeStatus.state == .running }
+        state.toggleProxy()
+        await harness.settle("the proxy stops") { state.runtime.runtimeStatus.state == .stopped }
+        await harness.settle("the Stop restores") { self.homeService(locations)?.proxies["HTTPProxy"] == .text("home.example") }
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
     }
 
     /// The explicit reload runs one at a time, refusing a second with a message, and re-evaluates the launch options' hold from what it

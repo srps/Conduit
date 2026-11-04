@@ -720,6 +720,7 @@ package final class FakeNetworkLocationStore: NetworkLocationStoring, @unchecked
     private var nextActiveLocation: String?
     package init(snapshot: NetworkLocationSnapshot) { state = snapshot }
     package func snapshot() throws -> NetworkLocationSnapshot { lock.withLock { state } }
+    package var activeLocationID: String { lock.withLock { state.activeLocationID } }
     package func edit(_ body: (inout NetworkLocationSnapshot) -> Void) { lock.withLock { body(&state) } }
     package func refuseWrites(_ refuse: Bool) { lock.withLock { failWrites = refuse } }
     private var compareFailuresRemaining = 0
@@ -763,10 +764,18 @@ package final class FakeNetworkLocationObserver: NetworkLocationObserving, @unch
     private let lock = NSLock()
     private var callback: (@Sendable (Result<String, NetworkSettingsError>) -> Void)?
     private var settingsCallback: (@Sendable () -> Void)?
+    private var store: FakeNetworkLocationStore?
     package init() {}
+    /// Each start then reports `store`'s active location before any change, as `NetworkLocationMonitor.start` reports the current set.
+    package func reportsActiveLocation(of store: FakeNetworkLocationStore?) { lock.withLock { self.store = store } }
     package func start(onChange: @escaping @Sendable (Result<String, NetworkSettingsError>) -> Void,
                        onSettingsChange: @escaping @Sendable () -> Void) {
-        lock.withLock { callback = onChange; settingsCallback = onSettingsChange }
+        let initial = lock.withLock { () -> String? in
+            callback = onChange
+            settingsCallback = onSettingsChange
+            return store?.activeLocationID
+        }
+        if let initial { onChange(.success(initial)) }
     }
     package func stop() { lock.withLock { callback = nil; settingsCallback = nil } }
     package func emit(_ locationID: String) { lock.withLock { callback }?(.success(locationID)) }

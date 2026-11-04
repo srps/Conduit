@@ -1696,6 +1696,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             let listings = self.listings
             let hold = self.hold
             let helper = self.helper
+            locationObserver.reportsActiveLocation(of: locationStore)
             return try await RuntimeHost.open(
                 stateSession: stateSession,
                 logger: DiscardingLogSink(),
