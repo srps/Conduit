@@ -23,7 +23,6 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         var contentionReported = false
     }
 
-    /// A nil `witness` keeps the advertised-endpoint record beside the journal file.
     package init(store: any NetworkLocationStoring, journal: PlatformStateJournal,
                  witness: (any ProxyEndpointWitnessing)? = nil,
                  limits: NetworkLocationLimits = .init(),
@@ -378,7 +377,6 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                 }
                 let hadRecords = journal.hasRecords(for: surface(kind))
                 try cleanLegacyAndRestore(kind: kind, config: config)
-                // Nothing of the last session is left on the machine for the record to describe.
                 if kind == .proxies && !journal.hasRecords(for: .systemProxy) { retireWitness() }
                 return hadRecords ? .restored(stale: false) : .nothingToDo(.nothingRecorded)
             } catch {
@@ -439,7 +437,6 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                                                              kind: kind, expected: current, replacement: replacement, requireActive: false))
         }
         guard !unreadable else { throw NetworkSettingsError.invalidRequest }
-        // Every service the record names was just swept, so it describes nothing on the machine.
         if ours.witnessed != nil { retireWitness() }
         // Retain corrupt evidence and never overwrite it with a released marker.
         if journalUnreadable {
@@ -477,9 +474,6 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         return false
     }
 
-    /// The HTTP/HTTPS endpoints a residue sweep treats as Conduit's. A configured port of 0 names no endpoint on the
-    /// machine, so only the witnessed record can name a port-0 session's; exact host and port is the only evidence. A
-    /// fixed port names its own endpoint, so a record left from an earlier port-0 session is not consulted.
     private struct ResidueIdentity {
         var configured: SystemProxyManager.LocalListenerFingerprint
         var record: ProxyEndpointWitnessRead
@@ -505,7 +499,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         case .present(let endpoint):
             detail = "source=witness host=\(endpoint.host) port=\(endpoint.port)"
         case .unreadable(let reason):
-            detail = "source=none reason=record_unreadable record_reason=\(reason)"
+            detail = "source=none reason=record_unreadable record_reason=\(reason.rawValue)"
         case .absent:
             guard config.localPort == 0 else { return }
             detail = "source=none reason=no_record"
@@ -513,8 +507,6 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         report("residue_identity", "surface=proxies " + detail)
     }
 
-    /// Runs before the first commit of a proxies apply, so a crash in between leaves a record naming a port no
-    /// service holds yet, never ephemeral residue without a record.
     private func witnessAdvertisedEndpoint(desired: [String: NetworkSettingValue], config: ProxyConfig) throws {
         guard config.localPort == 0, desired["ProxyAutoConfigEnable"] != .number(1), desired["HTTPEnable"] == .number(1),
               case .text(let host) = desired["HTTPProxy"], Self.isLoopback(host),
@@ -531,8 +523,6 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         }
     }
 
-    /// A record that outlives its session is consulted only by a later port-0 sweep, which clears no more than its exact
-    /// endpoint, so a failed removal is reported and never fails the apply, release or recovery around it.
     private func retireWitness() {
         do { try witness.retire() }
         catch { report("failed", "operation=retire_endpoint surface=proxies reason=\(error.localizedDescription)") }

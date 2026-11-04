@@ -346,10 +346,6 @@ enum NetworkLocationScenarios {
         )
     }
 
-    /// Another program rewrites the PAC after every Conduit write. Repairs stop at
-    /// the budget, one contention event explains why, and the window then reopens.
-    /// A port-0 session advertised 127.0.0.1:52870 and crashed, another tool holds 127.0.0.1:3128 on a second service,
-    /// and the journal became unreadable (#269).
     private static func ephemeralResidueUnderCorruptJournal(services: [LocationServiceSettings], home: String) throws
         -> (ownCleared: Bool, foreignKept: Bool, identityReported: Bool) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pm-location-ephemeral-\(UUID())")
@@ -388,6 +384,8 @@ enum NetworkLocationScenarios {
         return (ownCleared, foreignKept, identities == ["surface=proxies source=witness host=127.0.0.1 port=52870"])
     }
 
+    /// Another program rewrites the PAC after every Conduit write. Repairs stop at
+    /// the budget, one contention event explains why, and the window then reopens.
     private static func contendedRewritesStayBounded(services: [LocationServiceSettings], home: String) throws -> Bool {
         let store = FakeNetworkLocationStore(snapshot: .init(activeLocationID: home, services: services))
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("pm-location-contended-\(UUID()).json")

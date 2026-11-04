@@ -2,9 +2,6 @@
 import Foundation
 import ProxyKernel
 
-/// The loopback HTTP/HTTPS endpoint a port-0 session advertised from its ephemeral bind (#269). The journal records the
-/// same value per service; this copy exists for the launch where the journal is unreadable, so recovery can tell its own
-/// residue from another tool's loopback proxy by exact host and port.
 package struct AdvertisedProxyEndpoint: Codable, Equatable, Sendable {
     package static let formatVersion = 1
     package var version: Int = Self.formatVersion
@@ -17,19 +14,21 @@ package struct AdvertisedProxyEndpoint: Codable, Equatable, Sendable {
     }
 }
 
+package enum ProxyEndpointWitnessFault: String, Sendable {
+    case oversized, undecodable, io
+    case unsupportedVersion = "unsupported_version"
+    case invalidEndpoint = "invalid_endpoint"
+}
+
 package enum ProxyEndpointWitnessRead: Equatable, Sendable {
     case absent
     case present(AdvertisedProxyEndpoint)
-    /// A record that exists and is refused. The reason is a closed token: `oversized`, `undecodable`,
-    /// `unsupported_version`, `invalid_endpoint` or `io`.
-    case unreadable(reason: String)
+    case unreadable(ProxyEndpointWitnessFault)
 }
 
-/// Holds the advertised endpoint while a port-0 manual apply is outstanding (decision 0040).
 package protocol ProxyEndpointWitnessing: Sendable {
     func read() -> ProxyEndpointWitnessRead
     func record(_ endpoint: AdvertisedProxyEndpoint) throws
-    /// A missing record is success.
     func retire() throws
 }
 
@@ -52,19 +51,19 @@ package struct FileProxyEndpointWitness: ProxyEndpointWitnessing {
         } catch .missing {
             return .absent
         } catch .unreadable(.tooLarge(_), _) {
-            return .unreadable(reason: "oversized")
+            return .unreadable(.oversized)
         } catch {
-            return .unreadable(reason: "io")
+            return .unreadable(.io)
         }
         let endpoint: AdvertisedProxyEndpoint
         do {
             endpoint = try CanonicalJSON.decoder().decode(AdvertisedProxyEndpoint.self, from: data)
         } catch {
-            return .unreadable(reason: "undecodable")
+            return .unreadable(.undecodable)
         }
-        guard endpoint.version == AdvertisedProxyEndpoint.formatVersion else { return .unreadable(reason: "unsupported_version") }
+        guard endpoint.version == AdvertisedProxyEndpoint.formatVersion else { return .unreadable(.unsupportedVersion) }
         guard LocationSettingsRecovery.isLoopback(endpoint.host), (1...65535).contains(endpoint.port) else {
-            return .unreadable(reason: "invalid_endpoint")
+            return .unreadable(.invalidEndpoint)
         }
         return .present(endpoint)
     }

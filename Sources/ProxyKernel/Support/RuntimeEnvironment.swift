@@ -55,8 +55,6 @@ package struct RuntimeEnvironment: Sendable, Equatable {
         configDirectory.appendingPathComponent("update-state.json")
     }
 
-    /// The advertised-endpoint record kept beside a journal (decision 0040): `platform-state.json` ->
-    /// `platform-state.proxy-endpoint.json`, so every recovery over one journal file shares one record.
     package static func proxyEndpointWitnessFile(besideJournal journalFile: URL) -> URL {
         journalFile.deletingLastPathComponent()
             .appendingPathComponent(journalFile.deletingPathExtension().lastPathComponent + ".proxy-endpoint.json")

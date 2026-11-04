@@ -136,8 +136,6 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         return config
     }
 
-    /// A session that advertised `desired` and crashed, a second home service another tool pointed at
-    /// 127.0.0.1:3128, and a journal that then became unreadable.
     private func crashedSession(desired: [String: NetworkSettingValue], config: ProxyConfig,
                                 _ body: (FakeNetworkLocationStore, URL, Data) throws -> Void) throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("location-ephemeral-\(UUID())")
@@ -315,8 +313,6 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
-    /// The record names 127.0.0.1:52870 from an earlier port-0 session, and the config now names 8080. Whoever holds
-    /// 52870 now, the configured port does not name it, so recovery behaves as it did before the record existed.
     func testFixedPortIgnoresAStrayWitnessUnderACorruptJournal() throws {
         try crashedSession(desired: ephemeral, config: portConfig(0)) { store, file, corrupt in
             let witness = FileProxyEndpointWitness.beside(journalFile: file)
