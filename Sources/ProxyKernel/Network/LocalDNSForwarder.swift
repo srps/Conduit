@@ -47,6 +47,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
     private let preferProxyPathForDoH: @Sendable () -> Bool
+    private let localProxyPort: @Sendable () -> Int?
     private let onMetrics: (@Sendable () -> Void)?
     private let tuning: DNSForwarderTuning
     private let tcpMaximumConnections: Int
@@ -81,6 +82,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool = { false },
+        localProxyPort: @escaping @Sendable () -> Int? = { nil },
         onMetrics: (@Sendable () -> Void)? = nil,
         // Exposed only so tests can drive the slow-lookup and idle rules
         // without waiting out the production timeouts.
@@ -96,6 +98,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         self.logger = logger
         self.configProvider = configProvider
         self.preferProxyPathForDoH = preferProxyPathForDoH
+        self.localProxyPort = localProxyPort
         self.onMetrics = onMetrics
         self.tuning = tuning
         self.tcpMaximumConnections = tcpMaximumConnections
@@ -127,6 +130,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             logger: logger,
             configProvider: configProvider,
             preferProxyPathForDoH: { false },
+            localProxyPort: { nil },
             onMetrics: nil,
             tuning: DNSForwarderTuning()
         )
@@ -163,6 +167,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             logger: logger,
             configProvider: configProvider,
             preferProxyPathForDoH: preferProxyPathForDoH,
+            localProxyPort: localProxyPort,
             onMetrics: onMetrics,
             tuning: tuning
         )
@@ -305,6 +310,9 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     ///
     /// No-op when the forwarder is stopped (handler is nil). Safe to call
     /// from any actor context.
+    /// The port the DoH local-proxy route dials now, nil without a route or while stopped.
+    var doHLocalProxyPort: Int? { core?.doHLocalProxyPort }
+
     package func resetUpstreamTransports(reason: String) {
         guard let core else {
             logger.log(.debug, "DNS forwarder transports reset skipped (forwarder not running). reason=\(reason)", category: .network)
@@ -359,8 +367,9 @@ private struct DoHTransports: @unchecked Sendable {
     let direct: URLSession
     let upstream: URLSession?
     let localProxy: URLSession?
+    let localProxyPort: Int?
 
-    init(config: ProxyConfig) {
+    init(config: ProxyConfig, boundPort: Int?) {
         self.direct = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil))
 
         if let upstream = config.enabledUpstreams.first {
@@ -371,9 +380,9 @@ private struct DoHTransports: @unchecked Sendable {
             self.upstream = nil
         }
 
-        self.localProxy = DoHSessionFactory.session(
-            for: DoHSessionFactory.Route(proxy: (config.effectiveClientHost, config.localPort))
-        )
+        let localRoute = DoHSessionFactory.localProxyRoute(config: config, boundPort: boundPort)
+        self.localProxyPort = localRoute?.proxy?.port
+        self.localProxy = localRoute.map { DoHSessionFactory.session(for: $0) }
     }
 
     func invalidate() {
@@ -467,6 +476,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
     private let preferProxyPathForDoH: @Sendable () -> Bool
+    private let localProxyPort: @Sendable () -> Int?
     private let onMetrics: (@Sendable () -> Void)?
     private let tuning: DNSForwarderTuning
     private let lock = NSLock()
@@ -515,6 +525,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool,
+        localProxyPort: @escaping @Sendable () -> Int?,
         onMetrics: (@Sendable () -> Void)? = nil,
         tuning: DNSForwarderTuning
     ) {
@@ -523,15 +534,18 @@ private final class DNSResolutionCore: @unchecked Sendable {
         self.logger = logger
         self.configProvider = configProvider
         self.preferProxyPathForDoH = preferProxyPathForDoH
+        self.localProxyPort = localProxyPort
         self.onMetrics = onMetrics
         self.transportsBox = NIOLockedValueBox(
-            DoHTransportsHandle(transports: DoHTransports(config: configProvider()))
+            DoHTransportsHandle(transports: DoHTransports(config: configProvider(), boundPort: localProxyPort()))
         )
     }
 
     private func currentHandle() -> DoHTransportsHandle {
         transportsBox.withLockedValue { $0 }
     }
+
+    var doHLocalProxyPort: Int? { currentHandle().transports.localProxyPort }
 
     func invalidateSessions() {
         // Retire, don't invalidate directly: a `resolveViaDoH` call that
@@ -551,7 +565,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// DoH path on the very next query, so the user sees the recovery
     /// immediately instead of after the cached entry's TTL expires.
     func resetUpstreamTransports() {
-        let fresh = DoHTransportsHandle(transports: DoHTransports(config: configProvider()))
+        let fresh = DoHTransportsHandle(transports: DoHTransports(config: configProvider(), boundPort: localProxyPort()))
         let old = transportsBox.withLockedValue { current -> DoHTransportsHandle in
             let captured = current
             current = fresh

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import NIOConcurrencyHelpers
+import NIOCore
+import NIOPosix
 import XCTest
 import ConduitShared
 import ProxyAuth
@@ -3953,6 +3955,114 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: harness.environment.platformStateFile), corrupt, "the unreadable journal is kept as evidence")
         XCTAssertEqual(host.orchestrator.eventLog.events.filter { $0.event == "platform.location_residue_identity" }.compactMap(\.detail),
                        ["surface=proxies source=witness host=127.0.0.1 port=52870"])
+    }
+
+    @RuntimeActor func testARecycledEphemeralListenerIsReadvertisedOnEverySurface() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(
+            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .manual))
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.awaitLifecycleIdle()
+        let first = try XCTUnwrap(host.orchestrator.snapshot.bindings.proxyPort)
+        try assertAdvertised(port: first, "the start")
+
+        await host.orchestrator.localProxyServer.simulateListenerLossForTesting()
+        let squatter = try await Self.squat(on: first)
+        try await host.orchestrator.localProxyServer.recycleListener()
+        await host.deliveries.drain()
+        await host.awaitLifecycleIdle()
+
+        let second = try XCTUnwrap(host.orchestrator.snapshot.bindings.proxyPort)
+        XCTAssertNotEqual(second, first, "the squatter holds the old port")
+        try assertAdvertised(port: second, "the rebind")
+        XCTAssertEqual(clientEndpointEvents(host).last, "source=listener_rebound configured_port=0 port=\(second)")
+        XCTAssertEqual(reapplyEvents(host), [])
+
+        harness.locationObserver.emitSettingsChange()
+        await host.deliveries.drain()
+        try assertAdvertised(port: second, "the drift passes after the rebind")
+
+        _ = try? await squatter.close().get()
+        await host.stopRuntime()
+        await host.awaitLifecycleIdle()
+    }
+
+    @RuntimeActor func testAFixedPortRecycleReadvertisesNothing() async throws {
+        let configured = try reserveLoopbackPort()
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = configured
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(
+            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .manual))
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.awaitLifecycleIdle()
+
+        await host.orchestrator.localProxyServer.simulateListenerLossForTesting()
+        try await host.orchestrator.localProxyServer.recycleListener()
+        await host.deliveries.drain()
+        await host.awaitLifecycleIdle()
+
+        XCTAssertEqual(host.orchestrator.snapshot.bindings.proxyPort, configured)
+        try assertAdvertised(port: configured, "after the recycle")
+        XCTAssertEqual(clientEndpointEvents(host), [])
+        await host.stopRuntime()
+        await host.awaitLifecycleIdle()
+    }
+
+    @RuntimeActor func testARebindFollowedByAStopIsNotAdvertised() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(
+            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .manual))
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.awaitLifecycleIdle()
+        let first = try XCTUnwrap(host.orchestrator.snapshot.bindings.proxyPort)
+
+        let stop = queueStopInTheRebindTurn(of: host)
+        await host.orchestrator.localProxyServer.simulateListenerLossForTesting()
+        let squatter = try await Self.squat(on: first)
+        try await host.orchestrator.localProxyServer.recycleListener()
+        let stopping = try XCTUnwrap(stop.task, "the recycle moved the listener")
+        await stopping.value
+        await host.deliveries.drain()
+        await host.awaitLifecycleIdle()
+        _ = try? await squatter.close().get()
+
+        XCTAssertFalse(harness.wifi.routesThroughAProxy, "the stop clears the system proxy")
+        XCTAssertNil(harness.machine.launchdEnvironment["HTTP_PROXY"], "and the launchd variables")
+        XCTAssertFalse(clientEndpointEvents(host).contains { $0.hasPrefix("source=listener_rebound") }, "\(clientEndpointEvents(host))")
+    }
+
+    @RuntimeActor private final class QueuedStop {
+        var task: Task<Void, Never>?
+    }
+
+    /// A plain stop after `recycleListener()` returns runs after the host's re-advertise delivery, because the caller's own
+    /// continuation is queued behind it. Queued from the rebind's turn, the stop is admitted first.
+    @RuntimeActor private func queueStopInTheRebindTurn(of host: RuntimeHost) -> QueuedStop {
+        let readvertise = host.orchestrator.onEvent
+        let stop = QueuedStop()
+        host.orchestrator.onEvent = { event in
+            if case .proxyListenerRebound = event { stop.task = Task { @RuntimeActor in await host.stopRuntime() } }
+            readvertise?(event)
+        }
+        return stop
+    }
+
+    nonisolated private static func squat(on port: Int) async throws -> Channel {
+        try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .bind(host: "127.0.0.1", port: port)
+            .get()
     }
 
     /// Every client-facing surface names `port` on the configured client host.

@@ -34,7 +34,7 @@ package struct ClientEndpoints: Sendable, Equatable {
     package static func applied(config: ProxyConfig, bindings: ProxyOrchestratorBindings) -> ClientEndpoints {
         ClientEndpoints(
             proxyHost: config.effectiveClientHost,
-            proxyPort: bindings.proxyPort ?? config.localPort,
+            proxyPort: config.clientProxyPort(bound: bindings.proxyPort),
             localPACURL: bindings.localPACURL
         )
     }

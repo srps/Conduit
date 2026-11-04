@@ -44,6 +44,8 @@ package final class ConfigReapplyRetry {
         /// The system proxy switch stayed on and its mode changed, which
         /// rewrites the surface in the other shape.
         case modeChange = "mode_change"
+        /// The proxy listener moved while running (a port-0 recycle), so the surfaces were re-advertised on its new port.
+        case listenerRebound = "listener_rebound"
     }
 
     /// One attempt's verdict, from the host.

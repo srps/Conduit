@@ -29,6 +29,13 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   clears only that exact host and port, so another tool's proxy on 127.0.0.1
   stays. `platform.location_residue_identity` records which endpoint recovery
   treated as Conduit's.
+- With the proxy port set to 0, a recovery that rebinds the listener lands on
+  a fresh port, and the status, `pmctl`, the system proxy, the shell profiles
+  and the launchd variables now follow it instead of naming the old port
+  (#269). DNS-over-HTTPS through Conduit's own proxy dials the port the
+  listener holds; with the port set to 0 it used to dial port 0 and never
+  worked (#266). The rebind is recorded as `proxy.listener_recycled`. Fixed
+  ports are unchanged.
 
 - VPN flap durations are measured on a monotonic clock, so a wall-clock change
   during a flap can no longer make the total flap time negative and leave the
