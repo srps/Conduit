@@ -95,7 +95,7 @@ package final class PlatformStateJournal: @unchecked Sendable {
         case loaded
     }
 
-    private let fileURL: URL
+    package let fileURL: URL
     private let logger: (any LogSink)?
     /// Where the journal reports trouble (#191): the host's event log in
     /// both hosts, a collector in `pm-sim`. Called with the journal's lock

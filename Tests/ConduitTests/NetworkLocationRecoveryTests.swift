@@ -187,6 +187,133 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    private func identityDetails(_ events: RuntimeEventLog) -> [String] {
+        events.events.filter { $0.event == "platform.location_residue_identity" }.compactMap(\.detail)
+    }
+
+    func testCorruptJournalRecoveryReportsAndRetiresTheWitness() throws {
+        try crashedSession(desired: ephemeral, config: portConfig(0)) { store, file, _ in
+            let witness = FileProxyEndpointWitness.beside(journalFile: file)
+            XCTAssertEqual(witness.fileURL.lastPathComponent, "platform-state.proxy-endpoint.json")
+            XCTAssertEqual(witness.read(), .present(AdvertisedProxyEndpoint(host: "127.0.0.1", port: 52870)))
+            let events = RuntimeEventLog()
+            let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { events.append($0) })
+            _ = recovery.recover(kind: .proxies, config: portConfig(0), listenerIsLive: false)
+            XCTAssertEqual(identityDetails(events), ["surface=proxies source=witness host=127.0.0.1 port=52870"])
+            XCTAssertEqual(witness.read(), .absent)
+        }
+    }
+
+    func testCorruptJournalWithoutWitnessKeepsBothLoopbackProxies() throws {
+        try crashedSession(desired: ephemeral, config: portConfig(0)) { store, file, _ in
+            try FileProxyEndpointWitness.beside(journalFile: file).retire()
+            let events = RuntimeEventLog()
+            let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { events.append($0) })
+            _ = recovery.recover(kind: .proxies, config: portConfig(0), listenerIsLive: false)
+            let services = try store.snapshot().services
+            XCTAssertEqual(services.first { $0.serviceID == homeService }?.proxies["HTTPPort"], .number(52870))
+            XCTAssertEqual(services.first { $0.serviceID == usbService }?.proxies, foreign)
+            XCTAssertEqual(identityDetails(events), ["surface=proxies source=none reason=no_record"])
+        }
+    }
+
+    func testUnreadableWitnessKeepsBothLoopbackProxiesAndItsBytes() throws {
+        let cases: [(Data, String)] = [
+            (Data("{broken}".utf8), "undecodable"),
+            (Data(repeating: 0x20, count: FileProxyEndpointWitness.maximumBytes + 1), "oversized"),
+            (Data(#"{"version":2,"host":"127.0.0.1","port":52870}"#.utf8), "unsupported_version"),
+            (Data(#"{"version":1,"host":"127.0.0.1","port":0}"#.utf8), "invalid_endpoint")
+        ]
+        for (bytes, reason) in cases {
+            try crashedSession(desired: ephemeral, config: portConfig(0)) { store, file, _ in
+                let witness = FileProxyEndpointWitness.beside(journalFile: file)
+                try bytes.write(to: witness.fileURL)
+                let events = RuntimeEventLog()
+                let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { events.append($0) })
+                _ = recovery.recover(kind: .proxies, config: portConfig(0), listenerIsLive: false)
+                let services = try store.snapshot().services
+                XCTAssertEqual(services.first { $0.serviceID == homeService }?.proxies["HTTPPort"], .number(52870), reason)
+                XCTAssertEqual(services.first { $0.serviceID == usbService }?.proxies, foreign, reason)
+                XCTAssertEqual(identityDetails(events), ["surface=proxies source=none reason=record_unreadable record_reason=\(reason)"])
+                XCTAssertEqual(try Data(contentsOf: witness.fileURL), bytes, reason)
+            }
+        }
+    }
+
+    func testRefusedWitnessFailsPortZeroApplyBeforeAnyWrite() throws {
+        try withRecovery { store, journal, _, _ in
+            let witness = InMemoryProxyEndpointWitness()
+            witness.refuseWrites(true)
+            let events = RuntimeEventLog()
+            let recovery = LocationSettingsRecovery(store: store, journal: journal, witness: witness, emit: { events.append($0) })
+            let original = try store.snapshot()
+            XCTAssertThrowsError(try recovery.apply(kind: .proxies, desired: ephemeral, config: portConfig(0)))
+            XCTAssertEqual(store.committedWrites, 0)
+            XCTAssertEqual(try store.snapshot(), original)
+            XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+            XCTAssertTrue(events.events.contains {
+                $0.event == "platform.location_failed" && $0.detail?.hasPrefix("operation=record_endpoint surface=proxies") == true
+            })
+        }
+    }
+
+    func testPACFixedPortAndClearRetireTheWitness() throws {
+        try withRecovery { store, journal, _, _ in
+            let witness = InMemoryProxyEndpointWitness()
+            let recovery = LocationSettingsRecovery(store: store, journal: journal, witness: witness, emit: { _ in })
+            let recorded = ProxyEndpointWitnessRead.present(AdvertisedProxyEndpoint(host: "127.0.0.1", port: 52870))
+            var pacConfig = portConfig(0)
+            pacConfig.localPACEnabled = true
+            let pac = SystemProxyManager.locationFields(config: pacConfig, mode: .pac,
+                                                        endpoints: .init(proxyHost: "127.0.0.1", proxyPort: 52870, localPACURL: "http://127.0.0.1:52871/proxy.pac"))
+            let fixed = SystemProxyManager.locationFields(config: portConfig(3128), mode: .manual, endpoints: .configured(portConfig(3128)))
+            for (desired, config) in [(pac, pacConfig), (fixed, portConfig(3128))] {
+                try recovery.apply(kind: .proxies, desired: ephemeral, config: portConfig(0))
+                XCTAssertEqual(witness.current, recorded)
+                try recovery.apply(kind: .proxies, desired: desired, config: config)
+                XCTAssertEqual(witness.current, .absent)
+            }
+            try recovery.apply(kind: .proxies, desired: ephemeral, config: portConfig(0))
+            try recovery.clear(kind: .proxies, config: portConfig(0))
+            XCTAssertEqual(witness.current, .absent)
+        }
+    }
+
+    func testReadableRecoveryThatRestoresEveryRecordRetiresTheWitness() throws {
+        try withRecovery { store, journal, _, _ in
+            let witness = InMemoryProxyEndpointWitness()
+            let original = try store.snapshot()
+            try LocationSettingsRecovery(store: store, journal: journal, witness: witness, emit: { _ in })
+                .apply(kind: .proxies, desired: ephemeral, config: portConfig(0))
+            let relaunched = LocationSettingsRecovery(store: store, journal: journal, witness: witness, emit: { _ in })
+            XCTAssertEqual(relaunched.recover(kind: .proxies, config: portConfig(0), listenerIsLive: false), .restored(stale: false))
+            XCTAssertEqual(try store.snapshot().services, original.services)
+            XCTAssertEqual(witness.current, .absent)
+        }
+    }
+
+    func testLiveListenerAtWitnessedPortDeclinesRecovery() throws {
+        try crashedSession(desired: ephemeral, config: portConfig(0)) { store, file, _ in
+            let witness = InMemoryProxyEndpointWitness(.present(AdvertisedProxyEndpoint(host: "127.0.0.1", port: 52870)))
+            let journal = PlatformStateJournal(fileURL: file.deletingLastPathComponent().appendingPathComponent("fresh.json"))
+            let recovery = LocationSettingsRecovery(store: store, journal: journal, witness: witness, emit: { _ in })
+            let before = try store.snapshot()
+            XCTAssertEqual(recovery.recover(kind: .proxies, config: portConfig(0), listenerIsLive: true), .declinedLiveListener)
+            XCTAssertEqual(try store.snapshot(), before)
+            XCTAssertEqual(witness.current, .present(AdvertisedProxyEndpoint(host: "127.0.0.1", port: 52870)))
+        }
+    }
+
+    func testWitnessMatchesHostExactly() throws {
+        try crashedSession(desired: ephemeral, config: portConfig(0)) { store, file, _ in
+            let localhost: [String: NetworkSettingValue] = ["HTTPProxy": .text("localhost"), "HTTPPort": .number(52870), "HTTPEnable": .number(1)]
+            store.edit { $0.services[0].proxies = localhost }
+            let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { _ in })
+            _ = recovery.recover(kind: .proxies, config: portConfig(0), listenerIsLive: false)
+            XCTAssertEqual(try store.snapshot().services.first { $0.serviceID == homeService }?.proxies, localhost)
+        }
+    }
+
     func testUnreadableProtocolRetainsItsRecordAndDoesNotBlockOtherRecovery() throws {
         try withRecovery { store, journal, recovery, events in
             let original = try store.snapshot()
