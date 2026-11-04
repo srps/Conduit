@@ -194,12 +194,12 @@ enum RuntimeHostEffectsScenario {
             gss: .injected { fakes.gss },
             pacEvaluator: pac ?? fakes.pac,
             portHolderProbe: fakes.probe,
-            loopbackPortProbe: fakes.loopback.isServed(port:),
+            loopbackPortProbe: fakes.loopback.liveness(port:),
             commandRunner: { launchPath, arguments in
                 hold?.pass(launchPath, arguments)
                 return try machine.run(launchPath, arguments)
             },
-            dnsResponds: fakes.dns.responds(onPort:),
+            dnsProbe: fakes.dns.liveness(onPort:),
             networkPath: path,
             networkLocation: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil },

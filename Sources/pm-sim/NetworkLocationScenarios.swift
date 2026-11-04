@@ -72,7 +72,7 @@ enum NetworkLocationScenarios {
         let inactiveProxyRestored = try store.snapshot().services[0].proxies == beforePAC.services[0].proxies
         store.edit { $0.activeLocationID = home }
         store.edit { $0.services[0].proxies = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(7777), "HTTPEnable": .number(0)] }
-        let disabledIgnored = try !recovery.proxyListenerIsLive(config: config, probe: { _ in true })
+        let disabledIgnored = try recovery.proxyListenerLiveness(config: config, probe: { _ in .live }) == .notLive
         let beforeOversized = try store.snapshot()
         var oversizedRejected = false
         do {
@@ -236,7 +236,7 @@ enum NetworkLocationScenarios {
         let corruptRecovery = LocationSettingsRecovery(store: corruptStore, journal: corruptJournal, emit: { events.append($0) })
         var corruptFailures = 0
         for kind in [NetworkSettingsKind.proxies, .dns] {
-            if case .failed = corruptRecovery.recover(kind: kind, config: config, listenerIsLive: false) { corruptFailures += 1 }
+            if case .failed = corruptRecovery.recover(kind: kind, config: config, listener: .notLive) { corruptFailures += 1 }
         }
         corruptJournal.markReleased(surface: .launchdEnvironment)
         let corruptSnapshot = try corruptStore.snapshot()
@@ -373,7 +373,7 @@ enum NetworkLocationScenarios {
         let events = RuntimeEventLog(capacity: 64)
         let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { events.append($0) })
         let failed: Bool
-        if case .failed = recovery.recover(kind: .proxies, config: config, listenerIsLive: false) { failed = true } else { failed = false }
+        if case .failed = recovery.recover(kind: .proxies, config: config, listener: .notLive) { failed = true } else { failed = false }
         let after = try store.snapshot().services
         let wifi = after.first { $0.serviceID == services[0].serviceID }?.proxies ?? [:]
         let ownCleared = failed && ["HTTPProxy", "HTTPPort", "HTTPSProxy", "HTTPSPort"].allSatisfy { wifi[$0] == nil }

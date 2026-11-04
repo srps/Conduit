@@ -70,11 +70,11 @@ package struct RuntimeHostEffects: Sendable {
     package let portHolderProbe: any ListenerPortHolderProbing
     /// Whether a listener serves a loopback port. The system proxy's stale-listener check asks it at launch recovery and before a restore;
     /// production connects to the real port (`LoopbackPortProbe`), and a test or simulator answers from its own fake.
-    package let loopbackPortProbe: @Sendable (Int) -> Bool
+    package let loopbackPortProbe: @Sendable (Int) -> LoopbackLiveness
     /// The subprocess runner behind the `networksetup` and `launchctl` managers.
     package let commandRunner: @Sendable (String, [String]) throws -> CommandResult
     /// Whether a resolver answers on a local port: the system DNS liveness check.
-    package let dnsResponds: @Sendable (Int) -> Bool
+    package let dnsProbe: @Sendable (Int) -> LoopbackLiveness
     package let networkPath: any NetworkPathObserving
     package let networkLocation: any NetworkLocationObserving
     package let networkLocationStoreFactory: @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?
@@ -100,9 +100,9 @@ package struct RuntimeHostEffects: Sendable {
         gss: RuntimeGSSSource,
         pacEvaluator: any PacEvaluator,
         portHolderProbe: any ListenerPortHolderProbing,
-        loopbackPortProbe: @escaping @Sendable (Int) -> Bool,
+        loopbackPortProbe: @escaping @Sendable (Int) -> LoopbackLiveness,
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult,
-        dnsResponds: @escaping @Sendable (Int) -> Bool,
+        dnsProbe: @escaping @Sendable (Int) -> LoopbackLiveness,
         networkPath: any NetworkPathObserving,
         networkLocation: any NetworkLocationObserving,
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?,
@@ -120,7 +120,7 @@ package struct RuntimeHostEffects: Sendable {
         self.portHolderProbe = portHolderProbe
         self.loopbackPortProbe = loopbackPortProbe
         self.commandRunner = commandRunner
-        self.dnsResponds = dnsResponds
+        self.dnsProbe = dnsProbe
         self.networkPath = networkPath
         self.networkLocation = networkLocation
         self.networkLocationStoreFactory = networkLocationStoreFactory

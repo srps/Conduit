@@ -143,15 +143,15 @@ final class InteractiveHostHarness {
                     gss: .injected { RefusingGSS() },
                     pacEvaluator: pacEvaluator,
                     portHolderProbe: FakeListenerPortHolderProbe(),
-                    loopbackPortProbe: FakeLoopbackPortProbe().isServed(port:),
+                    loopbackPortProbe: FakeLoopbackPortProbe().liveness(port:),
                     commandRunner: { launchPath, arguments in
                         hold.pass(launchPath, arguments)
                         return try machine.run(launchPath, arguments)
                     },
-                    dnsResponds: { port in
+                    dnsProbe: { port in
                         dnsProbes.append(port)
                         hold.pass("dns-probe", [String(port)])
-                        return dnsProbe.responds(onPort: port)
+                        return dnsProbe.liveness(onPort: port)
                     },
                     networkPath: FakeNetworkPathObserver(),
                     networkLocation: FakeNetworkLocationObserver(),

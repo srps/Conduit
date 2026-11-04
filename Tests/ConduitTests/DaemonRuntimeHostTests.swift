@@ -64,7 +64,7 @@ private func makeHostEffects(
     networkLocation: any NetworkLocationObserving,
     networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?,
     vpnStatusMonitor: @escaping RuntimeVPNStatusMonitorFactory,
-    dnsResponds: @escaping @Sendable (Int) -> Bool,
+    dnsProbe: @escaping @Sendable (Int) -> LoopbackLiveness,
     homeDirectory: URL,
     resolverDirectory: String,
     stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem(),
@@ -77,9 +77,9 @@ private func makeHostEffects(
         gss: gss,
         pacEvaluator: pacEvaluator,
         portHolderProbe: FakeListenerPortHolderProbe(),
-        loopbackPortProbe: loopbackPortProbe.isServed(port:),
+        loopbackPortProbe: loopbackPortProbe.liveness(port:),
         commandRunner: commandRunner,
-        dnsResponds: dnsResponds,
+        dnsProbe: dnsProbe,
         networkPath: networkPath,
         networkLocation: networkLocation,
         networkLocationStoreFactory: networkLocationStoreFactory,
@@ -157,7 +157,7 @@ private func hostEffects(
     networkLocation: any NetworkLocationObserving,
     networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?,
     vpnStatus: any VPNStatusObserving,
-    dnsResponds: @escaping @Sendable (Int) -> Bool,
+    dnsProbe: @escaping @Sendable (Int) -> LoopbackLiveness,
     homeDirectory: URL,
     resolverDirectory: String,
     stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem(),
@@ -174,7 +174,7 @@ private func hostEffects(
         networkLocation: networkLocation,
         networkLocationStoreFactory: networkLocationStoreFactory,
         vpnStatusMonitor: { _, _ in vpnStatus },
-        dnsResponds: dnsResponds,
+        dnsProbe: dnsProbe,
         homeDirectory: homeDirectory,
         resolverDirectory: resolverDirectory,
         stateFiles: stateFiles,
@@ -641,7 +641,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil },
                 vpnStatusMonitor: { _, _ in FakeVPNStatusObserver() },
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: environment.configDirectory.appendingPathComponent("home"),
                 resolverDirectory: machine.resolverDirectory.path
             )
@@ -879,7 +879,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 credentials: InMemorySecretStore(), commandRunner: Self.offMachine,
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: environment.configDirectory.appendingPathComponent("home"),
                 resolverDirectory: try scratchResolverDirectory(environment)
             )
@@ -928,7 +928,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                     recorder.minVisible = minVisible
                     return FakeVPNStatusObserver()
                 },
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: environment.configDirectory.appendingPathComponent("home"),
                 resolverDirectory: try scratchResolverDirectory(environment)
             )
@@ -988,7 +988,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                     recorder.minVisible = minVisible
                     return FakeVPNStatusObserver()
                 },
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: environment.configDirectory.appendingPathComponent("home"),
                 resolverDirectory: machine.resolverDirectory.path
             )
@@ -1059,7 +1059,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil },
                 vpnStatusMonitor: { _, _ in FakeVPNStatusObserver() },
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: environment.configDirectory.appendingPathComponent("home"),
                 resolverDirectory: try scratchResolverDirectory(environment)
             )
@@ -1105,7 +1105,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil },
                 vpnStatusMonitor: { _, _ in FakeVPNStatusObserver() },
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: environment.configDirectory.appendingPathComponent("home"),
                 resolverDirectory: try scratchResolverDirectory(environment)
             )
@@ -1149,7 +1149,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil },
                 vpnStatusMonitor: { _, _ in FakeVPNStatusObserver() },
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: environment.configDirectory.appendingPathComponent("home"),
                 resolverDirectory: try scratchResolverDirectory(environment)
             )
@@ -1200,7 +1200,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 credentials: secrets, commandRunner: Self.offMachine,
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: environment.configDirectory.appendingPathComponent("home"),
                 resolverDirectory: try scratchResolverDirectory(environment)
             )
@@ -1237,7 +1237,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 credentials: InMemorySecretStore(), commandRunner: { path, arguments in try machine.run(path, arguments) },
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path
             )
         )
@@ -1323,7 +1323,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 credentials: InMemorySecretStore(), commandRunner: Self.offMachine,
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: environment.configDirectory.appendingPathComponent("home"),
                 resolverDirectory: try scratchResolverDirectory(environment)
             )
@@ -1359,7 +1359,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 credentials: InMemorySecretStore(), commandRunner: Self.offMachine,
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil }, vpnStatus: observer,
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: environment.configDirectory.appendingPathComponent("home"),
                 resolverDirectory: try scratchResolverDirectory(environment)
             )
@@ -1403,7 +1403,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 credentials: InMemorySecretStore(), commandRunner: Self.offMachine,
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil }, vpnStatus: observer,
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: environment.configDirectory.appendingPathComponent("home"),
                 resolverDirectory: try scratchResolverDirectory(environment)
             )
@@ -1445,7 +1445,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 credentials: InMemorySecretStore(), commandRunner: Self.offMachine,
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil }, vpnStatus: observer,
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: environment.configDirectory.appendingPathComponent("home"),
                 resolverDirectory: try scratchResolverDirectory(environment)
             )
@@ -1502,7 +1502,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 credentials: InMemorySecretStore(), commandRunner: Self.offMachine,
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: environment.configDirectory.appendingPathComponent("home"),
                 resolverDirectory: try scratchResolverDirectory(environment)
             )
@@ -1549,7 +1549,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 credentials: InMemorySecretStore(), commandRunner: { path, arguments in try machine.run(path, arguments) },
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path
             )
         )
@@ -1712,7 +1712,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                     networkPath: pathObserver, networkLocation: locationObserver,
                     networkLocationStoreFactory: { [locationStore] _ in locationStore }, vpnStatus: vpn,
                     // As `AppStateHarness`: never the real port 53.
-                    dnsResponds: FakeDNSProbe().responds(onPort:),
+                    dnsProbe: FakeDNSProbe().liveness(onPort:),
                     homeDirectory: stateDirectory.appendingPathComponent("home", isDirectory: true),
                     resolverDirectory: machine.resolverDirectory.path,
                     stateFiles: stateFiles,
@@ -2813,7 +2813,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 credentials: InMemorySecretStore(), commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: harness.homeDirectory, resolverDirectory: machine.resolverDirectory.path
             )
         )
@@ -2843,7 +2843,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 credentials: InMemorySecretStore(), commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: harness.homeDirectory, resolverDirectory: machine.resolverDirectory.path
             )
         )
@@ -3264,7 +3264,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 credentials: InMemorySecretStore(), commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
                 networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 homeDirectory: harness.homeDirectory, resolverDirectory: machine.resolverDirectory.path
             )
         )

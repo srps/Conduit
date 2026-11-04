@@ -188,7 +188,7 @@ enum LifecycleScenarios {
                 gate.pass(arguments)
                 return try machine.run(launchPath, arguments)
             },
-            portProbe: { _ in false }
+            portProbe: { _ in .notLive }
         )
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 3128

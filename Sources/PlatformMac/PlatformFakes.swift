@@ -578,9 +578,15 @@ package final class FakeKerberosTicketRecovery: KerberosTicketRecovering, @unche
 package final class FakeDNSProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var answering: Set<Int>
-    package init(answering: Set<Int> = []) { self.answering = answering }
+    private var timingOut: Set<Int>
+    package init(answering: Set<Int> = [], timingOut: Set<Int> = []) {
+        self.answering = answering
+        self.timingOut = timingOut
+    }
     package func setAnswering(_ ports: Set<Int>) { lock.withLock { answering = ports } }
-    package func responds(onPort port: Int) -> Bool { lock.withLock { answering.contains(port) } }
+    package func liveness(onPort port: Int) -> LoopbackLiveness {
+        lock.withLock { answering.contains(port) ? .live : timingOut.contains(port) ? .inconclusive : .notLive }
+    }
 }
 
 // MARK: - InMemorySecretStore
@@ -800,11 +806,13 @@ package struct UnplannedFakeEffect: Error, Equatable, CustomStringConvertible {
 package final class FakeLoopbackPortProbe: @unchecked Sendable {
     private let lock = NSLock()
     private let served: Set<Int>
+    private let timingOut: Set<Int>
     private var count = 0
     private var last: Int?
 
-    package init(served: Set<Int> = []) {
+    package init(served: Set<Int> = [], timingOut: Set<Int> = []) {
         self.served = served
+        self.timingOut = timingOut
     }
 
     /// How many questions were asked.
@@ -813,12 +821,12 @@ package final class FakeLoopbackPortProbe: @unchecked Sendable {
     /// The port of the most recent question.
     package var lastAsked: Int? { lock.withLock { last } }
 
-    package func isServed(port: Int) -> Bool {
+    package func liveness(port: Int) -> LoopbackLiveness {
         lock.withLock {
             count += 1
             last = port
         }
-        return served.contains(port)
+        return served.contains(port) ? .live : timingOut.contains(port) ? .inconclusive : .notLive
     }
 }
 

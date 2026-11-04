@@ -91,9 +91,9 @@ package final class RuntimeHost {
     /// host test never rewrites the machine it runs on.
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
     /// The stale-listener probe the system proxy manager asks; the effects supply it, so no manager reaches the real port by default.
-    private let loopbackPortProbe: @Sendable (Int) -> Bool
+    private let loopbackPortProbe: @Sendable (Int) -> LoopbackLiveness
     /// Whether a resolver answers on a local port, from `effects`, so launch recovery never waits on the real port 53 under test.
-    private let dnsResponds: @Sendable (Int) -> Bool
+    private let dnsProbe: @Sendable (Int) -> LoopbackLiveness
     private let homeDirectory: URL
     private let resolverDirectory: String
     /// One serialised pass per config reload: the runtime takes the edit,
@@ -145,7 +145,7 @@ package final class RuntimeHost {
         journal: platformStateJournal,
         legacySnapshotFile: environment.legacySavedDNSFile,
         commandRunner: commandRunner,
-        respondsOnPort: dnsResponds,
+        resolverLiveness: dnsProbe,
         locationRecovery: locationRecovery,
         configProvider: orchestrator.configSnapshotProvider
     )
@@ -411,7 +411,7 @@ package final class RuntimeHost {
         self.incarnation = incarnation
         self.startedAt = startedAt
         self.terminalExit = terminalExit
-        self.dnsResponds = effects.dnsResponds
+        self.dnsProbe = effects.dnsProbe
         self.environmentDriftInterval = environmentDriftInterval
         self.reapplyRetrySchedule = reapplyRetrySchedule
         self.networkPathObserver = effects.networkPath
@@ -1742,7 +1742,7 @@ extension RuntimeHost {
             journal: journal,
             legacySnapshotFile: environment.legacySavedDNSFile,
             commandRunner: runner,
-            respondsOnPort: effects.dnsResponds,
+            resolverLiveness: effects.dnsProbe,
             locationRecovery: locationRecovery
         )
         let systemProxy = SystemProxyManager(

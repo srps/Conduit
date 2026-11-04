@@ -64,14 +64,9 @@ package final class SystemDNSManager: @unchecked Sendable {
     /// machine holds cannot pin that decision.
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
 
-    /// Whether a local resolver is actually answering on the DNS port.
-    /// Injectable so `restoreIfNeeded` is testable without a live relay,
-    /// mirroring `SystemProxyManager`'s `portProbe`.
-    private let relayIsLive: @Sendable () -> Bool
-    /// Whether a resolver answers on `127.0.0.1:port`: `probeLiveness`, and
-    /// `relayIsLive` when none is given. A host under test passes its fake
-    /// machine's answer, so it never waits on, or reads, the real port 53.
-    private let respondsOnPort: @Sendable (Int) -> Bool
+    /// A host under test passes its fake machine's answer, so it never waits
+    /// on, or reads, the real port 53.
+    private let resolverLiveness: @Sendable (Int) -> LoopbackLiveness
     /// 0.1.x snapshot, imported into the journal on first launch. See
     /// `PlatformStateJournal.importLegacyDNSSnapshot`. Comes from the same
     /// `RuntimeEnvironment` as the journal — never `userDefault()` — so an
@@ -86,16 +81,14 @@ package final class SystemDNSManager: @unchecked Sendable {
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         },
-        relayIsLive: (@Sendable () -> Bool)? = nil,
-        respondsOnPort: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
+        resolverLiveness: @escaping @Sendable (Int) -> LoopbackLiveness = { SystemDNSManager.dnsLiveness(onPort: $0) },
         locationRecovery: LocationSettingsRecovery? = nil,
         configProvider: @escaping @Sendable () -> ProxyConfig = { ProxyConfig() }
     ) {
         self.privilegeClient = privilegeClient
         self.journal = journal
         self.commandRunner = commandRunner
-        self.relayIsLive = relayIsLive ?? { respondsOnPort(53) }
-        self.respondsOnPort = respondsOnPort
+        self.resolverLiveness = resolverLiveness
         self.legacySnapshotFile = legacySnapshotFile
         self.locationRecovery = locationRecovery
         self.configProvider = configProvider
@@ -359,7 +352,7 @@ package final class SystemDNSManager: @unchecked Sendable {
         defer { operations.unlock() }
         importLegacySnapshotIfPresent(logger: logger)
         if let locationRecovery {
-            return locationRecovery.recover(kind: .dns, config: configProvider(), listenerIsLive: relayIsLive())
+            return locationRecovery.recover(kind: .dns, config: configProvider(), listener: resolverLiveness(53))
         }
         guard hasSavedInterfaces(), let savedAt = journal.oldestRecordDate(for: .systemDNS) else {
             return .nothingToDo(.nothingRecorded)
@@ -383,9 +376,11 @@ package final class SystemDNSManager: @unchecked Sendable {
         //
         // Liveness answers what is actually being asked. A resolver that still
         // answers belongs to a session serving this machine, and taking its DNS
-        // away would break every client on it. One that answers nothing is
-        // residue, whoever is holding the socket.
-        if relayIsLive() {
+        // away would break every client on it. Only a refusal makes the records
+        // residue: a relay that is silent may front a session that is only
+        // slow, and a relay cannot say which session it forwards to.
+        switch resolverLiveness(53) {
+        case .live:
             // Any interface, not `isApplied()`'s every interface. A machine
             // where only some services still point at 127.0.0.1 — a VPN
             // interface that came back with its own resolvers, a service added
@@ -398,9 +393,11 @@ package final class SystemDNSManager: @unchecked Sendable {
             }
             deleteSavedState()
             return .discardedStaleRecords
+        case .inconclusive:
+            return .declinedInconclusiveProbe
+        case .notLive:
+            return performRestore(stale: false, logger: logger)
         }
-
-        return performRestore(stale: false, logger: logger)
     }
 
     /// A restore that throws, or that keeps records because some interface
@@ -496,7 +493,7 @@ package final class SystemDNSManager: @unchecked Sendable {
         if let started { return started }
         // Outside the lock: the probe waits up to two seconds, and a stop on
         // the main actor should not wait that out.
-        guard relayIsLive() else {
+        guard resolverLiveness(53) == .live else {
             // A stop that ran during the probe took the relay down on
             // purpose. That is not a pipeline to report as unresponsive.
             return operations.withLock { hasSavedInterfaces() } ? .unresponsive : .notManaged
@@ -667,20 +664,16 @@ package final class SystemDNSManager: @unchecked Sendable {
     // MARK: - Liveness probe
 
     package func probeLiveness(port: Int = 53) -> Bool {
-        respondsOnPort(port)
+        resolverLiveness(port) == .live
     }
 
-    /// Whether a resolver on `127.0.0.1:port` answers a query at all.
-    ///
-    /// Static because it is also the default for `relayIsLive`, which has to be
-    /// supplied before `self` exists. The generous timeout is deliberate on
-    /// that path: reading a live-but-slow relay as dead makes launch-time
-    /// recovery tear the DNS out from under a session that is serving the
-    /// machine, which is worse than the second it costs to be sure.
-    package static func dnsResponds(onPort port: Int, timeoutMilliseconds: Int32 = 2_000) -> Bool {
+    /// The socket is connected, so a port nothing holds is refused at once
+    /// instead of waited out.
+    package static func dnsLiveness(onPort port: Int, timeoutMilliseconds: Int32 = 2_000) -> LoopbackLiveness {
+        guard (1...65_535).contains(port) else { return .notLive }
         let query = DNSWireFormat.buildQuery(domain: DNSWireFormat.livenessProbeDomain, txID: 0xFACE)
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
-        guard fd >= 0 else { return false }
+        guard fd >= 0 else { return .inconclusive }
         defer { close(fd) }
 
         var addr = sockaddr_in()
@@ -689,22 +682,22 @@ package final class SystemDNSManager: @unchecked Sendable {
         addr.sin_port = UInt16(port).bigEndian
         addr.sin_addr.s_addr = inet_addr("127.0.0.1")
 
-        let sent = query.withUnsafeBufferPointer { buf in
-            withUnsafePointer(to: &addr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                    sendto(fd, buf.baseAddress, buf.count, 0, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
+        let connected = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        guard sent > 0 else { return false }
+        guard connected == 0 else { return .inconclusive }
+        let sent = query.withUnsafeBufferPointer { buf in Darwin.send(fd, buf.baseAddress, buf.count, 0) }
+        guard sent == query.count else { return errno == ECONNREFUSED ? .notLive : .inconclusive }
 
         var pollFD = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-        let ready = poll(&pollFD, 1, timeoutMilliseconds)
-        guard ready > 0, pollFD.revents & Int16(POLLIN) != 0 else { return false }
+        guard poll(&pollFD, 1, timeoutMilliseconds) > 0 else { return .inconclusive }
 
         var buf = [UInt8](repeating: 0, count: 512)
         let n = recv(fd, &buf, buf.count, 0)
-        return n >= 12
+        if n < 0 { return errno == ECONNREFUSED ? .notLive : .inconclusive }
+        return n >= 12 ? .live : .notLive
     }
 
 }

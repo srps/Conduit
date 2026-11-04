@@ -133,7 +133,7 @@ final class SystemDNSManagerTests: XCTestCase {
             privilegeClient: recording,
             journal: journal,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            relayIsLive: { relayIsLive }
+            resolverLiveness: { _ in relayIsLive ? .live : .notLive }
         )
     }
 
@@ -190,7 +190,7 @@ final class SystemDNSManagerTests: XCTestCase {
             privilegeClient: recording,
             journal: journal,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            relayIsLive: { stopDuringProbe.run(); return false }
+            resolverLiveness: { _ in stopDuringProbe.run(); return .notLive }
         )
         try manager.saveCurrentDNS(logger: nil)
         try manager.apply(forwarderPort: 5353, logger: nil)
@@ -771,7 +771,7 @@ final class SystemDNSManagerTests: XCTestCase {
         // Port 53 free, as the name says, whatever this machine runs there: the
         // real probe waited two seconds where nothing answered, and skipped
         // the restore where Conduit's relay did.
-        let manager = SystemDNSManager(privilegeClient: recording, journal: journal, relayIsLive: { false })
+        let manager = SystemDNSManager(privilegeClient: recording, journal: journal, resolverLiveness: { _ in .notLive })
         let realServices = try manager.connectedNetworkServices()
         guard let service = realServices.first else {
             throw XCTSkip("No connected network services")
@@ -819,7 +819,7 @@ final class SystemDNSManagerTests: XCTestCase {
             journal: journal,
             legacySnapshotFile: legacy,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            relayIsLive: { false }
+            resolverLiveness: { _ in .notLive }
         )
         XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(stale: false))
 
@@ -838,7 +838,7 @@ final class SystemDNSManagerTests: XCTestCase {
             journal: journal,
             legacySnapshotFile: legacy,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            relayIsLive: { false }
+            resolverLiveness: { _ in .notLive }
         )
 
         try manager.saveCurrentDNS(logger: nil)
@@ -890,7 +890,9 @@ final class SystemDNSManagerTests: XCTestCase {
     /// `SIGKILL` it is still bound to 53 and still forwarding to a forwarder
     /// port that nothing answers on. "Is the port held?" is therefore `true` in
     /// exactly the crash this recovery exists for, and gating on it skipped the
-    /// restore. Whether anything still *resolves* is the question being asked.
+    /// restore. Whether anything still *resolves* is the question being asked;
+    /// since #201 only a refusal answers it, and a relay that is silent waits
+    /// for a later launch (`testRestoreIfNeededLeavesASlowSessionAlone`).
     func testRestoreIfNeededRestoresWhenTheLeftoverRelayNoLongerResolves() {
         let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
         writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
@@ -949,8 +951,6 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)
     }
 
-    /// A session whose resolver is slow to answer is not a dead one (#201). The real probe asks a socket that is
-    /// bound but never replies, so it times out: recovery must leave the machine's DNS and its records alone.
     func testRestoreIfNeededLeavesASlowSessionAlone() throws {
         let port = Int.random(in: 17000..<18000)
         let silentFD = createUDPSocket(port: port)
@@ -962,14 +962,23 @@ final class SystemDNSManagerTests: XCTestCase {
             privilegeClient: recording,
             journal: journal,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            respondsOnPort: { _ in SystemDNSManager.dnsResponds(onPort: port, timeoutMilliseconds: 50) }
+            resolverLiveness: { _ in SystemDNSManager.dnsLiveness(onPort: port, timeoutMilliseconds: 50) }
         )
 
         let outcome = manager.restoreIfNeeded(logger: nil)
 
-        XCTAssertNotEqual(outcome, .restored(stale: false), "a timed-out probe is no evidence the session is gone")
+        XCTAssertEqual(outcome, .declinedInconclusiveProbe, "a timed-out probe is no evidence the session is gone")
         XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)
         XCTAssertTrue(manager.hasSavedState(), "the next launch retries from the records")
+    }
+
+    func testDNSLivenessReportsAClosedPortAsRefused() throws {
+        let port = Int.random(in: 17000..<18000)
+        let fd = createUDPSocket(port: port)
+        guard fd >= 0 else { throw XCTSkip("Could not bind a socket on port \(port)") }
+        close(fd)
+
+        XCTAssertEqual(SystemDNSManager.dnsLiveness(onPort: port, timeoutMilliseconds: 2_000), .notLive)
     }
 
     // MARK: - Liveness probe
@@ -979,7 +988,7 @@ final class SystemDNSManagerTests: XCTestCase {
         // the whole poll, and how long does not change the answer.
         let manager = SystemDNSManager(
             privilegeClient: recording, journal: journal,
-            respondsOnPort: { SystemDNSManager.dnsResponds(onPort: $0, timeoutMilliseconds: 200) }
+            resolverLiveness: { SystemDNSManager.dnsLiveness(onPort: $0, timeoutMilliseconds: 200) }
         )
         let port = Int.random(in: 17000..<18000)
         XCTAssertFalse(manager.probeLiveness(port: port), "Should fail with nothing on the port")

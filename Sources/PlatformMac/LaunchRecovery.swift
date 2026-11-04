@@ -86,6 +86,9 @@ package enum LaunchRecoveryOutcome: Equatable, Sendable {
     /// A live listener is serving the settings the records describe (another
     /// session is running), so they were left alone.
     case declinedLiveListener
+    /// A liveness probe timed out, so a session may still be serving the
+    /// settings and only be slow: left alone, and the next launch decides again.
+    case declinedInconclusiveProbe
     /// System DNS: a resolver answers but no interface points at loopback any
     /// more, so the records describe nothing and were dropped without a write.
     case discardedStaleRecords
@@ -177,6 +180,9 @@ extension LaunchRecovery {
         case .declinedLiveListener:
             name = "platform.launch_recovery_declined"
             detail = "\(subject) reason=live_listener"
+        case .declinedInconclusiveProbe:
+            name = "platform.launch_recovery_declined"
+            detail = "\(subject) reason=probe_inconclusive"
         case .discardedStaleRecords:
             name = "platform.launch_recovery_discarded"
             detail = "\(subject) reason=no_interface_points_at_loopback"
@@ -209,6 +215,8 @@ extension LaunchRecovery {
                 : "\(what): found settings recorded by a run that never tore down (likely a crash); restored the previous settings.")
         case .declinedLiveListener:
             return (.debug, "\(what): recorded state exists and a local listener is still serving it; left alone.")
+        case .declinedInconclusiveProbe:
+            return (.notice, "\(what): recorded state exists and the liveness probe got no answer in time; left alone for the next launch to retry.")
         case .discardedStaleRecords:
             return (.notice, "\(what): saved state exists but no interface points at 127.0.0.1 any more; dropped the stale records.")
         case .adoptedLegacyFiles(let adoption):

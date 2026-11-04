@@ -507,10 +507,10 @@ enum DevLaunch {
                 gss: .injected { DevRefusingGSS() },
                 pacEvaluator: pac,
                 portHolderProbe: FakeListenerPortHolderProbe(),
-                loopbackPortProbe: FakeLoopbackPortProbe().isServed(port:),
+                loopbackPortProbe: FakeLoopbackPortProbe().liveness(port:),
                 commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
                 // The installed Conduit's relay may answer on the real port 53.
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 networkPath: NetworkMonitor(),
                 networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in location },

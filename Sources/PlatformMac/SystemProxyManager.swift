@@ -46,7 +46,7 @@ package final class SystemProxyManager: @unchecked Sendable {
     /// is testable without a real listener.
     private let locationRecovery: LocationSettingsRecovery?
     private let configProvider: @Sendable () -> ProxyConfig
-    private let portProbe: @Sendable (Int) -> Bool
+    private let portProbe: @Sendable (Int) -> LoopbackLiveness
 
     package init(
         privilegeClient: PrivilegeClient = AppleScriptPrivilegeClient(),
@@ -54,7 +54,7 @@ package final class SystemProxyManager: @unchecked Sendable {
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         },
-        portProbe: @escaping @Sendable (Int) -> Bool = { LoopbackPortProbe.isServed(port: $0) },
+        portProbe: @escaping @Sendable (Int) -> LoopbackLiveness = { LoopbackPortProbe.liveness(port: $0) },
         locationRecovery: LocationSettingsRecovery? = nil,
         configProvider: @escaping @Sendable () -> ProxyConfig = { ProxyConfig() }
     ) {
@@ -560,8 +560,8 @@ package final class SystemProxyManager: @unchecked Sendable {
         if let locationRecovery {
             let config = configProvider()
             do {
-                let live = try locationRecovery.proxyListenerIsLive(config: config, probe: portProbe)
-                return locationRecovery.recover(kind: .proxies, config: config, listenerIsLive: live)
+                let listener = try locationRecovery.proxyListenerLiveness(config: config, probe: portProbe)
+                return locationRecovery.recover(kind: .proxies, config: config, listener: listener)
             } catch {
                 return .failed(reason: error.displayDescription)
             }
@@ -580,11 +580,11 @@ package final class SystemProxyManager: @unchecked Sendable {
         // A live listener on the port the machine is pointed at means another
         // instance is serving it, and taking its settings away would break
         // every client on the machine. Absent one, the settings are orphaned.
-        if localProxyListenerExists() {
-            return .declinedLiveListener
+        switch localProxyListenerLiveness() {
+        case .live: return .declinedLiveListener
+        case .inconclusive: return .declinedInconclusiveProbe
+        case .notLive: return performRestore(stale: false, logger: logger)
         }
-
-        return performRestore(stale: false, logger: logger)
     }
 
     /// A restore that throws, or that keeps records because some service
@@ -601,7 +601,7 @@ package final class SystemProxyManager: @unchecked Sendable {
 
     /// Whether something is listening on the loopback port the machine's proxy
     /// settings currently point at.
-    private func localProxyListenerExists() -> Bool {
+    private func localProxyListenerLiveness() -> LoopbackLiveness {
         let services = (try? connectedNetworkServices(logger: nil)) ?? allNetworkServices()
         var ports = Set<String>()
         for service in services {
@@ -619,12 +619,7 @@ package final class SystemProxyManager: @unchecked Sendable {
                 ports.insert(String(port))
             }
         }
-        return ports.contains { isListening(onPort: $0) }
-    }
-
-    private func isListening(onPort port: String) -> Bool {
-        guard let port = Int(port) else { return false }
-        return portProbe(port)
+        return .any(ports.lazy.map { Int($0).map(self.portProbe) ?? .notLive })
     }
 
     private func applyViaPrivilegeClient(config: ProxyConfig, endpoints: ClientEndpoints, mode: SystemProxyMode, services: [String], pacURL: String, logger: (any LogSink)?) throws {

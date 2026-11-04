@@ -1295,7 +1295,7 @@ extension SystemProxyManagerTests {
             privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run,
-            portProbe: { _ in false }
+            portProbe: { _ in .notLive }
         )
         try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
@@ -1306,7 +1306,7 @@ extension SystemProxyManagerTests {
             privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run,
-            portProbe: { _ in false }
+            portProbe: { _ in .notLive }
         )
         runner.invocations.removeAll()
 
@@ -1329,7 +1329,7 @@ extension SystemProxyManagerTests {
             privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run,
-            portProbe: { _ in true }
+            portProbe: { _ in .live }
         )
         try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
@@ -1344,6 +1344,28 @@ extension SystemProxyManagerTests {
         )
     }
 
+    func testRestoreIfNeededLeavesAProxyWhoseProbeTimedOutAlone() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run,
+            portProbe: FakeLoopbackPortProbe(timingOut: [63145]).liveness(port:)
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
+
+        runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"
+        runner.invocations.removeAll()
+
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedInconclusiveProbe)
+        XCTAssertTrue(runner.shellScripts.isEmpty)
+        XCTAssertTrue(manager.hasManagedState(), "the next launch retries from the records")
+    }
+
     /// Nothing recorded means nothing of ours is outstanding, whatever the
     /// machine currently holds.
     func testRestoreIfNeededDoesNothingWithoutRecords() {
@@ -1355,7 +1377,7 @@ extension SystemProxyManagerTests {
             privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run,
-            portProbe: { _ in false }
+            portProbe: { _ in .notLive }
         )
 
         XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .nothingToDo(.nothingRecorded))

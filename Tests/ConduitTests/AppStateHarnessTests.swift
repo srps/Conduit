@@ -108,13 +108,13 @@ final class AppStateHarness {
                 gss: .injected { HarnessRefusingGSS() },
                 pacEvaluator: pacEvaluator,
                 portHolderProbe: FakeListenerPortHolderProbe(),
-                loopbackPortProbe: FakeLoopbackPortProbe().isServed(port:),
+                loopbackPortProbe: FakeLoopbackPortProbe().liveness(port:),
                 commandRunner: { launchPath, arguments in
                     hold.pass(launchPath, arguments)
                     return try machine.run(launchPath, arguments)
                 },
                 // No resolver answers on the fake machine's loopback; the real port 53 is never probed.
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                dnsProbe: FakeDNSProbe().liveness(onPort:),
                 networkPath: FakeNetworkPathObserver(),
                 networkLocation: locationObserver,
                 networkLocationStoreFactory: { _ in locationStore },
