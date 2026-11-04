@@ -1276,7 +1276,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     /// handshake-limited request never reached the upstream (see
     /// `upstreamFailureReport`); everything else is the upstream's.
     static func upstreamPathFailureClass(_ error: Error) -> RequestFailureClass {
-        ConnectionPoolError.isLocalNonUpstreamFailure(error) ? .local : .upstream
+        ConnectionPoolError.failureClass(error) == .local ? .local : .upstream
     }
 
     /// Whose failure a direct connect was. The origin's, unless the

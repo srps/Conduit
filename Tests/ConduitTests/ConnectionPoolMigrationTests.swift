@@ -78,7 +78,7 @@ final class ConnectionPoolMigrationTests: XCTestCase {
 
         XCTAssertThrowsError(try pool.insertDialedConnection(late, target: "http://origin.test/a?q=1")) { error in
             XCTAssertEqual(error as? ConnectionPoolError, .vpnTransitionDuringConnect)
-            XCTAssertTrue(ConnectionPoolError.isLocalNonUpstreamFailure(error), "never a breaker signal")
+            XCTAssertEqual(ConnectionPoolError.failureClass(error), .local, "never a breaker signal")
         }
         XCTAssertFalse(late.channel.isActive)
         XCTAssertTrue(pool.allConnectionSnapshot.isEmpty, "never handed to a request")

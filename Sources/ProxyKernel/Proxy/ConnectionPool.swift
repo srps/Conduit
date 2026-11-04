@@ -29,6 +29,19 @@ package enum CloseScope: Sendable, Equatable {
     case all
 }
 
+/// Whose fact an upstream-path failure is. Only `.upstream` feeds the
+/// breaker; the retry policy and the error-rate alarm ask whether it is `.local`.
+package enum UpstreamFailureClass: Equatable, Sendable {
+    /// The pool or the runtime refused or closed it; the upstream did nothing.
+    case local
+    /// Connected, and no response bytes came within `upstreamResponseTimeout`.
+    /// Slowness is not loss (STYLE rule 11).
+    case inconclusive
+    /// Refused, missed the connect budget, reset, 5xx, rejected the credential
+    /// or answered nonsense.
+    case upstream
+}
+
 package enum ConnectionPoolError: Error, LocalizedError, Equatable {
     case noUpstreamsConfigured
     case authenticationUnavailable
@@ -98,11 +111,6 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
         return false
     }
 
-    package static func isLocalNonUpstreamFailure(_ error: Error) -> Bool {
-        isAuthHandshakeLimitExceeded(error) || isPoolExhausted(error) || isVPNTransitionDuringConnect(error)
-            || isConnectionTrackingFull(error)
-    }
-
     package static func isConnectionTrackingFull(_ error: Error) -> Bool {
         if case ConnectionPoolError.connectionTrackingFull = error {
             return true
@@ -129,6 +137,22 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
             return true
         }
         return false
+    }
+
+    /// Exhaustive over this enum, so a new case picks its class before it
+    /// compiles. Every other error (a NIO connect timeout, an `IOError`) is the
+    /// upstream's: a connect that misses its budget is a failed connect.
+    package static func failureClass(_ error: Error) -> UpstreamFailureClass {
+        guard let error = error as? ConnectionPoolError else { return .upstream }
+        switch error {
+        case .authHandshakeLimitExceeded, .poolExhausted, .vpnTransitionDuringConnect, .connectionTrackingFull:
+            return .local
+        case .upstreamResponseTimedOut:
+            return .inconclusive
+        case .noUpstreamsConfigured, .authenticationUnavailable, .authenticationRejected, .invalidResponse,
+             .bodyTooLargeForReplay, .streamingResponseInterrupted, .clientClosedDuringResponse, .upstreamReturnedStatus:
+            return .upstream
+        }
     }
 }
 
@@ -456,15 +480,15 @@ package final class ConnectionPool: @unchecked Sendable {
         }
         // Mirror the buffered path: acquire-time failures (e.g. immediate
         // connect-refused on a dead upstream) are upstream health signals and
-        // must feed the breaker. Local capacity signals are not upstream
-        // failures and are excluded below.
+        // must feed the breaker. Local capacity signals and response
+        // timeouts are not upstream failures and are excluded below (#197).
         // A client that hung up after the upstream answered in full is a
         // success for the upstream, not a breaker signal.
         return attempt.flatMapError { [weak self] (error: Error) -> EventLoopFuture<StreamingExchangeResult> in
             guard let self else { return attempt }
             if ConnectionPoolError.isClientClosedDuringResponse(error) {
                 self.recordSuccess(for: proxy, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
-            } else if !ConnectionPoolError.isLocalNonUpstreamFailure(error) {
+            } else if ConnectionPoolError.failureClass(error) == .upstream {
                 self.recordFailure(for: proxy)
             }
             return self.group.next().makeFailedFuture(error)
@@ -618,7 +642,7 @@ package final class ConnectionPool: @unchecked Sendable {
                             self.release(connection, keepAlive: true)
                             self.logger.log(.debug, "Prewarmed upstream connection for \(proxy.endpoint).", category: .proxy)
                         } catch {
-                            if !ConnectionPoolError.isLocalNonUpstreamFailure(error) { self.recordFailure(for: proxy) }
+                            if ConnectionPoolError.failureClass(error) == .upstream { self.recordFailure(for: proxy) }
                             self.logger.log(.debug, "Prewarm failed for \(proxy.endpoint): \(error.displayDescription)", category: .proxy)
                         }
                     }
@@ -1169,7 +1193,7 @@ package final class ConnectionPool: @unchecked Sendable {
                     connectTimeout: connectTimeout
                 )
             }
-            if !ConnectionPoolError.isLocalNonUpstreamFailure(error) {
+            if ConnectionPoolError.failureClass(error) == .upstream {
                 self.recordFailure(for: proxy)
             }
             return self.group.next().makeFailedFuture(error)
@@ -1611,7 +1635,7 @@ package final class ConnectionPool: @unchecked Sendable {
         // A sweep closed it because routing left that path (#148), or the
         // pool refused it locally; the message fallback below would
         // otherwise match a "closed".
-        if ConnectionPoolError.isLocalNonUpstreamFailure(error) { return false }
+        if ConnectionPoolError.failureClass(error) == .local { return false }
         if let channelError = error as? ChannelError {
             switch channelError {
             case .eof, .ioOnClosedChannel, .alreadyClosed:

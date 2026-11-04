@@ -106,7 +106,7 @@ final class OutboundSocketRegistryTests: XCTestCase {
         let late = try channel(local: "10.20.30.40")
         XCTAssertThrowsError(try open(registry, late, route: .upstream)) {
             XCTAssertTrue(ConnectionPoolError.isVPNTransitionDuringConnect($0))
-            XCTAssertTrue(ConnectionPoolError.isLocalNonUpstreamFailure($0), "never retried, never fed to a breaker")
+            XCTAssertEqual(ConnectionPoolError.failureClass($0), .local, "never retried, never fed to a breaker")
         }
         XCTAssertFalse(late.isActive)
         XCTAssertEqual(registry.count, 0)
@@ -146,7 +146,7 @@ final class OutboundSocketRegistryTests: XCTestCase {
         try open(registry, tracked)
         XCTAssertThrowsError(try open(registry, overflow)) {
             XCTAssertTrue(ConnectionPoolError.isConnectionTrackingFull($0))
-            XCTAssertTrue(ConnectionPoolError.isLocalNonUpstreamFailure($0), "never retried, never fed to a breaker")
+            XCTAssertEqual(ConnectionPoolError.failureClass($0), .local, "never retried, never fed to a breaker")
         }
         XCTAssertFalse(overflow.isActive, "no socket is left untracked")
         XCTAssertTrue(tracked.isActive)

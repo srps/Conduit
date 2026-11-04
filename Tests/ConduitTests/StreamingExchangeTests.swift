@@ -33,7 +33,7 @@ final class StreamingExchangeTests: XCTestCase {
 
     func testPoolExhaustedClassifier() {
         XCTAssertTrue(ConnectionPoolError.isPoolExhausted(ConnectionPoolError.poolExhausted))
-        XCTAssertTrue(ConnectionPoolError.isLocalNonUpstreamFailure(ConnectionPoolError.poolExhausted))
+        XCTAssertEqual(ConnectionPoolError.failureClass(ConnectionPoolError.poolExhausted), .local)
         XCTAssertFalse(ConnectionPoolError.isPoolExhausted(ConnectionPoolError.upstreamResponseTimedOut))
     }
 

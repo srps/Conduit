@@ -20,6 +20,23 @@ final class UpstreamFailureClassTests: XCTestCase {
 
     private static let attempts = 3
 
+    func testEachFailureIsClassedByWhoseFactItIs() {
+        let table: [(Error, UpstreamFailureClass)] = [
+            (ConnectionPoolError.upstreamResponseTimedOut, .inconclusive),
+            (ChannelError.connectTimeout(.seconds(5)), .upstream),
+            (IOError(errnoCode: ECONNREFUSED, reason: "connect"), .upstream),
+            (ConnectionPoolError.upstreamReturnedStatus(503, target: "example.com:443"), .upstream),
+            (ConnectionPoolError.authenticationRejected, .upstream),
+            (ConnectionPoolError.authHandshakeLimitExceeded, .local),
+            (ConnectionPoolError.poolExhausted, .local),
+            (ConnectionPoolError.vpnTransitionDuringConnect, .local),
+            (ConnectionPoolError.connectionTrackingFull, .local),
+        ]
+        for (error, expected) in table {
+            XCTAssertEqual(ConnectionPoolError.failureClass(error), expected, "\(error)")
+        }
+    }
+
     func testResponseTimeoutsOnTheExchangeAndTheTunnelLeaveTheBreakerAlone() async throws {
         let silent = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
