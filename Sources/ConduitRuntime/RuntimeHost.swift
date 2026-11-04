@@ -236,10 +236,14 @@ package final class RuntimeHost {
     private(set) var dnsRelayUnresponsive = false {
         didSet { if dnsRelayUnresponsive != oldValue { onControlStateChange?() } }
     }
-    private(set) var declinedLaunchRecovery: Set<PlatformSurface> = [] {
-        didSet { if systemDNSRecoveryDeclined != oldValue.contains(.systemDNS) { onControlStateChange?() } }
+    /// Each surface whose launch restore recovery declined, with that decline, until this run writes the surface. Only a timed-out
+    /// probe's DNS decline is shown: a live listener needs nothing from the user.
+    private(set) var declinedLaunchRecovery: [PlatformSurface: LaunchRecoveryOutcome] = [:] {
+        didSet {
+            if systemDNSRecoveryDeclined != (oldValue[.systemDNS] == .declinedInconclusiveProbe) { onControlStateChange?() }
+        }
     }
-    var systemDNSRecoveryDeclined: Bool { declinedLaunchRecovery.contains(.systemDNS) }
+    var systemDNSRecoveryDeclined: Bool { declinedLaunchRecovery[.systemDNS] == .declinedInconclusiveProbe }
     /// Whether the proxy module's surfaces are up: a proxy Start completed them, and no teardown of the proxy has begun since. Its
     /// split-DNS entry files exist only in that window, so VPN transitions and repairs must not apply them outside it.
     var runtimeStarted = false
@@ -675,8 +679,9 @@ package final class RuntimeHost {
     func awaitLaunchRecovery() async {
         guard let decisions = await launchRecovery?.join() else { return }
         launchRecovery = nil
-        declinedLaunchRecovery = Set([(PlatformSurface.systemDNS, decisions.systemDNS), (.systemProxy, decisions.systemProxy)]
-            .filter { $0.1 == .declinedInconclusiveProbe }.map(\.0))
+        declinedLaunchRecovery = [PlatformSurface.systemDNS: decisions.systemDNS, .systemProxy: decisions.systemProxy].filter {
+            $0.value == .declinedInconclusiveProbe || $0.value == .declinedLiveListener
+        }
     }
 
     /// A decline must reach the control snapshot without waiting for the first command, so the host joins its own recovery too.
@@ -685,7 +690,7 @@ package final class RuntimeHost {
     }
 
     func surfaceWritten(_ surface: PlatformSurface) {
-        declinedLaunchRecovery.remove(surface)
+        declinedLaunchRecovery[surface] = nil
     }
 
     /// The relay system DNS points at answers this run. A reading that lands after management went off stopped its timer and relay,
@@ -1170,8 +1175,8 @@ package final class RuntimeHost {
             let events = orchestrator.eventLog, logger = logger
             let applyProxy = platform.manageSystemProxy && state.proxyIsUp
             let applyDNS = platform.manageSystemDNS && state.dnsIsUp
-            let withholdProxyRestore = !applyProxy && declinedLaunchRecovery.contains(.systemProxy)
-            let withholdDNSRestore = !applyDNS && declinedLaunchRecovery.contains(.systemDNS)
+            let withholdProxyRestore = !applyProxy && declinedLaunchRecovery[.systemProxy] != nil
+            let withholdDNSRestore = !applyDNS && declinedLaunchRecovery[.systemDNS] != nil
             for (kind, withheld) in [(NetworkSettingsKind.proxies, withholdProxyRestore), (.dns, withholdDNSRestore)] where withheld {
                 recordLifecycle(RuntimeEvent(kind: .config, event: "platform.location_restore_withheld",
                                              detail: "surface=\(kind.rawValue) reason=launch_recovery_declined"))
@@ -1991,11 +1996,13 @@ extension RuntimeHost: RuntimeReconcilerHost {
             // not by throwing, so the journal is the oracle for "landed":
             // records left means the next reload must try again.
             let systemProxy = systemConduit
-            return await platformWork.run {
+            let cleared = await platformWork.run {
                 attemptFlagStep("Could not clear system proxy after the setting changed", logger: logger) {
                     try systemProxy.clear(logger: logger)
                 } && !systemProxy.hasManagedState()
             }
+            if cleared { surfaceWritten(.systemProxy) }
+            return cleared
         case .applyEnvironment:
             return await applyEnvironmentSwitch(config: config, cause: .switchOn)
         case .clearEnvironment:

@@ -834,8 +834,9 @@ extension RuntimeHost {
         // hand (#13). The ownership reads happen inside the block, after
         // whatever was queued ahead of it has landed.
         let stopPlace = splitDNSRepair.queue()
-        let (entryFiles, systemProxyCleared) = await platformWork.run { () -> (SplitDNSEntryFileRepair.Observation?, Bool) in
-            let systemProxyCleared = systemProxy.serialized { () -> Bool in
+        let (entryFiles, systemProxyRestored) = await platformWork.run { () -> (SplitDNSEntryFileRepair.Observation?, Bool) in
+            // A Stop is the user asking for the recorded proxy back, so what its clear left is this run's to retry.
+            let systemProxyRestored = systemProxy.serialized { () -> Bool in
                 guard terminal || !token.isSuperseded else { return false }
                 guard platform.manageSystemProxy || systemProxy.hasManagedState() else { return false }
                 do {
@@ -843,7 +844,7 @@ extension RuntimeHost {
                 } catch {
                     logger.log(.warning, "Could not clear system proxy settings: \(error.localizedDescription)", category: .system)
                 }
-                return !systemProxy.hasManagedState()
+                return true
             }
             environment.serialized {
                 guard terminal || !token.isSuperseded else { return }
@@ -882,9 +883,9 @@ extension RuntimeHost {
                 }
                 return nil
             }
-            return (entryFiles, systemProxyCleared)
+            return (entryFiles, systemProxyRestored)
         }
-        if systemProxyCleared { surfaceWritten(.systemProxy) }
+        if systemProxyRestored { surfaceWritten(.systemProxy) }
         await recordSplitDNS(entryFiles, source: .stop, startedAt: stopPlace)
         return terminal || holdsLane(effect, .proxy)
     }

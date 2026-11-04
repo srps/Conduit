@@ -3034,11 +3034,11 @@ final class DaemonRuntimeHostTests: XCTestCase {
         harness.listenerProbe = FakeLoopbackPortProbe(timingOut: [47113])
         let host = try await harness.makeHost()
         await host.awaitLaunchRecovery()
-        XCTAssertEqual(host.declinedLaunchRecovery, [.systemProxy])
+        XCTAssertEqual(host.declinedLaunchRecovery, [.systemProxy: .declinedInconclusiveProbe])
         XCTAssertEqual(harness.wifi.webProxy.port, "47113", "a timed-out probe restores nothing")
 
         _ = try await host.startProxy(conditionalDNS: false)
-        XCTAssertEqual(host.declinedLaunchRecovery, [], "the Start pointed system proxy at this run")
+        XCTAssertEqual(host.declinedLaunchRecovery, [:], "the Start pointed system proxy at this run")
     }
 
     @RuntimeActor func testAProxyStopEndsADeclinedSystemProxyRecoveryAStartDidNotWrite() async throws {
@@ -3053,11 +3053,29 @@ final class DaemonRuntimeHostTests: XCTestCase {
         harness.machine.failsServiceListing = true
         _ = try await host.startProxy(conditionalDNS: false)
         harness.machine.failsServiceListing = false
-        XCTAssertEqual(host.declinedLaunchRecovery, [.systemProxy], "a Start whose apply failed wrote nothing")
+        XCTAssertEqual(host.declinedLaunchRecovery, [.systemProxy: .declinedInconclusiveProbe], "a Start whose apply failed wrote nothing")
 
         _ = await host.stopProxy()
-        XCTAssertEqual(host.declinedLaunchRecovery, [])
+        XCTAssertEqual(host.declinedLaunchRecovery, [:])
         XCTAssertEqual(harness.wifi.webProxy.host, "prior.example.test", "the Stop put the recorded proxy back")
+    }
+
+    /// What a failed clear left is this run's to retry: the location reconcile may restore it.
+    @RuntimeActor func testAProxyStopWhoseClearFailedStillEndsADeclinedSystemProxyRecovery() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        seedCrashedRunProxy()
+        harness.listenerProbe = FakeLoopbackPortProbe(timingOut: [47113])
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+
+        harness.machine.failsServiceListing = true
+        _ = try await host.startProxy(conditionalDNS: false)
+        _ = await host.stopProxy()
+        harness.machine.failsServiceListing = false
+        XCTAssertEqual(harness.wifi.webProxy.port, "47113", "the clear put nothing back")
+        XCTAssertEqual(host.declinedLaunchRecovery, [:])
     }
 
     /// The journal and machine a crashed run leaves: the prior proxy recorded and applied, and the machine still pointed at a dead loopback

@@ -629,6 +629,18 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
     }
 
+    func testTheFirstLocationReportKeepsSystemDNSThatALiveListenerServes() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        let locations = try leaveACrashedRunsLocationSettingsBehindASlowListener(harness, kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])])
+        harness.dnsProbe = FakeDNSProbe(answering: [53])
+        let state = await harness.ready()
+        await settleTheFirstLocationReconcile(harness, kind: .dns)
+
+        XCTAssertEqual(homeService(locations)?.dns["ServerAddresses"], .list(["127.0.0.1"]), "another session serves it")
+        XCTAssertTrue(harness.journal.hasRecords(for: .systemDNS))
+        XCTAssertFalse(state.runtime.systemDNSRecoveryDeclined, "a live listener needs nothing from the user")
+    }
+
     func testTheFirstLocationReportKeepsADeclinedSystemProxyRecovery() async throws {
         let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemProxy: true))
         let locations = try leaveACrashedRunsLocationSettingsBehindASlowListener(harness, kind: .proxies, desired: [
