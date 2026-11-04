@@ -41,11 +41,8 @@ package struct FileProxyEndpointWitness: ProxyEndpointWitnessing {
         self.fileURL = fileURL
     }
 
-    /// `platform-state.json` -> `platform-state.proxy-endpoint.json`, so every recovery over one journal shares one record.
     package static func beside(journalFile: URL) -> FileProxyEndpointWitness {
-        let stem = journalFile.deletingPathExtension().lastPathComponent
-        return FileProxyEndpointWitness(fileURL: journalFile.deletingLastPathComponent()
-            .appendingPathComponent(stem + ".proxy-endpoint.json"))
+        FileProxyEndpointWitness(fileURL: RuntimeEnvironment.proxyEndpointWitnessFile(besideJournal: journalFile))
     }
 
     package func read() -> ProxyEndpointWitnessRead {

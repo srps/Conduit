@@ -92,6 +92,7 @@ final class DiagnosticDestinationGuardTests: XCTestCase {
         XCTAssertEqual(urls[.ready], root.appendingPathComponent("ready.json").path)
         XCTAssertEqual(urls[.daemonReady], root.appendingPathComponent("daemon-ready.json").path)
         XCTAssertEqual(urls[.control], root.appendingPathComponent("control.sock").path)
+        XCTAssertEqual(urls[.proxyEndpointWitness], root.appendingPathComponent("platform-state.proxy-endpoint.json").path)
     }
 
     /// The writer lease is one explicit extra entry, present only when a composer passes its URL.
