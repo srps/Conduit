@@ -63,3 +63,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0037](0037-saved-command-preparation-capture.md) | Capture saved command input once at preparation | accepted | implemented | passed |
 | [0038](0038-bounded-runtime-collection-capture.md) | Bound complete runtime collection captures independently of live connections | accepted | implemented | none |
 | [0039](0039-total-app-quit-budget.md) | Bound the in-process app's complete Quit wait to ten seconds | accepted | implemented | passed |
+| [0040](0040-proxy-endpoint-witness.md) | Witness a port-0 session's advertised proxy endpoint beside the journal | proposed | implemented | none |
