@@ -3026,9 +3026,9 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy), "and releases the surface it restored")
     }
 
-    @RuntimeActor func testAProxyStartWhoseApplyLandsEndsADeclinedSystemProxyRecovery() async throws {
+    @RuntimeActor private func makeHostWithADeclinedSystemProxyRecovery(localPort: Int = 0) async throws -> RuntimeHost {
         var config = GenericDefaults.shared.makeConfig()
-        config.localPort = 0
+        config.localPort = localPort
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
         seedCrashedRunProxy()
         harness.listenerProbe = FakeLoopbackPortProbe(timingOut: [47113])
@@ -3036,46 +3036,32 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.awaitLaunchRecovery()
         XCTAssertEqual(host.declinedLaunchRecovery, [.systemProxy: .declinedInconclusiveProbe])
         XCTAssertEqual(harness.wifi.webProxy.port, "47113", "a timed-out probe restores nothing")
-
-        _ = try await host.startProxy(conditionalDNS: false)
-        XCTAssertEqual(host.declinedLaunchRecovery, [:], "the Start pointed system proxy at this run")
+        return host
     }
 
-    @RuntimeActor func testAProxyStopEndsADeclinedSystemProxyRecoveryAStartDidNotWrite() async throws {
-        var config = GenericDefaults.shared.makeConfig()
-        config.localPort = 0
-        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
-        seedCrashedRunProxy()
-        harness.listenerProbe = FakeLoopbackPortProbe(timingOut: [47113])
-        let host = try await harness.makeHost()
-        await host.awaitLaunchRecovery()
-
+    /// The up proxy's drift repairs and reapplies write this run's settings, so a Start ends the decline even when its own apply failed.
+    @RuntimeActor func testAProxyStartEndsADeclinedSystemProxyRecoveryWhetherOrNotItsApplyLanded() async throws {
+        let host = try await makeHostWithADeclinedSystemProxyRecovery()
         harness.machine.failsServiceListing = true
         _ = try await host.startProxy(conditionalDNS: false)
         harness.machine.failsServiceListing = false
-        XCTAssertEqual(host.declinedLaunchRecovery, [.systemProxy: .declinedInconclusiveProbe], "a Start whose apply failed wrote nothing")
-
-        _ = await host.stopProxy()
         XCTAssertEqual(host.declinedLaunchRecovery, [:])
-        XCTAssertEqual(harness.wifi.webProxy.host, "prior.example.test", "the Stop put the recorded proxy back")
     }
 
-    /// What a failed clear left is this run's to retry: the location reconcile may restore it.
-    @RuntimeActor func testAProxyStopWhoseClearFailedStillEndsADeclinedSystemProxyRecovery() async throws {
-        var config = GenericDefaults.shared.makeConfig()
-        config.localPort = 0
-        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
-        seedCrashedRunProxy()
-        harness.listenerProbe = FakeLoopbackPortProbe(timingOut: [47113])
-        let host = try await harness.makeHost()
-        await host.awaitLaunchRecovery()
-
-        harness.machine.failsServiceListing = true
-        _ = try await host.startProxy(conditionalDNS: false)
-        _ = await host.stopProxy()
-        harness.machine.failsServiceListing = false
-        XCTAssertEqual(harness.wifi.webProxy.port, "47113", "the clear put nothing back")
+    /// A Start that cannot bind tears its proxy down, and that teardown's clear puts the recorded proxy back: the user acted on the
+    /// surface, as with a Stop.
+    @RuntimeActor func testAProxyTeardownThatRunsItsClearEndsADeclinedSystemProxyRecovery() async throws {
+        let held = try HeldTCPListener()
+        let host = try await makeHostWithADeclinedSystemProxyRecovery(localPort: held.port)
+        do {
+            _ = try await host.startProxy(conditionalDNS: false)
+            XCTFail("the held port refuses the bind")
+        } catch {
+            XCTAssertTrue("\(error)".contains("addressInUse"), "\(error)")
+        }
         XCTAssertEqual(host.declinedLaunchRecovery, [:])
+        XCTAssertEqual(harness.wifi.webProxy.host, "prior.example.test")
+        withExtendedLifetime(held) {}
     }
 
     /// The journal and machine a crashed run leaves: the prior proxy recorded and applied, and the machine still pointed at a dead loopback

@@ -763,14 +763,12 @@ package final class RuntimeHost {
         let interceptReadyAtStart = orchestrator.snapshot.bindings.dnsInterceptReady
         let forwarderRunningAtStart = orchestrator.snapshot.dnsRunState == .running
         let entryPlace = splitDNSRepair.queue()
-        let (entryFiles, systemProxyWritten) = await platformWork.run { () -> (SplitDNSEntryFileRepair.Observation?, Bool) in
-            var systemProxyWritten = false
+        let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Observation? in
             if platform.manageSystemProxy {
                 systemProxy.serialized {
                     guard !token.isSuperseded else { return }
                     do {
                         try systemProxy.apply(config: config, mode: platform.systemProxyMode, logger: logger, endpoints: endpoints)
-                        systemProxyWritten = true
                     } catch {
                         logger.log(.warning, "Could not apply system proxy settings (non-fatal): \(error.localizedDescription)", category: .system)
                     }
@@ -818,9 +816,8 @@ package final class RuntimeHost {
                     entryFiles = SplitDNSEntryFileRepair.Observation.after(outcome, config: config, dnsManager: resolvers)
                 }
             }
-            return (entryFiles, systemProxyWritten)
+            return entryFiles
         }
-        if systemProxyWritten { surfaceWritten(.systemProxy) }
         await recordSplitDNS(entryFiles, source: .start, startedAt: entryPlace)
         // A stop issued while the apply was out queued its clears behind
         // it, so the machine ends cleared; what must not happen now is the
@@ -831,6 +828,8 @@ package final class RuntimeHost {
         // acts as for a running proxy, and a Stop's teardown, which clears
         // this, is never undone by the start that it overtook.
         runtimeStarted = true
+        // An up proxy takes system proxy whether or not this apply landed: its repairs and reapplies write this run's settings.
+        surfaceWritten(.systemProxy)
         // A VPN transition handled while the apply was out could act only
         // as a stopped runtime does, so it wrote nothing for a tunnel that
         // came up; put the entry files where the gate is now. A drop and a

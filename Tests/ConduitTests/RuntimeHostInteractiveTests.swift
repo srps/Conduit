@@ -321,8 +321,8 @@ private final class SlotHold {
     }
 }
 
-/// A TCP listener the test holds on a loopback port it chose, so a tunnel's bind on that port fails as a contended port does.
-private final class HeldTCPListener {
+/// A TCP listener the test holds on a loopback port it chose, so a proxy or tunnel bind on that port fails as a contended port does.
+final class HeldTCPListener {
     let port: Int
     private let descriptor: Int32
 
