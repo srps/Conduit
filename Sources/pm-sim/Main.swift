@@ -77,6 +77,8 @@ enum PMSim {
               pac-slow-host           slow PAC host: answered from cache, re-evaluated in the background, warning rate-limited
               pac-route-bounds        configurable PAC cap bounds real fallback attempts without promoting DIRECT
               upstream-flap           upstream up/down/up; assert breaker opens, half-opens, closes
+              upstream-silent-failover  an upstream that goes silent is held once, then fails over within 1.5I + 5R + P + 6C; its timeouts leave the breaker closed
+              upstream-slow-serving   a slow-but-answering upstream neither fails over nor trips the breaker
               recovery-unreachable-ladder  unreachable upstream: ladder skips re-auth, exhaustion does not blame the password
               recovery-superseded-by-disconnect  a disconnect that routes DIRECT owns the status a superseded ladder left
               health-restart-superseded  a check from a health loop restarted for new settings is dropped, not applied
@@ -266,6 +268,8 @@ enum PMSim {
         "pac-slow-host",
         "pac-route-bounds",
         "upstream-flap",
+        "upstream-silent-failover",
+        "upstream-slow-serving",
         "recovery-unreachable-ladder",
         "recovery-superseded-by-disconnect",
         "health-restart-superseded",
@@ -441,6 +445,10 @@ enum PMSim {
             return [try await PACRoutingScenarios.routeBounds(verbose: verbose)]
         case "upstream-flap":
             return [try await UpstreamFlapScenarios.upstreamFlap(verbose: verbose)]
+        case "upstream-silent-failover":
+            return [try await SilentUpstreamScenarios.silentFailover(verbose: verbose)]
+        case "upstream-slow-serving":
+            return [try await SilentUpstreamScenarios.slowServing(verbose: verbose)]
         case "websocket-upgrade":
             return [try await UpgradeScenarios.websocketUpgrade(verbose: verbose)]
         case "connect-early-direct":
