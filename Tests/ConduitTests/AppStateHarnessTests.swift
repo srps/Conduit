@@ -50,6 +50,8 @@ final class AppStateHarness {
     let appLogHold = HeldDestinationGuard(holds: 0)
     /// Fetches no PAC from the network; a scenario that plans PAC work injects its own before `launch()`.
     var pacEvaluator: any PacEvaluator = FakePacEvaluator()
+    /// No resolver answers on the fake machine's loopback; the real port 53 is never probed. A scenario names a probe that times out.
+    var dnsProbe = FakeDNSProbe()
     /// The host store's file access; a scenario that holds or refuses a store step names its own before `launch()`.
     var stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem()
     private(set) var appState: AppState?
@@ -100,6 +102,7 @@ final class AppStateHarness {
         let helper = self.helper
         let locationStore = self.locationStore
         let appLogHold = self.appLogHold
+        let dnsProbe = self.dnsProbe
         return AppComposition(
             effects: RuntimeHostEffects(
                 privilege: { _ in RuntimePrivilegeAdapters(client: HoldingPrivilegeClient(base: machine, hold: hold), helperStatus: helper) },
@@ -113,8 +116,7 @@ final class AppStateHarness {
                     hold.pass(launchPath, arguments)
                     return try machine.run(launchPath, arguments)
                 },
-                // No resolver answers on the fake machine's loopback; the real port 53 is never probed.
-                dnsProbe: FakeDNSProbe().liveness(onPort:),
+                dnsProbe: dnsProbe.liveness(onPort:),
                 networkPath: FakeNetworkPathObserver(),
                 networkLocation: locationObserver,
                 networkLocationStoreFactory: { _ in locationStore },
@@ -497,6 +499,52 @@ final class AppStateHarnessTests: XCTestCase {
             $0.webProxy = FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "47113")
             $0.secureWebProxy = $0.webProxy
         }
+    }
+
+    /// A crashed run's system DNS on Wi-Fi, with the helper's relay still holding port 53 and answering nothing: the probe times out.
+    private func leaveACrashedRunsDNS(_ harness: AppStateHarness) {
+        harness.journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "192.0.2.1"])
+        harness.journal.markApplied(surface: .systemDNS)
+        harness.machine.describe("Wi-Fi") { $0.dnsServers = ["127.0.0.1"] }
+        harness.dnsProbe = FakeDNSProbe(timingOut: [53])
+    }
+
+    /// A declined launch recovery is shown until a DNS Start writes system DNS: the Start points the relay at the forwarder it bound.
+    func testADeclinedSystemDNSRecoveryIsShownUntilAStartRepointsTheRelay() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        leaveACrashedRunsDNS(harness)
+        let state = await harness.ready()
+        await harness.settle("the decline is shown") { state.runtime.systemDNSRecoveryDeclined }
+        XCTAssertEqual(wifi.dnsServers, ["127.0.0.1"], "a timed-out probe restores nothing")
+        XCTAssertTrue(harness.journal.hasRecords(for: .systemDNS))
+        XCTAssertTrue(harness.machine.privilege.commands(matching: .startDNSRelay).isEmpty)
+
+        state.startDNSAfterDeclinedRecovery()
+        await harness.settle("DNS runs") { state.runtime.dnsRunState == .running }
+        await harness.settle("the notice clears") { !state.runtime.systemDNSRecoveryDeclined }
+        let port = try XCTUnwrap(state.runtime.bindings.dnsPort)
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(port)], "the relay forwards to this run")
+        XCTAssertEqual(wifi.dnsServers, ["127.0.0.1"])
+
+        state.toggleDNS()
+        await harness.settle("DNS stops") { state.runtime.dnsRunState == .stopped }
+        await harness.settle("the Stop restores") { self.wifi.dnsServers == ["192.0.2.1"] }
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS), "the Start kept the crashed run's record, and the Stop put it back")
+    }
+
+    /// The other answer: Restore runs the DNS teardown, which puts back the servers the journal recorded, and the notice clears.
+    func testRestoringAfterADeclinedSystemDNSRecoveryPutsTheRecordedServersBack() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        leaveACrashedRunsDNS(harness)
+        let state = await harness.ready()
+        await harness.settle("the decline is shown") { state.runtime.systemDNSRecoveryDeclined }
+
+        state.restoreSystemDNSAfterDeclinedRecovery()
+        await harness.settle("the notice clears") { !state.runtime.systemDNSRecoveryDeclined }
+        XCTAssertEqual(wifi.dnsServers, ["192.0.2.1"], "the recorded servers are back")
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+        XCTAssertFalse(harness.machine.dnsRelayRunning, "the relay is stopped")
+        XCTAssertEqual(state.runtime.dnsRunState, .stopped, "nothing was started")
     }
 
     /// The explicit reload runs one at a time, refusing a second with a message, and re-evaluates the launch options' hold from what it

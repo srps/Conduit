@@ -39,6 +39,8 @@ final class RuntimePresentationAdapter: ObservableObject {
     @Published private(set) var proxyError: String?
     @Published private(set) var dnsError: String?
     @Published private(set) var tunnelsError: String?
+    /// System DNS still points at a crashed session's relay, which launch recovery could not prove gone (#201).
+    @Published private(set) var systemDNSRecoveryDeclined = false
     @Published private(set) var bindings = RuntimeBindingsDisplay()
     @Published private(set) var lastAuthOutcome: RuntimeAuthOutcome?
     @Published private(set) var lastAuthOutcomeAt: Date?
@@ -234,6 +236,7 @@ final class RuntimePresentationAdapter: ObservableObject {
         set(\.proxyError, snapshot.proxyError)
         set(\.dnsError, snapshot.dnsError)
         set(\.tunnelsError, snapshot.tunnelsError)
+        set(\.systemDNSRecoveryDeclined, snapshot.systemDNSRecoveryDeclined)
         set(\.bindings, RuntimeBindingsDisplay(snapshot.bindings, tunnelCount: snapshot.collections.tunnelBindings.totalCount.rawValue))
         set(\.lastAuthOutcome, snapshot.lastAuthOutcome.map(RuntimeAuthOutcome.init))
         set(\.lastAuthOutcomeAt, snapshot.lastAuthOutcomeAt.map(Date.init(controlTimestamp:)))
@@ -304,6 +307,7 @@ final class RuntimePresentationAdapter: ObservableObject {
         set(\.proxyError, nil)
         set(\.dnsError, nil)
         set(\.tunnelsError, nil)
+        set(\.systemDNSRecoveryDeclined, false)
         set(\.bindings, RuntimeBindingsDisplay())
         set(\.activeConnectionCount, 0)
         set(\.tunnelDNSOverrideStatus, .notNeeded)

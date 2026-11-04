@@ -115,6 +115,8 @@ final class AppState: ObservableObject {
     private var helperChangeInFlight = false
     /// The DNS module's last observed error while it ran, for the degraded notification's transition.
     private var lastDNSError: String?
+    /// The last snapshot's `systemDNSRecoveryDeclined`, so the notification fires once per decline.
+    private var systemDNSRecoveryDeclinedShown = false
     /// One explicit reload at a time; a second request while one runs is refused with a message.
     private(set) var reloading = false
     /// The login item refused the last registration; the next verified Settings save or successful proxy Start tries again.
@@ -868,6 +870,24 @@ final class AppState: ObservableObject {
         send(.testDNS) { _ in }
     }
 
+    // MARK: - Declined DNS recovery
+
+    /// The two answers to a declined system DNS recovery (#201). A DNS Start points system DNS at a forwarder that answers; a DNS Stop runs
+    /// the teardown's restore of the servers recorded before Conduit changed them, the same one Quit runs. The user chose the restore, so
+    /// it is not one a timed-out probe made. The host clears the notice once either writes system DNS.
+    func startDNSAfterDeclinedRecovery() {
+        guard MenuBarPresentation.moduleToggleAction(for: runtime.dnsRunState) == .start else { return }
+        toggleDNS()
+    }
+
+    func restoreSystemDNSAfterDeclinedRecovery() {
+        guard controlsEnabled else { return }
+        send(.stop(.dns)) { _ in }
+    }
+
+    static let systemDNSRecoveryDeclinedTitle = "System DNS still points at Conduit"
+    static let systemDNSRecoveryDeclinedBody = "Its relay is not answering, so names may not resolve. Start DNS, or restore your DNS settings."
+
     /// One command through the framed client and its settlement. A saved command's own causal writes are handed to the editor.
     ///
     /// A Stop is never dropped behind ordinary work: each module has a Stop lane of its own, as the host's Stop lanes do, outside the
@@ -1076,6 +1096,10 @@ final class AppState: ObservableObject {
             notificationManager.post(title: "DNS Forwarder Degraded", body: dnsError)
         }
         lastDNSError = dnsError
+        if snapshot.systemDNSRecoveryDeclined, !systemDNSRecoveryDeclinedShown {
+            notificationManager.post(title: Self.systemDNSRecoveryDeclinedTitle, body: Self.systemDNSRecoveryDeclinedBody)
+        }
+        systemDNSRecoveryDeclinedShown = snapshot.systemDNSRecoveryDeclined
     }
 
     /// Typed recovery events classify the generic notifications; no event is paired with a snapshot.

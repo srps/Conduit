@@ -73,6 +73,12 @@ struct StatusBarView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
+            if runtime.systemDNSRecoveryDeclined {
+                SystemDNSRecoveryNotice()
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                Divider()
+            }
             moduleRow(
                 title: "DNS forwarder",
                 detail: dnsEndpoint,

@@ -16,6 +16,9 @@ struct OverviewView: View {
                 if let unavailable = RuntimeStatusText.unavailable(phase: appState.phase, observation: runtime.observation) {
                     statusBanner(unavailable)
                 }
+                if runtime.systemDNSRecoveryDeclined {
+                    SystemDNSRecoveryNotice()
+                }
                 modules
                 routeCard
                 if showsTelemetry {

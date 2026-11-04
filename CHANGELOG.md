@@ -28,8 +28,9 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   times out now declines the restore with `platform.launch_recovery_declined
   reason=probe_inconclusive` and keeps the records for the next launch; only a
   refused probe restores. After a crash the helper's DNS relay can keep port 53
-  and stay silent, so system DNS waits until a later launch finds the relay
-  gone or a new Start reapplies it.
+  and stay silent, so every launch declines system DNS again. The app now says
+  so in a notification and in a notice on the menu and Overview, with Start DNS
+  and Restore DNS Settings; either one clears it, as do Quit and a reboot.
 
 - With the proxy port set to 0 ("choose a port"), the system proxy, the shell
   profiles and the launchd `HTTP(S)_PROXY` variables now name the port the
