@@ -9,7 +9,7 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 - The status menu, the Help menu and General settings link to the project on
   GitHub, so people who find Conduit useful can star it or report an issue.
-  The links are passive: Conduit never prompts for a star and records nothing.
+  They are plain links; nothing is counted or remembered.
 
 ## 0.6.1
 
