@@ -22,6 +22,11 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   advertised endpoint from the live bindings, and `config.client_endpoint_resolved`
   records the port chosen. The saved port stays 0, and fixed ports are unchanged.
 
+- VPN flap durations are measured on a monotonic clock, so a wall-clock change
+  during a flap can no longer make the total flap time negative and leave the
+  control status unavailable (#252). The recovery time shown for the last flap
+  still uses the wall clock.
+
 ## 0.6.1
 
 [Published](https://github.com/srps/Conduit/releases/tag/v0.6.1) on 2026-10-29
