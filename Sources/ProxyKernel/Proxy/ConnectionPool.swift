@@ -1215,7 +1215,8 @@ package final class ConnectionPool: @unchecked Sendable {
         connection: PooledUpstreamConnection,
         proxy: UpstreamProxy,
         authSource: String?,
-        responseTimeout: TimeAmount? = nil
+        responseTimeout: TimeAmount? = nil,
+        returnsToPool: Bool = true
     ) -> EventLoopFuture<UpstreamExchangeResponse> {
         let auth = connection.authenticationState()
         let promise = connection.channel.eventLoop.makePromise(of: UpstreamExchangeResponse.self)
@@ -1246,7 +1247,7 @@ package final class ConnectionPool: @unchecked Sendable {
             return connection.channel.eventLoop.makeFailedFuture(error)
         }.flatMap { response in
             connection.markAuthenticated(since: auth.generation, authMethod: response.authMethod)
-            self.release(connection, keepAlive: response.head.isKeepAlive)
+            self.release(connection, keepAlive: returnsToPool && response.head.isKeepAlive)
             return connection.channel.eventLoop.makeSucceededFuture(response)
         }
     }
@@ -1382,8 +1383,8 @@ package final class ConnectionPool: @unchecked Sendable {
                 state.expired = true
                 return state.channel
             }
-            channel?.close(mode: .all, promise: nil)
             settled.fail(ConnectionPoolError.upstreamResponseTimedOut)
+            channel?.close(mode: .all, promise: nil)
         }
         acquireConnection(for: proxy, target: url, preferFreshConnection: true, connectTimeout: timeout, selects: false)
             .flatMap { [weak self] connection -> EventLoopFuture<UpstreamExchangeResponse> in
@@ -1397,7 +1398,8 @@ package final class ConnectionPool: @unchecked Sendable {
                 }
                 return self.attributingRetirement(
                     self.performBufferedExchange(
-                        head: head, requestBody: nil, connection: connection, proxy: proxy, authSource: nil, responseTimeout: timeout
+                        head: head, requestBody: nil, connection: connection, proxy: proxy, authSource: nil, responseTimeout: timeout,
+                        returnsToPool: false
                     ),
                     connection: connection
                 )
