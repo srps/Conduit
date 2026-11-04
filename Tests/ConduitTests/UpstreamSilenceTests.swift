@@ -106,7 +106,6 @@ final class UpstreamSilenceTests: XCTestCase {
         )
     }
 
-    /// Answers `200 OK` to as many requests as it has answers and leaves the rest unanswered, counting connections and requests.
     private final class CountingUpstream: @unchecked Sendable {
         private let answers: NIOLockedValueBox<Int>
         private let counts = NIOLockedValueBox((connections: 0, requests: 0))

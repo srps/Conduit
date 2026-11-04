@@ -272,10 +272,12 @@ enum SilentUpstreamScenarios {
             do { return String(try await response.get().prefix(12)) } catch { return "no answer: \(error)" }
         }
 
-        // Before either upstream has a latency, ties alternate, so a concurrent wave reaches both.
-        var warm: [EventLoopFuture<String>] = []
-        for index in 0..<4 { warm.append(try await sendThroughProxy(group: group, port: port, tag: "warm-\(index)")) }
-        for response in warm { _ = await status(response) }
+        func warmBothUpstreamsWhileTheirLatenciesTie() async throws {
+            var warm: [EventLoopFuture<String>] = []
+            for index in 0..<4 { warm.append(try await sendThroughProxy(group: group, port: port, tag: "warm-\(index)")) }
+            for response in warm { _ = await status(response) }
+        }
+        try await warmBothUpstreamsWhileTheirLatenciesTie()
         let primaryLatency = latency(primaryEndpoint), secondaryLatency = latency(secondaryEndpoint)
         let primaryPreferred = (primaryLatency ?? .infinity) < (secondaryLatency ?? .infinity)
 
@@ -297,8 +299,7 @@ enum SilentUpstreamScenarios {
         }
 
         let connectSlack = 0.1
-        // origin/main opened the primary's breaker after `threshold` response timeouts and served the next request (2.6 s measured).
-        let mainBound = Double(threshold) * (responseTimeout + connectSlack)
+        let breakerPathBound = Double(threshold) * (responseTimeout + connectSlack)
         let primaryStatus = orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == primaryEndpoint }
         let deprioritized = events("upstream.deprioritized").compactMap(\.detail)
         let recovery = orchestrator.eventLog.events.filter { $0.event.hasPrefix("recovery.") }
@@ -308,8 +309,8 @@ enum SilentUpstreamScenarios {
             durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
                 .init("the primary served first with the lower latency, so selection preferred it", primaryPreferred),
-                .init("a request was served within threshold x (R + C), origin/main's breaker path",
-                      servedAfter.map { $0 <= mainBound } ?? false),
+                .init("a request was served within threshold x (R + C), the time a breaker opened by every timeout would take",
+                      servedAfter.map { $0 <= breakerPathBound } ?? false),
                 .init("only the \(decisive) silences that make a verdict failed before the secondary served",
                       servedAfter != nil && failedBeforeServed == decisive),
                 .init("the decisive silence ranked the primary behind the secondary, once",
@@ -321,7 +322,7 @@ enum SilentUpstreamScenarios {
                       healthyViaSecondary && recovery.isEmpty && !orchestrator.snapshot.directModeCause.isDirect),
             ], notes: [
                 "R=\(responseTimeout)s I=\(checkInterval)s C=\(connectSlack)s; warm latency primary=\(primaryLatency.map { String(format: "%.1f", $0) } ?? "nil") ms secondary=\(secondaryLatency.map { String(format: "%.1f", $0) } ?? "nil") ms",
-                "served \(servedAfter.map { String(format: "%.2f", $0) } ?? "never") s after the silence began (bound \(String(format: "%.2f", mainBound)) s) after \(failedBeforeServed) failed requests",
+                "served \(servedAfter.map { String(format: "%.2f", $0) } ?? "never") s after the silence began (bound \(String(format: "%.2f", breakerPathBound)) s) after \(failedBeforeServed) failed requests",
                 "primary saw \(primary.requestLines.count) request heads, secondary \(secondary.requestLines.count)",
                 "last health check: \(orchestrator.snapshot.runtimeStatus.lastHealthSummary); recovery events: \(recovery.map(\.event)); direct: \(orchestrator.snapshot.directModeCause.rawValue)",
             ])

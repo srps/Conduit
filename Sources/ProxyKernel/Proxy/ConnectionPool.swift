@@ -227,7 +227,6 @@ package final class PooledUpstreamConnection: @unchecked Sendable {
         get { metadata.withLockedValue { $0.lastUsedAt } }
         set { metadata.withLockedValue { $0.lastUsedAt = newValue } }
     }
-    /// It waited in the idle list, so the upstream may have dropped it without a word.
     var hasIdled: Bool { metadata.withLockedValue { $0.hasIdled } }
     /// Set by the pool before it publishes a dedicated tunnel, never after.
     /// Package-settable so tests can build synthetic states for the pure
@@ -1179,7 +1178,6 @@ package final class ConnectionPool: @unchecked Sendable {
             // (which is already in a failed state because we got here via
             // `flatMapError`). Simplifying makes the intent obvious.
             guard let self else { return attempt }
-            // A silence on a socket that sat idle may be the socket, not the upstream; a fresh connect measures.
             let idleSilence = asksAFreshConnectionAfterIdleSilence && ranOnAnIdledConnection.withLockedValue { $0 }
                 && ConnectionPoolError.failureClass(error) == .inconclusive
             let shouldRetry = allowRetry
@@ -1332,9 +1330,6 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    /// A silence is no strike, except on the half-open probe: that breaker opened on conclusive failures, which still stand, and
-    /// only an outcome frees its probe slot. Otherwise a decisive silence ranks the upstream behind the ones that answer, for one
-    /// base open interval, the breaker's own wait before it tries an upstream again.
     private func recordSilence(for proxy: UpstreamProxy) {
         enum Outcome { case halfOpenProbe, held, silenced(UnansweredStreak.Verdict) }
         let config = configProvider()
@@ -1350,7 +1345,7 @@ package final class ConnectionPool: @unchecked Sendable {
         }
         switch outcome {
         case .halfOpenProbe:
-            recordFailure(for: proxy, onlyWhenHalfOpen: true)
+            failHalfOpenProbe(for: proxy)
         case .held:
             break
         case .silenced(let verdict):
@@ -1362,6 +1357,8 @@ package final class ConnectionPool: @unchecked Sendable {
             logger.log(.notice, "Upstream \(proxy.name) stopped answering; preferring upstreams that answer: \(event.detail ?? "")", category: .proxy)
         }
     }
+
+    private func failHalfOpenProbe(for proxy: UpstreamProxy) { recordFailure(for: proxy, onlyWhenHalfOpen: true) }
 
     private func recordFailure(for proxy: UpstreamProxy, onlyWhenHalfOpen: Bool = false) {
         let config = configProvider()
