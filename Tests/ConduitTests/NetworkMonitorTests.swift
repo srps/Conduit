@@ -7,7 +7,7 @@ import ProxyKernel
 /// The production path adapter over the real `NWPathMonitor`, read-only: it observes the machine's path and changes nothing. A host
 /// starts its observers with a module and stops them when none is left, on one adapter for its whole life, so a Start after a Stop
 /// must report again (#260). `NWPathMonitor` reports the current path once after it starts, which is what each start waits for; the
-/// debounce is zero so that report is delivered as it comes.
+/// adapter delivers each update as it comes.
 ///
 /// Each lifetime reports to a callback of its own, set after the stop that ended the one before. A report the first lifetime's
 /// callback had already claimed when it was stopped can only land in the first log, so the second log hears from the restart alone.
@@ -22,7 +22,7 @@ final class NetworkMonitorTests: XCTestCase {
     }
 
     func testARestartedMonitorReportsAgain() async {
-        let monitor = NetworkMonitor(debounceInterval: 0)
+        let monitor = NetworkMonitor()
         let first = LockedLog<NetworkPathState>()
         monitor.setOnChange { first.append($0) }
         defer { monitor.stop() }
@@ -42,7 +42,7 @@ final class NetworkMonitorTests: XCTestCase {
     /// A stop while stopped changes nothing: the next restart still reports. It does not show that a start while observing is a no-op;
     /// two live monitors would pass it too.
     func testAStartWhileActiveAndAStopWhileStoppedChangeNothing() async {
-        let monitor = NetworkMonitor(debounceInterval: 0)
+        let monitor = NetworkMonitor()
         let first = LockedLog<NetworkPathState>()
         monitor.setOnChange { first.append($0) }
         defer { monitor.stop() }

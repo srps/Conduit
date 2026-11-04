@@ -58,4 +58,42 @@ final class PACNetworkChangeInvalidationTests: XCTestCase {
         XCTAssertTrue(invalidations().first?.contains("script=kept") == true, "\(invalidations())")
         XCTAssertEqual(pac.fetches, fetchesBefore + 1, "the PAC is fetched again")
     }
+
+    /// #198: the updates of a burst drop the answers as each one arrives, before the burst settles; only the
+    /// settled report refetches, once, and drops nothing more.
+    @RuntimeActor func testEachUpdateOfABurstInvalidatesAndOnlyTheSettledReportRefetches() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.upstreams = []
+        config.pacRoutingEnabled = true
+        config.pacURL = "http://pac.example.test/proxy.pac"
+        let pac = StaticPAC()
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink(), pacEvaluator: pac)
+        try await orchestrator.startProxy()
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
+        await orchestrator.handleNetworkPath(Self.wifi(gateway: "192.168.1.1"))
+        let cutoff = Date()
+        func count(_ name: String) -> Int {
+            orchestrator.eventLog.events.filter { $0.event == name && $0.timestamp >= cutoff }.count
+        }
+        let fetchesBefore = pac.fetches
+
+        XCTAssertTrue(orchestrator.invalidateNetworkPath(Self.wifi(gateway: "10.0.0.1")))
+        XCTAssertEqual(count("pac.routes_invalidated"), 1, "the first change drops the answers at once")
+        let invalidation = orchestrator.eventLog.events.last { $0.event == "network.path_invalidated" }
+        XCTAssertEqual(invalidation?.detail?.hasPrefix("dns=idle pac_routes=dropped changed=gateways gateways=192.168.1.1->10.0.0.1 "), true,
+                       "\(String(describing: invalidation?.detail))")
+        XCTAssertFalse(orchestrator.invalidateNetworkPath(Self.wifi(gateway: "10.0.0.1")), "a repeat drops nothing")
+        XCTAssertTrue(orchestrator.invalidateNetworkPath(Self.wifi(gateway: "10.0.0.2")))
+        XCTAssertEqual(count("pac.routes_invalidated"), 2, "a later change in the burst drops what the path before it produced")
+        XCTAssertEqual(count("network.path_invalidated"), 2)
+        XCTAssertEqual(count("network.path_changed"), 0, "nothing refreshes before the burst settles")
+        XCTAssertEqual(pac.fetches, fetchesBefore)
+
+        let refreshed = await orchestrator.handleNetworkPath(Self.wifi(gateway: "10.0.0.2"))
+        XCTAssertTrue(refreshed)
+        XCTAssertEqual(count("network.path_changed"), 1)
+        XCTAssertEqual(count("pac.routes_invalidated"), 2, "the settled report drops nothing the burst already dropped")
+        XCTAssertEqual(pac.fetches, fetchesBefore + 1, "one refetch for the burst")
+    }
 }

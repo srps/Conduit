@@ -71,10 +71,13 @@ package final class ObserverDeliveries: @unchecked Sendable {
     }
 
     /// Runs `work` on the owner in its own task. Callable from any
-    /// thread, which is where the observers call from.
-    package func deliver(_ work: @escaping @RuntimeActor @Sendable () async -> Void) {
+    /// thread, which is where the observers call from. Returns that task,
+    /// so a caller that may supersede the work can cancel it; a cancelled
+    /// delivery is still counted until it returns.
+    @discardableResult
+    package func deliver(_ work: @escaping @RuntimeActor @Sendable () async -> Void) -> Task<Void, Never> {
         lock.withLock { inFlight += 1 }
-        Task { @RuntimeActor in
+        return Task { @RuntimeActor in
             await work()
             self.finishOne()
         }

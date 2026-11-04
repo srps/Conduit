@@ -69,14 +69,21 @@ final class DNSTransportRecoveryTests: XCTestCase {
         XCTAssertEqual(resets.count, 1)
         XCTAssertEqual(resets.first?.detail, "source=network_change")
 
+        let invalidation = try XCTUnwrap(orchestrator.eventLog.events.last { $0.event == "network.path_invalidated" })
+        XCTAssertEqual(invalidation.kind, .health)
+        XCTAssertEqual(
+            invalidation.detail,
+            "dns=reset pac_routes=off changed=initial "
+                + "path=satisfied; interfaces en0/wifi; gateways 192.168.1.1; supports ipv4,ipv6,dns"
+        )
+        XCTAssertLessThanOrEqual(invalidation.timestamp, resets[0].timestamp, "the path event precedes what it decided")
         let change = try XCTUnwrap(orchestrator.eventLog.events.last { $0.event == "network.path_changed" })
         XCTAssertEqual(change.kind, .health)
         XCTAssertEqual(
             change.detail,
-            "satisfied=true dns=reset pac=refresh changed=initial unchanged_before=0 "
+            "satisfied=true pac=refresh changed=initial unchanged_before=0 "
                 + "path=satisfied; interfaces en0/wifi; gateways 192.168.1.1; supports ipv4,ipv6,dns"
         )
-        XCTAssertLessThanOrEqual(change.timestamp, resets[0].timestamp, "the path event precedes what it decided")
     }
 
     /// #101: `NWPathMonitor` delivered an update every ~75 s for hours with
@@ -96,6 +103,7 @@ final class DNSTransportRecoveryTests: XCTestCase {
         let since = orchestrator.eventLog.events.filter { $0.timestamp >= cutoff }
         XCTAssertEqual(acted, 0)
         XCTAssertEqual(transportResetEvents(in: orchestrator.eventLog, since: cutoff).count, 0)
+        XCTAssertEqual(since.filter { $0.event == "network.path_invalidated" }.count, 0, "nothing material moved")
         XCTAssertEqual(since.filter { $0.event == "network.path_changed" }.count, 0,
                        "no path_changed, so no pac=refresh")
         let unchanged = since.filter { $0.event == "network.path_unchanged" }
@@ -126,12 +134,19 @@ final class DNSTransportRecoveryTests: XCTestCase {
 
         XCTAssertTrue(acted)
         XCTAssertEqual(transportResetEvents(in: orchestrator.eventLog, since: cutoff).count, 1)
+        let invalidation = try XCTUnwrap(orchestrator.eventLog.events.last { $0.event == "network.path_invalidated" })
+        XCTAssertEqual(
+            invalidation.detail,
+            "dns=reset pac_routes=off changed=gateways gateways=192.168.1.1->10.0.0.1 "
+                + "path=satisfied; interfaces en0/wifi; gateways 10.0.0.1; supports ipv4,ipv6,dns"
+        )
         let change = try XCTUnwrap(orchestrator.eventLog.events.last { $0.event == "network.path_changed" })
         XCTAssertEqual(
             change.detail,
-            "satisfied=true dns=reset pac=refresh changed=gateways unchanged_before=3 gateways=192.168.1.1->10.0.0.1 "
+            "satisfied=true pac=refresh changed=gateways unchanged_before=3 gateways=192.168.1.1->10.0.0.1 "
                 + "path=satisfied; interfaces en0/wifi; gateways 10.0.0.1; supports ipv4,ipv6,dns"
         )
+        XCTAssertLessThanOrEqual(invalidation.timestamp, change.timestamp, "the leading edge runs before the refresh")
         let line = try XCTUnwrap(logger.entries().last { $0.message.hasPrefix("Network path changed") })
         XCTAssertEqual(line.level, .notice, "proxy.log keeps NOTICE and above")
         XCTAssertTrue(line.message.contains("gateways=192.168.1.1->10.0.0.1"), line.message)
@@ -156,7 +171,7 @@ final class DNSTransportRecoveryTests: XCTestCase {
         XCTAssertEqual(change.kind, .health)
         XCTAssertEqual(
             change.detail,
-            "satisfied=false dns=idle pac=skipped_unsatisfied changed=status unchanged_before=0 "
+            "satisfied=false pac=skipped_unsatisfied changed=status unchanged_before=0 "
                 + "status=satisfied->unsatisfied path=unsatisfied; interfaces en0/wifi; gateways 192.168.1.1; supports ipv4,ipv6,dns"
         )
         let line = try XCTUnwrap(logger.entries().last { $0.message.hasPrefix("Network path changed (status=satisfied->unsatisfied)") })

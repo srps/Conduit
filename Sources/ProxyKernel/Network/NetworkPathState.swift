@@ -8,8 +8,8 @@ import Foundation
 /// `NWPathMonitor` reports updates in which nothing the proxy depends on has
 /// moved (#101: a pair every ~75 s for hours, with the VPN off). Only the
 /// `Field`s decide whether the orchestrator resets DNS transports and
-/// refetches PAC; the hosts' system DNS reconcile runs for every report
-/// (`NetworkPathReports`). `isExpensive` and `isConstrained` are carried for the log
+/// refetches PAC; the hosts' system DNS reconcile runs for every settled
+/// report (`NetworkPathReports`). `isExpensive` and `isConstrained` are carried for the log
 /// line but are not material: they are cost hints (hotspot, Low Data Mode)
 /// that change no route, resolver or gateway, and a switch to a hotspot that
 /// does change the route also changes the interfaces and gateways.
@@ -32,9 +32,10 @@ package struct NetworkPathState: Sendable, Equatable {
     }
 
     /// The fields whose change drives a reset. Raw values are the
-    /// `changed=` tokens of `network.path_changed`, and each is also the key
-    /// of that field's `old->new` token, so none may collide with the event's
-    /// other keys (`satisfied`, `dns`, `pac`, `path`).
+    /// `changed=` tokens of `network.path_invalidated` and `network.path_changed`,
+    /// and each is also the key of that field's `old->new` token, so none may
+    /// collide with the events' other keys (`satisfied`, `dns`, `pac`,
+    /// `pac_routes`, `unchanged_before`, `path`).
     package enum Field: String, Sendable, Equatable, CaseIterable {
         case status
         case interfaces

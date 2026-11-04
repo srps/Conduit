@@ -27,6 +27,14 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   control status unavailable (#252). The recovery time shown for the last flap
   still uses the wall clock.
 
+- A network change drops the cached PAC answers and resets the DNS-over-HTTPS
+  connections as soon as it is seen, instead of 2 seconds after the network
+  stops changing. While a network kept changing, as on a roam or a wake,
+  answers worked out on the network it left stayed in use for as long as it
+  changed. Only the PAC refetch still waits for the network to settle. Each
+  change is recorded as `network.path_invalidated`; `network.path_changed` no
+  longer carries `dns=`. (#198)
+
 ## 0.6.1
 
 [Published](https://github.com/srps/Conduit/releases/tag/v0.6.1) on 2026-10-29

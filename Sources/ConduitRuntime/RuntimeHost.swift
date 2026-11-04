@@ -194,6 +194,20 @@ package final class RuntimeHost {
     /// The path source, from `effects`. Production is `NetworkMonitor`; a harness
     /// injects `FakeNetworkPathObserver`, so no test reads the machine's network.
     let networkPathObserver: any NetworkPathObserving
+    /// How long a burst of path updates must stay quiet before the refresh, and how the host waits (#198).
+    private let networkPathSettle: NetworkPathSettle
+    /// The newest path update not yet taken onto the owner. One value: an update that lands before the
+    /// owner took the one before it replaces it, as the owner only ever needs the newest path.
+    private let pendingNetworkPath = NIOLockedValueBox<NetworkPathState?>(nil)
+    /// One owner pass for path updates at a time, and one pending behind it.
+    private let networkPathUpdates = CoalescedObserverDelivery()
+    /// The one settle wait in flight, if any. A newer update or a stop of the observer cancels it.
+    private var networkPathSettleWait: Task<Void, Never>?
+    /// Advanced by every settle armed and every one cancelled, so a wait that finished just as it was
+    /// superseded refreshes nothing.
+    private var networkPathSettleSerial: UInt64 = 0
+    /// Whether the host has its path observer started. A settle is armed only then.
+    var networkPathObserving = false
     /// The hops from the observers and the orchestrator's callbacks onto the
     /// owner. Internal so the tests can `drain()` them instead of
     /// sleeping.
@@ -321,7 +335,8 @@ package final class RuntimeHost {
         networkLocationLimits: NetworkLocationLimits = .init(),
         environmentDriftInterval: Duration = .seconds(300),
         reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
-        splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval
+        splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval,
+        networkPathSettle: NetworkPathSettle = .standard
     ) async throws -> RuntimeHost {
         let store = ConfigurationStore(
             session: stateSession,
@@ -351,7 +366,8 @@ package final class RuntimeHost {
             networkLocationLimits: networkLocationLimits,
             environmentDriftInterval: environmentDriftInterval,
             reapplyRetrySchedule: reapplyRetrySchedule,
-            splitDNSHelperCheckInterval: splitDNSHelperCheckInterval
+            splitDNSHelperCheckInterval: splitDNSHelperCheckInterval,
+            networkPathSettle: networkPathSettle
         )
         host.emitConfigurationEvents(opened.events)
         return host
@@ -382,7 +398,8 @@ package final class RuntimeHost {
         networkLocationLimits: NetworkLocationLimits = .init(),
         environmentDriftInterval: Duration = .seconds(300),
         reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
-        splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval
+        splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval,
+        networkPathSettle: NetworkPathSettle = .standard
     ) {
         self.incarnation = incarnation
         self.startedAt = startedAt
@@ -391,6 +408,7 @@ package final class RuntimeHost {
         self.environmentDriftInterval = environmentDriftInterval
         self.reapplyRetrySchedule = reapplyRetrySchedule
         self.networkPathObserver = effects.networkPath
+        self.networkPathSettle = networkPathSettle
         self.networkLocationObserver = effects.networkLocation
         self.systemWakeObserver = effects.wake
         self.networkLocationStoreFactory = effects.networkLocationStoreFactory
@@ -530,9 +548,17 @@ package final class RuntimeHost {
         // pushes of inputs this host already adopted, and its delivery lands later. A writer there would move `config` outside
         // `adoptHostView`, which keeps the accepted view, the flap window and `configGeneration` together.
         // `onEvent` is not wired either: the kernel records each ladder outcome as a typed `proxy_recovery.*` event and logs it.
-        self.networkPathObserver.setOnChange { [weak self, deliveries] change in
-            deliveries.deliver {
-                await self?.handleNetworkChange(change)
+        // Every update is taken on the owner as it arrives (#198). A burst coalesces into the newest path, so the hops stay bounded
+        // whatever the update rate, and an older update can never land after a newer one.
+        self.networkPathObserver.setOnChange { [weak self, deliveries, pendingNetworkPath, networkPathUpdates] path in
+            pendingNetworkPath.withLockedValue { $0 = path }
+            networkPathUpdates.deliver(using: deliveries) {
+                let newest = pendingNetworkPath.withLockedValue { pending -> NetworkPathState? in
+                    defer { pending = nil }
+                    return pending
+                }
+                guard let newest else { return }
+                self?.receiveNetworkPath(newest)
             }
         }
         // The interface name is read on the monitor's own delivery, not
@@ -1134,7 +1160,40 @@ package final class RuntimeHost {
         } while locationReconcileWanted
     }
 
-    private func handleNetworkChange(_ path: NetworkPathState) async {
+    /// One path update, on the owner as it arrives (#198). The leading edge runs at once: a material change resets the DoH
+    /// transports and drops the PAC answers the old path produced, and says so (`network.path_invalidated`). Then the settle is armed
+    /// again, so the refresh (`settleNetworkPath`) runs once, on the newest path, after the burst has been quiet for
+    /// `networkPathSettle.interval`. A path that keeps changing defers only the refresh; every change still invalidates when it arrives.
+    private func receiveNetworkPath(_ path: NetworkPathState) {
+        orchestrator.invalidateNetworkPath(path)
+        // A stopped observer arms nothing: the update was claimed before the stop, and the next start reports the path afresh.
+        guard networkPathObserving else { return }
+        networkPathSettleWait?.cancel()
+        networkPathSettleSerial &+= 1
+        let serial = networkPathSettleSerial
+        let settle = networkPathSettle
+        networkPathSettleWait = deliveries.deliver { [weak self] in
+            do {
+                try await settle.sleep(settle.interval)
+            } catch {
+                // Cancelled: a newer update armed its own settle, or the observer stopped.
+                return
+            }
+            guard let self, self.networkPathSettleSerial == serial else { return }
+            self.networkPathSettleWait = nil
+            await self.settleNetworkPath(path)
+        }
+    }
+
+    /// Ends the settle in flight, if any, so no refresh runs after the observer stops.
+    func cancelNetworkPathSettle() {
+        networkPathSettleWait?.cancel()
+        networkPathSettleWait = nil
+        networkPathSettleSerial &+= 1
+    }
+
+    /// The refresh for a burst that has settled on `path`.
+    private func settleNetworkPath(_ path: NetworkPathState) async {
         await NetworkPathReports.receive(
             path, orchestrator: orchestrator,
             act: { [orchestrator] change in await orchestrator.handleNetworkChange(change) },

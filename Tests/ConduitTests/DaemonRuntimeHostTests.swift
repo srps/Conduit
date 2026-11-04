@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import NIOConcurrencyHelpers
 import XCTest
 import ConduitShared
 import ProxyAuth
@@ -1634,6 +1635,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         /// Long, so a split-DNS helper check never lands inside a scenario
         /// about something else; the check's own scenario passes a short one.
         var splitDNSHelperCheckInterval: Duration = .seconds(3600)
+        /// No wait, so each path report a scenario emits settles at once, as one burst of its own. The burst scenario holds it.
+        var networkPathSettle = NetworkPathSettle(interval: .zero)
         private let stateDirectory: URL
         /// The scratch home the host edits shell profiles in.
         var homeDirectory: URL { stateDirectory.appendingPathComponent("home", isDirectory: true) }
@@ -1706,7 +1709,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 ),
                 networkLocationLimits: locationLimits,
                 reapplyRetrySchedule: reapplyRetrySchedule,
-                splitDNSHelperCheckInterval: splitDNSHelperCheckInterval
+                splitDNSHelperCheckInterval: splitDNSHelperCheckInterval,
+                networkPathSettle: networkPathSettle
             )
         }
 
@@ -1984,6 +1988,67 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         await host.stopRuntime()
         XCTAssertFalse(harness.pathObserver.isObserving)
+    }
+
+    /// #198, on the actual host with the settle wait held, so the test counts settles instead of timing them: a burst of path changes
+    /// invalidates at the first change, and at each one after it, while the refresh waits; once the burst settles, one refresh runs, on
+    /// the newest path. Each update replaced the settle before it.
+    @RuntimeActor func testABurstOfPathChangesInvalidatesAtOnceAndRefreshesOnceAfterItSettles() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        let settles = HeldSettles()
+        harness.networkPathSettle = NetworkPathSettle(interval: .seconds(2)) { try await settles.sleep($0) }
+        addTeardownBlock {
+            settles.finish()
+            XCTAssertFalse(settles.overused, "a second settle wait started while one was held")
+        }
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        func events(_ name: String) -> [RuntimeEvent] { host.orchestrator.eventLog.events.filter { $0.event == name } }
+        func wifi(gateway: String) -> NetworkPathState {
+            NetworkPathState(status: .satisfied, interfaces: [.init(name: "en0", type: "wifi")], gateways: [gateway],
+                             supportsIPv4: true, supportsIPv6: false, supportsDNS: true)
+        }
+
+        // The first path is a burst of one.
+        harness.pathObserver.emit(wifi(gateway: "192.0.2.1"))
+        try await until("the first settle is held") { settles.started == 1 && settles.isHolding }
+        XCTAssertEqual(events("network.path_changed").count, 0, "the refresh waits for the settle")
+        XCTAssertEqual(settles.release(), .seconds(2))
+        await host.deliveries.drain()
+        XCTAssertEqual(events("network.path_changed").count, 1)
+        let invalidatedBefore = events("network.path_invalidated").count
+
+        // Three changes, each while the settle armed by the one before is still held.
+        for (index, gateway) in ["192.0.2.2", "192.0.2.3", "192.0.2.4"].enumerated() {
+            harness.pathObserver.emit(wifi(gateway: gateway))
+            try await until("settle \(index + 2) is held") { settles.started == index + 2 && settles.isHolding }
+            XCTAssertEqual(events("network.path_invalidated").count, invalidatedBefore + index + 1,
+                           "change \(index + 1) invalidates as it arrives")
+            XCTAssertEqual(events("network.path_changed").count, 1, "no refresh while the burst goes on")
+        }
+        XCTAssertEqual(events("network.path_invalidated").dropFirst(invalidatedBefore).first?.detail?.contains("gateways=192.0.2.1->192.0.2.2"), true,
+                       "the first change of the burst invalidates against the path before it")
+        XCTAssertEqual(settles.cancelled, 2, "each change replaced the settle before it")
+
+        XCTAssertEqual(settles.release(), .seconds(2))
+        await host.deliveries.drain()
+        let changes = events("network.path_changed")
+        XCTAssertEqual(changes.count, 2, "one refresh for the whole burst")
+        XCTAssertEqual(changes.last?.detail?.contains("gateways=192.0.2.1->192.0.2.4"), true, "on the newest path")
+        XCTAssertEqual(events("network.path_invalidated").count, invalidatedBefore + 3, "the refresh drops nothing more")
+        await host.stopRuntime()
+    }
+
+    /// Waits, bounded, for `condition`; fails the test with `what` when it does not hold in time.
+    @RuntimeActor private func until(_ what: String, _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !condition() {
+            _ = try XCTUnwrap(ContinuousClock.now < deadline ? true : nil, "timed out waiting until \(what)")
+            try await Task.sleep(for: .milliseconds(5))
+        }
     }
 
     @RuntimeActor func testLocationSwitchWithoutVPNOrPathChangeRestoresInactiveStateAndPreservesExternalEdits() async throws {
@@ -4492,5 +4557,81 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "no entry file with the tunnel down")
         XCTAssertFalse(harness.journal.hasRecords(for: .resolverFile))
         await host.stopRuntime()
+    }
+}
+
+/// The host's path-settle waits, held until the test releases them. One is held at a time, as the host keeps one settle in flight; a
+/// second while one is held is refused and marks the fixture overused. A cancelled wait throws, as `Task.sleep` does.
+private final class HeldSettles: Sendable {
+    private struct Held: Sendable {
+        let id: Int
+        let delay: Duration
+        let waiter: CheckedContinuation<Void, any Error>
+    }
+    private struct State: Sendable {
+        var held: Held?
+        var started = 0
+        var cancelled = 0
+        var overused = false
+        var finished = false
+    }
+    private let state = NIOLockedValueBox(State())
+
+    /// Waits requested so far, held or not.
+    var started: Int { state.withLockedValue { $0.started } }
+    var isHolding: Bool { state.withLockedValue { $0.held != nil } }
+    /// Waits cancelled while held, or requested by a cancelled settle.
+    var cancelled: Int { state.withLockedValue { $0.cancelled } }
+    var overused: Bool { state.withLockedValue { $0.overused } }
+
+    func sleep(_ delay: Duration) async throws {
+        let id = state.withLockedValue { $0.started += 1; return $0.started }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, any Error>) in
+                // One locked step with the cancellation check, so a cancel between them is not missed.
+                let holds = state.withLockedValue { (state: inout State) -> Bool in
+                    if Task.isCancelled {
+                        state.cancelled += 1
+                        return false
+                    }
+                    guard !state.finished else { return false }
+                    guard state.held == nil else {
+                        state.overused = true
+                        return false
+                    }
+                    state.held = Held(id: id, delay: delay, waiter: waiter)
+                    return true
+                }
+                if !holds { waiter.resume(throwing: CancellationError()) }
+            }
+        } onCancel: {
+            let held = state.withLockedValue { (state: inout State) -> Held? in
+                guard let held = state.held, held.id == id else { return nil }
+                state.held = nil
+                state.cancelled += 1
+                return held
+            }
+            held?.waiter.resume(throwing: CancellationError())
+        }
+    }
+
+    /// Passes the held wait, and returns its delay.
+    func release() -> Duration? {
+        let held = state.withLockedValue { (state: inout State) -> Held? in
+            defer { state.held = nil }
+            return state.held
+        }
+        held?.waiter.resume()
+        return held?.delay
+    }
+
+    /// Cancels the held wait and every later one.
+    func finish() {
+        let held = state.withLockedValue { (state: inout State) -> Held? in
+            defer { state.held = nil }
+            state.finished = true
+            return state.held
+        }
+        held?.waiter.resume(throwing: CancellationError())
     }
 }

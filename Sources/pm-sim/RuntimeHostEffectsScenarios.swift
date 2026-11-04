@@ -1305,6 +1305,9 @@ enum RuntimeHostEffectsScenario {
         config.logging.auditLogEnabled = true
         let auditFile = environment.configDirectory.appendingPathComponent("audit.ndjson")
         let path = FakeNetworkPathObserver()
+        // The path-settle wait is held, so the path burst below counts settles instead of timing them (#198).
+        let settles = HeldPathSettles()
+        defer { settles.finish() }
         let host: RuntimeHost
         do {
             try ProxyConfigPersistence.save(config, in: environment)
@@ -1317,7 +1320,8 @@ enum RuntimeHostEffectsScenario {
                 startupAllowsMissing: false,
                 startedAt: Date(timeIntervalSince1970: 1_700_000_000),
                 terminalExit: {},
-                effects: effects(fakes, home: home, path: path)
+                effects: effects(fakes, home: home, path: path),
+                networkPathSettle: NetworkPathSettle(interval: NetworkPathSettle.standardInterval) { try await settles.sleep($0) }
             )
         } catch {
             notes.append("audit host did not open: \(error.localizedDescription)")
@@ -1394,18 +1398,67 @@ enum RuntimeHostEffectsScenario {
             check("a Stop that leaves every module down stops the path observer", !path.isObserving)
             try await host.startRuntime()
             check("a Start after that Stop observes the path again", path.isObserving)
-            path.emit(NetworkPathState(
-                status: .satisfied, interfaces: [.init(name: "en0", type: "wifi")], gateways: ["192.0.2.1"],
-                supportsIPv4: true, supportsIPv6: false, supportsDNS: true
-            ))
-            var pathHandled = false
-            let pathDeadline = ContinuousClock.now.advanced(by: .seconds(5))
-            while !pathHandled, ContinuousClock.now < pathDeadline {
-                _ = await host.flushEvents()
-                pathHandled = try recordedEvents(in: environment.eventsFile).contains { $0.event == "network.path_changed" }
-                if !pathHandled { try await Task.sleep(for: .milliseconds(10)) }
+            func wifi(gateway: String) -> NetworkPathState {
+                NetworkPathState(status: .satisfied, interfaces: [.init(name: "en0", type: "wifi")], gateways: [gateway],
+                                 supportsIPv4: true, supportsIPv6: false, supportsDNS: true)
             }
-            check("a path report after the restart reaches the host's path handling", pathHandled)
+            /// The recorded events named `name`, after a flush.
+            func pathEvents(_ name: String) async throws -> [RuntimeEvent] {
+                _ = await host.flushEvents()
+                return try recordedEvents(in: environment.eventsFile).filter { $0.event == name }
+            }
+            /// Waits, bounded, until the host has asked for its `count`th settle wait and that one is held.
+            func settleHeld(_ count: Int) async throws -> Bool {
+                let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+                while !(settles.started == count && settles.isHolding), ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(5))
+                }
+                return settles.started == count && settles.isHolding
+            }
+            /// Waits, bounded, until `count` refreshes are recorded, and returns them.
+            func refreshes(_ count: Int) async throws -> [RuntimeEvent] {
+                let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+                var changes = try await pathEvents("network.path_changed")
+                while changes.count < count, ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                    changes = try await pathEvents("network.path_changed")
+                }
+                return changes
+            }
+            // The events file is shared with the exercises before this one, so counts are taken against what it held before.
+            let invalidatedBase = try await pathEvents("network.path_invalidated").count
+            let changedBase = try await pathEvents("network.path_changed").count
+            path.emit(wifi(gateway: "192.0.2.1"))
+            let firstHeld = try await settleHeld(1)
+            let firstInvalidated = try await pathEvents("network.path_invalidated").count
+            let refreshedEarly = try await pathEvents("network.path_changed").count
+            check("a path report after the restart takes its leading edge at once, and its refresh waits for the settle",
+                  firstHeld && firstInvalidated == invalidatedBase + 1 && refreshedEarly == changedBase)
+            settles.release()
+            let firstRefreshes = try await refreshes(changedBase + 1).count
+            check("a path report after the restart reaches the host's path handling", firstRefreshes == changedBase + 1)
+
+            // A burst: each change arrives while the settle the one before it armed is still held, so none has settled.
+            var burstHeld = true
+            for (index, gateway) in ["192.0.2.2", "192.0.2.3", "192.0.2.4"].enumerated() {
+                path.emit(wifi(gateway: gateway))
+                let held = try await settleHeld(index + 2)
+                burstHeld = burstHeld && held
+            }
+            let invalidated = try await pathEvents("network.path_invalidated")
+            let refreshedDuringBurst = try await pathEvents("network.path_changed").count
+            notes.append("path burst: settles=\(settles.started) cancelled=\(settles.cancelled) invalidated=\(invalidated.count)")
+            check("each change of a path burst invalidates as it arrives, the first against the path before the burst",
+                  burstHeld && invalidated.count == invalidatedBase + 4
+                    && invalidated[invalidatedBase + 1].detail?.contains("gateways=192.0.2.1->192.0.2.2") == true)
+            check("nothing refreshes while the path burst goes on", refreshedDuringBurst == changedBase + 1)
+            check("each change of the burst replaced the settle before it", settles.cancelled == 2)
+            settles.release()
+            let burstChanges = try await refreshes(changedBase + 2)
+            check("the burst refreshes once, on its newest path",
+                  burstChanges.count == changedBase + 2
+                    && burstChanges.last?.detail?.contains("gateways=192.0.2.1->192.0.2.4") == true)
+            check("no second settle wait started while one was held", !settles.overused)
 
             await host.stopRuntime()
             let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
@@ -2161,4 +2214,80 @@ private final class RefusingGSSProvider: GSSTokenProvider, @unchecked Sendable {
     }
 
     func resetContext() {}
+}
+
+/// The audit host's path-settle waits (#198), each held until the exercise releases it, so the exercise counts settles instead of
+/// timing them. One is held at a time, as the host keeps one settle in flight; a second while one is held is refused and marks the
+/// fixture overused. A cancelled wait throws, as `Task.sleep` does, and `finish` ends the held wait and refuses every later one.
+private final class HeldPathSettles: Sendable {
+    private struct Held: Sendable {
+        let id: Int
+        let waiter: CheckedContinuation<Void, any Error>
+    }
+    private struct State: Sendable {
+        var held: Held?
+        var started = 0
+        var cancelled = 0
+        var overused = false
+        var finished = false
+    }
+    private let state = NIOLockedValueBox(State())
+
+    /// Waits requested so far, held or not.
+    var started: Int { state.withLockedValue { $0.started } }
+    var isHolding: Bool { state.withLockedValue { $0.held != nil } }
+    /// Waits cancelled while held, or requested by a cancelled settle.
+    var cancelled: Int { state.withLockedValue { $0.cancelled } }
+    var overused: Bool { state.withLockedValue { $0.overused } }
+
+    func sleep(_: Duration) async throws {
+        let id = state.withLockedValue { $0.started += 1; return $0.started }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, any Error>) in
+                // One locked step with the cancellation check, so a cancel between them is not missed.
+                let holds = state.withLockedValue { (state: inout State) -> Bool in
+                    if Task.isCancelled {
+                        state.cancelled += 1
+                        return false
+                    }
+                    guard !state.finished else { return false }
+                    guard state.held == nil else {
+                        state.overused = true
+                        return false
+                    }
+                    state.held = Held(id: id, waiter: waiter)
+                    return true
+                }
+                if !holds { waiter.resume(throwing: CancellationError()) }
+            }
+        } onCancel: {
+            let held = state.withLockedValue { (state: inout State) -> Held? in
+                guard let held = state.held, held.id == id else { return nil }
+                state.held = nil
+                state.cancelled += 1
+                return held
+            }
+            held?.waiter.resume(throwing: CancellationError())
+        }
+    }
+
+    /// Passes the held wait. Returns whether one was held.
+    @discardableResult
+    func release() -> Bool {
+        let held = state.withLockedValue { (state: inout State) -> Held? in
+            defer { state.held = nil }
+            return state.held
+        }
+        held?.waiter.resume()
+        return held != nil
+    }
+
+    func finish() {
+        let held = state.withLockedValue { (state: inout State) -> Held? in
+            defer { state.held = nil }
+            state.finished = true
+            return state.held
+        }
+        held?.waiter.resume(throwing: CancellationError())
+    }
 }

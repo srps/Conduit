@@ -23,7 +23,7 @@ Each window gets one question and one verdict.
 
 **Totals:** 65 rows in sections A–G (a row sometimes groups windows of one mechanism): 35 bound, 10 backstop, 2 hysteresis, 9 inconclusive, 5 event-driven, 4 fence. Section H lists the remaining per-operation bounds and report rate limits, all bound.
 
-The totals are as audited. Since then B1 (#207), C9 (#209) and F1 (#210) were fixed in place, so C9 and F1 are now backstops, and rows F8 (#211) and G10 (#212) were added as backstops.
+The totals are as audited. Since then B1 (#207), C9 (#209), F1 (#210) and A3 (#198) were fixed in place, so C9 and F1 are now backstops and A3 is bound, and rows F8 (#211) and G10 (#212) were added as backstops.
 
 ## Findings
 
@@ -60,7 +60,7 @@ Ordered by how likely they are to bite. None is changed by this audit; each need
 | --- | --- | --- | --- | --- | --- | --- |
 | A1 | Flap min-visible, `vpnFlapMinVisibleSeconds` (1 s; Settings offers 0–5 s, the file is not capped) | `ConfigSections.swift:302`; armed `VPNStatusMonitor.swift:389` | Whether an IPv4 loss on a connected utun becomes `.reasserting`. Until it fires, the fused state stays `.connected` (`VPNStateFuser.swift:292`). Cancelled by recovery; a stale firing is a no-op on the phase guard (`VPNStateFuser.swift:206`). | Yes: fails open for ≤ 1 s after a real loss, by design. | hysteresis | #184 |
 | A2 | Flap grace, `vpnFlapGraceSeconds` (5 s) | `ConfigSections.swift:286`; armed `VPNStatusMonitor.swift:355` | `.reasserting` → `.disconnected(.networkLost)`. Routing is held (`DirectModeCause.transientNetworkChange`), split-DNS files kept (`SplitDNSVPNGate`), new CONNECTs still go upstream. Emits `vpn.flap.start` on entry and `vpn.disconnected.lost` on expiry. | Yes: fails open for 5 s from grace entry, about 6 s after the IPv4 loss with A1's default; the loss evidence already exists. | hysteresis | #184; finding 9 |
-| A3 | Network path debounce (2 s, trailing) | `NetworkMonitor.swift:18`; `TrailingDebouncer.swift:38` | Coalesces `NWPath` updates. The delivery it delays is what drops PAC answers and resets DNS transports (`ProxyOrchestrator.swift:2342-2353`); each new update restarts the 2 s, so a churning path defers both indefinitely. VPN transitions invalidate on their own path, undelayed. | Yes: answers from the old path stay in use ≥ 2 s after the change. | event-driven | Invalidate on the first update (leading edge); debounce only the refresh. |
+| A3 | Network path settle (2 s, trailing; refresh only) | `NetworkPathSettle.swift`; `RuntimeHost.swift` (`receiveNetworkPath`) | Coalesces a burst of `NWPath` updates into one PAC refetch and one system DNS/proxy reconcile, on the newest path. Each material update drops the PAC answers and resets DNS transports as it arrives (`ProxyOrchestrator.invalidateNetworkPath`, `network.path_invalidated`), so a churning path defers only the refresh. Audited as a 2 s trailing debounce in `NetworkMonitor` that delayed the invalidation too. | No. | bound | #198 |
 | A4 | Strict-hint settle window (15 s) | `DirectConnectDetector.swift:58`, `:276`; `RoutingTransitionSignal.swift:57` | Suppresses strict-mode "No-proxy candidate" probes for 15 s after a VPN or direct-mode change. A diagnostic hint, not routing. Emits `routing.strict_direct_reachable_suppressed`. | No routing authority. | bound | |
 
 ## B. Upstream health, breaker and recovery
@@ -175,7 +175,7 @@ Filed from this audit on 2026-10-21.
 
 1. [#196](https://github.com/srps/Conduit/issues/196) **Direct-connect cache: invalidate on routing transitions and fence late probes** (finding 1). D1, D2.
 2. [#197](https://github.com/srps/Conduit/issues/197) **Timeouts read as loss** (findings 2, 3, 5, 6, B12 and E7): one issue with a checklist, or one per surface: response timeouts and the breaker (with #184), the health check's first timeout and the ladder (with #181), the connectivity prober's wait for a `CONNECT` answer granting DIRECT, the DNS health tick's "unresponsive" report, the helper's `.notResponding`, the launchd residue read. The helper item is fixed (#210); the rest is open.
-3. [#198](https://github.com/srps/Conduit/issues/198) **Invalidate PAC answers on the first path change** (A3): drop answers and reset DNS transports on the leading edge, debounce only the refresh.
+3. [#198](https://github.com/srps/Conduit/issues/198) **Invalidate PAC answers on the first path change** (A3): drop answers and reset DNS transports on the leading edge, debounce only the refresh. Fixed: each material update invalidates as it arrives, and only the refresh waits for the path to settle.
 4. [#199](https://github.com/srps/Conduit/issues/199) **Transparent-relay reassert races a stop** (finding 7). C9. Closed by #209.
 5. [#200](https://github.com/srps/Conduit/issues/200) **DNS response cache: generation-fence stores across a transport reset** (finding 8), with the origin resolver's positive cache (D8) dropped on the same events.
 6. [#201](https://github.com/srps/Conduit/issues/201) **Launch recovery restores on a timed-out liveness probe** (finding 4): either a sub-item of #48, or a smaller interim change that declines the restore on a timeout and retries next launch.
