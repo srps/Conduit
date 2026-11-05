@@ -64,3 +64,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0038](0038-bounded-runtime-collection-capture.md) | Bound complete runtime collection captures independently of live connections | accepted | implemented | none |
 | [0039](0039-total-app-quit-budget.md) | Bound the in-process app's complete Quit wait to ten seconds | accepted | implemented | passed |
 | [0040](0040-proxy-endpoint-witness.md) | Witness a port-0 session's advertised proxy endpoint in the state root | accepted | implemented | none |
+| [0041](0041-dns-recovery-from-helper-relay-witness.md) | Decide DNS launch recovery from the helper's relay witness | accepted | partial | pending |

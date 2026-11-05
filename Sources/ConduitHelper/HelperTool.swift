@@ -24,7 +24,7 @@ enum HelperTool {
         deadline: UInt64 = HelperLineIO.deadline(afterMilliseconds: HelperSubprocess.operationMilliseconds)
     ) throws {
         switch arguments.command {
-        case .ping, .startDNSRelay, .stopDNSRelay, .startTCPRelay, .stopTCPRelay:
+        case .ping, .dnsRelayStatus, .startDNSRelay, .stopDNSRelay, .startTCPRelay, .stopTCPRelay:
             return
 
         case .compareNetworkSettings:

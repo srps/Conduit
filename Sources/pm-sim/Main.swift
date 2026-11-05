@@ -123,6 +123,7 @@ enum PMSim {
               update-coordinator      Daily update checks, version-change event, and updater report validation (#111)
               update-preflight        Helper rejection blocks install; a compatible retry recovers (#111)
               helper-busy-status      A helper that takes the ping and never answers is busy, not broken; the update refuses as helper_busy (#197)
+              dns-relay-witness       The DNS relay reports its target refused, silent, answered or not running, on the real OS (#201)
               runtime-host-effects    The actual shared RuntimeHost over explicit fakes and a scratch root: failed start on a held port, restart, stop, bounded shutdown (0033)
 
             OPTIONS:
@@ -315,6 +316,7 @@ enum PMSim {
         "update-coordinator",
         "update-preflight",
         "helper-busy-status",
+        "dns-relay-witness",
         "runtime-host-effects",
     ]
 
@@ -531,6 +533,8 @@ enum PMSim {
             return [try await UpdateScenarios.preflight()]
         case "helper-busy-status":
             return [try await HelperBusyScenarios.run()]
+        case "dns-relay-witness":
+            return [try DNSRelayWitnessScenarios.run()]
         case "runtime-host-effects":
             return [try await RuntimeHostEffectsScenario.run()]
         case "fixture-pass", "fixture-fail", "fixture-missing":

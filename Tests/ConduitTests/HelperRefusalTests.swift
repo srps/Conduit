@@ -168,15 +168,17 @@ final class HelperRefusalTests: XCTestCase {
 
 /// Accepts on a temporary Unix socket and answers each connection with the
 /// next scripted reply (`nil` = close without writing, the pre-field EOF).
-private final class FakeHelper: @unchecked Sendable {
+final class FakeHelper: @unchecked Sendable {
     let path: String
     private let serverFD: Int32
     private let replies: [HelperResponse?]
     private let lock = NSLock()
     private var seen = 0
+    private var commands: [HelperCommand?] = []
     private var running = true
 
     var requestsSeen: Int { lock.withLock { seen } }
+    var commandsSeen: [HelperCommand?] { lock.withLock { commands } }
 
     init(replies: [HelperResponse?]) throws {
         // sun_path is 104 bytes; /tmp keeps it short.
@@ -205,8 +207,14 @@ private final class FakeHelper: @unchecked Sendable {
             let client = accept(serverFD, nil, nil)
             guard client >= 0 else { return }
             var byte: UInt8 = 0
-            while Darwin.read(client, &byte, 1) == 1, byte != UInt8(ascii: "\n") {}
-            let index = lock.withLock { () -> Int in defer { seen += 1 }; return seen }
+            var line = Data()
+            while Darwin.read(client, &byte, 1) == 1, byte != UInt8(ascii: "\n") { line.append(byte) }
+            let command = (try? JSONDecoder().decode(HelperRequest.self, from: line))?.command
+            let index = lock.withLock { () -> Int in
+                defer { seen += 1 }
+                commands.append(command)
+                return seen
+            }
             if index < replies.count, let reply = replies[index],
                var data = try? JSONEncoder().encode(reply) {
                 data.append(UInt8(ascii: "\n"))

@@ -4,6 +4,7 @@ import Foundation
 package final class UDPRelay: @unchecked Sendable {
     private var listenFD: Int32 = -1
     private var forwardFD: Int32 = -1
+    private var target: (host: String, port: Int)?
     private var relayThread: Thread?
     /// Counts starts. A loop that exits on its own identifies itself by the
     /// generation it was started with, not by its descriptors: `stop()`
@@ -40,6 +41,69 @@ package final class UDPRelay: @unchecked Sendable {
         lock.withLock { listenFD >= 0 }
     }
 
+    /// How long `status` waits for the target to reply. A bound on one
+    /// measurement: a refusal arrives well before it, and a reply that does
+    /// not is reported `silent`, never live or dead.
+    package static let statusBoundMilliseconds = 100
+
+    /// Asks the target, on a fresh socket, whether anything still serves it.
+    ///
+    /// Throws only for a failure of this process's own socket calls, which
+    /// says nothing about the target.
+    package func status(boundMilliseconds: Int = UDPRelay.statusBoundMilliseconds) throws -> DNSRelayStatus {
+        let current = lock.withLock { listenFD >= 0 ? target : nil }
+        guard let current else { return .notRunning }
+        return .relaying(
+            targetPort: current.port,
+            target: try Self.probe(host: current.host, port: current.port, boundMilliseconds: boundMilliseconds)
+        )
+    }
+
+    private static func probe(host: String, port: Int, boundMilliseconds: Int) throws -> DNSRelayTargetVerdict {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0 else { throw UDPRelayError.socketCreationFailed(errnoText) }
+        defer { close(fd) }
+        guard fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else { throw UDPRelayError.socketCreationFailed(errnoText) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = UInt16(port).bigEndian
+        address.sin_addr.s_addr = inet_addr(host)
+        let connected = withUnsafePointer(to: &address) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { throw UDPRelayError.connectFailed(port, errnoText) }
+
+        let query = DNSWireFormat.buildQuery(domain: DNSWireFormat.livenessProbeDomain, txID: UInt16.random(in: .min ... .max))
+        if Darwin.send(fd, query, query.count, 0) < 0 {
+            guard errno == ECONNREFUSED else { throw UDPRelayError.probeFailed(port, "send: \(errnoText)") }
+            return .refused
+        }
+        let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(boundMilliseconds) * 1_000_000
+        var buffer = [UInt8](repeating: 0, count: 512)
+        while true {
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadline else { return .silent }
+            var readiness = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&readiness, 1, Int32(clamping: max(1, (deadline - now) / 1_000_000)))
+            if ready < 0 {
+                guard errno == EINTR else { throw UDPRelayError.probeFailed(port, "poll: \(errnoText)") }
+                continue
+            }
+            guard ready > 0 else { return .silent }
+            if recv(fd, &buffer, buffer.count, 0) >= 0 { return .answered }
+            switch errno {
+            case ECONNREFUSED: return .refused
+            case EAGAIN, EINTR: continue
+            default: throw UDPRelayError.probeFailed(port, "recv: \(errnoText)")
+            }
+        }
+    }
+
+    private static var errnoText: String { String(cString: strerror(errno)) }
+
     package func start(listenPort: Int, targetPort: Int, host: String = "127.0.0.1") throws {
         guard (0...65535).contains(listenPort) else {
             throw UDPRelayError.bindFailed(listenPort, "Port out of valid range (0-65535)")
@@ -51,7 +115,7 @@ package final class UDPRelay: @unchecked Sendable {
 
         let lfd = socket(AF_INET, SOCK_DGRAM, 0)
         guard lfd >= 0 else {
-            throw UDPRelayError.socketCreationFailed(errnoMessage)
+            throw UDPRelayError.socketCreationFailed(Self.errnoText)
         }
 
         var reuse: Int32 = 1
@@ -70,12 +134,12 @@ package final class UDPRelay: @unchecked Sendable {
         }
         guard bindResult == 0 else {
             close(lfd)
-            throw UDPRelayError.bindFailed(listenPort, errnoMessage)
+            throw UDPRelayError.bindFailed(listenPort, Self.errnoText)
         }
 
         let ffd = socket(AF_INET, SOCK_DGRAM, 0)
         guard ffd >= 0 else {
-            let message = errnoMessage
+            let message = Self.errnoText
             close(lfd)
             throw UDPRelayError.socketCreationFailed(message)
         }
@@ -83,7 +147,7 @@ package final class UDPRelay: @unchecked Sendable {
         // never block. poll may race close/reuse, but its result is validated
         // under that lock before either descriptor is used for actual I/O.
         guard fcntl(lfd, F_SETFL, O_NONBLOCK) == 0, fcntl(ffd, F_SETFL, O_NONBLOCK) == 0 else {
-            let message = errnoMessage
+            let message = Self.errnoText
             close(lfd)
             close(ffd)
             throw UDPRelayError.socketCreationFailed(message)
@@ -103,7 +167,7 @@ package final class UDPRelay: @unchecked Sendable {
             }
         }
         guard connectResult == 0 else {
-            let message = errnoMessage
+            let message = Self.errnoText
             close(lfd)
             close(ffd)
             throw UDPRelayError.connectFailed(targetPort, message)
@@ -113,6 +177,7 @@ package final class UDPRelay: @unchecked Sendable {
             self.generation &+= 1
             listenFD = lfd
             forwardFD = ffd
+            target = (host, targetPort)
             return self.generation
         }
 
@@ -139,6 +204,7 @@ package final class UDPRelay: @unchecked Sendable {
             if forwardFD >= 0 { close(forwardFD) }
             listenFD = -1
             forwardFD = -1
+            target = nil
             relayThread = nil
             return thread
         }
@@ -164,6 +230,7 @@ package final class UDPRelay: @unchecked Sendable {
             close(ffd)
             listenFD = -1
             forwardFD = -1
+            target = nil
         }
     }
 
@@ -277,15 +344,13 @@ package final class UDPRelay: @unchecked Sendable {
         return candidate
     }
 
-    private var errnoMessage: String {
-        String(cString: strerror(errno))
-    }
 }
 
 package enum UDPRelayError: Error, LocalizedError {
     case socketCreationFailed(String)
     case bindFailed(Int, String)
     case connectFailed(Int, String)
+    case probeFailed(Int, String)
 
     package var errorDescription: String? {
         switch self {
@@ -295,6 +360,8 @@ package enum UDPRelayError: Error, LocalizedError {
             return "Failed to bind port \(port): \(msg)"
         case .connectFailed(let port, let msg):
             return "Failed to connect to relay target port \(port): \(msg)"
+        case .probeFailed(let port, let msg):
+            return "Failed to probe relay target port \(port): \(msg)"
         }
     }
 }

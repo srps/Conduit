@@ -14,6 +14,10 @@ package final class AuditingPrivilegeClient: PrivilegeClient, @unchecked Sendabl
         self.eventSink = eventSink
     }
 
+    package func dnsRelayStatus() throws -> DNSRelayStatus? {
+        try base.dnsRelayStatus()
+    }
+
     package func execute(_ operation: PrivilegedOperation, values: [String]) throws {
         emit(operation: operation, outcome: "requested", valueCount: values.count)
         do {

@@ -12,10 +12,10 @@ import Foundation
 /// merely non-root: during a fast user switch the console is also uid 0,
 /// and another user's process must not reshape the system proxy.
 public enum HelperAdmission {
-    /// Commands that take no value: they only clear, remove or stop.
+    /// Commands that take no value: they only clear, remove or stop, or read.
     public static func isTeardownOnly(_ command: HelperCommand) -> Bool {
         switch command {
-        case .ping, .removeDNS, .clearSystemProxy, .disableAutoproxy,
+        case .ping, .dnsRelayStatus, .removeDNS, .clearSystemProxy, .disableAutoproxy,
              .stopDNSRelay, .stopTCPRelay:
             return true
         case .applyDNS, .applySystemProxy, .startDNSRelay, .startTCPRelay,

@@ -99,6 +99,17 @@ package final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
         lock.withLock { _commands.removeAll(); _batches.removeAll(); _mainThreadOperations.removeAll() }
     }
 
+    package var relayStatus: DNSRelayStatus? {
+        get { lock.withLock { _relayStatus } }
+        set { lock.withLock { _relayStatus = newValue } }
+    }
+    private var _relayStatus: DNSRelayStatus?
+
+    package func dnsRelayStatus() throws -> DNSRelayStatus? {
+        if let error { throw error }
+        return relayStatus
+    }
+
     package func execute(_ operation: PrivilegedOperation, values: [String]) throws {
         try execute(batch: [PrivilegedBatchStep(operation, values)])
     }
@@ -332,6 +343,10 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     }
 
     // MARK: PrivilegeClient
+
+    package func dnsRelayStatus() throws -> DNSRelayStatus? {
+        try privilege.dnsRelayStatus()
+    }
 
     package func execute(_ operation: PrivilegedOperation, values: [String]) throws {
         try execute(batch: [PrivilegedBatchStep(operation, values)])

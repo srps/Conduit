@@ -211,7 +211,11 @@ enum HelperDaemon {
         let deadline = HelperLineIO.deadline(afterMilliseconds: HelperSubprocess.operationMilliseconds)
         switch request.command {
         case .ping:
-            return (.ok(), .ok)
+            var response = HelperResponse.ok()
+            response.features = HelperFeature.allCases
+            return (response, .ok)
+        case .dnsRelayStatus:
+            return dnsRelayStatus()
         case .startDNSRelay:
             guard let portStr = request.values.first,
                   let port = Int(portStr), (1...65535).contains(port) else {
@@ -455,6 +459,30 @@ enum HelperDaemon {
         } catch {
             return .error(error.localizedDescription)
         }
+    }
+
+    private static func dnsRelayStatus() -> (HelperResponse, HelperAuditOutcome) {
+        let status: DNSRelayStatus
+        do {
+            status = try relay?.status(boundMilliseconds: UDPRelay.statusBoundMilliseconds) ?? .notRunning
+        } catch {
+            HelperLog.error("DNS relay status failed: \(error.localizedDescription)")
+            return (.error("DNS relay status failed: \(error.localizedDescription)"), .commandFailed)
+        }
+        var response = HelperResponse.ok()
+        switch status {
+        case .notRunning:
+            response.dnsRelay = HelperDNSRelayStatus(listening: false, targetPort: nil, target: .notRunning)
+        case .relaying(let targetPort, let verdict):
+            let target: HelperDNSRelayStatus.Target
+            switch verdict {
+            case .refused: target = .refused
+            case .answered: target = .answered
+            case .silent: target = .silent
+            }
+            response.dnsRelay = HelperDNSRelayStatus(listening: true, targetPort: targetPort, target: target)
+        }
+        return (response, .ok)
     }
 
     private static func stopDNSRelay() {

@@ -13,6 +13,14 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   GitHub, so people who find Conduit useful can star it or report an issue.
   They are plain links; nothing is counted or remembered.
 
+- The privileged helper can report what its DNS relay is doing: which port it
+  forwards to, and whether that port refuses, answers or stays silent (#201).
+  A Conduit that crashed with "Manage system DNS" on leaves the relay
+  forwarding to a port that refuses, and a later change uses this to restore
+  the user's DNS at the next launch without a click. Run
+  `sudo ./install-helper.sh` to get it; an older helper keeps working and
+  reports no status.
+
 ### Fixed
 
 - With the proxy port set to 0 ("choose a port"), the system proxy, the shell

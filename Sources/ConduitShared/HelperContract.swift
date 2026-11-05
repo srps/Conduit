@@ -93,6 +93,16 @@ public enum HelperProtocolVersion {
     /// back — the behaviour it had before, not a regression.
     /// v5 adds compare-network-settings; v3/v4 command semantics are unchanged.
     /// v5 clients require v5 for scoped writes and never degrade them to networksetup.
+    ///
+    /// *Added* within v5, recorded rather than inferred: `dns-relay-status`,
+    /// `HelperResponse.dnsRelay` and `HelperResponse.features` (#201). Not a
+    /// bump, on purpose. A v6 would make every installed v5 helper refuse
+    /// every frame as unsupported, and the client's exact-match guard would
+    /// then send every privileged operation to an admin prompt, or fail a
+    /// scoped write outright, until the user reinstalls. Added this way, a v5 helper that predates the command
+    /// cannot decode it and answers "Invalid request" stamped 5, which the
+    /// client reads as "no witness" and nothing else; both fields are
+    /// optional, so a client that predates them ignores the keys.
     public static let minimumSupported = 3
 
     public static func isSupported(_ version: Int) -> Bool {
@@ -154,7 +164,40 @@ public enum HelperCommand: String, Codable, Sendable, CaseIterable {
     case stopTCPRelay = "stop-tcp-relay"
     /// One bounded JSON NetworkSettingsRequest; ID-addressed compare-and-write under SCPreferences lock.
     case compareNetworkSettings = "compare-network-settings"
+    /// Reports what the DNS relay is doing and what a fresh query to its
+    /// target found, in `HelperResponse.dnsRelay`. No values; changes nothing.
+    case dnsRelayStatus = "dns-relay-status"
     case ping = "ping"
+}
+
+/// What a helper can do beyond its protocol version's baseline, listed on
+/// its ping reply. An app tells a helper that predates a feature from one
+/// that is busy by its absence here, without sending a command that fails.
+public enum HelperFeature: String, Codable, Sendable, CaseIterable {
+    case dnsRelayStatus = "dns-relay-status"
+}
+
+/// The reply to `dns-relay-status`.
+public struct HelperDNSRelayStatus: Codable, Sendable, Equatable {
+    public enum Target: String, Codable, Sendable {
+        /// The kernel refused the target port: nothing serves it.
+        case refused
+        case answered
+        /// No reply within the helper's bound.
+        case silent
+        case notRunning
+    }
+
+    /// Whether this helper's relay holds `127.0.0.1:53`.
+    public var listening: Bool
+    public var targetPort: Int?
+    public var target: Target
+
+    public init(listening: Bool, targetPort: Int?, target: Target) {
+        self.listening = listening
+        self.targetPort = targetPort
+        self.target = target
+    }
 }
 
 public enum HelperInputValidator {
@@ -351,6 +394,11 @@ public struct HelperResponse: Codable, Sendable, Equatable {
     /// an ordinary failed command. Optional, so a helper that predates it
     /// simply never sends it and a client that predates it ignores the key.
     public var refusal: HelperRefusal?
+    /// Set only on a `dns-relay-status` reply.
+    public var dnsRelay: HelperDNSRelayStatus?
+    /// Set only on a ping reply, by a helper that has any. Unknown names are
+    /// dropped on decode.
+    public var features: [HelperFeature]?
 
     public static func ok() -> HelperResponse {
         HelperResponse(protocolVersion: HelperProtocolVersion.current, success: true)
@@ -387,7 +435,9 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         exitCode: Int32? = nil,
         standardOutput: String? = nil,
         standardError: String? = nil,
-        refusal: HelperRefusal? = nil
+        refusal: HelperRefusal? = nil,
+        dnsRelay: HelperDNSRelayStatus? = nil,
+        features: [HelperFeature]? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.success = success
@@ -396,6 +446,8 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         self.standardOutput = standardOutput
         self.standardError = standardError
         self.refusal = refusal
+        self.dnsRelay = dnsRelay
+        self.features = features
     }
 
     enum CodingKeys: String, CodingKey {
@@ -406,6 +458,8 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         case standardOutput
         case standardError
         case refusal
+        case dnsRelay
+        case features
     }
 
     public init(from decoder: Decoder) throws {
@@ -419,6 +473,8 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         // Unknown values decode as `nil` rather than failing the frame: a
         // refusal reason this client does not know is still a refusal.
         refusal = try? container.decodeIfPresent(HelperRefusal.self, forKey: .refusal)
+        dnsRelay = try? container.decodeIfPresent(HelperDNSRelayStatus.self, forKey: .dnsRelay)
+        features = try container.decodeIfPresent([String].self, forKey: .features)?.compactMap(HelperFeature.init(rawValue:))
     }
 }
 

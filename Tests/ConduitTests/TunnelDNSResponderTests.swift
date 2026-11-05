@@ -387,6 +387,8 @@ private final class UDPTestCollector: ChannelInboundHandler, @unchecked Sendable
 }
 
 private final class TestPrivilegeClient: PrivilegeClient, @unchecked Sendable {
+    func dnsRelayStatus() throws -> DNSRelayStatus? { nil }
+
     private let lock = NSLock()
     private var _commands: [(PrivilegedOperation, [String])] = []
     var failingDomains: Set<String> = []

@@ -379,6 +379,10 @@ package enum DNSWireFormat {
         return response
     }
 
+    /// Asked by every relay liveness probe, so a live forwarder's cache
+    /// usually holds it and a reply does not wait on an upstream.
+    package static let livenessProbeDomain = "one.one.one.one"
+
     package static func buildQuery(domain: String, txID: UInt16 = 0xABCD, qtype: UInt16 = 1) -> [UInt8] {
         var packet: [UInt8] = []
         packet.append(UInt8(txID >> 8))
