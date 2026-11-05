@@ -83,6 +83,9 @@ enum PMSim {
               upstream-slow-serving   a slow-but-answering upstream neither fails over nor trips the breaker
               upstream-served-then-silent  of two upstreams, the one serving goes silent; the other serves after two silences, no breaker
               upstream-slow-origin    a healthy primary behind a slow origin keeps its traffic: its silences ask it once, it answers
+              upstream-egress-dead    a primary that answers the liveness probe and forwards nothing ranks behind once its silence spans two origins; the secondary serves within I + R + C + T
+              upstream-egress-dead-single  the same with one upstream: the first silent health check is decisive, DIRECT within I + 4R + P + 5C + C
+              upstream-ignores-probe-dead  upstream-egress-dead with a primary that ignores the liveness probe
               recovery-unreachable-ladder  unreachable upstream: ladder skips re-auth, exhaustion does not blame the password
               recovery-ephemeral-rebind  port 0: the ladder's recycle lands on a fresh port; snapshot and DoH route follow it
               recovery-superseded-by-disconnect  a disconnect that routes DIRECT owns the status a superseded ladder left
@@ -279,6 +282,9 @@ enum PMSim {
         "upstream-slow-serving",
         "upstream-served-then-silent",
         "upstream-slow-origin",
+        "upstream-egress-dead",
+        "upstream-egress-dead-single",
+        "upstream-ignores-probe-dead",
         "recovery-unreachable-ladder",
         "recovery-ephemeral-rebind",
         "recovery-superseded-by-disconnect",
@@ -471,6 +477,13 @@ enum PMSim {
             return [try await SilentUpstreamScenarios.servedThenSilent(verbose: verbose)]
         case "upstream-slow-origin":
             return [try await SilentUpstreamScenarios.slowOriginBehindAHealthyPrimary(verbose: verbose)]
+        case "upstream-egress-dead":
+            return [try await SilentUpstreamScenarios.egressDead(name: "upstream-egress-dead", probesIgnored: false, verbose: verbose)]
+        case "upstream-egress-dead-single":
+            return [try await SilentUpstreamScenarios.silentFailover(
+                name: "upstream-egress-dead-single", responseTimeout: 0.5, checkInterval: 2, probeAnswered: true, verbose: verbose)]
+        case "upstream-ignores-probe-dead":
+            return [try await SilentUpstreamScenarios.egressDead(name: "upstream-ignores-probe-dead", probesIgnored: true, verbose: verbose)]
         case "websocket-upgrade":
             return [try await UpgradeScenarios.websocketUpgrade(verbose: verbose)]
         case "connect-early-direct":

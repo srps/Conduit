@@ -105,11 +105,13 @@ enum SilentUpstreamScenarios {
 
     @RuntimeActor
     static func silentFailover(
-        name: String, responseTimeout: TimeInterval, checkInterval: TimeInterval, verbose: Bool
+        name: String, responseTimeout: TimeInterval, checkInterval: TimeInterval, probeAnswered: Bool = false, verbose: Bool
     ) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let answering = NIOLockedValueBox(true)
-        let upstream = DelayedHTTPUpstream { _ in answering.withLockedValue { $0 } ? .after(.zero) : .never }
+        let upstream = DelayedHTTPUpstream { line in
+            answering.withLockedValue { $0 } || (probeAnswered && line.hasPrefix("OPTIONS ")) ? .after(.zero) : .never
+        }
         try await upstream.start(group: group)
 
         let probeDeadline = UpstreamProber.defaultTimeoutSeconds
@@ -142,7 +144,7 @@ enum SilentUpstreamScenarios {
         let connectSlack = 0.1, silentCheck = responseTimeout + connectSlack
         let nextCheckDue = checkInterval, ladderChecks = 3 * silentCheck, postLadderProbe = probeDeadline + connectSlack
         let mainPath = nextCheckDue + silentCheck + ladderChecks + postLadderProbe
-        let probeBudget = min(config.health.connectionCheckTimeout, responseTimeout)
+        let probeBudget = probeAnswered ? 0 : min(config.health.connectionCheckTimeout, responseTimeout)
         let bound = mainPath + probeBudget + connectSlack
         let fell = try await until(timeout: bound + 5) { orchestrator.snapshot.directModeCause.isDirect }
         let fellAt = Date().timeIntervalSince(silentAt)
@@ -154,6 +156,14 @@ enum SilentUpstreamScenarios {
         let skipped = events("recovery.step_skipped").compactMap(\.detail)
         let exhausted = events("recovery.exhausted").compactMap(\.detail)
         let probes = events("connectivity.probe_inconclusive").compactMap(\.detail)
+        let deprioritized = events("upstream.deprioritized").compactMap(\.detail)
+        let livenessAssertion: ScenarioAssertion = probeAnswered
+            ? .init("the upstream answered the liveness probe, and its silence across the data-path origin and the check URL ranked it behind",
+                    !checks.isEmpty && checks.allSatisfy { $0.contains(" outcome=answered ") }
+                        && deprioritized.first?.contains(" reason=silent_origins ") == true)
+            : .init("the upstream was asked the liveness probe and answered nothing",
+                    !checks.isEmpty && checks.allSatisfy { $0.contains(" outcome=silent ") })
+        let bandName = probeAnswered ? "I + 4R + P + 5C + C" : "I + 4R + P + 5C + b + C"
 
         return ScenarioResult(name: name, clientCount: threshold + 1, clientsOpened: threshold + 1,
             clientsWithFirstByte: statuses.filter { !$0.isEmpty }.count, clientsClosedEarly: 0, totalBytes: 0,
@@ -166,18 +176,17 @@ enum SilentUpstreamScenarios {
                 .init("\(threshold + 1) response timeouts, which opened the breaker before #197 with the burst window off, left it closed",
                       events("upstream.circuit_opened").isEmpty && silentStatus?.consecutiveFailures == 0),
                 .init("no silent health check was held: the upstream was silent to the request it answers itself", held.isEmpty),
-                .init("the upstream was asked the liveness probe and answered nothing",
-                      !checks.isEmpty && checks.allSatisfy { $0.contains(" outcome=silent ") }),
+                livenessAssertion,
                 .init("the ladder skipped re-authentication because the upstream itself was silent",
                       skipped.count == 1 && skipped[0].hasPrefix("step=reauthenticate reason=upstream_silent")),
                 .init("the ladder exhausted on an upstream silent to its own request",
                       exhausted.count == 1 && exhausted[0].hasPrefix("failure=upstream_silent ")),
                 .init("the post-ladder probe's silence was decisive because a failure stood",
                       probes.count == 1 && probes[0].contains("decisive=true")),
-                .init("routing fell to DIRECT within main's path plus one probe budget: I + 4R + P + 5C + b + C",
+                .init("routing fell to DIRECT within main's path\(probeAnswered ? "" : " plus one probe budget"): \(bandName)",
                       fell && cause.routesClientTrafficDirectly && status.activeUpstream == "DIRECT" && fellAt <= bound + 1),
             ], notes: [
-                "R=\(responseTimeout)s I=\(checkInterval)s P=\(probeDeadline)s C=\(connectSlack)s b=\(probeBudget)s; main path \(String(format: "%.2f", mainPath))s, bound \(String(format: "%.2f", bound))s (+1 s slack)",
+                "R=\(responseTimeout)s I=\(checkInterval)s P=\(probeDeadline)s C=\(connectSlack)s b=\(probeBudget)s\(probeAnswered ? " (the upstream answers OPTIONS, so no probe decides)" : ""); main path \(String(format: "%.2f", mainPath))s, bound \(String(format: "%.2f", bound))s (+1 s slack)",
                 "fell to DIRECT (\(cause.rawValue)) \(String(format: "%.2f", fellAt))s after the silence began",
                 "upstream saw \(upstream.requestLines.count) request heads: \(upstream.requestLines.filter { $0.hasPrefix("HEAD ") }.count) health checks, \(upstream.requestLines.filter { $0.hasPrefix("OPTIONS ") }.count) liveness probes",
             ])
@@ -482,6 +491,96 @@ enum SilentUpstreamScenarios {
                 "fast requests via the primary: \(fastViaPrimary) of 6; secondary saw \(secondary.requestLines.count) request heads",
                 "silence checks: \(finished); deprioritized: \(events("upstream.deprioritized").compactMap(\.detail))",
                 "last health check: \(orchestrator.snapshot.runtimeStatus.lastHealthSummary); recovery events: \(recovery.map(\.event)); direct: \(orchestrator.snapshot.directModeCause.rawValue)",
+            ])
+    }
+
+    /// A live proxy whose egress dies: after the break it answers the liveness probe (or, `probesIgnored`, never
+    /// did) and forwards nothing. A request leaves every T seconds to one origin, so only the check URL can be
+    /// the second silent origin.
+    @RuntimeActor
+    static func egressDead(name: String, probesIgnored: Bool, verbose: Bool) async throws -> ScenarioResult {
+        let started = Date(), group = MultiThreadedEventLoopGroup.singleton
+        let broken = NIOLockedValueBox(false)
+        let primary = DelayedHTTPUpstream { line in
+            if line.hasPrefix("OPTIONS ") { return probesIgnored ? .never : .after(.zero) }
+            return broken.withLockedValue { $0 } ? .never : .after(.zero)
+        }
+        let secondary = DelayedHTTPUpstream { _ in .after(.milliseconds(40)) }
+        try await primary.start(group: group)
+        try await secondary.start(group: group)
+
+        let responseTimeout: TimeInterval = 0.5, checkInterval: TimeInterval = 2, period: TimeInterval = 0.25, connectSlack = 0.1
+        var config = strictConfigWithBreakerBurstWindowOff()
+        config.upstreamResponseTimeoutSeconds = responseTimeout
+        config.healthCheckIntervalSeconds = checkInterval
+        config.healthCheckURL = "http://egress-dead.test/"
+        config.upstreams = [
+            UpstreamProxy(name: "primary", host: "127.0.0.1", port: primary.port, priority: 0),
+            UpstreamProxy(name: "secondary", host: "127.0.0.1", port: secondary.port, priority: 1),
+        ]
+        let primaryEndpoint = "127.0.0.1:\(primary.port)", secondaryEndpoint = "127.0.0.1:\(secondary.port)"
+        let orchestrator = orchestrator(config: config, verbose: verbose)
+        try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
+        guard let port = orchestrator.snapshot.bindings.proxyPort else {
+            throw ScenarioExecutionError(message: "the HTTP listener did not bind")
+        }
+        func events(_ name: String) -> [RuntimeEvent] { orchestrator.eventLog.events.filter { $0.event == name } }
+        func latency(_ endpoint: String) -> Double? { orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == endpoint }?.ewmaLatencyMS }
+        func status(_ response: EventLoopFuture<String>) async -> String {
+            do { return String(try await response.get().prefix(12)) } catch { return "no answer: \(error)" }
+        }
+        func primaryDiscovery() -> String? {
+            events("upstream.liveness_discovered").compactMap(\.detail).first { $0.hasPrefix("upstream=primary ") }
+        }
+
+        var warm: [EventLoopFuture<String>] = []
+        for index in 0..<4 { warm.append(try await sendThroughProxy(group: group, port: port, tag: "warm-\(index)")) }
+        for response in warm { _ = await status(response) }
+        let discovered = try await until(timeout: 2 * responseTimeout + 2) { primaryDiscovery() != nil }
+        let primaryLatency = latency(primaryEndpoint), secondaryLatency = latency(secondaryEndpoint)
+        let primaryPreferred = (primaryLatency ?? .infinity) < (secondaryLatency ?? .infinity)
+
+        let bound = checkInterval + responseTimeout + connectSlack + period
+        broken.withLockedValue { $0 = true }
+        let brokeAt = Date()
+        let servedAt = NIOLockedValueBox<TimeInterval?>(nil)
+        var sent = 0
+        let deadline = brokeAt.addingTimeInterval(bound + 2 * checkInterval + 2)
+        func healthyViaSecondary() -> Bool { orchestrator.snapshot.runtimeStatus.lastHealthSummary.hasPrefix("Healthy via \(secondaryEndpoint) ") }
+        while Date() < deadline, servedAt.withLockedValue({ $0 }) == nil || !healthyViaSecondary() {
+            let response = try await sendThroughProxy(group: group, port: port, tag: "after-\(sent)")
+            sent += 1
+            response.whenSuccess { answer in
+                guard answer.hasPrefix("HTTP/1.1 200") else { return }
+                servedAt.withLockedValue { $0 = $0 ?? Date().timeIntervalSince(brokeAt) }
+            }
+            try await Task.sleep(for: .milliseconds(Int64(period * 1000)))
+        }
+        let served = servedAt.withLockedValue { $0 }
+
+        let primaryStatus = orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == primaryEndpoint }
+        let deprioritized = events("upstream.deprioritized").compactMap(\.detail)
+        let finished = events("upstream.silence_check_finished").compactMap(\.detail)
+
+        return ScenarioResult(name: name, clientCount: 4 + sent, clientsOpened: 4 + sent,
+            clientsWithFirstByte: served == nil ? 0 : 1, clientsClosedEarly: 0, totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
+                .init("the primary served first with the lower latency, so selection preferred it", primaryPreferred),
+                .init("the pool learnt whether the primary answers the liveness probe",
+                      discovered && primaryDiscovery()?.contains(probesIgnored ? " answers_probes=false" : " answers_probes=true") == true),
+                .init("the secondary served a request within I + R + C + T of the break", served.map { $0 <= bound } ?? false),
+                .init("the primary's silence across two origins ranked it behind, once",
+                      deprioritized.count == 1 && deprioritized[0].hasPrefix("upstream=primary ") && deprioritized[0].contains(" reason=silent_origins ")),
+                .init("the silences opened no breaker and struck nothing",
+                      events("upstream.circuit_opened").isEmpty && primaryStatus?.circuitState == .closed && primaryStatus?.consecutiveFailures == 0),
+                .init("the health check went healthy via the secondary, with no DIRECT",
+                      healthyViaSecondary() && !orchestrator.snapshot.directModeCause.isDirect),
+            ], notes: [
+                "R=\(responseTimeout)s I=\(checkInterval)s C=\(connectSlack)s T=\(period)s: the first check after the break is due within I and silent at R; the next request leaves within T; bound \(String(format: "%.2f", bound))s",
+                "secondary served \(served.map { String(format: "%.2f", $0) } ?? "never") s after the break, \(sent) requests sent after it",
+                "discovery: \(primaryDiscovery() ?? "none"); silence checks: \(finished); deprioritized: \(deprioritized)",
+                "last health check: \(orchestrator.snapshot.runtimeStatus.lastHealthSummary); direct: \(orchestrator.snapshot.directModeCause.rawValue)",
             ])
     }
 }

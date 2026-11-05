@@ -417,6 +417,200 @@ final class UpstreamSilenceTests: XCTestCase {
         pool.closeAll()
     }
 
+    // MARK: - Egress silence across origins
+
+    /// A primary that serves until `broken` and then forwards nothing, behind which a secondary always answers.
+    /// The primary has a latency score from one answered exchange, so selection prefers it until it ranks behind.
+    private func egressPools(
+        probes: CountingUpstream.Probes = .answered, withSecondary: Bool = true, answering: @escaping @Sendable (String) -> Bool = { _ in false }
+    ) async throws -> (ConnectionPool, primary: CountingUpstream, secondary: CountingUpstream?, Events, broken: NIOLockedValueBox<Bool>) {
+        let broken = NIOLockedValueBox(false)
+        let primary = try await CountingUpstream.start(answers: .max, probes: probes) { line in broken.withLockedValue { $0 } && !answering(line) }
+        let secondary = withSecondary ? try await CountingUpstream.start(answers: .max) : nil
+        let first = primary.proxy(named: "primary")
+        let events = Events()
+        var config = Self.config(upstreams: [first])
+        config.upstreamResponseTimeoutSeconds = 0.3
+        let current = NIOLockedValueBox(config)
+        let pool = makePool(config: current, events: events)
+        let warm = try await pool.exchange(head: Self.head(host: "warm.test", path: "/"), body: nil).get()
+        XCTAssertEqual(warm.upstream.id, first.id, "the primary answered and has a latency")
+        let discovered = await Self.eventually { !events.details("upstream.liveness_discovered").isEmpty }
+        XCTAssertTrue(discovered, "the first answer is followed by the discovery probe")
+        if let secondary { current.withLockedValue { $0.upstreams = [first, secondary.proxy(named: "secondary", priority: 1)] } }
+        broken.withLockedValue { $0 = true }
+        return (pool, primary, secondary, events, broken)
+    }
+
+    private func expectSilent(_ pool: ConnectionPool, host: String, _ label: String) async {
+        do {
+            let response = try await pool.exchange(head: Self.head(host: host, path: "/"), body: nil).get()
+            XCTFail("\(label) was answered by \(response.upstream.name)")
+        } catch {
+            XCTAssertEqual(error as? ConnectionPoolError, .upstreamResponseTimedOut, label)
+        }
+    }
+
+    private func servedBy(_ pool: ConnectionPool, host: String, path: String = "/after") async -> String {
+        do {
+            return try await pool.exchange(head: Self.head(host: host, path: path), body: nil).get().upstream.name
+        } catch {
+            return "no answer: \(error)"
+        }
+    }
+
+    func testASilentEgressBehindAProxyThatAnswersTheProbeRanksItBehind() async throws {
+        let (pool, primary, secondary, events, _) = try await egressPools()
+        await expectSilent(pool, host: "a.test", "the first request to origin a")
+        await expectSilent(pool, host: "a.test", "the second request to origin a")
+        let probed = await Self.eventually { !events.details("upstream.silence_check_finished").isEmpty }
+        XCTAssertTrue(probed, "two silences in a row asked the primary itself")
+
+        let check = await pool.healthCheck(urlString: "http://check.test/")
+        let after = await servedBy(pool, host: "a.test")
+
+        guard case .upstreamSilent? = check.failure else {
+            return XCTFail("silent to two origins with nothing answered between is a dead egress, got \(String(describing: check.failure))")
+        }
+        let deprioritized = events.details("upstream.deprioritized")
+        XCTAssertEqual(deprioritized.count, 1, "\(deprioritized)")
+        XCTAssertTrue(deprioritized.first?.contains(" reason=silent_origins ") == true, deprioritized.first ?? "none")
+        XCTAssertEqual(after, "secondary", "the primary ranks behind the secondary that answers")
+        pool.closeAll()
+        try await primary.close()
+        try await secondary?.close()
+    }
+
+    func testTwoSilentOriginsOnTheDataPathRankTheUpstreamBehindWithoutAHealthCheck() async throws {
+        let (pool, primary, secondary, events, _) = try await egressPools()
+        await expectSilent(pool, host: "a.test", "the request to origin a")
+        await expectSilent(pool, host: "b.test", "the request to origin b")
+
+        let after = await servedBy(pool, host: "a.test")
+
+        XCTAssertEqual(after, "secondary", "two silent origins with no answer between rank the primary behind")
+        let deprioritized = events.details("upstream.deprioritized")
+        XCTAssertEqual(deprioritized.count, 1, "\(deprioritized)")
+        XCTAssertTrue(deprioritized.first?.contains(" reason=silent_origins ") == true, deprioritized.first ?? "none")
+        XCTAssertEqual(pool.upstreamStatuses().first { $0.name == "primary" }?.consecutiveFailures, 0, "a silence strikes nothing")
+        pool.closeAll()
+        try await primary.close()
+        try await secondary?.close()
+    }
+
+    func testOneSilentOriginWithAnAnswerBetweenNeverRanksBehind() async throws {
+        let (pool, primary, secondary, events, _) = try await egressPools { $0.contains("c.test") }
+        await expectSilent(pool, host: "a.test", "the request to origin a")
+        let answered = try await pool.exchange(head: Self.head(host: "c.test", path: "/"), body: nil).get()
+        XCTAssertEqual(answered.upstream.name, "primary")
+        await expectSilent(pool, host: "b.test", "the request to origin b")
+
+        let after = await servedBy(pool, host: "c.test")
+
+        XCTAssertEqual(after, "primary", "an answer between two silent origins says the egress is alive")
+        XCTAssertEqual(events.details("upstream.deprioritized"), [])
+        XCTAssertEqual(secondary?.requests, 0)
+        pool.closeAll()
+        try await primary.close()
+        try await secondary?.close()
+    }
+
+    func testAProxyThatIgnoresTheProbeAndThenDiesIsRankedBehindAcrossOrigins() async throws {
+        let (pool, primary, secondary, events, _) = try await egressPools(probes: .ignored)
+        XCTAssertTrue(events.details("upstream.liveness_discovered").first?.contains(" answers_probes=false") == true,
+                      events.details("upstream.liveness_discovered").first ?? "none")
+        await expectSilent(pool, host: "a.test", "the request to origin a")
+
+        let check = await pool.healthCheck(urlString: "http://check.test/")
+        let after = await servedBy(pool, host: "a.test")
+
+        guard case .upstreamSilent? = check.failure else {
+            return XCTFail("the check URL is a second silent origin, got \(String(describing: check.failure))")
+        }
+        XCTAssertTrue(events.details("upstream.deprioritized").first?.contains(" reason=silent_origins ") == true,
+                      events.details("upstream.deprioritized").first ?? "none")
+        XCTAssertEqual(after, "secondary")
+        pool.closeAll()
+        try await primary.close()
+        try await secondary?.close()
+    }
+
+    func testASingleUpstreamWithASilentEgressIsDecisiveAtTheFirstHealthCheck() async throws {
+        let (pool, primary, _, events, _) = try await egressPools(withSecondary: false)
+        await expectSilent(pool, host: "a.test", "the request to origin a")
+
+        let check = await pool.healthCheck(urlString: "http://check.test/")
+
+        guard case .upstreamSilent? = check.failure else {
+            return XCTFail("a silent data-path origin and a silent check URL are two origins, got \(String(describing: check.failure))")
+        }
+        XCTAssertEqual(events.details("upstream.deprioritized").count, 1)
+        pool.closeAll()
+        try await primary.close()
+    }
+
+    func testAnEndpointChangeDuringAHalfOpenProbeFreesTheSlot() async throws {
+        let released = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton).bind(host: "127.0.0.1", port: 0).get()
+        let refusedPort = try XCTUnwrap(released.localAddress?.port)
+        try await released.close().get()
+        let silent = try await CountingUpstream.start(answers: 0, probes: .ignored)
+        let healthy = try await CountingUpstream.start(answers: .max)
+        let other = try await CountingUpstream.start(answers: .max)
+        let events = Events()
+        var config = Self.config(upstreams: [healthy.proxy(named: "a")])
+        config.circuitFailureThreshold = 2
+        config.circuitBreakerWindowSeconds = 0
+        config.circuitBaseOpenIntervalSeconds = 0.3
+        let current = NIOLockedValueBox(config)
+        let pool = makePool(config: current, events: events)
+        _ = try await pool.exchange(head: Self.head(path: "/warm"), body: nil).get()
+        _ = await Self.eventually { !events.details("upstream.liveness_discovered").isEmpty }
+        _ = pool.closeAll(scope: .idleOnly)
+        current.withLockedValue { $0.upstreams[0].port = refusedPort }
+        for _ in 0..<2 { _ = await pool.healthCheck(urlString: "http://check.test/") }
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open)
+        current.withLockedValue { $0.upstreams[0].port = silent.port }
+        await expectSilent(pool, host: "example.com", "the half-open probe exchange")
+        current.withLockedValue { $0.upstreams[0].port = healthy.port }
+        let settled = await Self.eventually { !events.details("upstream.silence_check_finished").isEmpty }
+        XCTAssertTrue(settled)
+        XCTAssertTrue(events.details("upstream.silence_check_finished").first?.contains(" verdict=superseded") == true,
+                      "the probe asked the endpoint the edit replaced: \(events.details("upstream.silence_check_finished"))")
+        current.withLockedValue { $0.upstreams.append(other.proxy(named: "c", priority: 1)) }
+        let healthyBefore = healthy.requests
+
+        var via: [String] = []
+        for index in 0..<3 { via.append(await servedBy(pool, host: "example.com", path: "/after-\(index)")) }
+
+        XCTAssertEqual(via.first, "a", "the slot the replaced endpoint held is free, so the next exchange is the new endpoint's probe")
+        XCTAssertGreaterThan(healthy.requests, healthyBefore, "the new endpoint was asked")
+        XCTAssertEqual(pool.upstreamStatuses().first { $0.name == "a" }?.circuitState, .closed, "its answer closed the breaker")
+        pool.closeAll()
+        try await silent.close()
+        try await healthy.close()
+        try await other.close()
+    }
+
+    func testAHalfOpenExchangeSilentAcrossOriginsReopensTheBreaker() async throws {
+        let (pool, upstream, events, openedByRefusals) = try await halfOpenPoolInFrontOf(answers: 0)
+        await expectSilent(pool, host: "a.test", "the half-open probe exchange to origin a")
+        let kept = await Self.eventually { !events.details("upstream.silence_check_finished").isEmpty }
+        XCTAssertTrue(kept)
+        XCTAssertTrue(events.details("upstream.silence_check_finished").first?.contains(" outcome=answered verdict=kept ") == true,
+                      events.details("upstream.silence_check_finished").first ?? "none")
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .halfOpen)
+
+        await expectSilent(pool, host: "b.test", "the half-open probe exchange to origin b")
+        let reopened = await Self.eventually { events.details("upstream.circuit_opened").count > openedByRefusals }
+
+        XCTAssertTrue(reopened, "two silent origins with no answer between re-open a half-open breaker")
+        XCTAssertTrue(events.details("upstream.circuit_opened").last?.contains("reason=probe_failed") == true,
+                      events.details("upstream.circuit_opened").last ?? "none")
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open)
+        pool.closeAll()
+        try await upstream.close()
+    }
+
     private static let head = head(path: "/")
 
     private static func head(host: String = "example.com", path: String) -> HTTPRequestHead {
