@@ -587,6 +587,50 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(port)], "the relay forwards to this run")
     }
 
+    /// What the crashed run's helper still holds: the relay on `:53`, forwarding to that run's forwarder port, which `:53` makes silent.
+    private func leaveACrashedRunsRelay(_ harness: AppStateHarness, target: DNSRelayTargetVerdict) {
+        harness.machine.leaveRelayRunning(targetPort: 53_531)
+        harness.machine.relayTarget = target
+    }
+
+    private func launchRecoveryEvent(_ harness: AppStateHarness, surface: PlatformSurface) -> String? {
+        harness.hostEventsText.split(separator: "\n").last {
+            $0.contains("platform.launch_recovery_") && $0.contains("surface=\(surface.rawValue)")
+        }.map(String.init)
+    }
+
+    /// The crash #201 is about, with a helper that has the witness: its relay's target refuses, so the next launch puts the user's
+    /// DNS back on its own and stops the orphaned relay. No notice, nothing to click.
+    func testACrashedRunsSystemDNSIsRestoredAtLaunchWhenTheHelperFindsItsRelayTargetRefused() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        leaveACrashedRunsDNS(harness)
+        leaveACrashedRunsRelay(harness, target: .refused)
+        let state = await harness.ready()
+        await harness.settle("the crashed run's servers are back") { self.wifi.dnsServers == ["192.0.2.1"] }
+        await harness.settle("launch recovery decided") { self.launchRecoveryEvent(harness, surface: .systemDNS) != nil }
+
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+        XCTAssertFalse(harness.machine.dnsRelayRunning, "the orphaned relay is stopped")
+        XCTAssertFalse(state.runtime.systemDNSRecoveryDeclined, "nothing is left for the user to do")
+        XCTAssertEqual(launchRecoveryEvent(harness, surface: .systemDNS)?.contains("evidence=relay_target_refused"), true,
+                       launchRecoveryEvent(harness, surface: .systemDNS) ?? "no event")
+    }
+
+    func testALocationScopedCrashIsRestoredAtLaunchWhenTheHelperFindsItsRelayTargetRefused() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        let locations = try leaveACrashedRunsLocationSettingsBehindASlowListener(harness, kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])])
+        leaveACrashedRunsRelay(harness, target: .refused)
+        let state = await harness.ready()
+        await harness.settle("the crashed run's servers are back") {
+            self.homeService(locations)?.dns["ServerAddresses"] == .list(["192.0.2.1"])
+        }
+        await harness.settle("launch recovery decided") { self.launchRecoveryEvent(harness, surface: .systemDNS) != nil }
+
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+        XCTAssertFalse(harness.machine.dnsRelayRunning, "the orphaned relay is stopped")
+        XCTAssertFalse(state.runtime.systemDNSRecoveryDeclined)
+    }
+
     private func leaveACrashedRunsLocationSettingsBehindASlowListener(_ harness: AppStateHarness, kind: NetworkSettingsKind,
                                                    desired: [String: NetworkSettingValue]) throws -> FakeNetworkLocationStore {
         let locations = NetworkLocationFixture.store()

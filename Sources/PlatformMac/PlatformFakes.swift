@@ -192,6 +192,9 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     private var _services: [String: Service]
     private var _launchdEnvironment: [String: String] = [:]
     private var _dnsRelayRunning = false
+    private var _dnsRelayTargetPort: Int?
+    private var _relayTarget: DNSRelayTargetVerdict?
+    private var _relayStatusFailure: (any Error)?
     private var _refusedScripts: [String] = []
     private var _failingSetenv: Set<String> = []
 
@@ -224,6 +227,24 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
 
     package var dnsRelayRunning: Bool {
         lock.withLock { _dnsRelayRunning }
+    }
+
+    /// What a query to the relay's target finds, as the helper reports it. `nil`, the default, is a helper that predates
+    /// `dns-relay-status`.
+    package var relayTarget: DNSRelayTargetVerdict? {
+        get { lock.withLock { _relayTarget } }
+        set { lock.withLock { _relayTarget = newValue } }
+    }
+
+    /// Thrown by `dnsRelayStatus`, as a helper that cannot be reached would.
+    package var relayStatusFailure: (any Error)? {
+        get { lock.withLock { _relayStatusFailure } }
+        set { lock.withLock { _relayStatusFailure = newValue } }
+    }
+
+    /// The relay a crashed run left in the helper, still forwarding to that run's port.
+    package func leaveRelayRunning(targetPort: Int) {
+        lock.withLock { _dnsRelayRunning = true; _dnsRelayTargetPort = targetPort }
     }
 
     /// Variable names whose `launchctl setenv` fails, as a launchd that
@@ -352,8 +373,15 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
 
     // MARK: PrivilegeClient
 
+    /// The relay's status as a helper with the witness reports it: what a query to its target finds while it runs, `.notRunning`
+    /// otherwise. Without a `relayTarget` the helper predates the witness and reports nothing.
     package func dnsRelayStatus() throws -> DNSRelayStatus? {
-        try privilege.dnsRelayStatus()
+        try lock.withLock {
+            if let _relayStatusFailure { throw _relayStatusFailure }
+            guard let _relayTarget else { return nil }
+            guard _dnsRelayRunning, let _dnsRelayTargetPort else { return .notRunning }
+            return .relaying(targetPort: _dnsRelayTargetPort, target: _relayTarget)
+        }
     }
 
     package func execute(_ operation: PrivilegedOperation, values: [String]) throws {
@@ -385,9 +413,9 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
             guard let domain = values.first else { return }
             try? FileManager.default.removeItem(at: resolverDirectory.appendingPathComponent(domain))
         case .startDNSRelay:
-            lock.withLock { _dnsRelayRunning = true }
+            lock.withLock { _dnsRelayRunning = true; _dnsRelayTargetPort = values.first.flatMap { Int($0) } }
         case .stopDNSRelay:
-            lock.withLock { _dnsRelayRunning = false }
+            lock.withLock { _dnsRelayRunning = false; _dnsRelayTargetPort = nil }
         case .startTCPRelay, .stopTCPRelay, .ping:
             break
         case .applySystemProxy, .clearSystemProxy, .setProxyBypass, .setAutoproxyURL,
