@@ -575,7 +575,7 @@ package final class ConnectionPool: @unchecked Sendable {
 
     private static let silenceDetail = ConnectionPoolError.upstreamResponseTimedOut.displayDescription
 
-    private enum SilenceCheckStart { case alreadyRanked, probe(owns: Bool) }
+    private enum SilenceCheckStart { case silenceStands, probe(owns: Bool) }
 
     /// A standing ranking is decisive at once, so a ladder step's check costs R, not R plus the probe budget.
     private func judgeSilentHealthCheck(
@@ -587,7 +587,9 @@ package final class ConnectionPool: @unchecked Sendable {
         }
         guard case .probe(let owns) = beginHealthCheckSilenceCheck(of: proxy) else { return unhealthy(.upstreamSilent(detail: detail)) }
         let outcome = await probeLiveness(of: proxy)
-        if owns { finishSilenceCheck(of: proxy, outcome) }
+        if owns, finishSilenceCheck(of: proxy, outcome) == .superseded {
+            return unhealthy(.answerTimedOut(detail: "\(detail); an exchange answered while the liveness probe ran"))
+        }
         let ignoresProbe = lock.withLock { breakers[proxy.id]?.probeSupport == .ignores }
         switch outcome {
         case .refused:
@@ -614,16 +616,19 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
+    /// A silent `HEAD` on a half-open upstream was its half-open probe, and fails it as a silent exchange does.
     private func beginHealthCheckSilenceCheck(of proxy: UpstreamProxy) -> SilenceCheckStart {
-        let (start, consecutive): (SilenceCheckStart, Int) = lock.withLock {
+        let (start, consecutive, halfOpen): (SilenceCheckStart, Int, Bool) = lock.withLock {
             syncUpstreamStatesLocked(with: configProvider().enabledUpstreams)
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
-            if breaker.ranksBehind(at: Date()) { return (.alreadyRanked, 0) }
+            let halfOpen = breaker.state == .halfOpen
+            if breaker.silenceStands { return (.silenceStands, 0, halfOpen) }
             let owns = breaker.beginSilenceCheck()
             breakers[proxy.id] = breaker
-            return (.probe(owns: owns), breaker.silences.consecutive)
+            return (.probe(owns: owns), breaker.silences.consecutive, halfOpen)
         }
-        if case .probe = start { publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "health_check") }
+        if halfOpen { failHalfOpenProbe(for: proxy) }
+        if case .probe(owns: true) = start { publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "health_check") }
         return start
     }
 
@@ -1382,8 +1387,10 @@ package final class ConnectionPool: @unchecked Sendable {
     private func discoverProbeSupport(of proxy: UpstreamProxy) {
         probeLiveness(of: proxy).whenSuccess { [weak self] outcome in
             guard let self else { return }
+            let proxies = self.configProvider().enabledUpstreams
             let support: UpstreamCircuitBreaker.ProbeSupport? = self.lock.withLock {
-                guard var breaker = self.breakers[proxy.id] else { return nil }
+                self.syncUpstreamStatesLocked(with: proxies)
+                guard var breaker = self.breakers[proxy.id], self.upstreamIdentities[proxy.id]?.endpoint == proxy.endpoint else { return nil }
                 breaker.recordDiscovery(outcome)
                 self.breakers[proxy.id] = breaker
                 return breaker.probeSupport
@@ -1481,6 +1488,7 @@ package final class ConnectionPool: @unchecked Sendable {
         ).flatMap { connection in
             let probe = LivenessProbeHandler(answerBudget: budget, settled: connection.channel.eventLoop.makePromise())
             return connection.channel.pipeline.addHandler(probe)
+                .recover { _ in probe.settle(.unasked) }
                 .flatMap { probe.outcome }
                 .always { _ in connection.channel.close(mode: .all, promise: nil) }
         }.flatMapErrorThrowing { error in
@@ -1502,7 +1510,10 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    private func finishSilenceCheck(of proxy: UpstreamProxy, _ outcome: UpstreamCircuitBreaker.SilenceCheckOutcome) {
+    @discardableResult
+    private func finishSilenceCheck(
+        of proxy: UpstreamProxy, _ outcome: UpstreamCircuitBreaker.SilenceCheckOutcome
+    ) -> UpstreamCircuitBreaker.SilenceCheckVerdict {
         let config = configProvider()
         let thresholds = breakerThresholds(from: config)
         let interval = thresholds.baseOpenInterval
@@ -1535,6 +1546,7 @@ package final class ConnectionPool: @unchecked Sendable {
             logger.log(.notice, "Upstream \(proxy.name) stopped answering; preferring upstreams that answer: \(event.detail ?? "")", category: .proxy)
         }
         if let strike { emitTransition(strike, for: proxy) }
+        return verdict
     }
 
     private func failHalfOpenProbe(for proxy: UpstreamProxy) { recordFailure(for: proxy, onlyWhenHalfOpen: true) }
@@ -2398,10 +2410,10 @@ private final class LivenessProbeHandler: ChannelInboundHandler, @unchecked Send
 
     func handlerAdded(context: ChannelHandlerContext) {
         guard context.channel.isActive else { return settle(.closed) }
+        timer = context.eventLoop.scheduleTask(in: answerBudget) { [weak self] in self?.settle(.silent) }
         context.write(wrapOutboundOut(.head(ConnectionPool.livenessProbeRequest)), promise: nil)
         sentAt = .now()
         context.writeAndFlush(wrapOutboundOut(.end(nil))).whenFailure { [weak self] _ in self?.settle(.closed) }
-        timer = context.eventLoop.scheduleTask(in: answerBudget) { [weak self] in self?.settle(.silent) }
     }
 
     func handlerRemoved(context: ChannelHandlerContext) {
@@ -2423,7 +2435,7 @@ private final class LivenessProbeHandler: ChannelInboundHandler, @unchecked Send
         context.close(promise: nil)
     }
 
-    private func settle(_ outcome: UpstreamCircuitBreaker.SilenceCheckOutcome) {
+    func settle(_ outcome: UpstreamCircuitBreaker.SilenceCheckOutcome) {
         guard !done else { return }
         done = true
         timer?.cancel()

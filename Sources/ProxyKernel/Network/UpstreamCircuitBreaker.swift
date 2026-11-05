@@ -74,6 +74,9 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         case none
         case checking(superseded: Bool)
         case ranksBehind(until: Date)
+        /// The ranking's interval ran out with no answer since: selection no longer ranks the upstream
+        /// behind, but its silence stands until it answers.
+        case lapsed
     }
 
     package enum ProbeSupport: Equatable, Sendable { case unknown, discovering, answers, ignores }
@@ -295,12 +298,15 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
 
     package mutating func endRankingIfDue(now: Date) -> Bool {
         guard case .ranksBehind(let until) = silence, until <= now else { return false }
-        silence = .none
+        silence = .lapsed
         return true
     }
 
+    /// Found silent to its own request and nothing answered since, whether or not selection still ranks it behind.
+    package var silenceStands: Bool { ranksBehind || silence == .lapsed }
+
     private mutating func endRanking() {
-        if ranksBehind { silence = .none }
+        if silenceStands { silence = .none }
     }
 
     private mutating func supersedeSilence() {
@@ -318,7 +324,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
     }
 
     package mutating func beginSilenceCheck() -> Bool {
-        guard state == .closed, silence == .none else { return false }
+        guard state == .closed, silence == .none || silence == .lapsed else { return false }
         silence = .checking(superseded: false)
         return true
     }

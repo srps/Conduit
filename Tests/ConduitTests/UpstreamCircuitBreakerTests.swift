@@ -434,6 +434,31 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         XCTAssertFalse(ranked.beginSilenceCheck(), "a ranked upstream is not asked again")
     }
 
+    func testARankingThatLapsesWithoutAnAnswerKeepsTheSilenceStanding() {
+        var breaker = decisivelySilent()
+        let now = Date()
+        XCTAssertEqual(breaker.finishSilenceCheck(.silent, now: now, interval: 30), .rankedBehind)
+        XCTAssertTrue(breaker.silenceStands)
+
+        XCTAssertTrue(breaker.endRankingIfDue(now: now.addingTimeInterval(30)))
+
+        XCTAssertEqual(breaker.silence, .lapsed)
+        XCTAssertFalse(breaker.ranksBehind(at: now.addingTimeInterval(30)), "selection competes for it again")
+        XCTAssertTrue(breaker.silenceStands, "nothing answered since the probe found it silent")
+        XCTAssertTrue(breaker.beginSilenceCheck(), "the data path may ask it again")
+        XCTAssertEqual(breaker.finishSilenceCheck(.silent, now: now.addingTimeInterval(31), interval: 30), .rankedBehind)
+
+        breaker.recordSuccess(latencyMS: 4)
+        XCTAssertEqual(breaker.silence, .none)
+        XCTAssertFalse(breaker.silenceStands, "an answer ends it")
+
+        var lapsed = decisivelySilent()
+        XCTAssertEqual(lapsed.finishSilenceCheck(.silent, now: now, interval: 30), .rankedBehind)
+        XCTAssertTrue(lapsed.endRankingIfDue(now: now.addingTimeInterval(30)))
+        lapsed.reset(reason: .vpnFlapRecovered, baseOpenInterval: 30)
+        XCTAssertEqual(lapsed.silence, .none, "a reset ends it too")
+    }
+
     func testASilentOrRefusedCheckRanksTheUpstreamBehindForTheInterval() {
         for outcome in [UpstreamCircuitBreaker.SilenceCheckOutcome.silent, .refused] {
             var breaker = decisivelySilent()

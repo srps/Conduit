@@ -174,6 +174,90 @@ final class UpstreamSilenceTests: XCTestCase {
         try await upstream.close()
     }
 
+    func testAHealthCheckOnAnUpstreamWhoseRankingLapsedWithoutAnAnswerIsDecisiveWithoutAnotherProbe() async throws {
+        let upstream = try await CountingUpstream.start(answers: .max)
+        let events = Events()
+        var config = Self.config(upstreams: [upstream.proxy(named: "a")])
+        config.circuitBaseOpenIntervalSeconds = 0
+        let pool = makePool(config: NIOLockedValueBox(config), events: events)
+        let first = await pool.healthCheck(urlString: "http://check.test/")
+        XCTAssertTrue(first.healthy, first.summary)
+        _ = await Self.eventually { !events.details("upstream.liveness_discovered").isEmpty }
+        upstream.stopAnsweringOnEveryConnection()
+
+        let second = await pool.healthCheck(urlString: "http://check.test/")
+        guard case .upstreamSilent? = second.failure else {
+            return XCTFail("the probe found it silent, got \(String(describing: second.failure))")
+        }
+        let probesSoFar = upstream.optionsRequests
+        let third = await pool.healthCheck(urlString: "http://check.test/")
+
+        guard case .upstreamSilent? = third.failure else {
+            return XCTFail("its silence stands until it answers, got \(String(describing: third.failure))")
+        }
+        XCTAssertEqual(upstream.optionsRequests, probesSoFar, "a standing silence is not probed again")
+        XCTAssertEqual(events.details("upstream.deprioritized").count, 1)
+        XCTAssertTrue(events.details("upstream.reprioritized").first?.contains(" reason=interval_elapsed") == true,
+                      "the ranking lapsed before the third check's HEAD timed out: \(events.details("upstream.reprioritized"))")
+        pool.closeAll()
+        try await upstream.close()
+    }
+
+    func testAHealthCheckWhoseProbeIsOutlivedByAnAnswerIsHeldNotDecisive() async throws {
+        let upstream = try await CountingUpstream.start(answers: .max, probes: .ignored) { $0.contains("check.test") }
+        let events = Events()
+        var config = Self.config(upstreams: [upstream.proxy(named: "a")])
+        config.upstreamResponseTimeoutSeconds = 0.5
+        let pool = makePool(config: NIOLockedValueBox(config), events: events)
+
+        async let check = pool.healthCheck(urlString: "http://check.test/")
+        let probed = await Self.eventually { upstream.optionsRequests == 1 }
+        XCTAssertTrue(probed, "the silent HEAD asked the probe")
+        _ = try await pool.exchange(head: Self.head(path: "/fast"), body: nil).get()
+        let result = await check
+
+        guard case .answerTimedOut? = result.failure else {
+            return XCTFail("an answer while the probe ran is the newer evidence, got \(String(describing: result.failure))")
+        }
+        XCTAssertTrue(events.details("upstream.silence_check_finished").first?.contains(" verdict=superseded") == true,
+                      events.details("upstream.silence_check_finished").first ?? "none")
+        XCTAssertEqual(events.details("upstream.deprioritized"), [])
+        pool.closeAll()
+        try await upstream.close()
+    }
+
+    func testAHealthCheckSilentOnAHalfOpenUpstreamFailsItsHalfOpenProbe() async throws {
+        let released = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton).bind(host: "127.0.0.1", port: 0).get()
+        let refusedPort = try XCTUnwrap(released.localAddress?.port)
+        try await released.close().get()
+        let upstream = try await CountingUpstream.start(answers: 0)
+        let events = Events()
+        var config = Self.config(upstreams: [UpstreamProxy(name: "a", host: "127.0.0.1", port: refusedPort, priority: 0)])
+        config.circuitFailureThreshold = 2
+        config.circuitBreakerWindowSeconds = 0
+        let current = NIOLockedValueBox(config)
+        let pool = makePool(config: current, events: events)
+        for _ in 0..<2 {
+            let refused = await pool.healthCheck(urlString: "http://check.test/")
+            XCTAssertFalse(refused.healthy)
+        }
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open)
+        let openedByRefusals = events.details("upstream.circuit_opened").count
+        current.withLockedValue { $0.upstreams[0].port = upstream.port }
+
+        let silent = await pool.healthCheck(urlString: "http://check.test/")
+
+        guard case .answerTimedOut? = silent.failure else {
+            return XCTFail("the upstream answered the probe, so only the origin was silent; got \(String(describing: silent.failure))")
+        }
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open, "the silent HEAD was the half-open probe, and failed it")
+        XCTAssertEqual(events.details("upstream.circuit_opened").count, openedByRefusals + 1)
+        XCTAssertTrue(events.details("upstream.circuit_opened").last?.contains(" reason=probe_failed ") == true,
+                      events.details("upstream.circuit_opened").last ?? "none")
+        pool.closeAll()
+        try await upstream.close()
+    }
+
     func testTwoConcurrentSlowRequestsBehindAHealthyPrimaryLeaveItServing() async throws {
         let primary = try await CountingUpstream.start(answers: .max) { $0.contains("/slow") }
         let secondary = try await CountingUpstream.start(answers: .max)
