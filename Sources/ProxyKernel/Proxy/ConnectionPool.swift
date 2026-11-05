@@ -1128,25 +1128,21 @@ package final class ConnectionPool: @unchecked Sendable {
         guard !proxies.isEmpty else { return nil }
         let result: (proxy: UpstreamProxy?, pending: [PendingTransitionEmission]) = lock.withLock {
             syncUpstreamStatesLocked(with: proxies)
-            let outcome = selectableProxiesLocked(from: proxies, now: .now)
+            let now = Date.now
+            let outcome = selectableProxiesLocked(from: proxies, now: now)
             guard !outcome.candidates.isEmpty else {
                 let index = min(preferredProxyIndex, max(0, proxies.count - 1))
                 return (proxies[index], outcome.pendingEmissions)
             }
             let selected = chooseProxyLocked(from: outcome.candidates)
+            var pending = outcome.pendingEmissions
+            if let claimed = claimProbeLocked(for: selected, now: now) { pending.append(claimed) }
             lastSelectedUpstreamID = selected.id
             if let selectedIndex = proxies.firstIndex(where: { $0.id == selected.id }) {
                 preferredProxyIndex = selectedIndex
             }
-            return (selected, outcome.pendingEmissions)
+            return (selected, pending)
         }
-        // Emit transitions OUTSIDE the lock. selectableProxiesLocked may
-        // promote a breaker to half-open via tryHalfOpen / forceHalfOpen,
-        // but the resulting `RuntimeEvent` + `logger.log(.notice, ...)` calls
-        // must NOT re-acquire the pool lock — emitTransition's identity-
-        // lookup variant takes the lock, which would deadlock under NIOLock
-        // (non-recursive). Pre-lock-release emit was the source of the
-        // pthread_mutex EAGAIN crash observed in `pm-sim upstream-flap`.
         for emission in result.pending {
             publishEmission(emission)
         }
@@ -1352,25 +1348,44 @@ package final class ConnectionPool: @unchecked Sendable {
     private func recordSilence(for proxy: UpstreamProxy, origin: ExchangeOrigin) {
         let config = configProvider()
         let thresholds = breakerThresholds(from: config)
-        let counted: (origins: [ExchangeOrigin], transition: UpstreamCircuitBreaker.Transition?)? = lock.withLock {
+        enum Outcome {
+            case probeReleased
+            case counted(origins: [ExchangeOrigin], transition: UpstreamCircuitBreaker.Transition?)
+        }
+        let outcome: Outcome? = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
             guard namesCurrentEndpointLocked(proxy) else { return nil }
             var ledger = silences[proxy.id] ?? UpstreamSilences()
             let counts = ledger.recordSilence(origin: origin)
             silences[proxy.id] = ledger
-            guard counts else { return nil }
-            return (ledger.origins, recordFailureLocked(for: proxy, thresholds: thresholds))
+            var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
+            guard counts else {
+                guard breaker.releaseHalfOpenProbe() else { return nil }
+                breakers[proxy.id] = breaker
+                return .probeReleased
+            }
+            guard breaker.state != .open else { return nil }
+            return .counted(origins: ledger.origins, transition: recordFailureLocked(for: proxy, thresholds: thresholds))
         }
-        guard let counted else { return }
-        let origins = counted.origins.map(\.description)
-        let event = RuntimeEvent(
-            kind: .health, event: "upstream.silence_counted",
-            detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) origin=\(origin) origins=\(origins.joined(separator: ","))"
-        )
-        eventSink?(event)
-        logger.log(.notice, "Upstream \(proxy.name) answered nothing for \(origins.count) origins (\(origins.joined(separator: ", "))); counting the silence as a failure.", category: .network)
-        if let transition = counted.transition {
-            emitTransition(transition, for: proxy)
+        switch outcome {
+        case nil:
+            return
+        case .probeReleased:
+            eventSink?(RuntimeEvent(
+                kind: .health, event: "upstream.probe_released",
+                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) origin=\(origin)"
+            ))
+            logger.log(.info, "Upstream \(proxy.name)'s half-open probe met only a silence from \(origin); the next request probes again.", category: .network)
+        case let .counted(counted, transition):
+            let origins = counted.map(\.description)
+            eventSink?(RuntimeEvent(
+                kind: .health, event: "upstream.silence_counted",
+                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) origin=\(origin) origins=\(origins.joined(separator: ","))"
+            ))
+            logger.log(.notice, "Upstream \(proxy.name) answered nothing for \(origins.count) origins (\(origins.joined(separator: ", "))); counting the silence as a failure.", category: .network)
+            if let transition {
+                emitTransition(transition, for: proxy)
+            }
         }
     }
 
@@ -1474,34 +1489,14 @@ package final class ConnectionPool: @unchecked Sendable {
         var pending: [PendingTransitionEmission] = []
 
         for proxy in proxies {
-            var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
-            switch breaker.state {
-            case .closed:
+            let breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
+            if breaker.state == .closed || breaker.mayProbe(now: now) {
                 candidates.append(proxy)
-            case .open:
-                if let transition = breaker.tryHalfOpen(now: now) {
-                    // Backoff elapsed and probe slot was free — emit and
-                    // promote into candidates so the very next request
-                    // becomes the probe.
-                    pending.append(PendingTransitionEmission(transition: transition, name: proxy.name, endpoint: proxy.endpoint))
-                    breakers[proxy.id] = breaker
-                    candidates.append(proxy)
-                } else {
-                    let openedAt = breaker.lastOpenedAt ?? .distantFuture
-                    if openedAt < fallbackOpenedAt {
-                        fallback = proxy
-                        fallbackOpenedAt = openedAt
-                    }
-                }
-            case .halfOpen:
-                if !breaker.halfOpenProbeInFlight {
-                    // Defensive: half-open with no probe in flight is
-                    // unreachable in normal operation (every entry to
-                    // `.halfOpen` arms the slot via `tryHalfOpen`). Still
-                    // surface the upstream to the selection round so a
-                    // stuck pool can recover; the next recordSuccess /
-                    // recordFailure will re-anchor the breaker.
-                    candidates.append(proxy)
+            } else if breaker.state == .open {
+                let openedAt = breaker.lastOpenedAt ?? .distantFuture
+                if openedAt < fallbackOpenedAt {
+                    fallback = proxy
+                    fallbackOpenedAt = openedAt
                 }
             }
         }
@@ -1521,6 +1516,14 @@ package final class ConnectionPool: @unchecked Sendable {
         }
 
         return SelectableProxiesOutcome(candidates: candidates, pendingEmissions: pending)
+    }
+
+    private func claimProbeLocked(for selected: UpstreamProxy, now: Date) -> PendingTransitionEmission? {
+        var breaker = breakers[selected.id] ?? UpstreamCircuitBreaker()
+        defer { breakers[selected.id] = breaker }
+        return breaker.claimProbe(now: now).map {
+            PendingTransitionEmission(transition: $0, name: selected.name, endpoint: selected.endpoint)
+        }
     }
 
     private func chooseProxyLocked(from proxies: [UpstreamProxy]) -> UpstreamProxy {

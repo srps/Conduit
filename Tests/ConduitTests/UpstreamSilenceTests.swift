@@ -309,6 +309,84 @@ final class UpstreamSilenceTests: XCTestCase {
         XCTAssertEqual(counted().first?.hasSuffix("origins=a.test:80,check.test:80"), true, counted().description)
     }
 
+    private func tripOnAnAnswerAndWaitForTheProbe(_ pool: ConnectionPool) async throws {
+        config.withLockedValue { $0.circuitBaseOpenIntervalSeconds = 0.2; $0.circuitMaxOpenIntervalSeconds = 0.4 }
+        let coordinator = CONNECTCoordinator(pool: pool, authenticatorProvider: { _ in Self.authenticator() }, logger: DiscardingLogSink())
+        do {
+            _ = try await coordinator.connectUpstreamTunnel(target: "x.test:443", proxyChain: [proxy]).get()
+            XCTFail("the upstream answers the CONNECT with a 502")
+        } catch {
+            XCTAssertTrue(ConnectionPoolError.isUpstreamAnswer(error), "\(error)")
+        }
+        XCTAssertEqual(status(pool)?.circuitState, .open, "the 502 trips with an empty ledger")
+        try await Task.sleep(for: .milliseconds(300))
+    }
+
+    private func released() -> [String] {
+        events.withLockedValue { $0 }.filter { $0.event == "upstream.probe_released" }.compactMap(\.detail)
+    }
+
+    func testAProbeThatMeetsOnlyASlowOriginLeavesTheUpstreamSelectable() async throws {
+        let subject = try await startUpstream { _, line in line.hasPrefix("CONNECT ") ? .status(502) : (line.contains("/slow") ? .silent : .ok) }
+        let other = try await startUpstream { _, _ in .ok }
+        let pool = makePool(port: subject.port)
+        defer { pool.closeAll() }
+        await assertAnswered(exchange(pool, "http://warm.test/warm"))
+        try await tripOnAnAnswerAndWaitForTheProbe(pool)
+
+        assertTimedOut(await exchange(pool, "http://slow.test/slow"), "the half-open probe lands on a slow origin")
+        XCTAssertEqual(status(pool)?.circuitState, .halfOpen, "one slow origin neither closes nor reopens the breaker")
+        XCTAssertEqual(released(), ["upstream=quiet endpoint=127.0.0.1:\(subject.port) origin=slow.test:80"])
+        XCTAssertEqual(counted(), [])
+
+        config.withLockedValue { $0.upstreams.append(UpstreamProxy(name: "other", host: "127.0.0.1", port: other.port, priority: 1)) }
+        for index in 0..<12 {
+            _ = await exchange(pool, "http://fast.test/ok\(index)")
+        }
+        XCTAssertGreaterThan(subject.requestLines.filter { $0.contains("/ok") }.count, 0, "the released slot let a later request probe the upstream")
+        XCTAssertEqual(status(pool)?.circuitState, .closed, "that probe was answered")
+    }
+
+    func testSilenceOnTwoOriginsDuringHalfOpenStillReopensTheBreaker() async throws {
+        let subject = try await startUpstream { _, line in line.hasPrefix("CONNECT ") ? .status(502) : .silent }
+        let pool = makePool(port: subject.port)
+        defer { pool.closeAll() }
+        try await tripOnAnAnswerAndWaitForTheProbe(pool)
+
+        assertTimedOut(await exchange(pool, "http://a.test/"))
+        XCTAssertEqual(status(pool)?.circuitState, .halfOpen, "a.test alone is pending")
+        assertTimedOut(await exchange(pool, "http://b.test/"))
+        XCTAssertEqual(status(pool)?.circuitState, .open, "silence on a second origin is the probe's failure")
+        XCTAssertEqual(released().count, 1)
+        XCTAssertEqual(counted().first?.hasSuffix("origins=a.test:80,b.test:80"), true, counted().description)
+        XCTAssertEqual(
+            events.withLockedValue { $0 }.filter { $0.event == "upstream.circuit_opened" }.last?.detail?.contains("reason=probe_failed"), true
+        )
+    }
+
+    func testAnUpstreamThatLosesTheLatencyDuelIsNotLeftHoldingTheProbe() async throws {
+        let subject = try await startUpstream { _, line in line.hasPrefix("CONNECT ") ? .status(502) : .ok }
+        let otherFallsSilent = NIOLockedValueBox(false)
+        let other = try await startUpstream { _, _ in otherFallsSilent.withLockedValue { $0 } ? .silent : .ok }
+        let pool = makePool(port: other.port)
+        defer { pool.closeAll() }
+        await assertAnswered(exchange(pool, "http://warm.test/"), "gives the other upstream a measured latency")
+        config.withLockedValue { $0.upstreams.insert(UpstreamProxy(name: "subject", host: "127.0.0.1", port: subject.port, priority: 0), at: 0) }
+        try await tripOnAnAnswerAndWaitForTheProbe(pool)
+
+        await assertAnswered(exchange(pool, "http://fast.test/first"))
+        XCTAssertEqual(subject.requestLines.filter { $0.hasPrefix("GET ") }, [], "the upstream with a measured latency wins the duel")
+        XCTAssertEqual(status(pool)?.circuitState, .open, "the loser took no probe slot")
+        XCTAssertEqual(events.withLockedValue { $0 }.filter { $0.event == "upstream.circuit_half_opened" }.count, 0)
+
+        otherFallsSilent.withLockedValue { $0 = true }
+        assertTimedOut(await exchange(pool, "http://a.test/"))
+        assertTimedOut(await exchange(pool, "http://b.test/"), "trips the other upstream")
+        await assertAnswered(exchange(pool, "http://fast.test/second"), "the duel's loser carries the probe")
+        XCTAssertEqual(subject.requestLines.filter { $0.hasPrefix("GET ") }.count, 1)
+        XCTAssertEqual(status(pool)?.circuitState, .closed)
+    }
+
     // MARK: - The ledger's lifetime
 
     func testDisablingAndReEnablingAnUpstreamDropsItsPendingSilences() async throws {

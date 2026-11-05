@@ -51,7 +51,11 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   as before. A health check
   that gets no answer on an idle pooled connection asks once more on a fresh
   one, and only that silence counts. Each counted silence is an
-  `upstream.silence_counted` event. Disabling and re-enabling an upstream, or
+  `upstream.silence_counted` event. A half-open probe that meets one slow
+  origin frees its slot without a verdict (`upstream.probe_released`), so
+  the next request probes again, and an upstream whose backoff ended but
+  that lost the latency comparison stays eligible instead of waiting on a
+  probe that never went out. Disabling and re-enabling an upstream, or
   editing its endpoint, drops its pending silences, and an idle connection to
   the old endpoint is never reused for the new one.
 

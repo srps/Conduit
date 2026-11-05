@@ -19,7 +19,7 @@ import Foundation
 /// Design invariants (all verified by `UpstreamCircuitBreakerTests`):
 ///
 ///   * `state` only changes inside `recordFailure`, `recordSuccess`,
-///     `tryHalfOpen`, or `reset`. The breaker has no implicit time-driven
+///     `claimProbe`, or `reset`. The breaker has no implicit time-driven
 ///     transitions; the caller drives the clock by passing `now:` at every
 ///     mutation. This keeps the structure deterministic for tests and
 ///     simulator scenarios.
@@ -232,20 +232,34 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         return .opened(reason: openReason, consecutiveFailures: triggeringFailureCount, openInterval: appliedInterval)
     }
 
-    /// Try to transition `.open → .halfOpen`. Succeeds if `openUntil` has
-    /// elapsed and no probe is currently in flight. Sets
-    /// `halfOpenProbeInFlight = true` so concurrent attempts return `nil`.
-    @discardableResult
-    package mutating func tryHalfOpen(now: Date) -> Transition? {
-        guard state == .open else { return nil }
-        guard let openUntil, openUntil <= now else { return nil }
-        guard !halfOpenProbeInFlight else { return nil }
+    package func mayProbe(now: Date) -> Bool {
+        guard !halfOpenProbeInFlight else { return false }
+        switch state {
+        case .closed: return false
+        case .halfOpen: return true
+        case .open: return openUntil.map { $0 <= now } ?? false
+        }
+    }
 
-        let elapsed = now.timeIntervalSince(lastOpenedAt ?? openUntil)
+    @discardableResult
+    package mutating func claimProbe(now: Date) -> Transition? {
+        guard mayProbe(now: now) else { return nil }
+        guard state == .open else {
+            halfOpenProbeInFlight = true
+            return nil
+        }
+
+        let elapsed = now.timeIntervalSince(lastOpenedAt ?? openUntil ?? now)
         state = .halfOpen
         halfOpenProbeInFlight = true
-        self.openUntil = nil
+        openUntil = nil
         return .halfOpened(elapsedSeconds: elapsed)
+    }
+
+    package mutating func releaseHalfOpenProbe() -> Bool {
+        guard state == .halfOpen, halfOpenProbeInFlight else { return false }
+        halfOpenProbeInFlight = false
+        return true
     }
 
     /// Force `.open → .halfOpen` regardless of whether `openUntil` has
