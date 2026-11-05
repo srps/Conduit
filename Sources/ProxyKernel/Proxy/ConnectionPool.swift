@@ -550,8 +550,10 @@ package final class ConnectionPool: @unchecked Sendable {
         let outcome = await attemptBufferedExchange(
             head: head, requestBody: nil, proxy: proxy, allowRetry: true, preferFreshConnection: false, authSource: nil, connectTimeout: connectTimeout
         ).outcome()
-        guard case .silent(let idled) = outcome else { return Self.healthResult(outcome, since: start) }
-        return await judgeSilentHealthCheck(head: head, via: proxy, idled: idled, connectTimeout: connectTimeout, since: start)
+        guard case .silent(let ranOnAnIdledConnection) = outcome else { return Self.healthResult(outcome, since: start) }
+        return await judgeSilentHealthCheck(
+            head: head, via: proxy, ranOnAnIdledConnection: ranOnAnIdledConnection, connectTimeout: connectTimeout, since: start
+        )
     }
 
     private static func healthResult(_ outcome: ExchangeOutcome, since start: Date) -> HealthCheckResult {
@@ -575,12 +577,9 @@ package final class ConnectionPool: @unchecked Sendable {
 
     private enum SilenceCheckStart { case alreadyRanked, probe(owns: Bool) }
 
-    /// A health check that connected and got nothing. A ranking the pool already holds is decisive at
-    /// once; otherwise one liveness probe says whether the upstream itself is silent (conclusive) or only
-    /// the check URL's origin is slow. A probe an idle pooled socket's silence led to is followed by one
-    /// fresh check, since a socket can die without a word.
+    /// A standing ranking is decisive at once, so a ladder step's check costs R, not R plus the probe budget.
     private func judgeSilentHealthCheck(
-        head: HTTPRequestHead, via proxy: UpstreamProxy, idled: Bool, connectTimeout: TimeAmount, since start: Date
+        head: HTTPRequestHead, via proxy: UpstreamProxy, ranOnAnIdledConnection: Bool, connectTimeout: TimeAmount, since start: Date
     ) async -> HealthCheckResult {
         let detail = Self.silenceDetail
         func unhealthy(_ failure: HealthCheckFailure) -> HealthCheckResult {
@@ -592,14 +591,14 @@ package final class ConnectionPool: @unchecked Sendable {
         let ignoresProbe = lock.withLock { breakers[proxy.id]?.probeSupport == .ignores }
         switch outcome {
         case .refused:
-            return unhealthy(.unreachable(detail: "\(detail); a fresh connect was refused"))
+            return unhealthy(.unreachable(detail: "\(detail); a fresh connect was refused or missed its budget"))
         case .silent where !ignoresProbe:
             let budgetMS = Int(Self.livenessAnswerBudget(configProvider()) * 1_000)
             return unhealthy(.upstreamSilent(detail: "\(detail); the liveness probe unanswered within \(budgetMS) ms"))
         case .silent, .closed, .unasked:
             return unhealthy(.answerTimedOut(detail: detail))
         case .answered(let status, let latencyMS):
-            guard idled else {
+            guard ranOnAnIdledConnection else {
                 return unhealthy(.answerTimedOut(detail: "\(detail); the upstream answered the liveness probe \(status) in \(latencyMS) ms"))
             }
             let event = RuntimeEvent(
@@ -1223,15 +1222,10 @@ package final class ConnectionPool: @unchecked Sendable {
 
     fileprivate enum ExchangeOutcome {
         case answered(UpstreamExchangeResponse)
-        /// Connected and no answer within the response timeout. `idled`: the connection had sat idle in the pool.
-        case silent(idled: Bool)
+        case silent(ranOnAnIdledConnection: Bool)
         case failed(Error)
     }
 
-    /// One exchange via `proxy`, retried once on a fresh connection when an idempotent request's connection
-    /// failed before answering. An answer and a conclusive failure are recorded here, connect failures from
-    /// `acquireConnection` included, so a refused connect feeds the breaker. A silence is the caller's to
-    /// judge: the data path records it, the health check asks the upstream itself.
     private func attemptBufferedExchange(
         head: HTTPRequestHead,
         requestBody: HTTPRequestBody?,
@@ -1268,7 +1262,7 @@ package final class ConnectionPool: @unchecked Sendable {
                 )
             }
             if ConnectionPoolError.failureClass(error) == .inconclusive {
-                return attempt.eventLoop.makeSucceededFuture(.silent(idled: ranOnAnIdledConnection.withLockedValue { $0 }))
+                return attempt.eventLoop.makeSucceededFuture(.silent(ranOnAnIdledConnection: ranOnAnIdledConnection.withLockedValue { $0 }))
             }
             self.recordExchangeFailure(error, for: proxy)
             return attempt.eventLoop.makeSucceededFuture(.failed(error))
@@ -1385,8 +1379,6 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    /// One probe per endpoint, right after its first answered exchange: it was alive, so what it does with
-    /// the probe is what it does. It never touches the silence check.
     private func discoverProbeSupport(of proxy: UpstreamProxy) {
         probeLiveness(of: proxy).whenSuccess { [weak self] outcome in
             guard let self else { return }
@@ -1462,7 +1454,7 @@ package final class ConnectionPool: @unchecked Sendable {
                 + "connect_budget_ms=\(connectBudget.nanoseconds / 1_000_000) budget_ms=\(Int(Self.livenessAnswerBudget(config) * 1_000))"
         )
         eventSink?(event)
-        logger.log(.info, "Upstream \(proxy.name) got nothing out of it; asking whether it answers for itself: \(event.detail ?? "")", category: .proxy)
+        logger.log(.info, "Upstream \(proxy.name) connected and answered nothing; asking it the liveness probe: \(event.detail ?? "")", category: .proxy)
     }
 
     /// RFC 9110 7.6.2: an intermediary that receives OPTIONS with `Max-Forwards: 0` answers it as the final
@@ -1476,15 +1468,12 @@ package final class ConnectionPool: @unchecked Sendable {
         return head
     }()
 
-    /// How long a probe waits for the proxy's own answer: the health check's connect budget, never longer
-    /// than the response timeout.
     static func livenessAnswerBudget(_ config: ProxyConfig) -> TimeInterval {
         max(min(config.health.connectionCheckTimeout, config.upstreamResponseTimeoutSeconds), 0.001)
     }
 
-    /// Ask `proxy` the liveness probe on a fresh connection that is closed afterwards, never pooled. It
-    /// selects nothing and consults no authenticator: a 407 is a status line. The connect budget is the
-    /// data path's, so a slow connect reads as slow, not refused. The future never fails.
+    /// No authenticator is consulted: a 407 is a status line. The connect budget is the data path's, so a
+    /// slow connect reads as slow, not refused.
     private func probeLiveness(of proxy: UpstreamProxy) -> EventLoopFuture<UpstreamCircuitBreaker.SilenceCheckOutcome> {
         let budget = TimeAmount.nanoseconds(DurationUnits.runtimeNanoseconds(Self.livenessAnswerBudget(configProvider())))
         return acquireConnection(
@@ -2390,9 +2379,6 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
     }
 }
 
-/// Sends `ConnectionPool.livenessProbeRequest` and settles on the first status line, on a close or an
-/// error before one (the peer acted, so `closed`), or on the answer budget (`silent`). Body parts after
-/// the head are ignored; the pool closes the connection whatever the outcome.
 private final class LivenessProbeHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPClientResponsePart
     typealias OutboundOut = HTTPClientRequestPart
@@ -2446,7 +2432,6 @@ private final class LivenessProbeHandler: ChannelInboundHandler, @unchecked Send
 }
 
 extension EventLoopFuture where Value == ConnectionPool.ExchangeOutcome {
-    /// The outcome, with a future that failed anyway read as a failed exchange.
     func outcome() async -> Value {
         await withCheckedContinuation { continuation in
             whenComplete { result in

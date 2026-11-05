@@ -183,7 +183,7 @@ final class ConnectionPoolConcurrencyTests: XCTestCase {
     /// dials only it.
     private struct HeldFirstResponseUpstream {
         let pool: ConnectionPool
-        let accepted: NIOLockedValueBox<Int>
+        let connectionsCarryingRequests: NIOLockedValueBox<Int>
         let requests: NIOLockedValueBox<[Bool]>
         let firstRequest: EventLoopPromise<Channel>
         /// Fails `firstRequest` after 10 s; the test cancels it when it ends.
@@ -191,7 +191,7 @@ final class ConnectionPoolConcurrencyTests: XCTestCase {
     }
 
     private func heldFirstResponseUpstream() async throws -> HeldFirstResponseUpstream {
-        let accepted = NIOLockedValueBox(0)
+        let connectionsCarryingRequests = NIOLockedValueBox(0)
         let requests = NIOLockedValueBox<[Bool]>([])
         let firstRequest = group.next().makePromise(of: Channel.self)
         // A no-op once the upstream has completed it; otherwise a test that
@@ -201,7 +201,7 @@ final class ConnectionPoolConcurrencyTests: XCTestCase {
             .childChannelInitializer { channel in
                 do {
                     try channel.pipeline.syncOperations.addHandler(
-                        HeldFirstResponseHandler(accepted: accepted, requests: requests, firstRequest: firstRequest)
+                        HeldFirstResponseHandler(connectionsCarryingRequests: connectionsCarryingRequests, requests: requests, firstRequest: firstRequest)
                     )
                     return channel.eventLoop.makeSucceededVoidFuture()
                 } catch {
@@ -222,7 +222,7 @@ final class ConnectionPoolConcurrencyTests: XCTestCase {
         let deadline = group.next().scheduleTask(in: .seconds(10)) {
             firstRequest.fail(PoolFixtureFailure.firstRequestTimedOut)
         }
-        return HeldFirstResponseUpstream(pool: pool, accepted: accepted, requests: requests,
+        return HeldFirstResponseUpstream(pool: pool, connectionsCarryingRequests: connectionsCarryingRequests, requests: requests,
                                          firstRequest: firstRequest, deadline: deadline)
     }
 
@@ -241,18 +241,21 @@ final class ConnectionPoolConcurrencyTests: XCTestCase {
     ) async throws {
         let seen = upstream.requests.withLockedValue { $0 }
         XCTAssertEqual(seen.count, 2, file: file, line: line)
-        XCTAssertEqual(upstream.accepted.withLockedValue { $0 }, 1,
+        XCTAssertEqual(upstream.connectionsCarryingRequests.withLockedValue { $0 }, 1,
                        "the second request reuses the first connection; the pool's liveness probe has a connection of its own", file: file, line: line)
         XCTAssertTrue(seen.allSatisfy { $0 }, "both requests carry credentials", file: file, line: line)
 
-        // The liveness probe that followed the first answer closes its own connection once answered.
-        for _ in 0..<200 where upstream.pool.allConnectionSnapshot.count > 1 { try await Task.sleep(for: .milliseconds(10)) }
+        try await untilTheProbeConnectionHasClosed(upstream.pool)
         let connections = upstream.pool.allConnectionSnapshot
         XCTAssertEqual(upstream.pool.closeAll(), 1, file: file, line: line)
         for connection in connections {
             connection.channel.close(mode: .all, promise: nil)
             try await connection.channel.closeFuture.get()
         }
+    }
+
+    private func untilTheProbeConnectionHasClosed(_ pool: ConnectionPool) async throws {
+        for _ in 0..<200 where pool.allConnectionSnapshot.count > 1 { try await Task.sleep(for: .milliseconds(10)) }
     }
 
     /// Drains what one streaming exchange forwarded to `client`: the
@@ -330,15 +333,14 @@ private final class HeldFirstResponseHandler: ChannelInboundHandler {
     static let ok = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
     static let forbidden = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 
-    /// Connections that carried a request; the pool's liveness probe (an OPTIONS) is not one.
-    private let accepted: NIOLockedValueBox<Int>
+    private let connectionsCarryingRequests: NIOLockedValueBox<Int>
     private let requests: NIOLockedValueBox<[Bool]>
     private let firstRequest: EventLoopPromise<Channel>
     private var received = ""
     private var carriedARequest = false
 
-    init(accepted: NIOLockedValueBox<Int>, requests: NIOLockedValueBox<[Bool]>, firstRequest: EventLoopPromise<Channel>) {
-        self.accepted = accepted
+    init(connectionsCarryingRequests: NIOLockedValueBox<Int>, requests: NIOLockedValueBox<[Bool]>, firstRequest: EventLoopPromise<Channel>) {
+        self.connectionsCarryingRequests = connectionsCarryingRequests
         self.requests = requests
         self.firstRequest = firstRequest
     }
@@ -360,7 +362,7 @@ private final class HeldFirstResponseHandler: ChannelInboundHandler {
             guard head.hasPrefix("GET ") else { continue }
             if !carriedARequest {
                 carriedARequest = true
-                accepted.withLockedValue { $0 += 1 }
+                connectionsCarryingRequests.withLockedValue { $0 += 1 }
             }
             let count = requests.withLockedValue { requests in
                 guard requests.count < 3 else { return requests.count }

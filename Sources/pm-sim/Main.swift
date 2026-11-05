@@ -459,10 +459,10 @@ enum PMSim {
             return [try await UpstreamFlapScenarios.upstreamFlap(verbose: verbose)]
         case "upstream-silent-failover":
             return [try await SilentUpstreamScenarios.silentFailover(
-                name: "upstream-silent-failover", responseTimeout: 0.5, checkInterval: 2, mainMeasuredFall: 7.02, verbose: verbose)]
+                name: "upstream-silent-failover", responseTimeout: 0.5, checkInterval: 2, verbose: verbose)]
         case "upstream-silent-failover-slow":
             return [try await SilentUpstreamScenarios.silentFailover(
-                name: "upstream-silent-failover-slow", responseTimeout: 3, checkInterval: 4, mainMeasuredFall: 19.04, verbose: verbose)]
+                name: "upstream-silent-failover-slow", responseTimeout: 3, checkInterval: 4, verbose: verbose)]
         case "upstream-ignores-probe":
             return [try await SilentUpstreamScenarios.ignoresProbe(verbose: verbose)]
         case "upstream-slow-serving":

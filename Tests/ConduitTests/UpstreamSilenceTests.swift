@@ -71,7 +71,7 @@ final class UpstreamSilenceTests: XCTestCase {
         let first = await pool.healthCheck(urlString: "http://check.test/")
         XCTAssertTrue(first.healthy, first.summary)
         _ = await Self.eventually { !events.details("upstream.liveness_discovered").isEmpty }
-        upstream.goSilent()
+        upstream.stopAnsweringOnEveryConnection()
 
         let second = await pool.healthCheck(urlString: "http://check.test/")
 
@@ -253,7 +253,7 @@ final class UpstreamSilenceTests: XCTestCase {
         let served = try await pool.exchange(head: Self.head, body: nil).get()
         XCTAssertEqual(served.upstream.id, first.id, "the primary answered and has a latency")
         _ = await Self.eventually { !events.details("upstream.liveness_discovered").isEmpty }
-        primary.goSilent()
+        primary.stopAnsweringOnEveryConnection()
         current.withLockedValue { $0.upstreams = [first, second] }
 
         for attempt in 1...2 {
@@ -355,9 +355,6 @@ final class UpstreamSilenceTests: XCTestCase {
         func reset() {}
     }
 
-    /// An upstream proxy that answers `answers` requests with 200 and the rest with nothing. It answers
-    /// an OPTIONS request itself with 403, as a forward proxy does, unless it `.ignored` probes; `goSilent`
-    /// stops every answer, OPTIONS included.
     private final class CountingUpstream: @unchecked Sendable {
         enum Probes { case answered, ignored }
 
@@ -421,10 +418,8 @@ final class UpstreamSilenceTests: XCTestCase {
         /// New connects are refused; accepted connections stay open and silent.
         func stopListening() async throws { try await listener?.close().get() }
 
-        /// Nothing is answered any more, the liveness probe included: dead behind an open socket.
-        func goSilent() { behaviour.withLockedValue { $0.alive = false } }
+        func stopAnsweringOnEveryConnection() { behaviour.withLockedValue { $0.alive = false } }
 
-        /// Every connection open now stops answering; new connections answer as before.
         func silenceOpenConnections() {
             let open = children.withLockedValue { $0.filter(\.isActive) }.map(ObjectIdentifier.init)
             behaviour.withLockedValue { $0.silenced.formUnion(open) }

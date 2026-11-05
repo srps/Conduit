@@ -208,8 +208,7 @@ final class InconclusiveTimeoutTests: XCTestCase {
         try await other.close().get()
     }
 
-    /// Answers `200 OK` to as many requests as it has answers left and leaves the rest unanswered. It
-    /// answers an OPTIONS request itself with 403, as a forward proxy does, so only the origin is silent.
+    /// Answers `200 OK` to as many requests as it has answers left and leaves the rest unanswered.
     private final class AnsweringUpstream: @unchecked Sendable {
         private let answers = NIOLockedValueBox(0)
         private var channel: Channel?

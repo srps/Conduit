@@ -103,11 +103,9 @@ enum SilentUpstreamScenarios {
         )
     }
 
-    /// A single upstream that served, then answers nothing, the liveness probe included. `mainMeasuredFall`
-    /// is what main measured for these parameters, for the notes.
     @RuntimeActor
     static func silentFailover(
-        name: String, responseTimeout: TimeInterval, checkInterval: TimeInterval, mainMeasuredFall: TimeInterval, verbose: Bool
+        name: String, responseTimeout: TimeInterval, checkInterval: TimeInterval, verbose: Bool
     ) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let answering = NIOLockedValueBox(true)
@@ -141,10 +139,9 @@ enum SilentUpstreamScenarios {
         var statuses: [String] = []
         for response in responses { statuses.append(String(try await response.get().prefix(12))) }
 
-        // Main's path: the next check due, one silent check, three ladder checks, the post-ladder probe. This
-        // branch adds at most one liveness probe's answer budget before the first check is decisive.
         let connectSlack = 0.1, silentCheck = responseTimeout + connectSlack
-        let mainPath = checkInterval + silentCheck + 3 * silentCheck + probeDeadline + connectSlack
+        let nextCheckDue = checkInterval, ladderChecks = 3 * silentCheck, postLadderProbe = probeDeadline + connectSlack
+        let mainPath = nextCheckDue + silentCheck + ladderChecks + postLadderProbe
         let probeBudget = min(config.health.connectionCheckTimeout, responseTimeout)
         let bound = mainPath + probeBudget + connectSlack
         let fell = try await until(timeout: bound + 5) { orchestrator.snapshot.directModeCause.isDirect }
@@ -181,13 +178,11 @@ enum SilentUpstreamScenarios {
                       fell && cause.routesClientTrafficDirectly && status.activeUpstream == "DIRECT" && fellAt <= bound + 1),
             ], notes: [
                 "R=\(responseTimeout)s I=\(checkInterval)s P=\(probeDeadline)s C=\(connectSlack)s b=\(probeBudget)s; main path \(String(format: "%.2f", mainPath))s, bound \(String(format: "%.2f", bound))s (+1 s slack)",
-                "fell to DIRECT (\(cause.rawValue)) \(String(format: "%.2f", fellAt))s after the silence began; main measured \(String(format: "%.2f", mainMeasuredFall))s",
+                "fell to DIRECT (\(cause.rawValue)) \(String(format: "%.2f", fellAt))s after the silence began",
                 "upstream saw \(upstream.requestLines.count) request heads: \(upstream.requestLines.filter { $0.hasPrefix("HEAD ") }.count) health checks, \(upstream.requestLines.filter { $0.hasPrefix("OPTIONS ") }.count) liveness probes",
             ])
     }
 
-    /// Two upstreams; the preferred one answers requests at once but never the liveness probe. Its
-    /// silences behind a slow origin must fall back to the streak rule, never rank it behind.
     @RuntimeActor
     static func ignoresProbe(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton

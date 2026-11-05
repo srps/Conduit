@@ -107,7 +107,6 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         case kept
         case rankedBehind = "ranked_behind"
         case superseded
-        /// Silent, but this upstream is known to ignore the probe, so its silence says nothing.
         case keptProbeIgnored = "kept_probe_ignored"
     }
 
@@ -318,7 +317,6 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         return (verdict, .check)
     }
 
-    /// Take the one silence-check slot. False while a check runs, a ranking stands or the breaker is not closed.
     package mutating func beginSilenceCheck() -> Bool {
         guard state == .closed, silence == .none else { return false }
         silence = .checking(superseded: false)
@@ -347,7 +345,6 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         }
     }
 
-    /// Take the one discovery per endpoint; true only the first time.
     package mutating func beginDiscovery() -> Bool {
         guard probeSupport == .unknown else { return false }
         probeSupport = .discovering
