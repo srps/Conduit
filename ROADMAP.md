@@ -101,9 +101,9 @@ records all 41 local workflow checks, 3,551 tests (four skips), 103 simulator
 records, 26 clean guard mutations and exact-head hosted evidence for PR253.
 The [physical-ordering verification](./docs/verification-runtime-physical-ordering-2026-10-27.md)
 records its narrower scope. Separate existing limitations remain #250 (shared
-pool Stop isolation), #251 (applied ephemeral endpoints), and #252 (wall-clock
-flap metrics), plus [#255](https://github.com/srps/Conduit/issues/255)
-(the apparently unreachable legacy recovery-failure notification). Keep these
+pool Stop isolation) and [#255](https://github.com/srps/Conduit/issues/255)
+(the apparently unreachable legacy recovery-failure notification); #251
+(applied ephemeral endpoints) and #252 (wall-clock flap metrics) are fixed. Keep these
 investigations separate from the behavior-preserving activation.
 
 Earlier evidence remains with its owning slice:
@@ -284,17 +284,23 @@ list below does not gate the core release:
    0.5.7 reads it. The 0.6.0 candidate still writes the format 0.5.8 reads;
    writing the envelope is this separate follow-up, and the ISO-8601 reader and
    the 0.1.x DNS importer go one release after it.
-4. **Remaining timeout semantics ([#197](https://github.com/srps/Conduit/issues/197)):** response timeouts and
-   the breaker (with the [#184](https://github.com/srps/Conduit/issues/184)
-   spike), a health check's first timeout, the prober's slow `CONNECT`, the DNS
-   health tick and the launchd residue read.
+4. **Remaining timeout semantics:** [#197](https://github.com/srps/Conduit/issues/197)
+   is fixed for the breaker and the health check's idle-socket timeout (#276):
+   a response timeout counts only when silence spans two origins. The rest
+   ([#280](https://github.com/srps/Conduit/issues/280)) is still open: the
+   prober's slow `CONNECT`, the DNS health tick, the launchd residue read,
+   CONNECT failover on a timeout and the first authentication's deadline, plus
+   the [#184](https://github.com/srps/Conduit/issues/184) spike. The half-open
+   probe slot's missing lease is [#279](https://github.com/srps/Conduit/issues/279).
 5. **Liveness-audit follow-ups:** the direct-connect cache
-   ([#196](https://github.com/srps/Conduit/issues/196)), PAC invalidation on
-   the first path change ([#198](https://github.com/srps/Conduit/issues/198)),
-   DNS cache stores across a transport reset
-   ([#200](https://github.com/srps/Conduit/issues/200)), launch recovery on a
-   timed-out probe ([#201](https://github.com/srps/Conduit/issues/201)) and the
-   `VPNStateFuser` latch ([#202](https://github.com/srps/Conduit/issues/202)).
+   ([#196](https://github.com/srps/Conduit/issues/196)), DNS cache stores
+   across a transport reset ([#200](https://github.com/srps/Conduit/issues/200))
+   and the `VPNStateFuser` latch ([#202](https://github.com/srps/Conduit/issues/202)).
+   PAC invalidation on the first path change
+   ([#198](https://github.com/srps/Conduit/issues/198)) is fixed. So is launch
+   recovery on a timed-out probe ([#201](https://github.com/srps/Conduit/issues/201)),
+   which now reads the helper's relay witness (decisions 0041 and 0042) and
+   passed the owner's real-machine check.
 6. **Configuration:** bypass-list validation and CIDR entries
    ([#172](https://github.com/srps/Conduit/issues/172)), and changed defaults
    reaching existing configs ([#173](https://github.com/srps/Conduit/issues/173)).

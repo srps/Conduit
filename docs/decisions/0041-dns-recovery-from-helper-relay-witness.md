@@ -3,7 +3,7 @@
 - Date: 2026-11-05
 - Decision: accepted (owner, 2026-11-05, [#275 comment](https://github.com/srps/Conduit/pull/275#issuecomment-6648861923): chose design B now and design C later, with the #270 notice kept as the fallback)
 - Implementation: implemented
-- Validation: pending
+- Validation: passed
 - Supersedes: none
 - Superseded by: none
 
@@ -135,11 +135,10 @@ machine after a crash. A Mac that suppresses ICMP port-unreachable replies
 (`net.inet.udp.blackhole`) is inferred to read every dead target as `silent`
 and so always takes the 0042 fallback; not observed.
 
+Validation: the owner's real-machine check passed on 2026-11-05. An installed build of #270 with the helper reinstalled, DNS managed and the app killed with `kill -9` restored DNS on relaunch with no click (`evidence=relay_target_refused`), as recorded in [verification-dns-launch-recovery-2026-11-05.md](../verification-dns-launch-recovery-2026-11-05.md).
+
 ## Open questions
 
 - Whether the state-root writer lease ([0017](0017-exclusive-state-directory-writer.md))
   is accepted as same-root authority in recovery, with pre-lease binaries left to
   the witness.
-- Owner validation is due once recovery uses the witness: installed build,
-  helper reinstalled, DNS managed, `kill -9` the app, relaunch, DNS restored with
-  no click.
