@@ -119,7 +119,7 @@ Every change is measured against these axes. A proposed feature either lands und
 ### Reliability
 
 - Connection pooling and keep-alive reuse
-- Configurable health-check timeout (`health.connectionCheckTimeout` in config, default 2 s)
+- Configurable health-check timeout (reads `connectionCheckTimeoutMS` in config, default 2000 ms)
 - Health checking and auto-recovery when upstream mode is active
 - Stalled connection cleanup
 - VPN/network change detection

@@ -286,9 +286,12 @@ list below does not gate the core release:
    the 0.1.x DNS importer go one release after it.
 4. **Remaining timeout semantics:** [#197](https://github.com/srps/Conduit/issues/197)
    is fixed for the breaker and the health check's idle-socket timeout (#276):
-   a response timeout counts only when silence spans two origins. Still open:
-   the prober's slow `CONNECT`, the DNS health tick and the launchd residue
-   read, and the [#184](https://github.com/srps/Conduit/issues/184) spike.
+   a response timeout counts only when silence spans two origins. The rest
+   ([#280](https://github.com/srps/Conduit/issues/280)) is still open: the
+   prober's slow `CONNECT`, the DNS health tick, the launchd residue read,
+   CONNECT failover on a timeout and the first authentication's deadline, plus
+   the [#184](https://github.com/srps/Conduit/issues/184) spike. The half-open
+   probe slot's missing lease is [#279](https://github.com/srps/Conduit/issues/279).
 5. **Liveness-audit follow-ups:** the direct-connect cache
    ([#196](https://github.com/srps/Conduit/issues/196)), DNS cache stores
    across a transport reset ([#200](https://github.com/srps/Conduit/issues/200))
