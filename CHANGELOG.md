@@ -15,24 +15,29 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 - The privileged helper can report what its DNS relay is doing: which port it
   forwards to, and whether that port refuses, answers or stays silent (#201).
-  A Conduit that crashed with "Manage system DNS" on leaves the relay
-  forwarding to a port that refuses, and a later change uses this to restore
-  the user's DNS at the next launch without a click. Run
-  `sudo ./install-helper.sh` to get it; an older helper keeps working and
-  reports no status.
+  Run `sudo ./install-helper.sh` to get it; an older helper keeps working and
+  reports no status, and Settings shows it as "Installed, update available"
+  with Update Helper.
 
 ### Fixed
 
+- After Conduit crashes with "Manage system DNS" on, the next launch puts the
+  user's DNS back on its own and stops the helper's orphaned relay, with no
+  notice and nothing to click (#201). It asks the helper, whose relay still
+  holds port 53 after the crash: when the relay's target refuses on two
+  readings, nothing serves it any more, and `platform.launch_recovery_restored`
+  says `evidence=relay_target_refused`. A target that answers is a session
+  still serving the machine, and recovery leaves it alone.
 - Launch recovery no longer restores the machine's DNS or proxy settings from
-  under a session that is only slow to answer (#201). A liveness probe that
-  times out now declines the restore with `platform.launch_recovery_declined
-  reason=probe_inconclusive` and keeps the records for the next launch; only a
-  refused probe restores. After a crash the helper's DNS relay can keep port 53
-  and stay silent, so every launch declines system DNS again. The app now says
-  so in a notification and in a notice on the menu and Overview, with Start DNS
-  and Restore DNS Settings; either one clears it, as do Quit and a reboot.
-  The network-location reconcile that runs as the app starts no longer undoes
-  the declined restore one moment later.
+  under a session that is only slow to answer (#201). Where no evidence
+  decides (a helper that predates the relay status, cannot be asked, or finds
+  its target silent), a liveness probe that times out declines the restore
+  with `platform.launch_recovery_declined reason=probe_inconclusive` and keeps
+  the records; only a refused probe restores. The app then says so in a
+  notification and in a notice on the menu and Overview, with Start DNS and
+  Restore DNS Settings; either one clears it, as do Quit and a reboot. The
+  network-location reconcile that runs as the app starts no longer undoes the
+  declined restore one moment later.
 
 - With the proxy port set to 0 ("choose a port"), the system proxy, the shell
   profiles and the launchd `HTTP(S)_PROXY` variables now name the port the
