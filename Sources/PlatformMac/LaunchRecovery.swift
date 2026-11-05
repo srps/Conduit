@@ -122,19 +122,35 @@ package enum SurfaceOwnership: Equatable, Sendable {
 
     package init(probe: LoopbackLiveness, witness: RelayWitnessGap?) {
         switch probe {
-        case .notLive: self = .ownerGone(.portRefused)
-        case .live: self = .anotherSessionLive(.portAnswered)
+        case .notLive: self = .ownerGone(.portRefused(witness: witness))
+        case .live: self = .anotherSessionLive(.portAnswered(witness: witness))
         case .inconclusive: self = .unknown(witness: witness)
         }
     }
 }
 
-package enum OwnershipEvidence: String, Sendable {
+package enum OwnershipEvidence: Equatable, Sendable {
     /// The helper's relay target refused a query twice: no forwarder serves it.
-    case relayTargetRefused = "relay_target_refused"
-    case relayTargetAnswered = "relay_target_answered"
-    case portRefused = "port_refused"
-    case portAnswered = "port_answered"
+    case relayTargetRefused
+    case relayTargetAnswered
+    /// The probe decided. `witness` is why the helper's relay witness did not
+    /// decide first; `nil` for a surface without one.
+    case portRefused(witness: RelayWitnessGap?)
+    case portAnswered(witness: RelayWitnessGap?)
+
+    /// The event fields: `evidence=`, then `witness=` when the probe decided for system DNS.
+    var detail: String {
+        switch self {
+        case .relayTargetRefused: "evidence=relay_target_refused"
+        case .relayTargetAnswered: "evidence=relay_target_answered"
+        case .portRefused(let witness): "evidence=port_refused" + Self.witnessField(witness)
+        case .portAnswered(let witness): "evidence=port_answered" + Self.witnessField(witness)
+        }
+    }
+
+    static func witnessField(_ witness: RelayWitnessGap?) -> String {
+        witness.map { " witness=\($0.rawValue)" } ?? ""
+    }
 }
 
 /// Why the helper's relay witness did not decide system DNS ownership, so the
@@ -244,13 +260,13 @@ extension LaunchRecovery {
             detail = "\(subject) stale=true"
         case .restored(.ownerGone(let evidence)):
             name = "platform.launch_recovery_restored"
-            detail = "\(subject) stale=false evidence=\(evidence.rawValue)"
+            detail = "\(subject) stale=false \(evidence.detail)"
         case .declinedLiveListener(let evidence):
             name = "platform.launch_recovery_declined"
-            detail = "\(subject) reason=live_listener evidence=\(evidence.rawValue)"
+            detail = "\(subject) reason=live_listener \(evidence.detail)"
         case .declinedInconclusiveProbe(let witness):
             name = "platform.launch_recovery_declined"
-            detail = "\(subject) reason=probe_inconclusive" + (witness.map { " witness=\($0.rawValue)" } ?? "")
+            detail = "\(subject) reason=probe_inconclusive" + OwnershipEvidence.witnessField(witness)
         case .discardedStaleRecords:
             name = "platform.launch_recovery_discarded"
             detail = "\(subject) reason=no_interface_points_at_loopback"

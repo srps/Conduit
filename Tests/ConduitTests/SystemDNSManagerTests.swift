@@ -832,7 +832,7 @@ final class SystemDNSManagerTests: XCTestCase {
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
             resolverLiveness: { _ in .notLive }
         )
-        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(.ownerGone(.portRefused)))
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(.ownerGone(.portRefused(witness: .noStatus))))
 
         XCTAssertEqual(recording.commands(matching: .setDNSServers), [["Wi-Fi", "192.168.1.1", "1.1.1.1"]])
         XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path), "removed after a successful import")
@@ -909,7 +909,7 @@ final class SystemDNSManagerTests: XCTestCase {
         writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
 
         let manager = makeManager(machine: machine, relayIsLive: false)
-        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(.ownerGone(.portRefused)))
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(.ownerGone(.portRefused(witness: .noStatus))))
 
         XCTAssertEqual(
             recording.commands(matching: .setDNSServers),
@@ -936,7 +936,7 @@ final class SystemDNSManagerTests: XCTestCase {
         ]))
 
         let manager = makeManager(machine: machine, relayIsLive: true)
-        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedLiveListener(.portAnswered))
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedLiveListener(.portAnswered(witness: .noStatus)))
 
         XCTAssertTrue(
             manager.hasSavedState(),
@@ -979,12 +979,12 @@ final class SystemDNSManagerTests: XCTestCase {
             Case(first: .relaying(targetPort: 5053, target: .refused), second: .relaying(targetPort: 5054, target: .refused),
                  probe: .inconclusive, expected: .declinedInconclusiveProbe(witness: .refusalUnconfirmed)),
             Case(first: .relaying(targetPort: 5053, target: .refused), second: nil,
-                 probe: .notLive, expected: .restored(.ownerGone(.portRefused))),
+                 probe: .notLive, expected: .restored(.ownerGone(.portRefused(witness: .refusalUnconfirmed)))),
             Case(first: .relaying(targetPort: 5053, target: .answered), second: nil,
                  probe: .notLive, expected: .declinedLiveListener(.relayTargetAnswered)),
             Case(first: .relaying(targetPort: 5053, target: .silent), second: nil,
                  probe: .inconclusive, expected: .declinedInconclusiveProbe(witness: .targetSilent)),
-            Case(first: .notRunning, second: nil, probe: .notLive, expected: .restored(.ownerGone(.portRefused))),
+            Case(first: .notRunning, second: nil, probe: .notLive, expected: .restored(.ownerGone(.portRefused(witness: .relayNotRunning)))),
             Case(first: .notRunning, second: nil, probe: .inconclusive, expected: .declinedInconclusiveProbe(witness: .relayNotRunning)),
             Case(first: nil, second: nil, probe: .inconclusive, expected: .declinedInconclusiveProbe(witness: .noStatus)),
         ]
