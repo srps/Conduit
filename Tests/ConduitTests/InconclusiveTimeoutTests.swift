@@ -17,9 +17,32 @@ final class InconclusiveTimeoutTests: XCTestCase {
     }
 
     @RuntimeActor
-    func testOneSilentHealthCheckIsHeldAndTheSecondStartsRecovery() async throws {
+    func testAHealthCheckOnAnUpstreamSilentToItsOwnRequestStartsRecoveryAtOnce() async throws {
         let silent = try await Self.silentServer()
         var config = Self.config(upstreamPort: try XCTUnwrap(silent.localAddress?.port))
+        config.healthCheckIntervalSeconds = 1
+        config.upstreamResponseTimeoutSeconds = 0.2
+        let orchestrator = Self.orchestrator(config: config, probe: ProbeScript())
+        try await orchestrator.startProxy()
+
+        func events(_ name: String) -> [RuntimeEvent] { orchestrator.eventLog.events.filter { $0.event == name } }
+        func recoveryEvents() -> [RuntimeEvent] { orchestrator.eventLog.events.filter { $0.event.hasPrefix("recovery.") } }
+
+        try await Self.until { !recoveryEvents().isEmpty }
+        XCTAssertEqual(events("health.inconclusive").map(\.detail), [], "silent to a request it answers itself: nothing is held")
+        XCTAssertEqual(recoveryEvents().first?.detail?.hasPrefix("step=reauthenticate reason=upstream_silent"), true,
+                       "the first check started the ladder")
+        XCTAssertTrue(events("upstream.silence_check_finished").first?.detail?.contains(" outcome=silent ") == true,
+                      events("upstream.silence_check_finished").first?.detail ?? "none")
+
+        await orchestrator.stopProxy()
+        try await silent.close().get()
+    }
+
+    @RuntimeActor
+    func testOneSilentHealthCheckBehindAnAnsweringUpstreamIsHeldAndTheSecondStartsRecovery() async throws {
+        let upstream = try await AnsweringUpstream.start()
+        var config = Self.config(upstreamPort: upstream.port)
         config.healthCheckIntervalSeconds = 1
         config.upstreamResponseTimeoutSeconds = 0.2
         let orchestrator = Self.orchestrator(config: config, probe: ProbeScript())
@@ -31,16 +54,16 @@ final class InconclusiveTimeoutTests: XCTestCase {
         try await Self.until { !events("health.inconclusive").isEmpty || !recoveryEvents().isEmpty }
         let first = events("health.inconclusive").first?.detail ?? ""
         XCTAssertTrue(first.hasPrefix("reason=answer_timed_out consecutive=1 decisive=false "), first)
-        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .running, "one silence changes nothing")
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .running, "one silence behind an answering upstream changes nothing")
         XCTAssertEqual(recoveryEvents().map(\.event), [])
 
         try await Self.until { !recoveryEvents().isEmpty }
         XCTAssertEqual(events("health.inconclusive").dropFirst().first?.detail?.contains("consecutive=2 decisive=true"), true)
-        XCTAssertEqual(recoveryEvents().first?.detail?.hasPrefix("step=reauthenticate reason=upstream_silent"), true,
-                       "the decisive silence started the ladder")
+        XCTAssertEqual(recoveryEvents().first?.detail?.hasPrefix("step=reauthenticate reason=origin_silent"), true,
+                       "the decisive silence started the ladder, and the upstream answered for itself")
 
         await orchestrator.stopProxy()
-        try await silent.close().get()
+        try await upstream.close()
     }
 
     @RuntimeActor
@@ -101,7 +124,6 @@ final class InconclusiveTimeoutTests: XCTestCase {
         func events(_ name: String) -> [RuntimeEvent] { orchestrator.eventLog.events.filter { $0.event == name } }
 
         try await Self.until { orchestrator.snapshot.runtimeStatus.state == .recovering }
-        // The pool's silence check sends a HEAD of its own and can take an answer meant for the ladder, so answer one at a time.
         try await Self.until {
             if upstream.answersLeft == 0 { upstream.answer(1) }
             return orchestrator.eventLog.events.contains { $0.typed == .proxyRecovery(.recovered) }
@@ -186,7 +208,8 @@ final class InconclusiveTimeoutTests: XCTestCase {
         try await other.close().get()
     }
 
-    /// Answers `200 OK` to as many requests as it has answers left and leaves the rest unanswered.
+    /// Answers `200 OK` to as many requests as it has answers left and leaves the rest unanswered. It
+    /// answers an OPTIONS request itself with 403, as a forward proxy does, so only the origin is silent.
     private final class AnsweringUpstream: @unchecked Sendable {
         private let answers = NIOLockedValueBox(0)
         private var channel: Channel?
@@ -218,7 +241,13 @@ final class InconclusiveTimeoutTests: XCTestCase {
                 var buffer = unwrapInboundIn(data)
                 pending += buffer.readString(length: buffer.readableBytes) ?? ""
                 while let end = pending.range(of: "\r\n\r\n") {
+                    let line = pending[pending.startIndex..<end.lowerBound].components(separatedBy: "\r\n").first ?? ""
                     pending.removeSubrange(pending.startIndex..<end.upperBound)
+                    if line.hasPrefix("OPTIONS ") {
+                        let response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        context.writeAndFlush(NIOAny(context.channel.allocator.buffer(string: response)), promise: nil)
+                        continue
+                    }
                     let answered = answers.withLockedValue { left in
                         guard left > 0 else { return false }
                         left -= 1

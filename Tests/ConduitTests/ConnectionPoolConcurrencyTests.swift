@@ -199,10 +199,9 @@ final class ConnectionPoolConcurrencyTests: XCTestCase {
         addTeardownBlock { firstRequest.fail(ChannelError.ioOnClosedChannel) }
         let server = try await ServerBootstrap(group: group)
             .childChannelInitializer { channel in
-                accepted.withLockedValue { $0 += 1 }
                 do {
                     try channel.pipeline.syncOperations.addHandler(
-                        HeldFirstResponseHandler(requests: requests, firstRequest: firstRequest)
+                        HeldFirstResponseHandler(accepted: accepted, requests: requests, firstRequest: firstRequest)
                     )
                     return channel.eventLoop.makeSucceededVoidFuture()
                 } catch {
@@ -242,10 +241,12 @@ final class ConnectionPoolConcurrencyTests: XCTestCase {
     ) async throws {
         let seen = upstream.requests.withLockedValue { $0 }
         XCTAssertEqual(seen.count, 2, file: file, line: line)
-        XCTAssertEqual(upstream.accepted.withLockedValue { $0 }, 1, "the second request reuses the first connection",
-                       file: file, line: line)
+        XCTAssertEqual(upstream.accepted.withLockedValue { $0 }, 1,
+                       "the second request reuses the first connection; the pool's liveness probe has a connection of its own", file: file, line: line)
         XCTAssertTrue(seen.allSatisfy { $0 }, "both requests carry credentials", file: file, line: line)
 
+        // The liveness probe that followed the first answer closes its own connection once answered.
+        for _ in 0..<200 where upstream.pool.allConnectionSnapshot.count > 1 { try await Task.sleep(for: .milliseconds(10)) }
         let connections = upstream.pool.allConnectionSnapshot
         XCTAssertEqual(upstream.pool.closeAll(), 1, file: file, line: line)
         for connection in connections {
@@ -327,12 +328,17 @@ private final class HeldFirstResponseHandler: ChannelInboundHandler {
     typealias OutboundOut = ByteBuffer
 
     static let ok = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+    static let forbidden = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 
+    /// Connections that carried a request; the pool's liveness probe (an OPTIONS) is not one.
+    private let accepted: NIOLockedValueBox<Int>
     private let requests: NIOLockedValueBox<[Bool]>
     private let firstRequest: EventLoopPromise<Channel>
     private var received = ""
+    private var carriedARequest = false
 
-    init(requests: NIOLockedValueBox<[Bool]>, firstRequest: EventLoopPromise<Channel>) {
+    init(accepted: NIOLockedValueBox<Int>, requests: NIOLockedValueBox<[Bool]>, firstRequest: EventLoopPromise<Channel>) {
+        self.accepted = accepted
         self.requests = requests
         self.firstRequest = firstRequest
     }
@@ -347,7 +353,15 @@ private final class HeldFirstResponseHandler: ChannelInboundHandler {
         while let end = received.range(of: "\r\n\r\n") {
             let head = String(received[..<end.lowerBound])
             received.removeSubrange(..<end.upperBound)
+            if head.hasPrefix("OPTIONS ") {
+                context.writeAndFlush(wrapOutboundOut(ByteBuffer(string: Self.forbidden)), promise: nil)
+                continue
+            }
             guard head.hasPrefix("GET ") else { continue }
+            if !carriedARequest {
+                carriedARequest = true
+                accepted.withLockedValue { $0 += 1 }
+            }
             let count = requests.withLockedValue { requests in
                 guard requests.count < 3 else { return requests.count }
                 requests.append(head.lowercased().contains("\r\nproxy-authorization: basic fixture"))

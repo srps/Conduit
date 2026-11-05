@@ -535,6 +535,10 @@ package final class ConnectionPool: @unchecked Sendable {
             logger.log(.error, refusal.event.detail ?? refusal.event.event, category: .network)
             return .unhealthy(.configurationRefused(detail: refusal.errorDescription ?? ""), responseTimeMS: 0)
         }
+        let config = configProvider()
+        guard let proxy = selectProxy(from: config) else {
+            return .unhealthy(.unreachable(detail: ConnectionPoolError.noUpstreamsConfigured.displayDescription), responseTimeMS: 0)
+        }
         let start = Date()
         var head = HTTPRequestHead(version: .http1_1, method: .HEAD, uri: urlString)
         head.headers.add(name: "Host", value: URL(string: urlString)?.host ?? "example.com")
@@ -542,24 +546,86 @@ package final class ConnectionPool: @unchecked Sendable {
         // connection is reused as is.
         // Canonical seconds, not the whole-millisecond legacy reading: a 1.001-second
         // probe keeps its millisecond, and the floor is still one millisecond.
-        let probeTimeout = TimeAmount.nanoseconds(max(DurationUnits.runtimeNanoseconds(configProvider().health.connectionCheckTimeout), 1_000_000))
-        do {
-            let response = try await bufferedExchange(
-                head: head, requestBody: nil, forcedProxy: nil, allowRetry: true,
-                preferFreshConnection: false, authSource: nil, connectTimeout: probeTimeout, asksAFreshConnectionAfterIdleSilence: true
-            ).get()
-            let elapsed = Int(Date().timeIntervalSince(start) * 1_000)
+        let connectTimeout = TimeAmount.nanoseconds(max(DurationUnits.runtimeNanoseconds(config.health.connectionCheckTimeout), 1_000_000))
+        let outcome = await attemptBufferedExchange(
+            head: head, requestBody: nil, proxy: proxy, allowRetry: true, preferFreshConnection: false, authSource: nil, connectTimeout: connectTimeout
+        ).outcome()
+        guard case .silent(let idled) = outcome else { return Self.healthResult(outcome, since: start) }
+        return await judgeSilentHealthCheck(head: head, via: proxy, idled: idled, connectTimeout: connectTimeout, since: start)
+    }
+
+    private static func healthResult(_ outcome: ExchangeOutcome, since start: Date) -> HealthCheckResult {
+        let elapsed = Int(Date().timeIntervalSince(start) * 1_000)
+        switch outcome {
+        case .answered(let response):
             let code = Int(response.head.status.code)
             let upstream = response.upstream.endpoint
             if (200..<500).contains(code) {
                 return .healthy(summary: "Healthy via \(upstream)", activeUpstream: upstream, responseTimeMS: elapsed)
             }
             return .unhealthy(.upstreamStatus(code: code, upstream: upstream), activeUpstream: upstream, responseTimeMS: elapsed)
-        } catch {
-            let elapsed = Int(Date().timeIntervalSince(start) * 1_000)
-            let detail = error.displayDescription
-            return .unhealthy(Self.healthFailure(for: error, detail: detail), responseTimeMS: elapsed)
+        case .failed(let error):
+            return .unhealthy(healthFailure(for: error, detail: error.displayDescription), responseTimeMS: elapsed)
+        case .silent:
+            return .unhealthy(.answerTimedOut(detail: silenceDetail), responseTimeMS: elapsed)
         }
+    }
+
+    private static let silenceDetail = ConnectionPoolError.upstreamResponseTimedOut.displayDescription
+
+    private enum SilenceCheckStart { case alreadyRanked, probe(owns: Bool) }
+
+    /// A health check that connected and got nothing. A ranking the pool already holds is decisive at
+    /// once; otherwise one liveness probe says whether the upstream itself is silent (conclusive) or only
+    /// the check URL's origin is slow. A probe an idle pooled socket's silence led to is followed by one
+    /// fresh check, since a socket can die without a word.
+    private func judgeSilentHealthCheck(
+        head: HTTPRequestHead, via proxy: UpstreamProxy, idled: Bool, connectTimeout: TimeAmount, since start: Date
+    ) async -> HealthCheckResult {
+        let detail = Self.silenceDetail
+        func unhealthy(_ failure: HealthCheckFailure) -> HealthCheckResult {
+            .unhealthy(failure, responseTimeMS: Int(Date().timeIntervalSince(start) * 1_000))
+        }
+        guard case .probe(let owns) = beginHealthCheckSilenceCheck(of: proxy) else { return unhealthy(.upstreamSilent(detail: detail)) }
+        let outcome = await probeLiveness(of: proxy)
+        if owns { finishSilenceCheck(of: proxy, outcome) }
+        let ignoresProbe = lock.withLock { breakers[proxy.id]?.probeSupport == .ignores }
+        switch outcome {
+        case .refused:
+            return unhealthy(.unreachable(detail: "\(detail); a fresh connect was refused"))
+        case .silent where !ignoresProbe:
+            let budgetMS = Int(Self.livenessAnswerBudget(configProvider()) * 1_000)
+            return unhealthy(.upstreamSilent(detail: "\(detail); the liveness probe unanswered within \(budgetMS) ms"))
+        case .silent, .closed, .unasked:
+            return unhealthy(.answerTimedOut(detail: detail))
+        case .answered(let status, let latencyMS):
+            guard idled else {
+                return unhealthy(.answerTimedOut(detail: "\(detail); the upstream answered the liveness probe \(status) in \(latencyMS) ms"))
+            }
+            let event = RuntimeEvent(
+                kind: .health, event: "health.idle_connection_silent",
+                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) retry=fresh_connection"
+            )
+            eventSink?(event)
+            logger.log(.info, "Health check got no answer on an idle connection; the upstream answers, so asking a fresh one: \(event.detail ?? "")", category: .network)
+            let fresh = await attemptBufferedExchange(
+                head: head, requestBody: nil, proxy: proxy, allowRetry: false, preferFreshConnection: true, authSource: nil, connectTimeout: connectTimeout
+            ).outcome()
+            return Self.healthResult(fresh, since: start)
+        }
+    }
+
+    private func beginHealthCheckSilenceCheck(of proxy: UpstreamProxy) -> SilenceCheckStart {
+        let (start, consecutive): (SilenceCheckStart, Int) = lock.withLock {
+            syncUpstreamStatesLocked(with: configProvider().enabledUpstreams)
+            var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
+            if breaker.ranksBehind(at: Date()) { return (.alreadyRanked, 0) }
+            let owns = breaker.beginSilenceCheck()
+            breakers[proxy.id] = breaker
+            return (.probe(owns: owns), breaker.silences.consecutive)
+        }
+        if case .probe = start { publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "health_check") }
+        return start
     }
 
     /// The durations an exchange converts: the probe budget, the response wait, and the
@@ -1133,21 +1199,52 @@ package final class ConnectionPool: @unchecked Sendable {
         allowRetry: Bool,
         preferFreshConnection: Bool,
         authSource: String?,
-        connectTimeout: TimeAmount? = nil,
-        asksAFreshConnectionAfterIdleSilence: Bool = false
+        connectTimeout: TimeAmount? = nil
     ) -> EventLoopFuture<UpstreamExchangeResponse> {
         let config = configProvider()
         guard let proxy = forcedProxy ?? selectProxy(from: config) else {
             return group.next().makeFailedFuture(ConnectionPoolError.noUpstreamsConfigured)
         }
+        return attemptBufferedExchange(
+            head: head, requestBody: requestBody, proxy: proxy, allowRetry: allowRetry,
+            preferFreshConnection: preferFreshConnection, authSource: authSource, connectTimeout: connectTimeout
+        ).flatMapThrowing { [weak self] outcome in
+            switch outcome {
+            case .answered(let response):
+                return response
+            case .silent:
+                self?.recordSilence(for: proxy)
+                throw ConnectionPoolError.upstreamResponseTimedOut
+            case .failed(let error):
+                throw error
+            }
+        }
+    }
 
+    fileprivate enum ExchangeOutcome {
+        case answered(UpstreamExchangeResponse)
+        /// Connected and no answer within the response timeout. `idled`: the connection had sat idle in the pool.
+        case silent(idled: Bool)
+        case failed(Error)
+    }
+
+    /// One exchange via `proxy`, retried once on a fresh connection when an idempotent request's connection
+    /// failed before answering. An answer and a conclusive failure are recorded here, connect failures from
+    /// `acquireConnection` included, so a refused connect feeds the breaker. A silence is the caller's to
+    /// judge: the data path records it, the health check asks the upstream itself.
+    private func attemptBufferedExchange(
+        head: HTTPRequestHead,
+        requestBody: HTTPRequestBody?,
+        proxy: UpstreamProxy,
+        allowRetry: Bool,
+        preferFreshConnection: Bool,
+        authSource: String?,
+        connectTimeout: TimeAmount?
+    ) -> EventLoopFuture<ExchangeOutcome> {
         let start = Date()
         let ranOnAnIdledConnection = NIOLockedValueBox(false)
-        let attempt: EventLoopFuture<UpstreamExchangeResponse> = acquireConnection(
-            for: proxy,
-            target: head.uri,
-            preferFreshConnection: preferFreshConnection,
-            connectTimeout: connectTimeout
+        let attempt: EventLoopFuture<ExchangeOutcome> = acquireConnection(
+            for: proxy, target: head.uri, preferFreshConnection: preferFreshConnection, connectTimeout: connectTimeout
         ).flatMap { [weak self] connection in
             guard let self else {
                 return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
@@ -1156,56 +1253,25 @@ package final class ConnectionPool: @unchecked Sendable {
             return self.attributingRetirement(
                 self.performBufferedExchange(head: head, requestBody: requestBody, connection: connection, proxy: proxy, authSource: authSource),
                 connection: connection
-            )
-                .flatMap { response in
-                    self.recordSuccess(for: response.upstream, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
-                    return connection.channel.eventLoop.makeSucceededFuture(response)
-                }
+            ).map { response in
+                self.recordSuccess(for: response.upstream, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
+                return .answered(response)
+            }
         }
-        // Note: this `.flatMapError` is on the outer chain (`acquireConnection +
-        // performBufferedExchange`), not just on `performBufferedExchange`'s
-        // result. That's deliberate: connect-refused failures from
-        // `acquireConnection` (e.g. upstream-down case in `pm-sim
-        // upstream-flap`) must also feed `recordFailure` so the breaker can
-        // trip. Pre-extraction the chain was nested and connect failures
-        // bypassed the breaker entirely — a real-world bug, not just a
-        // scenario quirk.
-        return attempt.flatMapError { [weak self] (error: Error) -> EventLoopFuture<UpstreamExchangeResponse> in
-            // `self?.group...makeFailedFuture(error)`
-            // is unreachable here — `guard let self else` fires precisely
-            // when `self` is nil, so the `??` left side always evaluates to
-            // nil. The propagation that actually happens is `return attempt`
-            // (which is already in a failed state because we got here via
-            // `flatMapError`). Simplifying makes the intent obvious.
-            guard let self else { return attempt }
-            let idleSilence = asksAFreshConnectionAfterIdleSilence && ranOnAnIdledConnection.withLockedValue { $0 }
-                && ConnectionPoolError.failureClass(error) == .inconclusive
-            let shouldRetry = allowRetry
-                && Self.isIdempotentMethod(head.method)
-                && (Self.isRetryableConnectionError(error) || idleSilence)
-            if shouldRetry {
-                if idleSilence {
-                    let event = RuntimeEvent(
-                        kind: .health, event: "health.idle_connection_silent",
-                        detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) retry=fresh_connection"
-                    )
-                    self.eventSink?(event)
-                    self.logger.log(.info, "Health check got no answer on an idle connection; asking a fresh one: \(event.detail ?? "")", category: .network)
-                } else {
-                    self.logger.log(.debug, "Retrying idempotent request via fresh connection after upstream reset (\(proxy.endpoint)).", category: .proxy)
-                }
-                return self.bufferedExchange(
-                    head: head,
-                    requestBody: requestBody,
-                    forcedProxy: proxy,
-                    allowRetry: false,
-                    preferFreshConnection: true,
-                    authSource: authSource,
-                    connectTimeout: connectTimeout
+        return attempt.flatMapError { [weak self] error in
+            guard let self else { return attempt.eventLoop.makeSucceededFuture(.failed(error)) }
+            if allowRetry, Self.isIdempotentMethod(head.method), Self.isRetryableConnectionError(error) {
+                self.logger.log(.debug, "Retrying idempotent request via fresh connection after upstream reset (\(proxy.endpoint)).", category: .proxy)
+                return self.attemptBufferedExchange(
+                    head: head, requestBody: requestBody, proxy: proxy, allowRetry: false,
+                    preferFreshConnection: true, authSource: authSource, connectTimeout: connectTimeout
                 )
             }
+            if ConnectionPoolError.failureClass(error) == .inconclusive {
+                return attempt.eventLoop.makeSucceededFuture(.silent(idled: ranOnAnIdledConnection.withLockedValue { $0 }))
+            }
             self.recordExchangeFailure(error, for: proxy)
-            return self.group.next().makeFailedFuture(error)
+            return attempt.eventLoop.makeSucceededFuture(.failed(error))
         }
     }
 
@@ -1214,9 +1280,7 @@ package final class ConnectionPool: @unchecked Sendable {
         requestBody: HTTPRequestBody?,
         connection: PooledUpstreamConnection,
         proxy: UpstreamProxy,
-        authSource: String?,
-        responseTimeout: TimeAmount? = nil,
-        returnsToPool: Bool = true
+        authSource: String?
     ) -> EventLoopFuture<UpstreamExchangeResponse> {
         let auth = connection.authenticationState()
         let promise = connection.channel.eventLoop.makePromise(of: UpstreamExchangeResponse.self)
@@ -1230,7 +1294,7 @@ package final class ConnectionPool: @unchecked Sendable {
             authHandshakeLimiter: authHandshakeLimiter,
             authLimitProvider: authHandshakeLimits,
             eventSink: eventSink,
-            responseTimeout: responseTimeout ?? upstreamResponseTimeout,
+            responseTimeout: upstreamResponseTimeout,
             responsePromise: promise
         )
 
@@ -1247,7 +1311,7 @@ package final class ConnectionPool: @unchecked Sendable {
             return connection.channel.eventLoop.makeFailedFuture(error)
         }.flatMap { response in
             connection.markAuthenticated(since: auth.generation, authMethod: response.authMethod)
-            self.release(connection, keepAlive: returnsToPool && response.head.isKeepAlive)
+            self.release(connection, keepAlive: response.head.isKeepAlive)
             return connection.channel.eventLoop.makeSucceededFuture(response)
         }
     }
@@ -1300,11 +1364,13 @@ package final class ConnectionPool: @unchecked Sendable {
     private func recordSuccess(for proxy: UpstreamProxy, latencyMS: Int) {
         var emittedTransition: UpstreamCircuitBreaker.Transition?
         var endedSilence = false
+        var discover = false
         lock.withLockVoid {
             syncUpstreamStatesLocked(with: configProvider().enabledUpstreams)
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
             endedSilence = breaker.ranksBehind
             emittedTransition = breaker.recordSuccess(latencyMS: latencyMS)
+            discover = breaker.beginDiscovery()
             breakers[proxy.id] = breaker
             lastSelectedUpstreamID = proxy.id
         }
@@ -1313,6 +1379,35 @@ package final class ConnectionPool: @unchecked Sendable {
         }
         if endedSilence {
             publishReprioritized(proxy, reason: "answered")
+        }
+        if discover {
+            discoverProbeSupport(of: proxy)
+        }
+    }
+
+    /// One probe per endpoint, right after its first answered exchange: it was alive, so what it does with
+    /// the probe is what it does. It never touches the silence check.
+    private func discoverProbeSupport(of proxy: UpstreamProxy) {
+        probeLiveness(of: proxy).whenSuccess { [weak self] outcome in
+            guard let self else { return }
+            let support: UpstreamCircuitBreaker.ProbeSupport? = self.lock.withLock {
+                guard var breaker = self.breakers[proxy.id] else { return nil }
+                breaker.recordDiscovery(outcome)
+                self.breakers[proxy.id] = breaker
+                return breaker.probeSupport
+            }
+            guard let support else { return }
+            let answers = switch support {
+            case .answers: "true"
+            case .ignores: "false"
+            case .unknown, .discovering: "unknown"
+            }
+            let event = RuntimeEvent(
+                kind: .health, event: "upstream.liveness_discovered",
+                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) outcome=\(outcome.name) answers_probes=\(answers)"
+            )
+            self.eventSink?(event)
+            self.logger.log(.info, "Learnt whether upstream \(proxy.name) answers the liveness probe: \(event.detail ?? "")", category: .proxy)
         }
     }
 
@@ -1353,72 +1448,68 @@ package final class ConnectionPool: @unchecked Sendable {
         case .held:
             break
         case .check(let verdict):
-            let budget = Self.silenceCheckBudget(config)
-            let event = RuntimeEvent(
-                kind: .health, event: "upstream.silence_check_started",
-                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) consecutive=\(verdict.consecutive) budget_ms=\(Int(budget * 1_000))"
-            )
-            eventSink?(event)
-            logger.log(.info, "Upstream \(proxy.name) left exchanges unanswered; asking it directly: \(event.detail ?? "")", category: .proxy)
-            checkSilence(of: proxy, url: config.healthCheckURL, budget: budget)
+            publishSilenceCheckStarted(for: proxy, consecutive: verdict.consecutive, askedBy: "silences")
+            probeLiveness(of: proxy).whenSuccess { [weak self] outcome in self?.finishSilenceCheck(of: proxy, outcome) }
         }
     }
 
-    private static func silenceCheckBudget(_ config: ProxyConfig) -> TimeInterval {
+    private func publishSilenceCheckStarted(for proxy: UpstreamProxy, consecutive: Int, askedBy: String) {
+        let config = configProvider()
+        let connectBudget = Self.dataPathConnectTimeout(configured: config.upstreamConnectTimeoutSeconds, minimum: minimumConnectTimeout)
+        let event = RuntimeEvent(
+            kind: .health, event: "upstream.silence_check_started",
+            detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) consecutive=\(consecutive) asked_by=\(askedBy) "
+                + "connect_budget_ms=\(connectBudget.nanoseconds / 1_000_000) budget_ms=\(Int(Self.livenessAnswerBudget(config) * 1_000))"
+        )
+        eventSink?(event)
+        logger.log(.info, "Upstream \(proxy.name) got nothing out of it; asking whether it answers for itself: \(event.detail ?? "")", category: .proxy)
+    }
+
+    /// RFC 9110 7.6.2: an intermediary that receives OPTIONS with `Max-Forwards: 0` answers it as the final
+    /// recipient, so any status line is the proxy itself alive, whatever its origins do. The `.invalid`
+    /// name (RFC 6761) keeps a proxy that ignores `Max-Forwards` from reaching any origin.
+    static let livenessProbeRequest: HTTPRequestHead = {
+        var head = HTTPRequestHead(version: .http1_1, method: .OPTIONS, uri: "http://conduit-probe.invalid/")
+        head.headers.add(name: "Host", value: "conduit-probe.invalid")
+        head.headers.add(name: "Max-Forwards", value: "0")
+        head.headers.add(name: "Connection", value: "close")
+        return head
+    }()
+
+    /// How long a probe waits for the proxy's own answer: the health check's connect budget, never longer
+    /// than the response timeout.
+    static func livenessAnswerBudget(_ config: ProxyConfig) -> TimeInterval {
         max(min(config.health.connectionCheckTimeout, config.upstreamResponseTimeoutSeconds), 0.001)
     }
 
-    private func checkSilence(of proxy: UpstreamProxy, url: String, budget: TimeInterval) {
-        let head = HTTPRequestHead(
-            version: .http1_1, method: .HEAD, uri: url, headers: ["Host": URL(string: url)?.host ?? "example.com"]
-        )
-        let timeout = TimeAmount.nanoseconds(DurationUnits.runtimeNanoseconds(budget))
-        let start = Date()
-        let loop = group.next()
-        let settled = loop.makePromise(of: UpstreamExchangeResponse.self)
-        let dialed = NIOLockedValueBox<(expired: Bool, channel: Channel?)>((false, nil))
-        // The response timer starts only once the request is sent, after a fresh connection's first authentication token.
-        let deadline = loop.scheduleTask(in: timeout + timeout) {
-            let channel = dialed.withLockedValue { state -> Channel? in
-                state.expired = true
-                return state.channel
-            }
-            settled.fail(ConnectionPoolError.upstreamResponseTimedOut)
-            channel?.close(mode: .all, promise: nil)
+    /// Ask `proxy` the liveness probe on a fresh connection that is closed afterwards, never pooled. It
+    /// selects nothing and consults no authenticator: a 407 is a status line. The connect budget is the
+    /// data path's, so a slow connect reads as slow, not refused. The future never fails.
+    private func probeLiveness(of proxy: UpstreamProxy) -> EventLoopFuture<UpstreamCircuitBreaker.SilenceCheckOutcome> {
+        let budget = TimeAmount.nanoseconds(DurationUnits.runtimeNanoseconds(Self.livenessAnswerBudget(configProvider())))
+        return acquireConnection(
+            for: proxy, target: Self.livenessProbeRequest.uri, preferFreshConnection: true, connectTimeout: dataPathConnectTimeout, selects: false
+        ).flatMap { connection in
+            let probe = LivenessProbeHandler(answerBudget: budget, settled: connection.channel.eventLoop.makePromise())
+            return connection.channel.pipeline.addHandler(probe)
+                .flatMap { probe.outcome }
+                .always { _ in connection.channel.close(mode: .all, promise: nil) }
+        }.flatMapErrorThrowing { error in
+            ConnectionPoolError.failureClass(error) == .local ? .unasked : .refused
         }
-        acquireConnection(for: proxy, target: url, preferFreshConnection: true, connectTimeout: timeout, selects: false)
-            .flatMap { [weak self] connection -> EventLoopFuture<UpstreamExchangeResponse> in
-                let expired = dialed.withLockedValue { state -> Bool in
-                    state.channel = connection.channel
-                    return state.expired
-                }
-                guard let self, !expired else {
-                    connection.channel.close(mode: .all, promise: nil)
-                    return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.upstreamResponseTimedOut)
-                }
-                return self.attributingRetirement(
-                    self.performBufferedExchange(
-                        head: head, requestBody: nil, connection: connection, proxy: proxy, authSource: nil, responseTimeout: timeout,
-                        returnsToPool: false
-                    ),
-                    connection: connection
-                )
-            }
-            .cascade(to: settled)
-        settled.futureResult.whenComplete { [weak self] result in
-            deadline.cancel()
-            let outcome: UpstreamCircuitBreaker.SilenceCheckOutcome
-            switch result {
-            case .success(let response):
-                outcome = .answered(status: response.head.status.code, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
-            case .failure(let error):
-                switch ConnectionPoolError.failureClass(error) {
-                case .upstream: outcome = .refused
-                case .inconclusive: outcome = .silent
-                case .local: outcome = .unasked
+    }
+
+    private func probeLiveness(of proxy: UpstreamProxy) async -> UpstreamCircuitBreaker.SilenceCheckOutcome {
+        await withCheckedContinuation { continuation in
+            probeLiveness(of: proxy).whenComplete { [weak self] result in
+                switch result {
+                case .success(let outcome):
+                    continuation.resume(returning: outcome)
+                case .failure(let error):
+                    self?.logger.log(.error, "Liveness probe of \(proxy.endpoint) failed outside its outcomes: \(error.displayDescription)", category: .proxy)
+                    continuation.resume(returning: .unasked)
                 }
             }
-            self?.finishSilenceCheck(of: proxy, outcome)
         }
     }
 
@@ -1441,10 +1532,9 @@ package final class ConnectionPool: @unchecked Sendable {
             breakers[proxy.id] = breaker
             return (verdict, strike)
         }
-        let finished = RuntimeEvent(
-            kind: .health, event: "upstream.silence_check_finished",
-            detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) outcome=\(outcome.name) verdict=\(verdict.rawValue)"
-        )
+        var detail = "upstream=\(proxy.name) endpoint=\(proxy.endpoint) outcome=\(outcome.name) verdict=\(verdict.rawValue)"
+        if case .answered(let status, let latencyMS) = outcome { detail += " status=\(status) latency_ms=\(latencyMS)" }
+        let finished = RuntimeEvent(kind: .health, event: "upstream.silence_check_finished", detail: detail)
         eventSink?(finished)
         logger.log(.info, "Silence check of upstream \(proxy.name) finished: \(finished.detail ?? "")", category: .proxy)
         if verdict == .rankedBehind {
@@ -1524,6 +1614,9 @@ package final class ConnectionPool: @unchecked Sendable {
             }
             // Refresh identity on every sync; the user may have renamed an
             // upstream or moved it to a new host without changing its UUID.
+            if let known = upstreamIdentities[proxy.id], known.endpoint != proxy.endpoint {
+                breakers[proxy.id]?.forgetProbeSupport()
+            }
             upstreamIdentities[proxy.id] = (proxy.name, proxy.endpoint)
         }
     }
@@ -2294,5 +2387,74 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
         }
         HTTPHopByHopHeaders.sanitizeForwardedRequestHeaders(&updated.headers)
         return updated
+    }
+}
+
+/// Sends `ConnectionPool.livenessProbeRequest` and settles on the first status line, on a close or an
+/// error before one (the peer acted, so `closed`), or on the answer budget (`silent`). Body parts after
+/// the head are ignored; the pool closes the connection whatever the outcome.
+private final class LivenessProbeHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = HTTPClientResponsePart
+    typealias OutboundOut = HTTPClientRequestPart
+
+    private let answerBudget: TimeAmount
+    private let settled: EventLoopPromise<UpstreamCircuitBreaker.SilenceCheckOutcome>
+    private var timer: Scheduled<Void>?
+    private var sentAt: NIODeadline = .now()
+    private var done = false
+
+    var outcome: EventLoopFuture<UpstreamCircuitBreaker.SilenceCheckOutcome> { settled.futureResult }
+
+    init(answerBudget: TimeAmount, settled: EventLoopPromise<UpstreamCircuitBreaker.SilenceCheckOutcome>) {
+        self.answerBudget = answerBudget
+        self.settled = settled
+    }
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        guard context.channel.isActive else { return settle(.closed) }
+        context.write(wrapOutboundOut(.head(ConnectionPool.livenessProbeRequest)), promise: nil)
+        sentAt = .now()
+        context.writeAndFlush(wrapOutboundOut(.end(nil))).whenFailure { [weak self] _ in self?.settle(.closed) }
+        timer = context.eventLoop.scheduleTask(in: answerBudget) { [weak self] in self?.settle(.silent) }
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        settle(.closed)
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        guard case .head(let head) = unwrapInboundIn(data) else { return }
+        settle(.answered(status: head.status.code, latencyMS: Int((NIODeadline.now() - sentAt).nanoseconds / 1_000_000)))
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        settle(.closed)
+        context.fireChannelInactive()
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        settle(.closed)
+        context.close(promise: nil)
+    }
+
+    private func settle(_ outcome: UpstreamCircuitBreaker.SilenceCheckOutcome) {
+        guard !done else { return }
+        done = true
+        timer?.cancel()
+        settled.succeed(outcome)
+    }
+}
+
+extension EventLoopFuture where Value == ConnectionPool.ExchangeOutcome {
+    /// The outcome, with a future that failed anyway read as a failed exchange.
+    func outcome() async -> Value {
+        await withCheckedContinuation { continuation in
+            whenComplete { result in
+                switch result {
+                case .success(let outcome): continuation.resume(returning: outcome)
+                case .failure(let error): continuation.resume(returning: .failed(error))
+                }
+            }
+        }
     }
 }

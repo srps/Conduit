@@ -261,14 +261,36 @@ final class AutoRecoveryTests: XCTestCase {
         XCTAssertFalse(result)
         XCTAssertEqual(service.reauthenticateCallCount, 0)
         XCTAssertEqual(events.names, ["recovery.step_skipped", "recovery.exhausted"])
-        XCTAssertEqual(events.details.first, "step=reauthenticate reason=upstream_silent summary=\(silent.summary)")
+        XCTAssertEqual(events.details.first, "step=reauthenticate reason=origin_silent summary=\(silent.summary)")
         XCTAssertTrue(events.details.last?.hasPrefix("failure=answer_timed_out ") == true)
+        XCTAssertFalse(logger.entries().contains { $0.message.localizedCaseInsensitiveContains("password") })
+    }
+
+    @RuntimeActor func testALadderOnAnUpstreamSilentToItsOwnRequestSkipsReauthenticationAndNamesIt() async {
+        let logger = RecordingLogSink()
+        let events = EventRecorder()
+        let service = MockRecoverableService()
+        service.closeStalledShouldSucceed = true
+        service.switchUpstreamShouldSucceed = true
+        service.recycleListenerShouldSucceed = true
+        let silent = HealthCheckFailure.upstreamSilent(detail: "Timed out waiting for the upstream proxy to respond; the liveness probe unanswered within 200 ms")
+        service.healthResults = Array(repeating: .unhealthy(silent, responseTimeMS: 400), count: 3)
+        let recovery = AutoRecovery(service: service, logger: logger, eventSink: events.record)
+
+        let result = await recovery.recover(trigger: silent)
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(service.reauthenticateCallCount, 0)
+        XCTAssertEqual(events.names, ["recovery.step_skipped", "recovery.exhausted"])
+        XCTAssertEqual(events.details.first, "step=reauthenticate reason=upstream_silent summary=\(silent.summary)")
+        XCTAssertTrue(events.details.last?.hasPrefix("failure=upstream_silent ") == true, events.details.last ?? "none")
         XCTAssertFalse(logger.entries().contains { $0.message.localizedCaseInsensitiveContains("password") })
     }
 
     func testExhaustionMessageOnlySuggestsPasswordForCredentialOrUnknownFailures() {
         XCTAssertFalse(AutoRecovery.exhaustion(for: .unreachable(detail: "timeout")).message.contains("password"))
         XCTAssertFalse(AutoRecovery.exhaustion(for: .answerTimedOut(detail: "timeout")).message.contains("password"))
+        XCTAssertFalse(AutoRecovery.exhaustion(for: .upstreamSilent(detail: "timeout")).message.contains("password"))
         XCTAssertFalse(AutoRecovery.exhaustion(for: .upstreamStatus(code: 503, upstream: "proxy.example.test:8080")).message.contains("password"))
         XCTAssertTrue(AutoRecovery.exhaustion(for: .credentialUnavailable(detail: "no ticket")).message.contains("password"))
         XCTAssertTrue(AutoRecovery.exhaustion(for: .authenticationRejected(detail: "407")).message.contains("password"))
