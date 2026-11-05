@@ -32,16 +32,144 @@ final class UpstreamSilenceTests: XCTestCase {
 
     func testAHealthCheckSilentOnAFreshConnectionTooIsInconclusive() async throws {
         let upstream = try await CountingUpstream.start(answers: 1)
-        let pool = makePool(upstreams: [UpstreamProxy(name: "a", host: "127.0.0.1", port: upstream.port, priority: 0)])
+        let events = Events()
+        let pool = makePool(config: NIOLockedValueBox(Self.config(upstreams: [upstream.proxy(named: "a")])), events: events)
         let first = await pool.healthCheck(urlString: "http://check.test/")
         XCTAssertTrue(first.healthy, first.summary)
+        _ = await Self.eventually { !events.details("upstream.liveness_discovered").isEmpty }
 
         let second = await pool.healthCheck(urlString: "http://check.test/")
 
         guard case .answerTimedOut? = second.failure else {
             return XCTFail("connected and never answered, got \(String(describing: second.failure))")
         }
-        XCTAssertEqual(upstream.connections, 2, "the silent idle connection was followed by one fresh connection")
+        XCTAssertEqual(upstream.methods, ["HEAD", "OPTIONS", "HEAD", "OPTIONS", "HEAD"],
+                       "the silent idle connection was followed by the probe, which it answered, then one fresh check")
+        pool.closeAll()
+        try await upstream.close()
+    }
+
+    func testAHealthCheckWithASlowCheckURLBehindAnAnsweringUpstreamIsInconclusive() async throws {
+        let upstream = try await CountingUpstream.start(answers: .max) { $0.contains("check.test") }
+        let pool = makePool(upstreams: [upstream.proxy(named: "a")])
+
+        let result = await pool.healthCheck(urlString: "http://check.test/")
+
+        guard case .answerTimedOut? = result.failure else {
+            return XCTFail("the upstream answered its own request, so the origin was slow; got \(String(describing: result.failure))")
+        }
+        XCTAssertEqual(upstream.optionsRequests, 1, "the check asked the upstream itself once, with a request it answers without an origin")
+        XCTAssertEqual(upstream.methods.filter { $0 == "HEAD" }.count, 1, "a fresh connection's silence is not retried")
+        pool.closeAll()
+        try await upstream.close()
+    }
+
+    func testAHealthCheckOnAnUpstreamSilentToItsOwnRequestIsDecisive() async throws {
+        let upstream = try await CountingUpstream.start(answers: .max)
+        let events = Events()
+        let pool = makePool(config: NIOLockedValueBox(Self.config(upstreams: [upstream.proxy(named: "a")])), events: events)
+        let first = await pool.healthCheck(urlString: "http://check.test/")
+        XCTAssertTrue(first.healthy, first.summary)
+        _ = await Self.eventually { !events.details("upstream.liveness_discovered").isEmpty }
+        upstream.goSilent()
+
+        let second = await pool.healthCheck(urlString: "http://check.test/")
+
+        guard case .upstreamSilent? = second.failure else {
+            return XCTFail("silent to a request it answers itself, got \(String(describing: second.failure))")
+        }
+        XCTAssertEqual(events.details("upstream.deprioritized").count, 1)
+        XCTAssertTrue(events.details("upstream.deprioritized").first?.contains(" reason=silence_check_silent ") == true,
+                      events.details("upstream.deprioritized").first ?? "none")
+        pool.closeAll()
+        try await upstream.close()
+    }
+
+    func testAnIdleConnectionThatWentSilentIsFollowedByTheProbeThenAFreshCheck() async throws {
+        let upstream = try await CountingUpstream.start(answers: .max)
+        let events = Events()
+        let pool = makePool(config: NIOLockedValueBox(Self.config(upstreams: [upstream.proxy(named: "a")])), events: events)
+        let first = await pool.healthCheck(urlString: "http://check.test/")
+        XCTAssertTrue(first.healthy, first.summary)
+        _ = await Self.eventually { !events.details("upstream.liveness_discovered").isEmpty }
+        upstream.silenceOpenConnections()
+
+        let second = await pool.healthCheck(urlString: "http://check.test/")
+
+        XCTAssertTrue(second.healthy, second.summary)
+        XCTAssertEqual(events.details("health.idle_connection_silent").count, 1)
+        XCTAssertEqual(upstream.methods, ["HEAD", "OPTIONS", "HEAD", "OPTIONS", "HEAD"],
+                       "the idle socket's silence is followed by the probe, then one fresh check")
+        pool.closeAll()
+        try await upstream.close()
+    }
+
+    func testASlowCheckURLBehindAHealthyPrimaryKeepsItsTraffic() async throws {
+        let primary = try await CountingUpstream.start(answers: .max) { $0.contains("check.test") }
+        let secondary = try await CountingUpstream.start(answers: .max)
+        let first = primary.proxy(named: "primary"), second = secondary.proxy(named: "secondary", priority: 1)
+        let events = Events()
+        var config = Self.config(upstreams: [first])
+        config.upstreamResponseTimeoutSeconds = 0.3
+        config.healthCheckURL = "http://check.test/"
+        let current = NIOLockedValueBox(config)
+        let pool = makePool(config: current, events: events)
+        let warm = try await pool.exchange(head: Self.head(path: "/fast-warm"), body: nil).get()
+        XCTAssertEqual(warm.upstream.id, first.id, "the primary answered and has a latency")
+        current.withLockedValue { $0.upstreams = [first, second] }
+
+        let slow = (0..<2).map { pool.exchange(head: Self.head(host: "check.test", path: "/\($0)"), body: nil) }
+        for (index, exchange) in slow.enumerated() {
+            do {
+                let response = try await exchange.get()
+                XCTFail("slow request \(index) was answered by \(response.upstream.name)")
+            } catch {
+                XCTAssertEqual(error as? ConnectionPoolError, .upstreamResponseTimedOut, "slow request \(index)")
+            }
+        }
+        let checked = await Self.eventually { !events.details("upstream.silence_check_finished").isEmpty }
+        var servedBy: [String] = []
+        for index in 0..<6 {
+            servedBy.append(try await pool.exchange(head: Self.head(path: "/fast-\(index)"), body: nil).get().upstream.name)
+        }
+
+        XCTAssertTrue(checked, "the decisive silence asked the primary itself")
+        XCTAssertTrue(events.details("upstream.silence_check_finished").first?.contains("outcome=answered") == true,
+                      events.details("upstream.silence_check_finished").first ?? "none")
+        XCTAssertEqual(servedBy, Array(repeating: "primary", count: 6), "a slow check URL is a slow origin, no reason to move traffic off a healthy primary")
+        XCTAssertEqual(events.details("upstream.deprioritized"), [])
+        XCTAssertEqual(secondary.requests, 0)
+        pool.closeAll()
+        try await primary.close()
+        try await secondary.close()
+    }
+
+    func testAnUpstreamThatIgnoresTheProbeIsNeverRankedBehindForASilence() async throws {
+        let upstream = try await CountingUpstream.start(answers: .max, probes: .ignored) { $0.contains("/slow") || $0.contains("check.test") }
+        let events = Events()
+        let pool = makePool(config: NIOLockedValueBox(Self.config(upstreams: [upstream.proxy(named: "a")])), events: events)
+        _ = try await pool.exchange(head: Self.head(path: "/warm"), body: nil).get()
+        let discovered = await Self.eventually { !events.details("upstream.liveness_discovered").isEmpty }
+        XCTAssertTrue(discovered, "the first answer is followed by one probe that learns whether the upstream answers it")
+        XCTAssertTrue(events.details("upstream.liveness_discovered").first?.contains(" answers_probes=false") == true,
+                      events.details("upstream.liveness_discovered").first ?? "none")
+
+        for index in 0..<2 {
+            do {
+                _ = try await pool.exchange(head: Self.head(path: "/slow-\(index)"), body: nil).get()
+                XCTFail("slow request \(index) was answered")
+            } catch {}
+        }
+        let checked = await Self.eventually { !events.details("upstream.silence_check_finished").isEmpty }
+        XCTAssertTrue(checked)
+        XCTAssertTrue(events.details("upstream.silence_check_finished").first?.contains("outcome=silent verdict=kept_probe_ignored") == true,
+                      events.details("upstream.silence_check_finished").first ?? "none")
+        XCTAssertEqual(events.details("upstream.deprioritized"), [], "an upstream known to ignore the probe falls back to the streak rule")
+
+        let check = await pool.healthCheck(urlString: "http://check.test/")
+        guard case .answerTimedOut? = check.failure else {
+            return XCTFail("a silent probe says nothing about an upstream that ignores it, got \(String(describing: check.failure))")
+        }
         pool.closeAll()
         try await upstream.close()
     }
@@ -49,8 +177,7 @@ final class UpstreamSilenceTests: XCTestCase {
     func testTwoConcurrentSlowRequestsBehindAHealthyPrimaryLeaveItServing() async throws {
         let primary = try await CountingUpstream.start(answers: .max) { $0.contains("/slow") }
         let secondary = try await CountingUpstream.start(answers: .max)
-        let first = UpstreamProxy(name: "primary", host: "127.0.0.1", port: primary.port, priority: 0)
-        let second = UpstreamProxy(name: "secondary", host: "127.0.0.1", port: secondary.port, priority: 1)
+        let first = primary.proxy(named: "primary"), second = secondary.proxy(named: "secondary", priority: 1)
         let events = Events()
         let current = NIOLockedValueBox(Self.config(upstreams: [first]))
         let pool = makePool(config: current, events: events)
@@ -88,16 +215,15 @@ final class UpstreamSilenceTests: XCTestCase {
         try await secondary.close()
     }
 
-    func testASilenceCheckWhoseAuthenticationStallsStillFinishesWithinItsBudget() async throws {
+    func testASilenceCheckNeverConsultsTheAuthenticator() async throws {
         let upstream = try await CountingUpstream.start(answers: .max) { $0.contains("/slow") }
-        let proxy = UpstreamProxy(name: "a", host: "127.0.0.1", port: upstream.port, priority: 0)
+        let proxy = upstream.proxy(named: "a")
         let events = Events()
-        let authenticator = StallingAuthenticator(stallFromCall: 3)
+        let authenticator = CountingAuthenticator()
         let pool = ConnectionPool(
             group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(),
             configProvider: { Self.config(upstreams: [proxy]) }, authenticatorProvider: { _ in authenticator }, eventSink: events.record
         )
-        defer { authenticator.release() }
         _ = try await pool.exchange(head: Self.head(path: "/warm"), body: nil).get()
         for index in 0..<2 {
             do {
@@ -108,25 +234,26 @@ final class UpstreamSilenceTests: XCTestCase {
 
         let finished = await Self.eventually { !events.details("upstream.silence_check_finished").isEmpty }
 
-        XCTAssertTrue(finished, "a check stuck in authentication would hold the slot and stop every later check")
-        XCTAssertTrue(events.details("upstream.silence_check_finished").first?.contains("outcome=silent") == true,
-                      events.details("upstream.silence_check_finished").first ?? "none")
+        XCTAssertTrue(finished)
+        XCTAssertEqual(authenticator.calls, 2,
+                       "one credential for the warm connection and one for the second slow request's fresh connection; the probe asks for none, so a stalled credential cannot hold it")
         let released = await Self.eventually { pool.allConnectionSnapshot.isEmpty }
-        XCTAssertTrue(released, "the stalled check's connection is closed, or checks would pile up behind a hung authenticator")
+        XCTAssertTrue(released, "the probe's connection is closed, or checks would pile up")
         pool.closeAll()
         try await upstream.close()
     }
 
     func testASecondSilenceInARowWhoseCheckIsSilentRanksTheUpstreamBehindOneThatAnswers() async throws {
-        let primary = try await CountingUpstream.start(answers: 1)
+        let primary = try await CountingUpstream.start(answers: .max)
         let secondary = try await CountingUpstream.start(answers: .max)
-        let first = UpstreamProxy(name: "primary", host: "127.0.0.1", port: primary.port, priority: 0)
-        let second = UpstreamProxy(name: "secondary", host: "127.0.0.1", port: secondary.port, priority: 1)
+        let first = primary.proxy(named: "primary"), second = secondary.proxy(named: "secondary", priority: 1)
         let events = Events()
         let current = NIOLockedValueBox(Self.config(upstreams: [first]))
         let pool = makePool(config: current, events: events)
         let served = try await pool.exchange(head: Self.head, body: nil).get()
         XCTAssertEqual(served.upstream.id, first.id, "the primary answered and has a latency")
+        _ = await Self.eventually { !events.details("upstream.liveness_discovered").isEmpty }
+        primary.goSilent()
         current.withLockedValue { $0.upstreams = [first, second] }
 
         for attempt in 1...2 {
@@ -137,7 +264,7 @@ final class UpstreamSilenceTests: XCTestCase {
                 XCTAssertEqual(error as? ConnectionPoolError, .upstreamResponseTimedOut, "attempt \(attempt)")
             }
         }
-        XCTAssertEqual(primary.requestLines.filter { $0.hasPrefix("GET ") }.count, 3,
+        XCTAssertEqual(primary.methods.filter { $0 == "GET" }.count, 3,
                        "one silence left the primary first, so the second request went to it too")
         let checked = await Self.eventually { !events.details("upstream.silence_check_finished").isEmpty }
 
@@ -181,9 +308,9 @@ final class UpstreamSilenceTests: XCTestCase {
 
     private static let head = head(path: "/")
 
-    private static func head(path: String) -> HTTPRequestHead {
-        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://example.com\(path)")
-        head.headers.add(name: "Host", value: "example.com")
+    private static func head(host: String = "example.com", path: String) -> HTTPRequestHead {
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://\(host)\(path)")
+        head.headers.add(name: "Host", value: host)
         return head
     }
 
@@ -212,29 +339,36 @@ final class UpstreamSilenceTests: XCTestCase {
         )
     }
 
-    private final class StallingAuthenticator: ProxyAuthenticator, @unchecked Sendable {
+    private final class CountingAuthenticator: ProxyAuthenticator, @unchecked Sendable {
         let scheme = "Basic"
-        private let stallFromCall: Int
-        private let calls = NIOLockedValueBox(0)
-        private let gate = DispatchSemaphore(value: 0)
+        private let count = NIOLockedValueBox(0)
 
-        init(stallFromCall: Int) { self.stallFromCall = stallFromCall }
+        var calls: Int { count.withLockedValue { $0 } }
 
         func initialToken(for host: String) throws -> String {
-            let call = calls.withLockedValue { $0 += 1; return $0 }
-            if call >= stallFromCall { gate.wait() }
+            count.withLockedValue { $0 += 1 }
             return "Basic dGVzdA=="
         }
 
         func processChallenge(headerValues: [String], host: String) throws -> String? { nil }
         func canHandle(scheme: String) -> Bool { scheme.caseInsensitiveCompare("Basic") == .orderedSame }
         func reset() {}
-        func release() { for _ in 0..<8 { gate.signal() } }
     }
 
+    /// An upstream proxy that answers `answers` requests with 200 and the rest with nothing. It answers
+    /// an OPTIONS request itself with 403, as a forward proxy does, unless it `.ignored` probes; `goSilent`
+    /// stops every answer, OPTIONS included.
     private final class CountingUpstream: @unchecked Sendable {
-        private let answers: NIOLockedValueBox<Int>
-        private let counts = NIOLockedValueBox((connections: 0, requests: 0))
+        enum Probes { case answered, ignored }
+
+        private struct Behaviour {
+            var answers: Int
+            var alive = true
+            var silenced: Set<ObjectIdentifier> = []
+        }
+
+        private let behaviour: NIOLockedValueBox<Behaviour>
+        private let counts = NIOLockedValueBox((connections: 0, requests: 0, options: 0))
         private let lines = NIOLockedValueBox<[String]>([])
         private var listener: Channel?
         private let children = NIOLockedValueBox<[Channel]>([])
@@ -242,19 +376,43 @@ final class UpstreamSilenceTests: XCTestCase {
         var port: Int { listener?.localAddress?.port ?? 0 }
         var connections: Int { counts.withLockedValue { $0.connections } }
         var requests: Int { counts.withLockedValue { $0.requests } }
+        var optionsRequests: Int { counts.withLockedValue { $0.options } }
         var requestLines: [String] { lines.withLockedValue { $0 } }
+        var methods: [String] { requestLines.map { String($0.prefix { $0 != " " }) } }
 
-        private init(answers: Int) { self.answers = NIOLockedValueBox(answers) }
+        private init(answers: Int) { self.behaviour = NIOLockedValueBox(Behaviour(answers: answers)) }
 
-        static func start(answers: Int, neverAnswers: @escaping @Sendable (String) -> Bool = { _ in false }) async throws -> CountingUpstream {
+        func proxy(named name: String, priority: Int = 0) -> UpstreamProxy {
+            UpstreamProxy(name: name, host: "127.0.0.1", port: port, priority: priority)
+        }
+
+        static func start(
+            answers: Int, probes: Probes = .answered, neverAnswers: @escaping @Sendable (String) -> Bool = { _ in false }
+        ) async throws -> CountingUpstream {
             let upstream = CountingUpstream(answers: answers)
-            let answers = upstream.answers, counts = upstream.counts, lines = upstream.lines, children = upstream.children
+            let behaviour = upstream.behaviour, counts = upstream.counts, lines = upstream.lines, children = upstream.children
+            let reply: @Sendable (Channel, String) -> String? = { channel, line in
+                counts.withLockedValue {
+                    $0.requests += 1
+                    if line.hasPrefix("OPTIONS ") { $0.options += 1 }
+                }
+                lines.withLockedValue { $0.append(line) }
+                return behaviour.withLockedValue { state -> String? in
+                    guard state.alive, !state.silenced.contains(ObjectIdentifier(channel)) else { return nil }
+                    if line.hasPrefix("OPTIONS ") {
+                        return probes == .answered ? "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" : nil
+                    }
+                    guard !neverAnswers(line), state.answers > 0 else { return nil }
+                    state.answers -= 1
+                    return "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                }
+            }
             upstream.listener = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
                 .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
                 .childChannelInitializer { channel in
                     counts.withLockedValue { $0.connections += 1 }
                     children.withLockedValue { $0.append(channel) }
-                    return channel.pipeline.addHandler(RequestHandler(answers: answers, neverAnswers: neverAnswers, counts: counts, lines: lines))
+                    return channel.pipeline.addHandler(RequestHandler(reply: reply))
                 }
                 .bind(host: "127.0.0.1", port: 0).get()
             return upstream
@@ -262,6 +420,15 @@ final class UpstreamSilenceTests: XCTestCase {
 
         /// New connects are refused; accepted connections stay open and silent.
         func stopListening() async throws { try await listener?.close().get() }
+
+        /// Nothing is answered any more, the liveness probe included: dead behind an open socket.
+        func goSilent() { behaviour.withLockedValue { $0.alive = false } }
+
+        /// Every connection open now stops answering; new connections answer as before.
+        func silenceOpenConnections() {
+            let open = children.withLockedValue { $0.filter(\.isActive) }.map(ObjectIdentifier.init)
+            behaviour.withLockedValue { $0.silenced.formUnion(open) }
+        }
 
         func close() async throws {
             if listener?.isActive == true { try await listener?.close().get() }
@@ -272,21 +439,10 @@ final class UpstreamSilenceTests: XCTestCase {
 
         private final class RequestHandler: ChannelInboundHandler, @unchecked Sendable {
             typealias InboundIn = ByteBuffer
-            private let answers: NIOLockedValueBox<Int>
-            private let neverAnswers: @Sendable (String) -> Bool
-            private let counts: NIOLockedValueBox<(connections: Int, requests: Int)>
-            private let lines: NIOLockedValueBox<[String]>
+            private let reply: @Sendable (Channel, String) -> String?
             private var pending = ""
 
-            init(
-                answers: NIOLockedValueBox<Int>, neverAnswers: @escaping @Sendable (String) -> Bool,
-                counts: NIOLockedValueBox<(connections: Int, requests: Int)>, lines: NIOLockedValueBox<[String]>
-            ) {
-                self.answers = answers
-                self.neverAnswers = neverAnswers
-                self.counts = counts
-                self.lines = lines
-            }
+            init(reply: @escaping @Sendable (Channel, String) -> String?) { self.reply = reply }
 
             func channelRead(context: ChannelHandlerContext, data: NIOAny) {
                 var buffer = unwrapInboundIn(data)
@@ -294,15 +450,7 @@ final class UpstreamSilenceTests: XCTestCase {
                 while let end = pending.range(of: "\r\n\r\n") {
                     let line = pending[pending.startIndex..<end.lowerBound].components(separatedBy: "\r\n").first ?? ""
                     pending.removeSubrange(pending.startIndex..<end.upperBound)
-                    counts.withLockedValue { $0.requests += 1 }
-                    lines.withLockedValue { $0.append(line) }
-                    let answered = !neverAnswers(line) && answers.withLockedValue { left in
-                        guard left > 0 else { return false }
-                        left -= 1
-                        return true
-                    }
-                    guard answered else { continue }
-                    let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                    guard let response = reply(context.channel, line) else { continue }
                     context.writeAndFlush(NIOAny(context.channel.allocator.buffer(string: response)), promise: nil)
                 }
             }

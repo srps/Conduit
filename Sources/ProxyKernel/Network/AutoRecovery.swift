@@ -191,6 +191,9 @@ package final class AutoRecovery: @unchecked Sendable {
         case .answerTimedOut(let detail):
             return ("answer_timed_out",
                     "Automatic recovery exhausted all steps: an upstream accepted connections but never answered (\(detail)). Health checks continue and routing resumes when an upstream answers.")
+        case .upstreamSilent(let detail):
+            return ("upstream_silent",
+                    "Automatic recovery exhausted all steps: an upstream accepted connections but answered nothing, not even a request it answers itself (\(detail)). Health checks continue and routing resumes when it answers.")
         case .upstreamStatus(let code, let upstream):
             return ("upstream_status",
                     "Automatic recovery exhausted all steps: the upstream answered HTTP \(code) via \(upstream).")

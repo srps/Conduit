@@ -14,8 +14,12 @@ package enum HealthCheckFailure: Error, Equatable, Sendable {
     case authenticationRejected(detail: String)
     /// No usable answer: refused, missed the connect budget, reset, or the proxy is stopped.
     case unreachable(detail: String)
-    /// Connected (or reused a pooled connection) and the answer wait ran out.
+    /// Connected (or reused a pooled connection) and the answer wait ran out, but the upstream
+    /// answered a request it answers itself, or is known to ignore that request: the origin was slow.
     case answerTimedOut(detail: String)
+    /// Connected, the answer wait ran out, and the upstream did not answer a request it answers
+    /// itself either. Conclusive: a dead upstream behind an open socket.
+    case upstreamSilent(detail: String)
     /// The check did not run: a configured duration is one the runtime cannot hold. This says
     /// nothing about any upstream, so it feeds neither the breaker nor recovery.
     case configurationRefused(detail: String)
@@ -23,7 +27,7 @@ package enum HealthCheckFailure: Error, Equatable, Sendable {
     package var summary: String {
         switch self {
         case .credentialUnavailable(let detail), .authenticationRejected(let detail), .unreachable(let detail),
-             .answerTimedOut(let detail), .configurationRefused(let detail):
+             .answerTimedOut(let detail), .upstreamSilent(let detail), .configurationRefused(let detail):
             return detail
         case .upstreamStatus(let code, let upstream):
             return "HTTP \(code) via \(upstream)"
@@ -34,7 +38,8 @@ package enum HealthCheckFailure: Error, Equatable, Sendable {
     package var reauthenticationSkip: (reason: String, why: String)? {
         switch self {
         case .unreachable: ("upstream_unreachable", "no upstream answered")
-        case .answerTimedOut: ("upstream_silent", "the upstream connected but never answered")
+        case .upstreamSilent: ("upstream_silent", "the upstream connected but never answered")
+        case .answerTimedOut: ("origin_silent", "the upstream answered its own request, so the origin was slow, and no credential changes that")
         case .credentialUnavailable, .upstreamStatus, .authenticationRejected, .configurationRefused: nil
         }
     }
