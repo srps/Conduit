@@ -31,7 +31,9 @@ enum SilentUpstreamScenarios {
                         lines.withLockedValue { $0.append(requestLine) }
                         guard case .after(let delay) = answerTo(requestLine) else { return }
                         channel.eventLoop.scheduleTask(in: delay) {
-                            let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                            let response = requestLine.hasPrefix("OPTIONS ")
+                                ? "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                                : "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
                             channel.writeAndFlush(channel.allocator.buffer(string: response), promise: nil)
                         }
                     })
@@ -101,14 +103,18 @@ enum SilentUpstreamScenarios {
         )
     }
 
+    /// A single upstream that served, then answers nothing, the liveness probe included. `mainMeasuredFall`
+    /// is what main measured for these parameters, for the notes.
     @RuntimeActor
-    static func silentFailover(verbose: Bool) async throws -> ScenarioResult {
+    static func silentFailover(
+        name: String, responseTimeout: TimeInterval, checkInterval: TimeInterval, mainMeasuredFall: TimeInterval, verbose: Bool
+    ) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let answering = NIOLockedValueBox(true)
         let upstream = DelayedHTTPUpstream { _ in answering.withLockedValue { $0 } ? .after(.zero) : .never }
         try await upstream.start(group: group)
 
-        let responseTimeout: TimeInterval = 0.5, checkInterval: TimeInterval = 2, probeDeadline = UpstreamProber.defaultTimeoutSeconds
+        let probeDeadline = UpstreamProber.defaultTimeoutSeconds
         var config = strictConfigWithBreakerBurstWindowOff()
         config.upstreamResponseTimeoutSeconds = responseTimeout
         config.healthCheckIntervalSeconds = checkInterval
@@ -135,21 +141,24 @@ enum SilentUpstreamScenarios {
         var statuses: [String] = []
         for response in responses { statuses.append(String(try await response.get().prefix(12))) }
 
+        // Main's path: the next check due, one silent check, three ladder checks, the post-ladder probe. This
+        // branch adds at most one liveness probe's answer budget before the first check is decisive.
         let connectSlack = 0.1, silentCheck = responseTimeout + connectSlack
-        let nextCheckDue = checkInterval, heldCheck = silentCheck, recheckDue = max(checkInterval / 2, 1), decisiveCheck = silentCheck
-        let ladderChecks = 3 * silentCheck, postLadderProbe = probeDeadline + connectSlack
-        let bound = nextCheckDue + heldCheck + recheckDue + decisiveCheck + ladderChecks + postLadderProbe
+        let mainPath = checkInterval + silentCheck + 3 * silentCheck + probeDeadline + connectSlack
+        let probeBudget = min(config.health.connectionCheckTimeout, responseTimeout)
+        let bound = mainPath + probeBudget + connectSlack
         let fell = try await until(timeout: bound + 5) { orchestrator.snapshot.directModeCause.isDirect }
         let fellAt = Date().timeIntervalSince(silentAt)
         let status = orchestrator.snapshot.runtimeStatus
         let cause = orchestrator.snapshot.directModeCause
         let silentStatus = orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == endpoint }
-        let silences = events("health.inconclusive").compactMap(\.detail)
+        let held = events("health.inconclusive").compactMap(\.detail)
+        let checks = events("upstream.silence_check_finished").compactMap(\.detail)
         let skipped = events("recovery.step_skipped").compactMap(\.detail)
         let exhausted = events("recovery.exhausted").compactMap(\.detail)
         let probes = events("connectivity.probe_inconclusive").compactMap(\.detail)
 
-        return ScenarioResult(name: "upstream-silent-failover", clientCount: threshold + 1, clientsOpened: threshold + 1,
+        return ScenarioResult(name: name, clientCount: threshold + 1, clientsOpened: threshold + 1,
             clientsWithFirstByte: statuses.filter { !$0.isEmpty }.count, clientsClosedEarly: 0, totalBytes: 0,
             durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
@@ -159,22 +168,102 @@ enum SilentUpstreamScenarios {
                         && events("upstream.response_timeout").count >= threshold + 1),
                 .init("\(threshold + 1) response timeouts, which opened the breaker before #197 with the burst window off, left it closed",
                       events("upstream.circuit_opened").isEmpty && silentStatus?.consecutiveFailures == 0),
-                .init("the first silent health check was held as inconclusive",
-                      silences.first?.hasPrefix("reason=answer_timed_out consecutive=1 decisive=false ") == true),
-                .init("the second consecutive silent check was decisive, and every later one while the failure stood",
-                      silences.count >= 2 && silences[1].contains(" consecutive=2 decisive=true ")
-                        && silences.dropFirst().allSatisfy { $0.contains(" decisive=true ") }),
-                .init("the ladder skipped re-authentication because nothing answered",
+                .init("no silent health check was held: the upstream was silent to the request it answers itself", held.isEmpty),
+                .init("the upstream was asked the liveness probe and answered nothing",
+                      !checks.isEmpty && checks.allSatisfy { $0.contains(" outcome=silent ") }),
+                .init("the ladder skipped re-authentication because the upstream itself was silent",
                       skipped.count == 1 && skipped[0].hasPrefix("step=reauthenticate reason=upstream_silent")),
-                .init("the ladder exhausted on a silence, not on an unreachable upstream",
-                      exhausted.count == 1 && exhausted[0].hasPrefix("failure=answer_timed_out ")),
+                .init("the ladder exhausted on an upstream silent to its own request",
+                      exhausted.count == 1 && exhausted[0].hasPrefix("failure=upstream_silent ")),
                 .init("the post-ladder probe's silence was decisive because a failure stood",
                       probes.count == 1 && probes[0].contains("decisive=true")),
-                .init("routing fell to DIRECT within the bound 1.5I + 5R + P + 6C",
-                      fell && cause.routesClientTrafficDirectly && status.activeUpstream == "DIRECT" && fellAt <= bound + 2),
+                .init("routing fell to DIRECT within main's path plus one probe budget: I + 4R + P + 5C + b + C",
+                      fell && cause.routesClientTrafficDirectly && status.activeUpstream == "DIRECT" && fellAt <= bound + 1),
             ], notes: [
-                "R=\(responseTimeout)s I=\(checkInterval)s P=\(probeDeadline)s C=\(connectSlack)s; bound \(String(format: "%.2f", bound))s (+2 s slack); fell to DIRECT (\(cause.rawValue)) \(String(format: "%.2f", fellAt))s after the silence began",
-                "upstream saw \(upstream.requestLines.count) request heads, \(upstream.requestLines.filter { $0.hasPrefix("HEAD ") }.count) of them health checks",
+                "R=\(responseTimeout)s I=\(checkInterval)s P=\(probeDeadline)s C=\(connectSlack)s b=\(probeBudget)s; main path \(String(format: "%.2f", mainPath))s, bound \(String(format: "%.2f", bound))s (+1 s slack)",
+                "fell to DIRECT (\(cause.rawValue)) \(String(format: "%.2f", fellAt))s after the silence began; main measured \(String(format: "%.2f", mainMeasuredFall))s",
+                "upstream saw \(upstream.requestLines.count) request heads: \(upstream.requestLines.filter { $0.hasPrefix("HEAD ") }.count) health checks, \(upstream.requestLines.filter { $0.hasPrefix("OPTIONS ") }.count) liveness probes",
+            ])
+    }
+
+    /// Two upstreams; the preferred one answers requests at once but never the liveness probe. Its
+    /// silences behind a slow origin must fall back to the streak rule, never rank it behind.
+    @RuntimeActor
+    static func ignoresProbe(verbose: Bool) async throws -> ScenarioResult {
+        let started = Date(), group = MultiThreadedEventLoopGroup.singleton
+        let primary = DelayedHTTPUpstream { line in
+            if line.hasPrefix("OPTIONS ") { return .never }
+            return line.contains("/slow-") ? .after(.seconds(5)) : .after(.zero)
+        }
+        let secondary = DelayedHTTPUpstream { _ in .after(.milliseconds(40)) }
+        try await primary.start(group: group)
+        try await secondary.start(group: group)
+
+        let responseTimeout: TimeInterval = 0.3, checkInterval: TimeInterval = 2
+        var config = strictConfigWithBreakerBurstWindowOff()
+        config.upstreamResponseTimeoutSeconds = responseTimeout
+        config.healthCheckIntervalSeconds = checkInterval
+        config.healthCheckURL = "http://check.test/"
+        config.upstreams = [
+            UpstreamProxy(name: "primary", host: "127.0.0.1", port: primary.port, priority: 0),
+            UpstreamProxy(name: "secondary", host: "127.0.0.1", port: secondary.port, priority: 1),
+        ]
+        let primaryEndpoint = "127.0.0.1:\(primary.port)"
+        let orchestrator = orchestrator(config: config, verbose: verbose)
+        try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
+        guard let port = orchestrator.snapshot.bindings.proxyPort else {
+            throw ScenarioExecutionError(message: "the HTTP listener did not bind")
+        }
+        func events(_ name: String) -> [RuntimeEvent] { orchestrator.eventLog.events.filter { $0.event == name } }
+        func status(_ response: EventLoopFuture<String>) async -> String {
+            do { return String(try await response.get().prefix(12)) } catch { return "no answer: \(error)" }
+        }
+        func primaryDiscovery() -> String? {
+            events("upstream.liveness_discovered").compactMap(\.detail).first { $0.hasPrefix("upstream=primary ") }
+        }
+
+        var warm: [EventLoopFuture<String>] = []
+        for index in 0..<4 { warm.append(try await sendThroughProxy(group: group, port: port, tag: "warm-\(index)")) }
+        for response in warm { _ = await status(response) }
+        let discovered = try await until(timeout: 2 * responseTimeout + 2) { primaryDiscovery() != nil }
+
+        let slow = [try await sendThroughProxy(group: group, port: port, tag: "slow-0"), try await sendThroughProxy(group: group, port: port, tag: "slow-1")]
+        var slowStatuses: [String] = []
+        for response in slow { slowStatuses.append(await status(response)) }
+        let checked = try await until(timeout: 2 * responseTimeout + 2) { !events("upstream.silence_check_finished").isEmpty }
+        var fastStatuses: [String] = []
+        for index in 0..<6 { fastStatuses.append(await status(try await sendThroughProxy(group: group, port: port, tag: "fast-\(index)"))) }
+        let fastViaPrimary = primary.requestLines.filter { $0.contains("/fast-") }.count
+        let healthyViaPrimary = try await until(timeout: 2 * checkInterval + 2) {
+            orchestrator.snapshot.runtimeStatus.lastHealthSummary.hasPrefix("Healthy via \(primaryEndpoint) ")
+        }
+
+        let primaryStatus = orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == primaryEndpoint }
+        let finished = events("upstream.silence_check_finished").compactMap(\.detail)
+        let recovery = orchestrator.eventLog.events.filter { $0.event.hasPrefix("recovery.") }
+
+        return ScenarioResult(name: "upstream-ignores-probe", clientCount: 12, clientsOpened: 12,
+            clientsWithFirstByte: fastStatuses.filter { $0.hasPrefix("HTTP/") }.count, clientsClosedEarly: 0, totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
+                .init("the primary's first answer was followed by a probe it ignored, and the pool learnt that",
+                      discovered && primaryDiscovery()?.contains(" answers_probes=false") == true),
+                .init("both slow requests ended with a 502 after the response budget",
+                      slowStatuses.allSatisfy { $0.hasPrefix("HTTP/1.1 502") } && events("upstream.response_timeout").count >= 2),
+                .init("the decisive silence asked the primary, got nothing, and kept it because it ignores the probe",
+                      checked && finished.count == 1 && finished[0].contains(" outcome=silent verdict=kept_probe_ignored")),
+                .init("the primary was never ranked behind", events("upstream.deprioritized").isEmpty),
+                .init("every fast request after the slow ones was served by the primary",
+                      fastStatuses.allSatisfy { $0.hasPrefix("HTTP/1.1 200") } && fastViaPrimary == 6),
+                .init("the slow requests opened no breaker and struck nothing",
+                      events("upstream.circuit_opened").isEmpty && primaryStatus?.circuitState == .closed && primaryStatus?.consecutiveFailures == 0),
+                .init("the health check stayed healthy via the primary, with no recovery ladder and no DIRECT",
+                      healthyViaPrimary && recovery.isEmpty && !orchestrator.snapshot.directModeCause.isDirect),
+            ], notes: [
+                "R=\(responseTimeout)s I=\(checkInterval)s; the primary never answers OPTIONS and answers /slow-* after 5 s",
+                "discovery: \(primaryDiscovery() ?? "none"); silence checks: \(finished); deprioritized: \(events("upstream.deprioritized").compactMap(\.detail))",
+                "fast requests via the primary: \(fastViaPrimary) of 6; secondary saw \(secondary.requestLines.count) request heads",
+                "last health check: \(orchestrator.snapshot.runtimeStatus.lastHealthSummary); recovery events: \(recovery.map(\.event)); direct: \(orchestrator.snapshot.directModeCause.rawValue)",
             ])
     }
 
@@ -214,8 +303,7 @@ enum SilentUpstreamScenarios {
         for response in responses { statuses.append(String(try await response.get().prefix(12))) }
         // Read before the next HEAD can answer: a healthy check resets the count a timeout might have raised.
         let strikesRightAfterTheTimeouts = orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == endpoint }?.consecutiveFailures
-        func healthCheckHeads() -> Int { heads() - events("upstream.silence_check_started").count }
-        let threeChecks = try await until(timeout: 5 * checkInterval + 5) { healthCheckHeads() >= 4 }
+        let threeChecks = try await until(timeout: 5 * checkInterval + 5) { heads() >= 4 }
         let fast = String(try await sendThroughProxy(group: group, port: port, tag: "fast").get().prefix(12))
         let status = orchestrator.snapshot.runtimeStatus
         let slowStatus = orchestrator.snapshot.upstreamStatuses.first { $0.endpoint == endpoint }

@@ -77,7 +77,9 @@ enum PMSim {
               pac-slow-host           slow PAC host: answered from cache, re-evaluated in the background, warning rate-limited
               pac-route-bounds        configurable PAC cap bounds real fallback attempts without promoting DIRECT
               upstream-flap           upstream up/down/up; assert breaker opens, half-opens, closes
-              upstream-silent-failover  an upstream that goes silent is held once, then fails over within 1.5I + 5R + P + 6C; its timeouts leave the breaker closed
+              upstream-silent-failover  an upstream silent to its own liveness probe fails over within main's I + 4R + P + 5C plus one probe budget (R=0.5, I=2); its timeouts leave the breaker closed
+              upstream-silent-failover-slow  the same at R=3, I=4
+              upstream-ignores-probe  a primary that ignores the liveness probe is never ranked behind for a silence; its silences fall back to the streak rule
               upstream-slow-serving   a slow-but-answering upstream neither fails over nor trips the breaker
               upstream-served-then-silent  of two upstreams, the one serving goes silent; the other serves after two silences, no breaker
               upstream-slow-origin    a healthy primary behind a slow origin keeps its traffic: its silences ask it once, it answers
@@ -272,6 +274,8 @@ enum PMSim {
         "pac-route-bounds",
         "upstream-flap",
         "upstream-silent-failover",
+        "upstream-silent-failover-slow",
+        "upstream-ignores-probe",
         "upstream-slow-serving",
         "upstream-served-then-silent",
         "upstream-slow-origin",
@@ -454,7 +458,13 @@ enum PMSim {
         case "upstream-flap":
             return [try await UpstreamFlapScenarios.upstreamFlap(verbose: verbose)]
         case "upstream-silent-failover":
-            return [try await SilentUpstreamScenarios.silentFailover(verbose: verbose)]
+            return [try await SilentUpstreamScenarios.silentFailover(
+                name: "upstream-silent-failover", responseTimeout: 0.5, checkInterval: 2, mainMeasuredFall: 7.02, verbose: verbose)]
+        case "upstream-silent-failover-slow":
+            return [try await SilentUpstreamScenarios.silentFailover(
+                name: "upstream-silent-failover-slow", responseTimeout: 3, checkInterval: 4, mainMeasuredFall: 19.04, verbose: verbose)]
+        case "upstream-ignores-probe":
+            return [try await SilentUpstreamScenarios.ignoresProbe(verbose: verbose)]
         case "upstream-slow-serving":
             return [try await SilentUpstreamScenarios.slowServing(verbose: verbose)]
         case "upstream-served-then-silent":
