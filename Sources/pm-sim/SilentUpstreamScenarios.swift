@@ -351,7 +351,7 @@ enum SilentUpstreamScenarios {
             UpstreamProxy(name: "primary", host: "127.0.0.1", port: primary.port, priority: 0),
             UpstreamProxy(name: "secondary", host: "127.0.0.1", port: secondary.port, priority: 1),
         ]
-        let threshold = config.circuitFailureThreshold, decisive = UnansweredStreak.decisiveCount
+        let threshold = config.circuitFailureThreshold, decisive = UpstreamSilences.probeAfter
         let primaryEndpoint = "127.0.0.1:\(primary.port)", secondaryEndpoint = "127.0.0.1:\(secondary.port)"
         let orchestrator = orchestrator(config: config, verbose: verbose)
         try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
@@ -494,9 +494,7 @@ enum SilentUpstreamScenarios {
             ])
     }
 
-    /// A live proxy whose egress dies: after the break it answers the liveness probe (or, `probesIgnored`, never
-    /// did) and forwards nothing. A request leaves every T seconds to one origin, so only the check URL can be
-    /// the second silent origin.
+    /// A request leaves every T seconds to one origin, so only the check URL can be the second silent origin.
     @RuntimeActor
     static func egressDead(name: String, probesIgnored: Bool, verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton

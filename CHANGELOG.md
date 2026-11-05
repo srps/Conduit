@@ -27,12 +27,19 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   it is silent or refused too does it rank behind the upstreams that answer for
   one breaker open interval (`upstream.deprioritized`). An upstream seen
   ignoring that request right after it answered (`upstream.liveness_discovered`)
-  is never ranked behind for a silence. A health check that connected and got
-  no answer asks the same request: an upstream silent to it is found at the
-  first failed check, as before this change; one that answers it is held once
-  (`health.inconclusive`), rechecked sooner, and counts only when it is the
-  second in a row or follows a conclusive failure, so one slow check no longer
-  starts the recovery ladder or falls to DIRECT. A connectivity probe that
+  is never ranked behind for a silence. That request cannot tell a slow origin
+  from a proxy whose egress is dead, so an upstream that leaves two distinct
+  origins (host and port; the health-check URL counts as one) unanswered with
+  no exchange answered in between ranks behind at once, whether or not it
+  answers the request (`upstream.deprioritized reason=silent_origins`), and a
+  half-open breaker in that state re-opens: no single slow origin can do that.
+  A health check that connected and got no answer asks the same request: an
+  upstream silent to it is found at the first failed check, as before this
+  change, and so is one whose check URL is that second silent origin; one that
+  answers it is otherwise held once (`health.inconclusive`), rechecked sooner,
+  and counts only when it is the second in a row or follows a conclusive
+  failure, so one slow check no longer starts the recovery ladder or falls to
+  DIRECT. A connectivity probe that
   connected and got no answer is held the same way
   (`connectivity.probe_inconclusive`). A health check whose idle pooled
   connection gets no answer while the upstream answers for itself asks once

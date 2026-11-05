@@ -62,8 +62,8 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
     /// unobservable to consumers — `recordFailure` overwrites it on every trip.
     package private(set) var nextOpenInterval: TimeInterval = 30
     package private(set) var ewmaLatencyMS: Double?
-    /// Exchanges in a row that connected and got no answer. They never count toward `consecutiveFailures`.
-    package private(set) var silences = UnansweredStreak()
+    /// Exchanges that connected and got no answer since the last answered one. They never count toward `consecutiveFailures`.
+    package private(set) var silences = UpstreamSilences()
     package private(set) var silence: Silence = .none
     /// Whether this upstream answers the liveness probe, a request a forward proxy answers itself.
     /// Learnt once per endpoint from the probe that follows the first answered exchange; `ignores`
@@ -81,7 +81,17 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
 
     package enum ProbeSupport: Equatable, Sendable { case unknown, discovering, answers, ignores }
 
-    package enum SilenceStep: Equatable, Sendable { case held, check }
+    package enum SilenceVerdict: Equatable, Sendable {
+        case held
+        /// The breaker is `.checking`: the caller owes it the liveness probe's outcome.
+        case askProbe
+        /// A half-open probe exchange: the caller settles the slot by the liveness probe's outcome.
+        case halfOpenProbe
+        /// Two distinct origins silent since the last answer: the breaker now ranks behind.
+        case acrossOrigins
+        /// Two distinct origins silent since the last answer on a half-open breaker.
+        case reopenHalfOpen
+    }
 
     package enum SilenceCheckOutcome: Equatable, Sendable {
         /// A status line, whatever the status: the proxy itself answered.
@@ -319,10 +329,21 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         }
     }
 
-    package mutating func recordUnanswered() -> (verdict: UnansweredStreak.Verdict, step: SilenceStep) {
-        let verdict = silences.recordUnanswered()
-        guard verdict.isDecisive, beginSilenceCheck() else { return (verdict, .held) }
-        return (verdict, .check)
+    package mutating func recordUnanswered(
+        origin: ExchangeOrigin, source: SilenceSource, now: Date, interval: TimeInterval
+    ) -> (verdict: SilenceVerdict, consecutive: Int) {
+        guard state != .open else { return (.held, silences.consecutive) }
+        let record = silences.recordUnanswered(origin: origin, source: source)
+        if state == .halfOpen { return (record.acrossOrigins ? .reopenHalfOpen : .halfOpenProbe, record.consecutive) }
+        if ranksBehind { return (.held, record.consecutive) }
+        if record.acrossOrigins {
+            silence = .ranksBehind(until: now.addingTimeInterval(interval))
+            return (.acrossOrigins, record.consecutive)
+        }
+        // A lapsed ranking's silence still stands for a health check, which is decisive at once; an exchange asks again.
+        if silence == .lapsed, source == .healthCheck { return (.held, record.consecutive) }
+        guard record.asksProbe, beginSilenceCheck() else { return (.held, record.consecutive) }
+        return (.askProbe, record.consecutive)
     }
 
     package mutating func beginSilenceCheck() -> Bool {
@@ -339,7 +360,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         guard state == .closed else { return .superseded }
         switch outcome {
         case .answered:
-            silences.recordAnswer()
+            silences.recordProbeAnswer()
             probeSupport = .answers
             return .kept
         case .unasked, .closed:

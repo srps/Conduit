@@ -163,7 +163,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                 // A VPN-transition sweep closed it mid-handshake (#148): the
                 // upstream did nothing wrong, and it is not retried.
                 let error: Error = connection.wasRetiredByVPNTransition ? ConnectionPoolError.vpnTransitionDuringConnect : error
-                pool.recordExchangeFailure(error, for: connection.proxy)
+                pool.recordExchangeFailure(error, for: connection.proxy, origin: ExchangeOrigin.connect(target))
                 return connection.channel.eventLoop.makeFailedFuture(error)
             }
         }

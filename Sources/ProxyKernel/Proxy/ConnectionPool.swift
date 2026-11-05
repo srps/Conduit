@@ -477,7 +477,7 @@ package final class ConnectionPool: @unchecked Sendable {
             if ConnectionPoolError.isClientClosedDuringResponse(error) {
                 self.recordSuccess(for: proxy, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
             } else {
-                self.recordExchangeFailure(error, for: proxy)
+                self.recordExchangeFailure(error, for: proxy, origin: ExchangeOrigin(head))
             }
             return self.group.next().makeFailedFuture(error)
         }
@@ -586,7 +586,7 @@ package final class ConnectionPool: @unchecked Sendable {
             .unhealthy(failure, responseTimeMS: Int(Date().timeIntervalSince(start) * 1_000))
         }
         let owns: Bool, halfOpen: Bool
-        switch beginHealthCheckSilenceCheck(of: proxy) {
+        switch recordHealthCheckSilence(of: proxy, origin: ExchangeOrigin(head)) {
         case .silenceStands: return unhealthy(.upstreamSilent(detail: detail))
         case .stale: return unhealthy(.answerTimedOut(detail: "\(detail); the upstream's endpoint changed while the check ran"))
         case .probe(let o, let h): (owns, halfOpen) = (o, h)
@@ -628,23 +628,40 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    /// A silent `HEAD` on a half-open upstream was its half-open probe; the liveness probe settles it as for a silent exchange.
-    private func beginHealthCheckSilenceCheck(of proxy: UpstreamProxy) -> SilenceCheckStart {
-        let (start, consecutive): (SilenceCheckStart, Int) = lock.withLock {
-            syncUpstreamStatesLocked(with: configProvider().enabledUpstreams)
-            guard namesEndpointLocked(proxy) else { return (.stale, 0) }
+    private func recordHealthCheckSilence(of proxy: UpstreamProxy, origin: ExchangeOrigin) -> SilenceCheckStart {
+        enum Recorded { case stale, stands, rankedBehind([ExchangeOrigin]), reopen, probe(owns: Bool, halfOpen: Bool, consecutive: Int) }
+        let config = configProvider()
+        let interval = breakerThresholds(from: config).baseOpenInterval
+        let recorded: Recorded = lock.withLock {
+            syncUpstreamStatesLocked(with: config.enabledUpstreams)
+            guard namesEndpointLocked(proxy) else { return .stale }
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
-            if breaker.silenceStands { return (.silenceStands, 0) }
-            let owns = breaker.beginSilenceCheck()
+            let (verdict, consecutive) = breaker.recordUnanswered(origin: origin, source: .healthCheck, now: Date(), interval: interval)
             breakers[proxy.id] = breaker
-            return (.probe(owns: owns, halfOpen: breaker.state == .halfOpen), breaker.silences.consecutive)
+            switch verdict {
+            case .acrossOrigins: return .rankedBehind(breaker.silences.origins)
+            case .reopenHalfOpen: return .reopen
+            case .askProbe: return .probe(owns: true, halfOpen: false, consecutive: consecutive)
+            case .halfOpenProbe: return .probe(owns: false, halfOpen: true, consecutive: consecutive)
+            case .held: return breaker.silenceStands ? .stands : .probe(owns: false, halfOpen: false, consecutive: consecutive)
+            }
         }
-        switch start {
-        case .probe(owns: true, halfOpen: _): publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "health_check")
-        case .probe(owns: false, halfOpen: true): publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "half_open_probe")
-        case .probe, .silenceStands, .stale: break
+        switch recorded {
+        case .stale:
+            return .stale
+        case .stands:
+            return .silenceStands
+        case .reopen:
+            failHalfOpenProbe(for: proxy)
+            return .silenceStands
+        case .rankedBehind(let origins):
+            publishDeprioritizedAcrossOrigins(proxy, origins: origins, interval: interval)
+            return .silenceStands
+        case .probe(let owns, let halfOpen, let consecutive):
+            if owns { publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "health_check") }
+            if halfOpen { publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "half_open_probe") }
+            return .probe(owns: owns, halfOpen: halfOpen)
         }
-        return start
     }
 
     /// Whether `proxy.id` still names `proxy.endpoint`; a result about a replaced endpoint is about another proxy.
@@ -719,7 +736,7 @@ package final class ConnectionPool: @unchecked Sendable {
                             self.release(connection, keepAlive: true)
                             self.logger.log(.debug, "Prewarmed upstream connection for \(proxy.endpoint).", category: .proxy)
                         } catch {
-                            self.recordExchangeFailure(error, for: proxy)
+                            if ConnectionPoolError.failureClass(error) == .upstream { self.recordFailure(for: proxy) }
                             self.logger.log(.debug, "Prewarm failed for \(proxy.endpoint): \(error.displayDescription)", category: .proxy)
                         }
                     }
@@ -1237,7 +1254,7 @@ package final class ConnectionPool: @unchecked Sendable {
             case .answered(let response):
                 return response
             case .silent:
-                self?.recordSilence(for: proxy)
+                self?.recordSilence(for: proxy, origin: ExchangeOrigin(head))
                 throw ConnectionPoolError.upstreamResponseTimedOut
             case .failed(let error):
                 throw error
@@ -1289,7 +1306,7 @@ package final class ConnectionPool: @unchecked Sendable {
             if ConnectionPoolError.failureClass(error) == .inconclusive {
                 return attempt.eventLoop.makeSucceededFuture(.silent(ranOnAnIdledConnection: ranOnAnIdledConnection.withLockedValue { $0 }))
             }
-            self.recordExchangeFailure(error, for: proxy)
+            self.recordExchangeFailure(error, for: proxy, origin: ExchangeOrigin(head))
             return attempt.eventLoop.makeSucceededFuture(.failed(error))
         }
     }
@@ -1438,40 +1455,49 @@ package final class ConnectionPool: @unchecked Sendable {
         logger.log(.notice, "Upstream \(proxy.name) competes for traffic again: \(event.detail ?? "")", category: .proxy)
     }
 
-    package func recordExchangeFailure(_ error: Error, for proxy: UpstreamProxy) {
+    package func recordExchangeFailure(_ error: Error, for proxy: UpstreamProxy, origin: ExchangeOrigin) {
         switch ConnectionPoolError.failureClass(error) {
         case .upstream: recordFailure(for: proxy)
-        case .inconclusive: recordSilence(for: proxy)
+        case .inconclusive: recordSilence(for: proxy, origin: origin)
         case .local: break
         }
     }
 
-    private func recordSilence(for proxy: UpstreamProxy) {
-        enum Outcome { case halfOpenProbe(consecutive: Int), held, check(UnansweredStreak.Verdict) }
+    private func recordSilence(for proxy: UpstreamProxy, origin: ExchangeOrigin) {
         let config = configProvider()
-        let outcome: Outcome = lock.withLock {
+        let interval = breakerThresholds(from: config).baseOpenInterval
+        let recorded: (verdict: UpstreamCircuitBreaker.SilenceVerdict, consecutive: Int, origins: [ExchangeOrigin])? = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
-            guard namesEndpointLocked(proxy) else { return .held }
+            guard namesEndpointLocked(proxy) else { return nil }
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
-            switch breaker.state {
-            case .closed: break
-            case .halfOpen: return .halfOpenProbe(consecutive: breaker.silences.consecutive)
-            case .open: return .held
-            }
-            let recorded = breaker.recordUnanswered()
+            let (verdict, consecutive) = breaker.recordUnanswered(origin: origin, source: .exchange, now: Date(), interval: interval)
             breakers[proxy.id] = breaker
-            return recorded.step == .check ? .check(recorded.verdict) : .held
+            return (verdict, consecutive, breaker.silences.origins)
         }
-        switch outcome {
-        case .halfOpenProbe(let consecutive):
-            publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "half_open_probe")
-            probeLiveness(of: proxy).whenSuccess { [weak self] outcome in self?.settleHalfOpenProbe(for: proxy, outcome) }
+        guard let recorded else { return }
+        switch recorded.verdict {
         case .held:
             break
-        case .check(let verdict):
-            publishSilenceCheckStarted(for: proxy, consecutive: verdict.consecutive, askedBy: "silences")
+        case .halfOpenProbe:
+            publishSilenceCheckStarted(for: proxy, consecutive: recorded.consecutive, askedBy: "half_open_probe")
+            probeLiveness(of: proxy).whenSuccess { [weak self] outcome in self?.settleHalfOpenProbe(for: proxy, outcome) }
+        case .askProbe:
+            publishSilenceCheckStarted(for: proxy, consecutive: recorded.consecutive, askedBy: "silences")
             probeLiveness(of: proxy).whenSuccess { [weak self] outcome in self?.finishSilenceCheck(of: proxy, outcome) }
+        case .reopenHalfOpen:
+            failHalfOpenProbe(for: proxy)
+        case .acrossOrigins:
+            publishDeprioritizedAcrossOrigins(proxy, origins: recorded.origins, interval: interval)
         }
+    }
+
+    private func publishDeprioritizedAcrossOrigins(_ proxy: UpstreamProxy, origins: [ExchangeOrigin], interval: TimeInterval) {
+        let event = RuntimeEvent(
+            kind: .health, event: "upstream.deprioritized",
+            detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) reason=silent_origins origins=\(origins.map(\.hostPort).joined(separator: ",")) seconds=\(Int(interval))"
+        )
+        eventSink?(event)
+        logger.log(.notice, "Upstream \(proxy.name) answered nothing for two origins in a row; preferring upstreams that answer: \(event.detail ?? "")", category: .proxy)
     }
 
     /// The breaker was opened by conclusive failures, so a half-open exchange's silence re-opens it only when the

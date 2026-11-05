@@ -145,7 +145,7 @@ final class UpstreamSilenceTests: XCTestCase {
     }
 
     func testAnUpstreamThatIgnoresTheProbeIsNeverRankedBehindForASilence() async throws {
-        let upstream = try await CountingUpstream.start(answers: .max, probes: .ignored) { $0.contains("/slow") || $0.contains("check.test") }
+        let upstream = try await CountingUpstream.start(answers: .max, probes: .ignored) { $0.contains("/slow") }
         let events = Events()
         let pool = makePool(config: NIOLockedValueBox(Self.config(upstreams: [upstream.proxy(named: "a")])), events: events)
         _ = try await pool.exchange(head: Self.head(path: "/warm"), body: nil).get()
@@ -166,9 +166,9 @@ final class UpstreamSilenceTests: XCTestCase {
                       events.details("upstream.silence_check_finished").first ?? "none")
         XCTAssertEqual(events.details("upstream.deprioritized"), [], "an upstream known to ignore the probe falls back to the streak rule")
 
-        let check = await pool.healthCheck(urlString: "http://check.test/")
+        let check = await pool.healthCheck(urlString: "http://example.com/slow-check")
         guard case .answerTimedOut? = check.failure else {
-            return XCTFail("a silent probe says nothing about an upstream that ignores it, got \(String(describing: check.failure))")
+            return XCTFail("a silent probe says nothing about an upstream that ignores it, and one silent origin decides nothing, got \(String(describing: check.failure))")
         }
         pool.closeAll()
         try await upstream.close()
@@ -411,15 +411,12 @@ final class UpstreamSilenceTests: XCTestCase {
         } catch {}
         XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open)
 
-        for _ in 0..<2 { pool.recordExchangeFailure(ConnectionPoolError.upstreamResponseTimedOut, for: config.upstreams[0]) }
+        for _ in 0..<2 { pool.recordExchangeFailure(ConnectionPoolError.upstreamResponseTimedOut, for: config.upstreams[0], origin: .connect("example.com:80")) }
 
         XCTAssertEqual(events.details("upstream.deprioritized"), [], "late silences on an open breaker must not hide its half-open probe")
         pool.closeAll()
     }
 
-    // MARK: - Egress silence across origins
-
-    /// A primary that serves until `broken` and then forwards nothing, behind which a secondary always answers.
     /// The primary has a latency score from one answered exchange, so selection prefers it until it ranks behind.
     private func egressPools(
         probes: CountingUpstream.Probes = .answered, withSecondary: Bool = true, answering: @escaping @Sendable (String) -> Bool = { _ in false }
@@ -565,6 +562,7 @@ final class UpstreamSilenceTests: XCTestCase {
         let pool = makePool(config: current, events: events)
         _ = try await pool.exchange(head: Self.head(path: "/warm"), body: nil).get()
         _ = await Self.eventually { !events.details("upstream.liveness_discovered").isEmpty }
+        // Idle connections are keyed by upstream id, so the warm socket would carry a check to the old endpoint.
         _ = pool.closeAll(scope: .idleOnly)
         current.withLockedValue { $0.upstreams[0].port = refusedPort }
         for _ in 0..<2 { _ = await pool.healthCheck(urlString: "http://check.test/") }
