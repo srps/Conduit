@@ -1409,8 +1409,8 @@ package final class ConnectionPool: @unchecked Sendable {
             deadline.cancel()
             let outcome: UpstreamCircuitBreaker.SilenceCheckOutcome
             switch result {
-            case .success:
-                outcome = .answered(latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
+            case .success(let response):
+                outcome = .answered(status: response.head.status.code, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
             case .failure(let error):
                 switch ConnectionPoolError.failureClass(error) {
                 case .upstream: outcome = .refused

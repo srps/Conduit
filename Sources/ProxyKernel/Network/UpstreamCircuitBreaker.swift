@@ -65,6 +65,10 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
     /// Exchanges in a row that connected and got no answer. They never count toward `consecutiveFailures`.
     package private(set) var silences = UnansweredStreak()
     package private(set) var silence: Silence = .none
+    /// Whether this upstream answers the liveness probe, a request a forward proxy answers itself.
+    /// Learnt once per endpoint from the probe that follows the first answered exchange; `ignores`
+    /// only when the upstream had just answered an exchange, so it was alive and still said nothing.
+    package private(set) var probeSupport: ProbeSupport = .unknown
 
     package enum Silence: Equatable, Sendable {
         case none
@@ -72,12 +76,20 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         case ranksBehind(until: Date)
     }
 
+    package enum ProbeSupport: Equatable, Sendable { case unknown, discovering, answers, ignores }
+
     package enum SilenceStep: Equatable, Sendable { case held, check }
 
     package enum SilenceCheckOutcome: Equatable, Sendable {
-        case answered(latencyMS: Int)
+        /// A status line, whatever the status: the proxy itself answered.
+        case answered(status: UInt, latencyMS: Int)
+        /// Connected and nothing within the answer budget.
         case silent
+        /// A refused or missed connect, or a reset before the connection was made.
         case refused
+        /// The peer closed or reset before a status line: it acted, so it is not silent.
+        case closed
+        /// Not asked: a full pool or a VPN-transition sweep, nothing about the upstream.
         case unasked
 
         package var name: String {
@@ -85,6 +97,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
             case .answered: "answered"
             case .silent: "silent"
             case .refused: "refused"
+            case .closed: "closed"
             case .unasked: "unasked"
             }
         }
@@ -94,6 +107,8 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         case kept
         case rankedBehind = "ranked_behind"
         case superseded
+        /// Silent, but this upstream is known to ignore the probe, so its silence says nothing.
+        case keptProbeIgnored = "kept_probe_ignored"
     }
 
     // MARK: - Internal state
@@ -299,27 +314,57 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
 
     package mutating func recordUnanswered() -> (verdict: UnansweredStreak.Verdict, step: SilenceStep) {
         let verdict = silences.recordUnanswered()
-        guard verdict.isDecisive, state == .closed, silence == .none else { return (verdict, .held) }
-        silence = .checking(superseded: false)
+        guard verdict.isDecisive, beginSilenceCheck() else { return (verdict, .held) }
         return (verdict, .check)
     }
 
+    /// Take the one silence-check slot. False while a check runs, a ranking stands or the breaker is not closed.
+    package mutating func beginSilenceCheck() -> Bool {
+        guard state == .closed, silence == .none else { return false }
+        silence = .checking(superseded: false)
+        return true
+    }
+
+    /// The probe's answer is the proxy's own, not an exchange: it ends the streak and feeds neither the
+    /// latency score nor the strike count.
     package mutating func finishSilenceCheck(_ outcome: SilenceCheckOutcome, now: Date, interval: TimeInterval) -> SilenceCheckVerdict {
         guard case .checking(let superseded) = silence else { return .superseded }
         silence = .none
         guard state == .closed else { return .superseded }
         switch outcome {
-        case .answered(let latencyMS):
-            recordSuccess(latencyMS: latencyMS)
+        case .answered:
+            silences.recordAnswer()
+            probeSupport = .answers
             return .kept
-        case .unasked:
+        case .unasked, .closed:
             return .kept
+        case .silent where probeSupport == .ignores:
+            return .keptProbeIgnored
         case .silent, .refused:
-            guard !superseded, silences.failureStanding else { return .superseded }
+            guard !superseded else { return .superseded }
             silence = .ranksBehind(until: now.addingTimeInterval(interval))
             return .rankedBehind
         }
     }
+
+    /// Take the one discovery per endpoint; true only the first time.
+    package mutating func beginDiscovery() -> Bool {
+        guard probeSupport == .unknown else { return false }
+        probeSupport = .discovering
+        return true
+    }
+
+    package mutating func recordDiscovery(_ outcome: SilenceCheckOutcome) {
+        guard probeSupport == .discovering else { return }
+        switch outcome {
+        case .answered: probeSupport = .answers
+        case .silent, .closed: probeSupport = .ignores
+        case .refused, .unasked: probeSupport = .unknown
+        }
+    }
+
+    /// The endpoint behind this id changed, so what was learnt about its probe support is about another proxy.
+    package mutating func forgetProbeSupport() { probeSupport = .unknown }
 
     /// Try to transition `.open → .halfOpen`. Succeeds if `openUntil` has
     /// elapsed and no probe is currently in flight. Sets
