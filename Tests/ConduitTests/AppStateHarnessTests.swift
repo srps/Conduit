@@ -531,8 +531,9 @@ final class AppStateHarnessTests: XCTestCase {
 
         state.toggleDNS()
         await harness.settle("DNS stops") { state.runtime.dnsRunState == .stopped }
-        await harness.settle("the Stop restores") { self.wifi.dnsServers == ["192.0.2.1"] }
-        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS), "the Start kept the crashed run's record, and the Stop put it back")
+        await harness.settle("the Stop restores and releases the record") {
+            self.wifi.dnsServers == ["192.0.2.1"] && !harness.journal.hasRecords(for: .systemDNS)
+        }
     }
 
     func testRestoringAfterADeclinedSystemDNSRecoveryPutsTheRecordedServersBack() async throws {
@@ -775,8 +776,9 @@ final class AppStateHarnessTests: XCTestCase {
         await harness.settle("the proxy runs") { state.runtime.runtimeStatus.state == .running }
         state.toggleProxy()
         await harness.settle("the proxy stops") { state.runtime.runtimeStatus.state == .stopped }
-        await harness.settle("the Stop restores") { self.homeService(locations)?.proxies["HTTPProxy"] == .text("home.example") }
-        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+        await harness.settle("the Stop restores and releases the record") {
+            self.homeService(locations)?.proxies["HTTPProxy"] == .text("home.example") && !harness.journal.hasRecords(for: .systemProxy)
+        }
     }
 
     /// The explicit reload runs one at a time, refusing a second with a message, and re-evaluates the launch options' hold from what it
