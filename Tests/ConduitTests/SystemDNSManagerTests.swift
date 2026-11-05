@@ -974,6 +974,8 @@ final class SystemDNSManagerTests: XCTestCase {
                  probe: .inconclusive, expected: .restored(.ownerGone(.relayTargetRefused))),
             Case(first: .relaying(targetPort: 5053, target: .refused), second: .relaying(targetPort: 5053, target: .answered),
                  probe: .inconclusive, expected: .declinedLiveListener(.relayTargetAnswered)),
+            Case(first: .relaying(targetPort: 5053, target: .refused), second: .relaying(targetPort: 5054, target: .answered),
+                 probe: .notLive, expected: .declinedLiveListener(.relayTargetAnswered)),
             Case(first: .relaying(targetPort: 5053, target: .refused), second: .relaying(targetPort: 5054, target: .refused),
                  probe: .inconclusive, expected: .declinedInconclusiveProbe(witness: .refusalUnconfirmed)),
             Case(first: .relaying(targetPort: 5053, target: .refused), second: nil,

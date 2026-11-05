@@ -394,7 +394,7 @@ package final class SystemDNSManager: @unchecked Sendable {
             relayRecheckPause(Self.relayRefusalRecheckDelay)
             switch readRelay() {
             case .reading(.relaying(port, .refused)): return .ownerGone(.relayTargetRefused)
-            case .reading(.relaying(port, .answered)): return .anotherSessionLive(.relayTargetAnswered)
+            case .reading(.relaying(_, .answered)): return .anotherSessionLive(.relayTargetAnswered)
             default: gap = .refusalUnconfirmed
             }
         case .reading(.relaying(_, .answered)): return .anotherSessionLive(.relayTargetAnswered)
