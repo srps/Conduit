@@ -347,6 +347,38 @@ final class UpstreamSilenceTests: XCTestCase {
         XCTAssertEqual(status(pool)?.circuitState, .closed, "that probe was answered")
     }
 
+    func testAProbeToAnEndpointEditedAwayStillFreesTheSlot() async throws {
+        let subject = try await startUpstream { _, line in line.hasPrefix("CONNECT ") ? .status(502) : (line.contains("/slow") ? .silent : .ok) }
+        let moved = try await startUpstream { _, _ in .ok }
+        let other = try await startUpstream { _, _ in .ok }
+        let pool = makePool(port: subject.port)
+        defer { pool.closeAll() }
+        await assertAnswered(exchange(pool, "http://warm.test/warm"))
+        try await tripOnAnAnswerAndWaitForTheProbe(pool)
+
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://slow.test/slow")
+        head.headers.add(name: "Host", value: "slow.test")
+        let probe = pool.exchange(head: head, body: nil)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(status(pool)?.circuitState, .halfOpen, "the probe to the old endpoint is in flight")
+        config.withLockedValue { $0.upstreams[0].port = moved.port }
+        do {
+            _ = try await probe.get()
+            XCTFail("the old endpoint never answers /slow")
+        } catch {
+            XCTAssertTrue(ConnectionPoolError.isUpstreamResponseTimedOut(error), "\(error)")
+        }
+        XCTAssertEqual(released().count, 1, "the probe's silence frees the slot though its endpoint is gone")
+        XCTAssertEqual(counted(), [])
+
+        config.withLockedValue { $0.upstreams.append(UpstreamProxy(name: "other", host: "127.0.0.1", port: other.port, priority: 1)) }
+        for index in 0..<12 {
+            _ = await exchange(pool, "http://fast.test/ok\(index)")
+        }
+        XCTAssertGreaterThan(moved.requestLines.filter { $0.contains("/ok") }.count, 0, "the edited upstream is probed again")
+        XCTAssertEqual(status(pool)?.circuitState, .closed)
+    }
+
     func testSilenceOnTwoOriginsDuringHalfOpenStillReopensTheBreaker() async throws {
         let subject = try await startUpstream { _, line in line.hasPrefix("CONNECT ") ? .status(502) : .silent }
         let pool = makePool(port: subject.port)

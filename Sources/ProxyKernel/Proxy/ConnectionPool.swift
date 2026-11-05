@@ -1354,10 +1354,14 @@ package final class ConnectionPool: @unchecked Sendable {
         }
         let outcome: Outcome? = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
-            guard namesCurrentEndpointLocked(proxy) else { return nil }
-            var ledger = silences[proxy.id] ?? UpstreamSilences()
-            let counts = ledger.recordSilence(origin: origin)
-            silences[proxy.id] = ledger
+            var counts = false
+            var pending: [ExchangeOrigin] = []
+            if namesCurrentEndpointLocked(proxy) {
+                var ledger = silences[proxy.id] ?? UpstreamSilences()
+                counts = ledger.recordSilence(origin: origin)
+                pending = ledger.origins
+                silences[proxy.id] = ledger
+            }
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
             guard counts else {
                 guard breaker.releaseHalfOpenProbe() else { return nil }
@@ -1365,7 +1369,7 @@ package final class ConnectionPool: @unchecked Sendable {
                 return .probeReleased
             }
             guard breaker.state != .open else { return nil }
-            return .counted(origins: ledger.origins, transition: recordFailureLocked(for: proxy, thresholds: thresholds))
+            return .counted(origins: pending, transition: recordFailureLocked(for: proxy, thresholds: thresholds))
         }
         switch outcome {
         case nil:
