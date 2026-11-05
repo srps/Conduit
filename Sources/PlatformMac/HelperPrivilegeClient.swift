@@ -37,7 +37,6 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
         try runPrivileged(Self.abortOnFirstFailure(batchScript(for: batch)))
     }
 
-    /// No helper, so no relay to ask about.
     package func dnsRelayStatus() throws -> DNSRelayStatus? { nil }
 
     /// Returns what the script printed, which `installHelper()` reads its
@@ -438,10 +437,6 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         return .refused(PrivilegeRefusal(refusal), message ?? refusal.rawValue)
     }
 
-    /// A helper that answers but cannot give a status, such as a v5 helper
-    /// that predates the command and answers "Invalid request", is `nil` with
-    /// `auth.privilege_helper_relay_status_unavailable`. It is never sent to
-    /// the AppleScript fallback, which has no relay to ask about.
     package func dnsRelayStatus() throws -> DNSRelayStatus? {
         let command = HelperCommand.dnsRelayStatus
         let response: HelperResponse
@@ -824,8 +819,6 @@ extension PrivilegeRefusal {
 }
 
 extension DNSRelayStatus {
-    /// `nil` for a status whose fields contradict each other: no witness
-    /// rather than a guess at which field is wrong.
     init?(_ wire: HelperDNSRelayStatus) {
         let verdict: DNSRelayTargetVerdict
         switch wire.target {

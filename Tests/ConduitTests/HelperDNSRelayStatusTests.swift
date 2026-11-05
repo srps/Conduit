@@ -6,15 +6,8 @@ import XCTest
 @testable import PlatformMac
 @testable import ProxyKernel
 
-/// `dns-relay-status` is added within protocol v5 (#201). A v5 helper that
-/// predates it must read as "no witness": never an admin prompt, never
-/// unreachability.
 final class HelperDNSRelayStatusTests: XCTestCase {
 
-    // MARK: - Wire
-
-    /// What an installed helper that predates a command does with it: the
-    /// request does not decode, so the helper answers "Invalid request".
     func testACommandTheHelperDoesNotKnowFailsToDecode() {
         let later = Data(#"{"protocolVersion":5,"command":"some-later-command","values":[]}"#.utf8)
         XCTAssertThrowsError(try JSONDecoder().decode(HelperRequest.self, from: later))
@@ -44,13 +37,9 @@ final class HelperDNSRelayStatusTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(HelperResponse.self, from: ping).features, [.dnsRelayStatus])
     }
 
-    /// A read changes nothing, so the last console user may make it while
-    /// nobody is at the console, as with a ping.
     func testTheLastConsoleUserMayReadTheStatusAtTheLoginwindow() {
         XCTAssertNil(HelperAdmission.refusal(peerUID: 501, consoleUID: 0, lastConsoleUID: 501, command: .dnsRelayStatus))
     }
-
-    // MARK: - Client against a stand-in helper
 
     func testAHelperThatPredatesTheCommandIsNoStatusWithoutAPrompt() throws {
         let helper = try FakeHelper(replies: [.error("Invalid request")])
@@ -108,8 +97,6 @@ final class HelperDNSRelayStatusTests: XCTestCase {
         XCTAssertEqual(probe.events.withLockedValue { $0 }.first?.detail, "reason=unreadable_status")
     }
 
-    /// Unreachability is the caller's to judge; it is not dressed as "no
-    /// witness", and it raises no prompt.
     func testAMissingHelperThrowsUnreachableWithoutAPrompt() {
         let probe = clientProbe("/tmp/pm-no-helper-\(UUID().uuidString.prefix(8)).sock")
         XCTAssertThrowsError(try probe.client.dnsRelayStatus()) { error in

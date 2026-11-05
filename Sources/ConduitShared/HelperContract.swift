@@ -185,7 +185,6 @@ public struct HelperDNSRelayStatus: Codable, Sendable, Equatable {
         case answered
         /// No reply within the helper's bound.
         case silent
-        /// No relay is running, so there is no target.
         case notRunning
     }
 
@@ -474,8 +473,6 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         // Unknown values decode as `nil` rather than failing the frame: a
         // refusal reason this client does not know is still a refusal.
         refusal = try? container.decodeIfPresent(HelperRefusal.self, forKey: .refusal)
-        // A status this client cannot read, such as a verdict added later, is
-        // no witness rather than a broken frame.
         dnsRelay = try? container.decodeIfPresent(HelperDNSRelayStatus.self, forKey: .dnsRelay)
         features = try container.decodeIfPresent([String].self, forKey: .features)?.compactMap(HelperFeature.init(rawValue:))
     }

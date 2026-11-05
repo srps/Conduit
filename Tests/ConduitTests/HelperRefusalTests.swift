@@ -178,8 +178,6 @@ final class FakeHelper: @unchecked Sendable {
     private var running = true
 
     var requestsSeen: Int { lock.withLock { seen } }
-    /// Each request's command as this helper decodes it; `nil` for one it
-    /// could not.
     var commandsSeen: [HelperCommand?] { lock.withLock { commands } }
 
     init(replies: [HelperResponse?]) throws {

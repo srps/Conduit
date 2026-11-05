@@ -3,13 +3,6 @@ import Darwin
 import Foundation
 import ProxyKernel
 
-/// `pm-sim dns-relay-witness` (#201). The helper's real `UDPRelay`, on an
-/// ephemeral loopback port instead of :53 so no root is needed, reports
-/// what a fresh query to its target finds. A forwarder that exited (the
-/// crash case) is refused by the kernel at once; a port held by something
-/// that never replies is silent at the bound; a target that replies is
-/// answered; a stopped relay is not running. Nothing on the machine is
-/// touched.
 enum DNSRelayWitnessScenarios {
     private struct Failure: Error, CustomStringConvertible { let description: String }
 
@@ -27,20 +20,11 @@ enum DNSRelayWitnessScenarios {
         let refused = try relay.status(boundMilliseconds: 30_000)
         let refusedSeconds = Date().timeIntervalSince(refusedStarted)
 
-        // The same port, now held by a socket that never reads.
         let holder = try boundSocket(port: targetPort)
         defer { close(holder) }
         let silent = try relay.status()
-        // The silent probe's query is still queued on the holder; the replier
-        // must answer the next one.
-        var drain = [UInt8](repeating: 0, count: 512)
-        while recv(holder, &drain, drain.count, MSG_DONTWAIT) >= 0 {}
-        // Bounds the replier's wait, so a status that never sends leaves no
-        // thread blocked behind the scenario.
-        var timeout = timeval(tv_sec: 5, tv_usec: 0)
-        guard setsockopt(holder, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0 else {
-            throw Failure(description: "SO_RCVTIMEO: \(String(cString: strerror(errno)))")
-        }
+        discardQueuedQueries(holder)
+        try boundReceive(holder, seconds: 5)
 
         let replier = Thread {
             var buffer = [UInt8](repeating: 0, count: 512)
@@ -94,6 +78,18 @@ enum DNSRelayWitnessScenarios {
             throw Failure(description: "bind 127.0.0.1:\(port): \(message)")
         }
         return fd
+    }
+
+    private static func discardQueuedQueries(_ fd: Int32) {
+        var buffer = [UInt8](repeating: 0, count: 512)
+        while recv(fd, &buffer, buffer.count, MSG_DONTWAIT) >= 0 {}
+    }
+
+    private static func boundReceive(_ fd: Int32, seconds: Int) throws {
+        var timeout = timeval(tv_sec: seconds, tv_usec: 0)
+        guard setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0 else {
+            throw Failure(description: "SO_RCVTIMEO: \(String(cString: strerror(errno)))")
+        }
     }
 
     private static func port(of fd: Int32) throws -> Int {

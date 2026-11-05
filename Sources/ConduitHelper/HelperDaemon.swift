@@ -461,13 +461,10 @@ enum HelperDaemon {
         }
     }
 
-    /// Reads the relay's own target, not a port the app names: the app's
-    /// configured forwarder port is only its guess at what this relay feeds.
-    /// Up to `UDPRelay.statusBoundMilliseconds` of the single accept loop.
     private static func dnsRelayStatus() -> (HelperResponse, HelperAuditOutcome) {
         let status: DNSRelayStatus
         do {
-            status = try relay?.status() ?? .notRunning
+            status = try relay?.status(boundMilliseconds: UDPRelay.statusBoundMilliseconds) ?? .notRunning
         } catch {
             HelperLog.error("DNS relay status failed: \(error.localizedDescription)")
             return (.error("DNS relay status failed: \(error.localizedDescription)"), .commandFailed)

@@ -678,7 +678,7 @@ package final class SystemDNSManager: @unchecked Sendable {
     /// recovery tear the DNS out from under a session that is serving the
     /// machine, which is worse than the second it costs to be sure.
     package static func dnsResponds(onPort port: Int, timeoutMilliseconds: Int32 = 2_000) -> Bool {
-        let query = DNSWireFormat.buildQuery(domain: "one.one.one.one", txID: 0xFACE)
+        let query = DNSWireFormat.buildQuery(domain: DNSWireFormat.livenessProbeDomain, txID: 0xFACE)
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { return false }
         defer { close(fd) }

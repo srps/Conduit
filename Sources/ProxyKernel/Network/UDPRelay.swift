@@ -48,8 +48,6 @@ package final class UDPRelay: @unchecked Sendable {
 
     /// Asks the target, on a fresh socket, whether anything still serves it.
     ///
-    /// The relay's own forward socket is not asked: its loop consumes the
-    /// refusal a query earns, and reading it here would race that loop.
     /// Throws only for a failure of this process's own socket calls, which
     /// says nothing about the target.
     package func status(boundMilliseconds: Int = UDPRelay.statusBoundMilliseconds) throws -> DNSRelayStatus {
@@ -61,8 +59,6 @@ package final class UDPRelay: @unchecked Sendable {
         )
     }
 
-    /// Any datagram back counts as `answered`: the question is whether a
-    /// process holds the port, not whether its answer is right.
     private static func probe(host: String, port: Int, boundMilliseconds: Int) throws -> DNSRelayTargetVerdict {
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { throw UDPRelayError.socketCreationFailed(errnoText) }
@@ -80,14 +76,12 @@ package final class UDPRelay: @unchecked Sendable {
         }
         guard connected == 0 else { throw UDPRelayError.connectFailed(port, errnoText) }
 
-        // The name the app's own relay probe asks, so a live forwarder's
-        // cache usually holds it and the reply does not wait on an upstream.
-        let query = DNSWireFormat.buildQuery(domain: "one.one.one.one", txID: UInt16.random(in: .min ... .max))
+        let query = DNSWireFormat.buildQuery(domain: DNSWireFormat.livenessProbeDomain, txID: UInt16.random(in: .min ... .max))
         if Darwin.send(fd, query, query.count, 0) < 0 {
             guard errno == ECONNREFUSED else { throw UDPRelayError.probeFailed(port, "send: \(errnoText)") }
             return .refused
         }
-        let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(max(0, boundMilliseconds)) * 1_000_000
+        let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(boundMilliseconds) * 1_000_000
         var buffer = [UInt8](repeating: 0, count: 512)
         while true {
             let now = DispatchTime.now().uptimeNanoseconds

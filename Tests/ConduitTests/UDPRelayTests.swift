@@ -428,10 +428,6 @@ final class UDPRelayTests: XCTestCase {
         XCTAssertEqual(recv(target, &buf, buf.count, 0), -1, "a datagram with no question must not be forwarded")
     }
 
-    // MARK: - Target status (#201)
-
-    /// The crash case: the forwarder's process died, so the kernel refuses its
-    /// port. The answer is the kernel's, so it comes long before the bound.
     func testAStatusOfATargetNobodyListensOnIsRefusedWithoutWaitingTheBound() throws {
         let closed = createUDPSocket(port: 0)
         XCTAssertGreaterThanOrEqual(closed, 0)

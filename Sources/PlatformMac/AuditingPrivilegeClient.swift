@@ -14,7 +14,6 @@ package final class AuditingPrivilegeClient: PrivilegeClient, @unchecked Sendabl
         self.eventSink = eventSink
     }
 
-    /// A read, not a privileged operation: nothing to audit.
     package func dnsRelayStatus() throws -> DNSRelayStatus? {
         try base.dnsRelayStatus()
     }
