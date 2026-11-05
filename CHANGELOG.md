@@ -20,18 +20,23 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   a 502 and `upstream.response_timeout`, but it no longer strikes the circuit
   breaker; a refused or missed connect, a 5xx and a rejected credential still
   count, one strike each. An upstream that leaves two exchanges in a row
-  unanswered is asked once, on a fresh connection, whether it answers
-  (`upstream.silence_check_started`). If it does, the origin was slow and the
-  upstream keeps its traffic; only if the check is silent or refused too does it
-  rank behind the upstreams that answer for one breaker open interval
-  (`upstream.deprioritized`). A health check or connectivity probe that connected
-  and got no answer is held once (`health.inconclusive`,
-  `connectivity.probe_inconclusive`), rechecked sooner, and counts only when it
-  is the second in a row or follows a conclusive failure, so one slow check no
-  longer starts the recovery ladder or falls to DIRECT. A health check whose
-  idle pooled connection gets no answer asks once more on a fresh connection
-  (`health.idle_connection_silent`), so a dead upstream is still found at the
-  first failed check. The DNS health tick
+  unanswered is asked once, on a fresh connection, a request it answers itself
+  without any origin: `OPTIONS` with `Max-Forwards: 0`
+  (`upstream.silence_check_started`). Any status line means the origin was slow
+  and the upstream keeps its traffic, a slow health-check URL included; only if
+  it is silent or refused too does it rank behind the upstreams that answer for
+  one breaker open interval (`upstream.deprioritized`). An upstream seen
+  ignoring that request right after it answered (`upstream.liveness_discovered`)
+  is never ranked behind for a silence. A health check that connected and got
+  no answer asks the same request: an upstream silent to it is found at the
+  first failed check, as before this change; one that answers it is held once
+  (`health.inconclusive`), rechecked sooner, and counts only when it is the
+  second in a row or follows a conclusive failure, so one slow check no longer
+  starts the recovery ladder or falls to DIRECT. A connectivity probe that
+  connected and got no answer is held the same way
+  (`connectivity.probe_inconclusive`). A health check whose idle pooled
+  connection gets no answer while the upstream answers for itself asks once
+  more on a fresh connection (`health.idle_connection_silent`). The DNS health tick
   reports the pipeline unresponsive only on a failed relay start or two
   unconfirmed restarts in a row (`dns.relay_unconfirmed`). At teardown, a launchd
   variable that cannot be read no longer counts as absent, so the environment
