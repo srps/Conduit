@@ -104,8 +104,12 @@ Launch recovery reads it in #270: `SurfaceOwnership` in
 A refused target is read again after half a second and must still refuse on
 the same port, because a live forwarder that rebinds its port reads refused
 for that moment; the writer lease (0017) would settle only same-root sessions,
-and its role in recovery is still the open question below. A restore on the
-witness also stops the orphaned relay. A helper whose ping lists no
+and its role in recovery is still the open question below. Recovery that acts on
+a witnessed refusal also stops the orphaned relay, whatever it then ends in: a
+restore, leftover settings cleared with no records, or a failure such as an
+unreadable journal. Where the witness does not decide and the `:53` probe does,
+the restore or decline event names why in `witness=`, and a machine with no
+helper binary reads `witness=no_status` without asking the socket. A helper whose ping lists no
 `dns-relay-status` feature shows as "Installed, update available" in Settings
 (`HelperToolPrivilegeClient.Status.updateAvailable`), and the same feature list
 tells a helper that predates the command from one that failed it. The ping's
@@ -113,7 +117,10 @@ tells a helper that predates the command from one that failed it. The ping's
 frame, since only a foreign or broken helper sends one; unknown names in the
 array are dropped. Tests:
 [`SystemDNSManagerTests`](../../Tests/ConduitTests/SystemDNSManagerTests.swift)
-`testLaunchRecoveryDecidesSystemDNSOwnershipFromTheRelayWitnessFirst`,
+`testLaunchRecoveryDecidesSystemDNSOwnershipFromTheRelayWitnessFirst` and
+`testAProbeDecisionNamesWhyTheWitnessDidNotDecide`,
+[`NetworkLocationRecoveryTests`](../../Tests/ConduitTests/NetworkLocationRecoveryTests.swift)
+`testAWitnessedRefusalStopsTheRelayWhateverTheRestoreEndsIn`,
 [`AppStateHarnessTests`](../../Tests/ConduitTests/AppStateHarnessTests.swift)
 `testACrashedRunsSystemDNSIsRestoredAtLaunchWhenTheHelperFindsItsRelayTargetRefused`,
 `testALocationScopedCrashIsRestoredAtLaunchWhenTheHelperFindsItsRelayTargetRefused`,

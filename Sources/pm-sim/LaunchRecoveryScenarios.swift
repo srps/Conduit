@@ -102,6 +102,20 @@ enum LaunchRecoveryScenarios {
             && store.snapshot().services == services && !journal.hasRecords(for: .systemDNS)
             && real.relay.status() == .notRunning
 
+        let corrupt = file.deletingLastPathComponent().appendingPathComponent("pm-launch-recovery-corrupt-\(UUID()).json")
+        defer {
+            do { try FileManager.default.removeItem(at: corrupt) }
+            catch { fputs("launch-recovery-ownership corrupt journal cleanup failed: \(error.localizedDescription)\n", stderr) }
+        }
+        try Data("not json".utf8).write(to: corrupt)
+        store.edit { $0.services[0].dns = ["ServerAddresses": .list(["127.0.0.1"])] }
+        try real.relay.start(listenPort: 0, targetPort: try closedPort())
+        let corruptLaunch = launch(store: store, journal: PlatformStateJournal(fileURL: corrupt), helper: real,
+                                   dns: FakeDNSProbe(timingOut: [53]), proxy: FakeLoopbackPortProbe())
+        let orphanStopped = try corruptLaunch.contains { $0.event == "platform.launch_recovery_failed" && $0.detail?.hasPrefix("surface=systemDNS") == true }
+            && store.snapshot().services[0].dns["ServerAddresses"] != .list(["127.0.0.1"])
+            && real.relay.status() == .notRunning
+
         return ScenarioResult(
             name: "launch-recovery-ownership", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
@@ -112,7 +126,7 @@ enum LaunchRecoveryScenarios {
                 ]),
                 .init("a declined launch leaves the settings and their records alone", oldHelperLeftAlone),
                 .init("refused probes restore both surfaces on the next launch", restored == [
-                    "surface=systemDNS stale=false evidence=port_refused", "surface=systemProxy stale=false evidence=port_refused",
+                    "surface=systemDNS stale=false evidence=port_refused witness=no_status", "surface=systemProxy stale=false evidence=port_refused",
                 ]),
                 .init("the next launch puts the prior settings back and releases the records", goneRestored),
                 .init("a crash whose relay target the helper finds refused is restored, and the relay stopped", witnessRestored),
@@ -120,8 +134,9 @@ enum LaunchRecoveryScenarios {
                 .init("a relay target that answers is a live session, left alone", liveDeclined),
                 .init("a helper that cannot be asked falls back to the probe, and declines", unreachableDeclined),
                 .init("a real relay aimed at a closed port is read as refused, restored and stopped", realRestored),
+                .init("with an unreadable journal, a refused relay target clears the leftover settings and stops the relay", orphanStopped),
             ],
-            notes: [oldHelper, gone, witnessed, rebound, live, unreachable, realLaunch].flatMap { $0 }.map { "\($0.event) \($0.detail ?? "")" }
+            notes: [oldHelper, gone, witnessed, rebound, live, unreachable, realLaunch, corruptLaunch].flatMap { $0 }.map { "\($0.event) \($0.detail ?? "")" }
         )
     }
 

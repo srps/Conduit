@@ -26,8 +26,11 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   notice and nothing to click (#201). It asks the helper, whose relay still
   holds port 53 after the crash: when the relay's target refuses on two
   readings, nothing serves it any more, and `platform.launch_recovery_restored`
-  says `evidence=relay_target_refused`. A target that answers is a session
-  still serving the machine, and recovery leaves it alone.
+  says `evidence=relay_target_refused`. The relay is stopped on that verdict
+  even when the restore itself fails, as with an unreadable journal. A target
+  that answers is a session still serving the machine, and recovery leaves it
+  alone. When the helper cannot decide and the port probe does, the event
+  names why in `witness=`.
 - Launch recovery no longer restores the machine's DNS or proxy settings from
   under a session that is only slow to answer (#201). Where no evidence
   decides (a helper that predates the relay status, cannot be asked, or finds
