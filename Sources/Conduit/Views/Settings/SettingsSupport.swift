@@ -415,13 +415,14 @@ enum HelperStatusPresentation {
         case .waitingForConsoleUser: return "Installed, waiting for a login session"
         case .unauthorized: return "Installed, but refusing this user"
         case .callerNotAccepted: return "Installed, but not accepting this build"
+        case .updateAvailable: return "Installed, update available"
         }
     }
 
     static func color(for status: HelperToolPrivilegeClient.Status) -> Color {
         switch status {
         case .installed: return Color(nsColor: .systemGreen)
-        case .outdated: return Color(nsColor: .systemOrange)
+        case .outdated, .updateAvailable: return Color(nsColor: .systemOrange)
         case .notInstalled: return Color(nsColor: .systemGray)
         case .notResponding: return Color(nsColor: .systemRed)
         case .waitingForConsoleUser, .busy: return Color(nsColor: .systemYellow)
@@ -435,7 +436,7 @@ enum HelperStatusPresentation {
     static func primaryActionTitle(for status: HelperToolPrivilegeClient.Status) -> String? {
         switch status {
         case .callerNotAccepted, .installed: return "Reinstall Helper"
-        case .outdated: return "Update Helper"
+        case .outdated, .updateAvailable: return "Update Helper"
         case .notInstalled: return "Install Helper"
         case .notResponding: return "Repair Helper"
         case .busy:
@@ -456,6 +457,8 @@ enum HelperStatusPresentation {
                 + "Reinstalling pins it to this build. The helper said: \(message)"
         case .busy:
             return busyNote
+        case .updateAvailable:
+            return "This helper predates DNS crash recovery. Until it is updated, a launch after a crash may ask you to restore DNS."
         default:
             return nil
         }
@@ -467,7 +470,7 @@ enum HelperStatusPresentation {
     /// Whether DNS and Tunnels should suggest installing the helper. A busy
     /// helper is installed; suggesting an install would mislead.
     static func suggestsInstall(for status: HelperToolPrivilegeClient.Status) -> Bool {
-        status != .installed && status != .busy
+        !status.serves && status != .busy
     }
 
     /// Who may use the helper, as the last install from here left it.
@@ -481,7 +484,7 @@ enum HelperStatusPresentation {
 
     /// "(via helper)" or "(requires admin)" after a toggle that needs root.
     static func privilegeHint(for status: HelperToolPrivilegeClient.Status, otherwise: String = "requires admin") -> String {
-        status == .installed ? "(via helper)" : "(\(otherwise))"
+        status.serves ? "(via helper)" : "(\(otherwise))"
     }
 }
 

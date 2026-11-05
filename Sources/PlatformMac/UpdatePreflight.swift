@@ -180,7 +180,7 @@ package enum UpdateHelperPreflightWorker {
         guard arguments.contains(argument) else { return nil }
         guard arguments == [argument] else { return 64 }
         switch status() {
-        case .notInstalled, .installed: return 0
+        case .notInstalled, .installed, .updateAvailable: return 0
         case .notResponding: return 69
         case .outdated: return 70
         case .unauthorized: return 71

@@ -53,7 +53,7 @@ package struct ActivationPreflightEvaluator {
         dnsManager: DNSManager,
         vpnConnected: Bool
     ) -> ActivationPreflight {
-        let helperAvailable = helperStatus == .installed
+        let helperAvailable = helperStatus.serves
 
         let systemProxy: IntegrationStatus
         if platformConfig.manageSystemProxy {

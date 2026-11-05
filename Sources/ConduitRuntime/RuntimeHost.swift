@@ -1438,13 +1438,13 @@ package final class RuntimeHost {
                 do { try await Task.sleep(for: delay) }
                 catch { return }
                 guard self?.splitDNSRepair.pending != nil else { break }
-                // A raw reading: `.busy` is not `.installed`, so a helper
+                // A raw reading: `.busy` does not serve, so a helper
                 // still serving another request is no evidence (#210).
                 let reading = await withCheckedContinuation { continuation in
                     DispatchQueue.global(qos: .utility).async { continuation.resume(returning: helper.status) }
                 }
                 guard !Task.isCancelled else { return }
-                if self?.observeHelperForSplitDNS(available: reading == .installed, trigger: "helper_check") == true { return }
+                if self?.observeHelperForSplitDNS(available: reading.serves, trigger: "helper_check") == true { return }
             }
             self?.splitDNSHelperCheck = nil
         }

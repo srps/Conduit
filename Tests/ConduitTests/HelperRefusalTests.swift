@@ -133,7 +133,9 @@ final class HelperRefusalTests: XCTestCase {
 
     /// An answer is a verdict and says nothing more.
     func testAnAnsweredPingIsInstalledWithoutAnEvent() throws {
-        let helper = try FakeHelper(replies: [.ok()])
+        var current = HelperResponse.ok()
+        current.features = HelperFeature.allCases
+        let helper = try FakeHelper(replies: [current])
         defer { helper.stop() }
         let events = NIOLockedBox<[RuntimeEvent]>([])
         XCTAssertEqual(statusClient(helper, events: events).status, .installed)

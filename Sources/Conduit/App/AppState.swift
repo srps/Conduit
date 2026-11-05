@@ -1660,6 +1660,7 @@ extension HelperToolPrivilegeClient.Status {
         case .waitingForConsoleUser: self = .waitingForConsoleUser
         case .unauthorized: self = .unauthorized
         case .callerNotAccepted: self = .callerNotAccepted(message: "")
+        case .updateAvailable: self = .updateAvailable
         }
     }
 }

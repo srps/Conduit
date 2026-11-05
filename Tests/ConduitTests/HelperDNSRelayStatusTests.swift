@@ -41,19 +41,35 @@ final class HelperDNSRelayStatusTests: XCTestCase {
         XCTAssertNil(HelperAdmission.refusal(peerUID: 501, consoleUID: 0, lastConsoleUID: 501, command: .dnsRelayStatus))
     }
 
-    func testAHelperThatPredatesTheCommandIsNoStatusWithoutAPrompt() throws {
-        let helper = try FakeHelper(replies: [.error("Invalid request")])
-        defer { helper.stop() }
-        let probe = clientProbe(helper.path)
+    /// Both fail the command as "Invalid request"; the ping's feature list says which helper this is.
+    func testAHelperThatPredatesTheCommandIsNoStatusWithoutAPromptAndToldApartFromAFailure() throws {
+        var current = HelperResponse.ok()
+        current.features = [.dnsRelayStatus]
+        for (ping, reason) in [(HelperResponse.ok(), "helper_predates_command"), (current, "helper_error")] {
+            let helper = try FakeHelper(replies: [.error("Invalid request"), ping])
+            defer { helper.stop() }
+            let probe = clientProbe(helper.path)
 
-        XCTAssertNil(try probe.client.dnsRelayStatus())
-        XCTAssertFalse(probe.fallbackRan.withLockedValue { $0 })
-        XCTAssertEqual(helper.commandsSeen, [.dnsRelayStatus])
+            XCTAssertNil(try probe.client.dnsRelayStatus())
+            XCTAssertFalse(probe.fallbackRan.withLockedValue { $0 })
+            XCTAssertEqual(helper.commandsSeen, [.dnsRelayStatus, .ping])
+            XCTAssertEqual(probe.events.withLockedValue { $0 }.map(\.event), ["auth.privilege_helper_relay_status_unavailable"])
+            XCTAssertEqual(probe.events.withLockedValue { $0 }.first?.detail, "reason=\(reason) helper_error=Invalid request")
+        }
+    }
+
+    /// The feature list is decoded strictly: helpers this client talks to send an array of strings, so anything else is a broken
+    /// frame, not an empty list. Unknown names inside the array are still dropped.
+    func testAFeatureListThatIsNotAnArrayBreaksTheFrame() {
+        let ping = Data(#"{"protocolVersion":5,"success":true,"features":"dns-relay-status"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(HelperResponse.self, from: ping))
+    }
+
+    func testAnUnreachableHelperIsReportedBeforeItThrows() {
+        let probe = clientProbe("/tmp/pm-no-helper-\(UUID().uuidString.prefix(8)).sock")
+        XCTAssertThrowsError(try probe.client.dnsRelayStatus())
         XCTAssertEqual(probe.events.withLockedValue { $0 }.map(\.event), ["auth.privilege_helper_relay_status_unavailable"])
-        XCTAssertEqual(
-            probe.events.withLockedValue { $0 }.first?.detail,
-            "reason=helper_error helper_error=Invalid request"
-        )
+        XCTAssertEqual(probe.events.withLockedValue { $0 }.first?.detail?.hasPrefix("reason=unreachable "), true)
     }
 
     func testAHelperOnAnotherProtocolIsNoStatus() throws {
