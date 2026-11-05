@@ -528,6 +528,18 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         XCTAssertTrue(checking.beginSilenceCheck(), "and the new endpoint can be asked")
     }
 
+    func testAnEndpointChangeFreesTheHalfOpenSlotTheOldEndpointHeld() {
+        var breaker = UpstreamCircuitBreaker()
+        let now = Date()
+        breaker.recordFailure(now: now, threshold: 1, windowSeconds: 0, baseOpenInterval: 30, maxOpenInterval: 300)
+        XCTAssertNotNil(breaker.tryHalfOpen(now: now.addingTimeInterval(30)))
+
+        breaker.forgetEndpoint()
+
+        XCTAssertEqual(breaker.state, .halfOpen, "the conclusive failures that opened it are not forgotten")
+        XCTAssertTrue(breaker.armHalfOpenProbe(), "the next exchange is the new endpoint's probe")
+    }
+
     func testAHalfOpenSlotFreedByAnAnsweringProxyIsArmedAgainBySelection() {
         var breaker = UpstreamCircuitBreaker()
         let now = Date()

@@ -395,6 +395,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         probeSupport = .unknown
         silences.reset()
         silence = .none
+        halfOpenProbeInFlight = false
     }
 
     /// A half-open probe exchange got no answer while the proxy answered its own request: the breaker was

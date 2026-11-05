@@ -39,7 +39,8 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   answers it is otherwise held once (`health.inconclusive`), rechecked sooner,
   and counts only when it is the second in a row or follows a conclusive
   failure, so one slow check no longer starts the recovery ladder or falls to
-  DIRECT. A connectivity probe that
+  DIRECT. Editing an upstream's endpoint while its half-open probe is in flight
+  no longer leaves the breaker stuck half-open. A connectivity probe that
   connected and got no answer is held the same way
   (`connectivity.probe_inconclusive`). A health check whose idle pooled
   connection gets no answer while the upstream answers for itself asks once
