@@ -253,6 +253,8 @@ private final class CountingSink: @unchecked Sendable {
 /// Emits one structured event per command through the sink its host gave the privilege factory, then forwards the
 /// command to a recording client, so no command reaches the machine.
 private final class EmittingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
+    func dnsRelayStatus() throws -> DNSRelayStatus? { nil }
+
     private let base = RecordingPrivilegeClient()
     private let emit: @Sendable (RuntimeEvent) -> Void
 

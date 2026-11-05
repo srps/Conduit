@@ -162,5 +162,7 @@ final class ActivationPreflightTests: XCTestCase {
 }
 
 private final class NoopPrivilegeClient: PrivilegeClient, @unchecked Sendable {
+    func dnsRelayStatus() throws -> DNSRelayStatus? { nil }
+
     func execute(_ operation: PrivilegedOperation, values: [String]) throws {}
 }

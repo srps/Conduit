@@ -118,6 +118,13 @@ package enum DNSRelayTargetVerdict: String, Sendable, Equatable {
 package protocol PrivilegeClient: Sendable {
     func execute(_ operation: PrivilegedOperation, values: [String]) throws
 
+    /// Asks the helper what its DNS relay is doing. Read-only, never prompts.
+    ///
+    /// `nil` means this client has no such witness: no helper (the AppleScript
+    /// client), or a helper that predates the command. A helper that cannot be
+    /// reached or refuses this process throws, as `execute` does.
+    func dnsRelayStatus() throws -> DNSRelayStatus?
+
     /// Runs several operations as a single unit of elevation.
     ///
     /// Restoring one network service's proxy configuration takes four

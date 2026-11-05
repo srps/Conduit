@@ -281,6 +281,8 @@ final class InterceptRuleValidationTests: XCTestCase {
 // MARK: - Test Double
 
 private final class RecordingInterceptPrivilegeClient: PrivilegeClient, @unchecked Sendable {
+    func dnsRelayStatus() throws -> DNSRelayStatus? { nil }
+
     private let lock = NSLock()
     private var executed: [(PrivilegedOperation, [String])] = []
 

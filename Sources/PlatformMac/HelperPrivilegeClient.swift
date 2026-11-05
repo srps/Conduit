@@ -37,6 +37,9 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
         try runPrivileged(Self.abortOnFirstFailure(batchScript(for: batch)))
     }
 
+    /// No helper, so no relay to ask about.
+    package func dnsRelayStatus() throws -> DNSRelayStatus? { nil }
+
     /// Returns what the script printed, which `installHelper()` reads its
     /// result from.
     @discardableResult
@@ -364,14 +367,7 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
                 // mismatch on it would read as "unreachable" — the exact
                 // misclassification this field exists to end.
                 if let refusal = response.refusal {
-                    eventSink?(
-                        RuntimeEvent(
-                            kind: .auth,
-                            event: "auth.privilege_helper_refused",
-                            detail: "command=\(command.rawValue) reason=\(refusal.rawValue)"
-                        )
-                    )
-                    throw PrivilegeClientError.refused(PrivilegeRefusal(refusal), response.errorMessage ?? refusal.rawValue)
+                    throw refused(refusal, command: command, message: response.errorMessage)
                 }
                 guard response.protocolVersion == HelperProtocolVersion.current else {
                     throw PrivilegeClientError.communicationFailed(
@@ -431,6 +427,48 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         }
     }
 
+    private func refused(_ refusal: HelperRefusal, command: HelperCommand, message: String?) -> PrivilegeClientError {
+        eventSink?(
+            RuntimeEvent(
+                kind: .auth,
+                event: "auth.privilege_helper_refused",
+                detail: "command=\(command.rawValue) reason=\(refusal.rawValue)"
+            )
+        )
+        return .refused(PrivilegeRefusal(refusal), message ?? refusal.rawValue)
+    }
+
+    /// A helper that answers but cannot give a status, such as a v5 helper
+    /// that predates the command and answers "Invalid request", is `nil` with
+    /// `auth.privilege_helper_relay_status_unavailable`. It is never sent to
+    /// the AppleScript fallback, which has no relay to ask about.
+    package func dnsRelayStatus() throws -> DNSRelayStatus? {
+        let command = HelperCommand.dnsRelayStatus
+        let response: HelperResponse
+        do {
+            response = try sendRequest(HelperRequest(command: command, values: []))
+        } catch let error as PrivilegeClientError {
+            throw error
+        } catch {
+            throw PrivilegeClientError.communicationFailed(error.displayDescription)
+        }
+        if let refusal = response.refusal {
+            throw refused(refusal, command: command, message: response.errorMessage)
+        }
+        let reason: String
+        if response.protocolVersion != HelperProtocolVersion.current {
+            reason = "reason=protocol_mismatch protocol=\(response.protocolVersion)"
+        } else if !response.success {
+            reason = "reason=helper_error helper_error=\(response.errorMessage ?? "none")"
+        } else if let wire = response.dnsRelay, let status = DNSRelayStatus(wire) {
+            return status
+        } else {
+            reason = "reason=unreadable_status"
+        }
+        eventSink?(RuntimeEvent(kind: .auth, event: "auth.privilege_helper_relay_status_unavailable", detail: reason))
+        return nil
+    }
+
     package func ping() -> Bool {
         guard let response = try? sendRequest(HelperRequest(command: .ping, values: [])) else {
             return false
@@ -453,7 +491,7 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         case .compareNetworkSettings:
             guard values.count == 1 else { throw NetworkSettingsError.invalidRequest }
             _ = try NetworkSettingsRequest.decode(values[0])
-        case .ping, .stopDNSRelay, .stopTCPRelay:
+        case .ping, .dnsRelayStatus, .stopDNSRelay, .stopTCPRelay:
             return
         case .startDNSRelay:
             guard values.count == 1, HelperInputValidator.validatePort(values[0]) else {
@@ -782,6 +820,25 @@ extension PrivilegeRefusal {
         case .unauthorized: self = .unauthorized
         case .noConsoleUser: self = .noConsoleUser
         }
+    }
+}
+
+extension DNSRelayStatus {
+    /// `nil` for a status whose fields contradict each other: no witness
+    /// rather than a guess at which field is wrong.
+    init?(_ wire: HelperDNSRelayStatus) {
+        let verdict: DNSRelayTargetVerdict
+        switch wire.target {
+        case .notRunning:
+            guard !wire.listening, wire.targetPort == nil else { return nil }
+            self = .notRunning
+            return
+        case .refused: verdict = .refused
+        case .answered: verdict = .answered
+        case .silent: verdict = .silent
+        }
+        guard wire.listening, let port = wire.targetPort, HelperInputValidator.validatePort(port) else { return nil }
+        self = .relaying(targetPort: port, target: verdict)
     }
 }
 

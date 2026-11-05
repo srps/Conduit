@@ -46,6 +46,8 @@ private final class EventRecorder: @unchecked Sendable {
 }
 
 private final class FakePrivilegeClient: PrivilegeClient, @unchecked Sendable {
+    func dnsRelayStatus() throws -> DNSRelayStatus? { nil }
+
     private let error: Error?
 
     init(error: Error? = nil) {
