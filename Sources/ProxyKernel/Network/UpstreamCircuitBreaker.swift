@@ -369,11 +369,11 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
     }
 
     /// The endpoint behind this id changed, so what was learnt about the old one, probe support and silence
-    /// alike, is about another proxy. A check in flight lands as superseded.
+    /// alike, is about another proxy. A check in flight for it finds nothing checking and lands as superseded.
     package mutating func forgetEndpoint() {
         probeSupport = .unknown
         silences.reset()
-        supersedeSilence()
+        silence = .none
     }
 
     /// A half-open probe exchange got no answer while the proxy answered its own request: the breaker was

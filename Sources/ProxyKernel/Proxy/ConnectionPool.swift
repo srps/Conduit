@@ -575,7 +575,7 @@ package final class ConnectionPool: @unchecked Sendable {
 
     private static let silenceDetail = ConnectionPoolError.upstreamResponseTimedOut.displayDescription
 
-    private enum SilenceCheckStart { case silenceStands, probe(owns: Bool, halfOpen: Bool) }
+    private enum SilenceCheckStart { case silenceStands, stale, probe(owns: Bool, halfOpen: Bool) }
 
     /// A standing ranking is decisive at once, so a ladder step's check costs R, not R plus the probe budget.
     private func judgeSilentHealthCheck(
@@ -585,12 +585,20 @@ package final class ConnectionPool: @unchecked Sendable {
         func unhealthy(_ failure: HealthCheckFailure) -> HealthCheckResult {
             .unhealthy(failure, responseTimeMS: Int(Date().timeIntervalSince(start) * 1_000))
         }
-        guard case .probe(let owns, let halfOpen) = beginHealthCheckSilenceCheck(of: proxy) else {
-            return unhealthy(.upstreamSilent(detail: detail))
+        let owns: Bool, halfOpen: Bool
+        switch beginHealthCheckSilenceCheck(of: proxy) {
+        case .silenceStands: return unhealthy(.upstreamSilent(detail: detail))
+        case .stale: return unhealthy(.answerTimedOut(detail: "\(detail); the upstream's endpoint changed while the check ran"))
+        case .probe(let o, let h): (owns, halfOpen) = (o, h)
         }
         let outcome = await probeLiveness(of: proxy)
-        if halfOpen { settleHalfOpenProbe(for: proxy, outcome) }
-        let verdict = owns ? finishSilenceCheck(of: proxy, outcome) : nil
+        let verdict: UpstreamCircuitBreaker.SilenceCheckVerdict? = if owns {
+            finishSilenceCheck(of: proxy, outcome)
+        } else if halfOpen {
+            settleHalfOpenProbe(for: proxy, outcome)
+        } else {
+            nil
+        }
         let (ignoresProbe, closed) = lock.withLock { (breakers[proxy.id]?.probeSupport == .ignores, breakers[proxy.id]?.state == .closed) }
         if verdict == .superseded, closed {
             return unhealthy(.answerTimedOut(detail: "\(detail); an exchange answered or a reset landed while the liveness probe ran"))
@@ -624,6 +632,7 @@ package final class ConnectionPool: @unchecked Sendable {
     private func beginHealthCheckSilenceCheck(of proxy: UpstreamProxy) -> SilenceCheckStart {
         let (start, consecutive): (SilenceCheckStart, Int) = lock.withLock {
             syncUpstreamStatesLocked(with: configProvider().enabledUpstreams)
+            guard namesEndpointLocked(proxy) else { return (.stale, 0) }
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
             if breaker.silenceStands { return (.silenceStands, 0) }
             let owns = breaker.beginSilenceCheck()
@@ -633,9 +642,14 @@ package final class ConnectionPool: @unchecked Sendable {
         switch start {
         case .probe(owns: true, halfOpen: _): publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "health_check")
         case .probe(owns: false, halfOpen: true): publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "half_open_probe")
-        case .probe, .silenceStands: break
+        case .probe, .silenceStands, .stale: break
         }
         return start
+    }
+
+    /// Whether `proxy.id` still names `proxy.endpoint`; a result about a replaced endpoint is about another proxy.
+    private func namesEndpointLocked(_ proxy: UpstreamProxy) -> Bool {
+        upstreamIdentities[proxy.id]?.endpoint == proxy.endpoint
     }
 
     /// The durations an exchange converts: the probe budget, the response wait, and the
@@ -1437,6 +1451,7 @@ package final class ConnectionPool: @unchecked Sendable {
         let config = configProvider()
         let outcome: Outcome = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
+            guard namesEndpointLocked(proxy) else { return .held }
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
             switch breaker.state {
             case .closed: break
@@ -1461,15 +1476,29 @@ package final class ConnectionPool: @unchecked Sendable {
 
     /// The breaker was opened by conclusive failures, so a half-open exchange's silence re-opens it only when the
     /// proxy does not answer for itself either; a proxy that does keeps its half-open slot free for the next exchange.
-    private func settleHalfOpenProbe(for proxy: UpstreamProxy, _ outcome: UpstreamCircuitBreaker.SilenceCheckOutcome) {
+    @discardableResult
+    private func settleHalfOpenProbe(
+        for proxy: UpstreamProxy, _ outcome: UpstreamCircuitBreaker.SilenceCheckOutcome
+    ) -> UpstreamCircuitBreaker.SilenceCheckVerdict {
+        let proxies = configProvider().enabledUpstreams
+        let (stillNamed, ignoresProbe) = lock.withLock {
+            syncUpstreamStatesLocked(with: proxies)
+            return (namesEndpointLocked(proxy), breakers[proxy.id]?.probeSupport == .ignores)
+        }
+        func released() -> Bool { lock.withLock { breakers[proxy.id]?.releaseHalfOpenProbe() == true } }
         let verdict: UpstreamCircuitBreaker.SilenceCheckVerdict
         switch outcome {
+        case _ where !stillNamed:
+            verdict = .superseded
+        case .silent where ignoresProbe:
+            verdict = released() ? .keptProbeIgnored : .superseded
         case .silent, .refused:
             verdict = failHalfOpenProbe(for: proxy) ? .reopened : .superseded
         case .answered, .closed, .unasked:
-            verdict = lock.withLock { breakers[proxy.id]?.releaseHalfOpenProbe() == true } ? .kept : .superseded
+            verdict = released() ? .kept : .superseded
         }
         publishSilenceCheckFinished(for: proxy, outcome: outcome, verdict: verdict)
+        return verdict
     }
 
     private func publishSilenceCheckStarted(for proxy: UpstreamProxy, consecutive: Int, askedBy: String) {
@@ -1539,7 +1568,7 @@ package final class ConnectionPool: @unchecked Sendable {
         let interval = thresholds.baseOpenInterval
         let (verdict, strike): (UpstreamCircuitBreaker.SilenceCheckVerdict, UpstreamCircuitBreaker.Transition?) = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
-            guard var breaker = breakers[proxy.id] else { return (.superseded, nil) }
+            guard var breaker = breakers[proxy.id], namesEndpointLocked(proxy) else { return (.superseded, nil) }
             let now = Date()
             let verdict = breaker.finishSilenceCheck(outcome, now: now, interval: interval)
             var strike: UpstreamCircuitBreaker.Transition?

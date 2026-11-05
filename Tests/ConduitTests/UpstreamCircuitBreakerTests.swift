@@ -468,8 +468,9 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
 
         var checking = decisivelySilent()
         checking.forgetEndpoint()
-        XCTAssertEqual(checking.silence, .checking(superseded: true))
+        XCTAssertEqual(checking.silence, .none, "nothing is checking the new endpoint")
         XCTAssertEqual(checking.finishSilenceCheck(.silent, now: Date(), interval: 30), .superseded, "a check in flight was about the old endpoint")
+        XCTAssertTrue(checking.beginSilenceCheck(), "and the new endpoint can be asked")
     }
 
     func testAHalfOpenSlotFreedByAnAnsweringProxyIsArmedAgainBySelection() {
