@@ -511,6 +511,7 @@ enum DevLaunch {
                 commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
                 // The installed Conduit's relay may answer on the real port 53.
                 dnsProbe: FakeDNSProbe().liveness(onPort:),
+                relayRecheckPause: { _ in },
                 networkPath: NetworkMonitor(),
                 networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in location },

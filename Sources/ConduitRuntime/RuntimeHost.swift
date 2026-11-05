@@ -94,6 +94,7 @@ package final class RuntimeHost {
     private let loopbackPortProbe: @Sendable (Int) -> LoopbackLiveness
     /// Whether a resolver answers on a local port, from `effects`, so launch recovery never waits on the real port 53 under test.
     private let dnsProbe: @Sendable (Int) -> LoopbackLiveness
+    private let relayRecheckPause: @Sendable (TimeInterval) -> Void
     private let homeDirectory: URL
     private let resolverDirectory: String
     /// One serialised pass per config reload: the runtime takes the edit,
@@ -146,6 +147,7 @@ package final class RuntimeHost {
         legacySnapshotFile: environment.legacySavedDNSFile,
         commandRunner: commandRunner,
         resolverLiveness: dnsProbe,
+        relayRecheckPause: relayRecheckPause,
         locationRecovery: locationRecovery,
         configProvider: orchestrator.configSnapshotProvider
     )
@@ -236,14 +238,19 @@ package final class RuntimeHost {
     private(set) var dnsRelayUnresponsive = false {
         didSet { if dnsRelayUnresponsive != oldValue { onControlStateChange?() } }
     }
-    /// Each surface whose launch restore recovery declined, with that decline, until this run writes the surface. Only a timed-out
-    /// probe's DNS decline is shown: a live listener needs nothing from the user.
+    /// Each surface whose launch restore recovery declined, with that decline, until this run writes the surface. Only a DNS decline
+    /// that no evidence decided is shown: a live listener needs nothing from the user.
     private(set) var declinedLaunchRecovery: [PlatformSurface: LaunchRecoveryOutcome] = [:] {
         didSet {
-            if systemDNSRecoveryDeclined != (oldValue[.systemDNS] == .declinedInconclusiveProbe) { onControlStateChange?() }
+            if systemDNSRecoveryDeclined != Self.isUndecided(oldValue[.systemDNS]) { onControlStateChange?() }
         }
     }
-    var systemDNSRecoveryDeclined: Bool { declinedLaunchRecovery[.systemDNS] == .declinedInconclusiveProbe }
+    var systemDNSRecoveryDeclined: Bool { Self.isUndecided(declinedLaunchRecovery[.systemDNS]) }
+
+    private static func isUndecided(_ outcome: LaunchRecoveryOutcome?) -> Bool {
+        if case .declinedInconclusiveProbe = outcome { return true }
+        return false
+    }
     /// Whether the proxy module's surfaces are up: a proxy Start completed them, and no teardown of the proxy has begun since. Its
     /// split-DNS entry files exist only in that window, so VPN transitions and repairs must not apply them outside it.
     var runtimeStarted = false
@@ -420,6 +427,7 @@ package final class RuntimeHost {
         self.startedAt = startedAt
         self.terminalExit = terminalExit
         self.dnsProbe = effects.dnsProbe
+        self.relayRecheckPause = effects.relayRecheckPause
         self.environmentDriftInterval = environmentDriftInterval
         self.reapplyRetrySchedule = reapplyRetrySchedule
         self.networkPathObserver = effects.networkPath
@@ -680,7 +688,10 @@ package final class RuntimeHost {
         guard let decisions = await launchRecovery?.join() else { return }
         launchRecovery = nil
         declinedLaunchRecovery = [PlatformSurface.systemDNS: decisions.systemDNS, .systemProxy: decisions.systemProxy].filter {
-            $0.value == .declinedInconclusiveProbe || $0.value == .declinedLiveListener
+            switch $0.value {
+            case .declinedInconclusiveProbe, .declinedLiveListener: true
+            default: false
+            }
         }
     }
 
@@ -1786,6 +1797,7 @@ extension RuntimeHost {
             legacySnapshotFile: environment.legacySavedDNSFile,
             commandRunner: runner,
             resolverLiveness: effects.dnsProbe,
+            relayRecheckPause: effects.relayRecheckPause,
             locationRecovery: locationRecovery
         )
         let systemProxy = SystemProxyManager(

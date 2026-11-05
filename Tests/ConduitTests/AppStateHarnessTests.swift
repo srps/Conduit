@@ -51,6 +51,8 @@ final class AppStateHarness {
     /// Fetches no PAC from the network; a scenario that plans PAC work injects its own before `launch()`.
     var pacEvaluator: any PacEvaluator = FakePacEvaluator()
     var dnsProbe = FakeDNSProbe()
+    /// Runs between the two relay readings that confirm a refused target; a scenario can change the fake helper's answer here.
+    var relayRecheckPause: @Sendable (TimeInterval) -> Void = { _ in }
     var loopbackPortProbe = FakeLoopbackPortProbe()
     /// The host store's file access; a scenario that holds or refuses a store step names its own before `launch()`.
     var stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem()
@@ -103,6 +105,7 @@ final class AppStateHarness {
         let locationStore = self.locationStore
         let appLogHold = self.appLogHold
         let dnsProbe = self.dnsProbe
+        let relayRecheckPause = self.relayRecheckPause
         let loopbackPortProbe = self.loopbackPortProbe
         locationObserver.reportsActiveLocation(of: locationStore)
         return AppComposition(
@@ -119,6 +122,7 @@ final class AppStateHarness {
                     return try machine.run(launchPath, arguments)
                 },
                 dnsProbe: dnsProbe.liveness(onPort:),
+                relayRecheckPause: relayRecheckPause,
                 networkPath: FakeNetworkPathObserver(),
                 networkLocation: locationObserver,
                 networkLocationStoreFactory: { _ in locationStore },
@@ -629,6 +633,64 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
         XCTAssertFalse(harness.machine.dnsRelayRunning, "the orphaned relay is stopped")
         XCTAssertFalse(state.runtime.systemDNSRecoveryDeclined)
+    }
+
+    /// A live forwarder that rebinds its port reads refused for a moment, so one refusal is not enough: an answer on the second
+    /// reading is a session serving the machine.
+    func testARefusalThatTheSecondReadingContradictsDeclinesAsALiveListener() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        leaveACrashedRunsDNS(harness)
+        leaveACrashedRunsRelay(harness, target: .refused)
+        let machine = harness.machine
+        harness.relayRecheckPause = { _ in machine.relayTarget = .answered }
+        let state = await harness.ready()
+        await harness.settle("launch recovery decided") { self.launchRecoveryEvent(harness, surface: .systemDNS) != nil }
+
+        XCTAssertEqual(wifi.dnsServers, ["127.0.0.1"], "a session still serves it")
+        XCTAssertTrue(harness.journal.hasRecords(for: .systemDNS))
+        XCTAssertTrue(harness.machine.dnsRelayRunning)
+        XCTAssertFalse(state.runtime.systemDNSRecoveryDeclined, "a live listener needs nothing from the user")
+        XCTAssertEqual(launchRecoveryEvent(harness, surface: .systemDNS)?.contains("reason=live_listener evidence=relay_target_answered"), true,
+                       launchRecoveryEvent(harness, surface: .systemDNS) ?? "no event")
+    }
+
+    func testARelayTargetThatAnswersDeclinesAsALiveListener() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        leaveACrashedRunsDNS(harness)
+        leaveACrashedRunsRelay(harness, target: .answered)
+        let state = await harness.ready()
+        await harness.settle("launch recovery decided") { self.launchRecoveryEvent(harness, surface: .systemDNS) != nil }
+
+        XCTAssertEqual(wifi.dnsServers, ["127.0.0.1"])
+        XCTAssertTrue(harness.journal.hasRecords(for: .systemDNS))
+        XCTAssertFalse(state.runtime.systemDNSRecoveryDeclined)
+        XCTAssertEqual(launchRecoveryEvent(harness, surface: .systemDNS)?.contains("reason=live_listener evidence=relay_target_answered"), true)
+    }
+
+    /// No witness to ask, or one that cannot be reached, and a silent `:53`: the fallback declines and shows the notice.
+    func testWithoutAWitnessASilentRelayKeepsTheNotice() async throws {
+        for (failure, witness) in [(nil, "no_status"), (PrivilegeClientError.timedOut("busy") as Error?, "helper_unavailable")] {
+            let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+            leaveACrashedRunsDNS(harness)
+            harness.machine.leaveRelayRunning(targetPort: 53_531)
+            harness.machine.relayStatusFailure = failure
+            let state = await harness.ready()
+            await harness.settle("the decline is shown") { state.runtime.systemDNSRecoveryDeclined }
+
+            XCTAssertEqual(wifi.dnsServers, ["127.0.0.1"])
+            XCTAssertTrue(harness.journal.hasRecords(for: .systemDNS))
+            XCTAssertEqual(launchRecoveryEvent(harness, surface: .systemDNS)?.contains("reason=probe_inconclusive witness=\(witness)"), true,
+                           launchRecoveryEvent(harness, surface: .systemDNS) ?? "no event")
+        }
+    }
+
+    func testASilentRelayTargetKeepsTheNotice() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        leaveACrashedRunsDNS(harness)
+        leaveACrashedRunsRelay(harness, target: .silent)
+        let state = await harness.ready()
+        await harness.settle("the decline is shown") { state.runtime.systemDNSRecoveryDeclined }
+        XCTAssertEqual(launchRecoveryEvent(harness, surface: .systemDNS)?.contains("witness=target_silent"), true)
     }
 
     private func leaveACrashedRunsLocationSettingsBehindASlowListener(_ harness: AppStateHarness, kind: NetworkSettingsKind,

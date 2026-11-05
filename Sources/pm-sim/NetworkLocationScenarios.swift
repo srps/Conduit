@@ -236,7 +236,7 @@ enum NetworkLocationScenarios {
         let corruptRecovery = LocationSettingsRecovery(store: corruptStore, journal: corruptJournal, emit: { events.append($0) })
         var corruptFailures = 0
         for kind in [NetworkSettingsKind.proxies, .dns] {
-            if case .failed = corruptRecovery.recover(kind: kind, config: config, listener: .notLive) { corruptFailures += 1 }
+            if case .failed = corruptRecovery.recover(kind: kind, config: config, ownership: { .ownerGone(.portRefused) }) { corruptFailures += 1 }
         }
         corruptJournal.markReleased(surface: .launchdEnvironment)
         let corruptSnapshot = try corruptStore.snapshot()
@@ -373,7 +373,7 @@ enum NetworkLocationScenarios {
         let events = RuntimeEventLog(capacity: 64)
         let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { events.append($0) })
         let failed: Bool
-        if case .failed = recovery.recover(kind: .proxies, config: config, listener: .notLive) { failed = true } else { failed = false }
+        if case .failed = recovery.recover(kind: .proxies, config: config, ownership: { .ownerGone(.portRefused) }) { failed = true } else { failed = false }
         let after = try store.snapshot().services
         let wifi = after.first { $0.serviceID == services[0].serviceID }?.proxies ?? [:]
         let ownCleared = failed && ["HTTPProxy", "HTTPPort", "HTTPSProxy", "HTTPSPort"].allSatisfy { wifi[$0] == nil }

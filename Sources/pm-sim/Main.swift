@@ -107,7 +107,7 @@ enum PMSim {
               ntlm-credential-cache   A burst of NTLM fallbacks reads the saved password once, also across a proxy start; a failing store is reported once
               pool-auth-reset-during-exchange  A reauthentication while an exchange is in flight makes the same pooled connection authenticate again, once
               network-location-recovery  inactive-location recovery, external edits, and write races
-              launch-recovery-inconclusive-probe  Timed-out liveness probes decline the launch restore with an event; refused ones restore next launch (#201)
+              launch-recovery-ownership  Launch recovery restores DNS on the helper's relay witness, declines a live session, and falls back to the probe and its notice (#201)
               environment-drift       A silently wiped shell environment is repaired with its events; repeats are withheld past the budget; an unsafe profile is left alone (#175)
               journal-integrity       A journal from a newer Conduit fails closed, is kept and reported; a failing disk is one event per episode; version 1 reads in every shape (#182, #191)
               state-writer-lease      Real OS writer lease and root layout in a scratch directory: busy while held, atomic replacement keeps the lock, outside config refused for writing (0017, 0020)
@@ -300,7 +300,7 @@ enum PMSim {
         "pool-auth-reset-during-exchange",
         "helper-caller-identity",
         "network-location-recovery",
-        "launch-recovery-inconclusive-probe",
+        "launch-recovery-ownership",
         "environment-drift",
         "journal-integrity",
         "state-writer-lease",
@@ -501,8 +501,8 @@ enum PMSim {
             return [try await PoolConcurrencyScenarios.authResetDuringExchange(verbose: verbose)]
         case "network-location-recovery":
             return [try await NetworkLocationScenarios.recovery()]
-        case "launch-recovery-inconclusive-probe":
-            return [try LaunchRecoveryScenarios.inconclusiveProbe()]
+        case "launch-recovery-ownership":
+            return [try LaunchRecoveryScenarios.ownership()]
         case "environment-drift":
             return [try EnvironmentDriftScenarios.run()]
         case "journal-integrity":

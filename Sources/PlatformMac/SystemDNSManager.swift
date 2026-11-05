@@ -67,6 +67,8 @@ package final class SystemDNSManager: @unchecked Sendable {
     /// A host under test passes its fake machine's answer, so it never waits
     /// on, or reads, the real port 53.
     private let resolverLiveness: @Sendable (Int) -> LoopbackLiveness
+    /// Waits between the two relay readings that confirm a refused target.
+    private let relayRecheckPause: @Sendable (TimeInterval) -> Void
     /// 0.1.x snapshot, imported into the journal on first launch. See
     /// `PlatformStateJournal.importLegacyDNSSnapshot`. Comes from the same
     /// `RuntimeEnvironment` as the journal — never `userDefault()` — so an
@@ -82,6 +84,7 @@ package final class SystemDNSManager: @unchecked Sendable {
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         },
         resolverLiveness: @escaping @Sendable (Int) -> LoopbackLiveness = { SystemDNSManager.dnsLiveness(onPort: $0) },
+        relayRecheckPause: @escaping @Sendable (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
         locationRecovery: LocationSettingsRecovery? = nil,
         configProvider: @escaping @Sendable () -> ProxyConfig = { ProxyConfig() }
     ) {
@@ -89,6 +92,7 @@ package final class SystemDNSManager: @unchecked Sendable {
         self.journal = journal
         self.commandRunner = commandRunner
         self.resolverLiveness = resolverLiveness
+        self.relayRecheckPause = relayRecheckPause
         self.legacySnapshotFile = legacySnapshotFile
         self.locationRecovery = locationRecovery
         self.configProvider = configProvider
@@ -355,64 +359,95 @@ package final class SystemDNSManager: @unchecked Sendable {
         defer { operations.unlock() }
         importLegacySnapshotIfPresent(logger: logger)
         if let locationRecovery {
-            return locationRecovery.recover(kind: .dns, config: configProvider(), listener: resolverLiveness(53))
+            let outcome = locationRecovery.recover(kind: .dns, config: configProvider(), ownership: ownership)
+            // The witness saw the crashed run's relay still holding :53; `clear` would stop it, and this restore must too.
+            if outcome == .restored(.ownerGone(.relayTargetRefused)) { stopRelay(logger: logger) }
+            return outcome
         }
         guard hasSavedInterfaces(), let savedAt = journal.oldestRecordDate(for: .systemDNS) else {
             return .nothingToDo(.nothingRecorded)
         }
 
         let stalenessThreshold: TimeInterval = 7 * 24 * 3600
-        let isStale = Date().timeIntervalSince(savedAt) > stalenessThreshold
-
-        if isStale {
-            return performRestore(stale: true, logger: logger)
+        if Date().timeIntervalSince(savedAt) > stalenessThreshold {
+            return performRestore(.stale, logger: logger)
         }
 
-        // "Is anything holding port 53?" was the wrong question, and repairing
-        // the `lsof` path that made it always answer "no" is what exposed that.
-        // The relay does not run in the app: it runs inside the privileged
-        // LaunchDaemon, which is `KeepAlive` and outlives us. A `SIGKILL`
-        // therefore leaves it listening on 53 and forwarding to a forwarder
-        // port nothing serves any more — so the port is held in precisely the
-        // crash this function exists to repair, and gating on "held" switched
-        // launch-time recovery off at the moment it was needed.
-        //
-        // Liveness answers what is actually being asked. A resolver that still
-        // answers belongs to a session serving this machine, and taking its DNS
-        // away would break every client on it. Only a refusal makes the records
-        // residue: a relay that is silent may front a session that is only
-        // slow, and a relay cannot say which session it forwards to.
-        switch resolverLiveness(53) {
-        case .live:
-            // Any interface, not `isApplied()`'s every interface. A machine
-            // where only some services still point at 127.0.0.1 — a VPN
-            // interface that came back with its own resolvers, a service added
-            // since — reads as "not applied", and deleting on that basis throws
-            // away the recorded servers for the interfaces that are still
-            // pinned. That branch was unreachable while the probe always said
-            // "port free"; it is not any more.
+        switch ownership() {
+        case .anotherSessionLive(let evidence):
+            // Any interface, not every interface: a machine where only some
+            // services still point at 127.0.0.1 (a VPN interface that came back
+            // with its own resolvers, a service added since) still holds pinned
+            // interfaces whose recorded servers must not be thrown away.
             if loopbackResidueExists() {
-                return .declinedLiveListener
+                return .declinedLiveListener(evidence)
             }
             deleteSavedState()
             return .discardedStaleRecords
-        case .inconclusive:
-            return .declinedInconclusiveProbe
-        case .notLive:
-            return performRestore(stale: false, logger: logger)
+        case .unknown(let witness):
+            return .declinedInconclusiveProbe(witness: witness)
+        case .ownerGone(let evidence):
+            return performRestore(.ownerGone(evidence), logger: logger)
+        }
+    }
+
+    /// How long a refused relay target must stay refused before recovery
+    /// believes it. A live forwarder that rebinds its port reads refused for
+    /// that moment.
+    static let relayRefusalRecheckDelay: TimeInterval = 0.5
+
+    /// Who owns system DNS, from the helper's relay witness first.
+    ///
+    /// The relay runs in the helper, which outlives the app, so after a crash
+    /// it still holds `:53` and forwards to a port nothing serves. Asked
+    /// directly, `:53` is then silent, which cannot tell a dead session from a
+    /// slow one. The helper can: it queries its own target, and the kernel
+    /// refuses a port nothing holds. The `:53` probe decides only when the
+    /// witness cannot.
+    private func ownership() -> SurfaceOwnership {
+        let gap: RelayWitnessGap
+        switch readRelay() {
+        case .reading(.relaying(let port, .refused)):
+            relayRecheckPause(Self.relayRefusalRecheckDelay)
+            switch readRelay() {
+            case .reading(.relaying(port, .refused)): return .ownerGone(.relayTargetRefused)
+            case .reading(.relaying(port, .answered)): return .anotherSessionLive(.relayTargetAnswered)
+            default: gap = .refusalUnconfirmed
+            }
+        case .reading(.relaying(_, .answered)): return .anotherSessionLive(.relayTargetAnswered)
+        case .reading(.relaying(_, .silent)): gap = .targetSilent
+        case .reading(.notRunning): gap = .relayNotRunning
+        case .noStatus: gap = .noStatus
+        case .unavailable: gap = .helperUnavailable
+        }
+        return SurfaceOwnership(probe: resolverLiveness(53), witness: gap)
+    }
+
+    private enum RelayReading {
+        case reading(DNSRelayStatus)
+        case noStatus
+        /// The client surfaced why with its own event.
+        case unavailable
+    }
+
+    private func readRelay() -> RelayReading {
+        do {
+            return try privilegeClient.dnsRelayStatus().map(RelayReading.reading) ?? .noStatus
+        } catch {
+            return .unavailable
         }
     }
 
     /// A restore that throws, or that keeps records because some interface
     /// could not be put back, is a failure of recovery: the records are what
     /// the next launch retries from.
-    private func performRestore(stale: Bool, logger: (any LogSink)?) -> LaunchRecoveryOutcome {
+    private func performRestore(_ ground: LaunchRecoveryOutcome.RestoreGround, logger: (any LogSink)?) -> LaunchRecoveryOutcome {
         do {
             try clear(logger: logger)
         } catch {
             return .failed(reason: error.displayDescription)
         }
-        return hasSavedInterfaces() ? .failed(reason: "records_kept") : .restored(stale: stale)
+        return hasSavedInterfaces() ? .failed(reason: "records_kept") : .restored(ground)
     }
 
     // MARK: - State Detection

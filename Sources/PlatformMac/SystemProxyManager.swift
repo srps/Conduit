@@ -561,7 +561,7 @@ package final class SystemProxyManager: @unchecked Sendable {
             let config = configProvider()
             do {
                 let listener = try locationRecovery.proxyListenerLiveness(config: config, probe: portProbe)
-                return locationRecovery.recover(kind: .proxies, config: config, listener: listener)
+                return locationRecovery.recover(kind: .proxies, config: config) { SurfaceOwnership(probe: listener, witness: nil) }
             } catch {
                 return .failed(reason: error.displayDescription)
             }
@@ -574,29 +574,29 @@ package final class SystemProxyManager: @unchecked Sendable {
 
         let stalenessThreshold: TimeInterval = 7 * 24 * 3600
         if Date().timeIntervalSince(appliedAt) > stalenessThreshold {
-            return performRestore(stale: true, logger: logger)
+            return performRestore(.stale, logger: logger)
         }
 
         // A live listener on the port the machine is pointed at means another
         // instance is serving it, and taking its settings away would break
         // every client on the machine. Absent one, the settings are orphaned.
-        switch localProxyListenerLiveness() {
-        case .live: return .declinedLiveListener
-        case .inconclusive: return .declinedInconclusiveProbe
-        case .notLive: return performRestore(stale: false, logger: logger)
+        switch SurfaceOwnership(probe: localProxyListenerLiveness(), witness: nil) {
+        case .anotherSessionLive(let evidence): return .declinedLiveListener(evidence)
+        case .unknown(let witness): return .declinedInconclusiveProbe(witness: witness)
+        case .ownerGone(let evidence): return performRestore(.ownerGone(evidence), logger: logger)
         }
     }
 
     /// A restore that throws, or that keeps records because some service
     /// could not be put back, is a failure of recovery: the records are what
     /// the next launch retries from.
-    private func performRestore(stale: Bool, logger: (any LogSink)?) -> LaunchRecoveryOutcome {
+    private func performRestore(_ ground: LaunchRecoveryOutcome.RestoreGround, logger: (any LogSink)?) -> LaunchRecoveryOutcome {
         do {
             try clear(logger: logger)
         } catch {
             return .failed(reason: error.displayDescription)
         }
-        return hasManagedState() ? .failed(reason: "records_kept") : .restored(stale: stale)
+        return hasManagedState() ? .failed(reason: "records_kept") : .restored(ground)
     }
 
     /// Whether something is listening on the loopback port the machine's proxy

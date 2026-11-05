@@ -75,6 +75,9 @@ package struct RuntimeHostEffects: Sendable {
     package let commandRunner: @Sendable (String, [String]) throws -> CommandResult
     /// Whether a resolver answers on a local port: the system DNS liveness check.
     package let dnsProbe: @Sendable (Int) -> LoopbackLiveness
+    /// Waits between the two readings of the helper's relay that confirm a refused target at launch recovery. Production sleeps the
+    /// thread; a test or simulator returns at once, or changes its fake helper's answer.
+    package let relayRecheckPause: @Sendable (TimeInterval) -> Void
     package let networkPath: any NetworkPathObserving
     package let networkLocation: any NetworkLocationObserving
     package let networkLocationStoreFactory: @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?
@@ -103,6 +106,7 @@ package struct RuntimeHostEffects: Sendable {
         loopbackPortProbe: @escaping @Sendable (Int) -> LoopbackLiveness,
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult,
         dnsProbe: @escaping @Sendable (Int) -> LoopbackLiveness,
+        relayRecheckPause: @escaping @Sendable (TimeInterval) -> Void,
         networkPath: any NetworkPathObserving,
         networkLocation: any NetworkLocationObserving,
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?,
@@ -121,6 +125,7 @@ package struct RuntimeHostEffects: Sendable {
         self.loopbackPortProbe = loopbackPortProbe
         self.commandRunner = commandRunner
         self.dnsProbe = dnsProbe
+        self.relayRecheckPause = relayRecheckPause
         self.networkPath = networkPath
         self.networkLocation = networkLocation
         self.networkLocationStoreFactory = networkLocationStoreFactory

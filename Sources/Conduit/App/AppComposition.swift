@@ -124,6 +124,7 @@ extension AppComposition {
                 loopbackPortProbe: { LoopbackPortProbe.liveness(port: $0) },
                 commandRunner: CommandRunner.host,
                 dnsProbe: { SystemDNSManager.dnsLiveness(onPort: $0) },
+                relayRecheckPause: { Thread.sleep(forTimeInterval: $0) },
                 networkPath: NetworkMonitor(),
                 networkLocation: NetworkLocationMonitor(),
                 networkLocationStoreFactory: { SystemNetworkLocationStore(privilegeClient: $0) },

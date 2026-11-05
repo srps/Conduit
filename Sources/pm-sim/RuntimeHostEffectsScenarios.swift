@@ -210,6 +210,7 @@ enum RuntimeHostEffectsScenario {
                 return try machine.run(launchPath, arguments)
             },
             dnsProbe: fakes.dns.liveness(onPort:),
+            relayRecheckPause: { _ in },
             networkPath: path,
             networkLocation: {
                 let observer = FakeNetworkLocationObserver()

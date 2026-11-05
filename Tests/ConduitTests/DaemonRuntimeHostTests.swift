@@ -65,6 +65,7 @@ private func makeHostEffects(
     networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?,
     vpnStatusMonitor: @escaping RuntimeVPNStatusMonitorFactory,
     dnsProbe: @escaping @Sendable (Int) -> LoopbackLiveness,
+    relayRecheckPause: @escaping @Sendable (TimeInterval) -> Void = { _ in },
     homeDirectory: URL,
     resolverDirectory: String,
     stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem(),
@@ -80,6 +81,7 @@ private func makeHostEffects(
         loopbackPortProbe: loopbackPortProbe.liveness(port:),
         commandRunner: commandRunner,
         dnsProbe: dnsProbe,
+        relayRecheckPause: relayRecheckPause,
         networkPath: networkPath,
         networkLocation: networkLocation,
         networkLocationStoreFactory: networkLocationStoreFactory,
@@ -158,6 +160,7 @@ private func hostEffects(
     networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?,
     vpnStatus: any VPNStatusObserving,
     dnsProbe: @escaping @Sendable (Int) -> LoopbackLiveness,
+    relayRecheckPause: @escaping @Sendable (TimeInterval) -> Void = { _ in },
     homeDirectory: URL,
     resolverDirectory: String,
     stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem(),
@@ -175,6 +178,7 @@ private func hostEffects(
         networkLocationStoreFactory: networkLocationStoreFactory,
         vpnStatusMonitor: { _, _ in vpnStatus },
         dnsProbe: dnsProbe,
+        relayRecheckPause: relayRecheckPause,
         homeDirectory: homeDirectory,
         resolverDirectory: resolverDirectory,
         stateFiles: stateFiles,
@@ -2754,7 +2758,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             "one event per surface, in recovery's order, as in the app"
         )
         XCTAssertEqual(recovery.map { $0.detail?.split(separator: " ").first }, ["surface=systemDNS", "surface=systemProxy", "surface=resolverFile"])
-        XCTAssertEqual(recovery.dropFirst().first?.detail, "surface=systemProxy stale=false")
+        XCTAssertEqual(recovery.dropFirst().first?.detail, "surface=systemProxy stale=false evidence=port_refused")
 
         try await host.startRuntime()
         await host.awaitLifecycleIdle()
@@ -3034,7 +3038,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         harness.listenerProbe = FakeLoopbackPortProbe(timingOut: [47113])
         let host = try await harness.makeHost()
         await host.awaitLaunchRecovery()
-        XCTAssertEqual(host.declinedLaunchRecovery, [.systemProxy: .declinedInconclusiveProbe])
+        XCTAssertEqual(host.declinedLaunchRecovery, [.systemProxy: .declinedInconclusiveProbe(witness: nil)])
         XCTAssertEqual(harness.wifi.webProxy.port, "47113", "a timed-out probe restores nothing")
         return host
     }
@@ -3313,7 +3317,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         // The stale-listener check asked the injected probe about the port the machine was pointed at, and no real port was touched.
         XCTAssertEqual(harness.listenerProbe.lastAsked, 47113)
         XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
-        let expected = ["surface=systemDNS reason=nothing_recorded", "surface=systemProxy stale=false", "surface=resolverFile reason=config_unavailable"]
+        let expected = ["surface=systemDNS reason=nothing_recorded", "surface=systemProxy stale=false evidence=port_refused", "surface=resolverFile reason=config_unavailable"]
         XCTAssertEqual(events.filter { $0.event.hasPrefix("platform.launch_recovery_") }.map(\.detail), expected)
         let written = try String(contentsOf: harness.environment.eventsFile, encoding: .utf8)
         XCTAssertTrue(written.contains("platform.launch_recovery_restored"), "the events reach events.ndjson: \(written)")

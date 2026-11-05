@@ -155,6 +155,7 @@ final class InteractiveHostHarness {
                         hold.pass("dns-probe", [String(port)])
                         return dnsProbe.liveness(onPort: port)
                     },
+                    relayRecheckPause: { _ in },
                     networkPath: FakeNetworkPathObserver(),
                     networkLocation: FakeNetworkLocationObserver(),
                     networkLocationStoreFactory: { _ in nil },

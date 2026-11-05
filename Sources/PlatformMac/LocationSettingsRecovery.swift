@@ -369,27 +369,36 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         try journal.forgetNetworkState(surface: surface(kind), scope: record.scope)
     }
 
-    package func recover(kind: NetworkSettingsKind, config: ProxyConfig, listener: LoopbackLiveness) -> LaunchRecoveryOutcome {
+    /// Asks `ownership` only when there is something to restore: records, or our settings left on a service.
+    package func recover(kind: NetworkSettingsKind, config: ProxyConfig, ownership: () -> SurfaceOwnership) -> LaunchRecoveryOutcome {
         operations.withLock {
             do {
-                if listener != .notLive {
-                    let snapshot = try store.snapshot()
-                    let ours = residueIdentity(kind: kind, config: config)
-                    let residue = snapshot.services.contains {
-                        let current = fields($0, kind)
-                        return current != removeResidue(current, kind: kind, ours: ours)
-                    }
-                    if journal.hasRecords(for: surface(kind)) || residue {
-                        return listener == .live ? .declinedLiveListener : .declinedInconclusiveProbe
-                    }
-                }
                 let hadRecords = journal.hasRecords(for: surface(kind))
-                try cleanLegacyAndRestore(kind: kind, config: config)
-                return hadRecords ? .restored(stale: false) : .nothingToDo(.nothingRecorded)
+                guard try hadRecords || hasResidue(kind: kind, config: config) else {
+                    try cleanLegacyAndRestore(kind: kind, config: config)
+                    return .nothingToDo(.nothingRecorded)
+                }
+                switch ownership() {
+                case .anotherSessionLive(let evidence):
+                    return .declinedLiveListener(evidence)
+                case .unknown(let witness):
+                    return .declinedInconclusiveProbe(witness: witness)
+                case .ownerGone(let evidence):
+                    try cleanLegacyAndRestore(kind: kind, config: config)
+                    return hadRecords ? .restored(.ownerGone(evidence)) : .nothingToDo(.nothingRecorded)
+                }
             } catch {
                 report("failed", "operation=recover reason=\(error.localizedDescription)")
                 return .failed(reason: error.localizedDescription)
             }
+        }
+    }
+
+    private func hasResidue(kind: NetworkSettingsKind, config: ProxyConfig) throws -> Bool {
+        let ours = residueIdentity(kind: kind, config: config)
+        return try store.snapshot().services.contains {
+            let current = fields($0, kind)
+            return current != removeResidue(current, kind: kind, ours: ours)
         }
     }
 

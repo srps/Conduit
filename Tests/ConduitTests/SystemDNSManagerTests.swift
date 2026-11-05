@@ -832,7 +832,7 @@ final class SystemDNSManagerTests: XCTestCase {
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
             resolverLiveness: { _ in .notLive }
         )
-        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(stale: false))
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(.ownerGone(.portRefused)))
 
         XCTAssertEqual(recording.commands(matching: .setDNSServers), [["Wi-Fi", "192.168.1.1", "1.1.1.1"]])
         XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path), "removed after a successful import")
@@ -909,7 +909,7 @@ final class SystemDNSManagerTests: XCTestCase {
         writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
 
         let manager = makeManager(machine: machine, relayIsLive: false)
-        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(stale: false))
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(.ownerGone(.portRefused)))
 
         XCTAssertEqual(
             recording.commands(matching: .setDNSServers),
@@ -936,7 +936,7 @@ final class SystemDNSManagerTests: XCTestCase {
         ]))
 
         let manager = makeManager(machine: machine, relayIsLive: true)
-        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedLiveListener)
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedLiveListener(.portAnswered))
 
         XCTAssertTrue(
             manager.hasSavedState(),
@@ -962,6 +962,68 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)
     }
 
+    /// The helper's relay witness decides before the `:53` probe; the probe decides only what the witness could not. A refusal
+    /// counts only when a second reading of the same target agrees.
+    func testLaunchRecoveryDecidesSystemDNSOwnershipFromTheRelayWitnessFirst() {
+        struct Case {
+            var first: DNSRelayStatus?
+            var second: DNSRelayStatus?
+            var probe: LoopbackLiveness
+            var expected: LaunchRecoveryOutcome
+        }
+        let cases = [
+            Case(first: .relaying(targetPort: 5053, target: .refused), second: .relaying(targetPort: 5053, target: .refused),
+                 probe: .inconclusive, expected: .restored(.ownerGone(.relayTargetRefused))),
+            Case(first: .relaying(targetPort: 5053, target: .refused), second: .relaying(targetPort: 5053, target: .answered),
+                 probe: .inconclusive, expected: .declinedLiveListener(.relayTargetAnswered)),
+            Case(first: .relaying(targetPort: 5053, target: .refused), second: .relaying(targetPort: 5054, target: .refused),
+                 probe: .inconclusive, expected: .declinedInconclusiveProbe(witness: .refusalUnconfirmed)),
+            Case(first: .relaying(targetPort: 5053, target: .refused), second: nil,
+                 probe: .notLive, expected: .restored(.ownerGone(.portRefused))),
+            Case(first: .relaying(targetPort: 5053, target: .answered), second: nil,
+                 probe: .notLive, expected: .declinedLiveListener(.relayTargetAnswered)),
+            Case(first: .relaying(targetPort: 5053, target: .silent), second: nil,
+                 probe: .inconclusive, expected: .declinedInconclusiveProbe(witness: .targetSilent)),
+            Case(first: .notRunning, second: nil, probe: .notLive, expected: .restored(.ownerGone(.portRefused))),
+            Case(first: .notRunning, second: nil, probe: .inconclusive, expected: .declinedInconclusiveProbe(witness: .relayNotRunning)),
+            Case(first: nil, second: nil, probe: .inconclusive, expected: .declinedInconclusiveProbe(witness: .noStatus)),
+        ]
+        for testCase in cases {
+            let journal = PlatformStateJournal(fileURL: stateDirectory.appendingPathComponent("platform-state-\(UUID().uuidString).json"))
+            journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "192.168.1.1"])
+            journal.markApplied(surface: .systemDNS)
+            let helper = RecordingPrivilegeClient()
+            helper.relayStatus = testCase.first
+            let pauses = LockedLog<TimeInterval>()
+            let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+            let manager = SystemDNSManager(
+                privilegeClient: helper,
+                journal: journal,
+                commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+                resolverLiveness: { _ in testCase.probe },
+                relayRecheckPause: { delay in
+                    pauses.append(delay)
+                    helper.relayStatus = testCase.second
+                }
+            )
+            XCTAssertEqual(manager.restoreIfNeeded(logger: nil), testCase.expected, "\(testCase)")
+            let refusedFirst = testCase.first == .relaying(targetPort: 5053, target: .refused)
+            XCTAssertEqual(pauses.values, refusedFirst ? [SystemDNSManager.relayRefusalRecheckDelay] : [], "only a refusal is read twice: \(testCase)")
+        }
+    }
+
+    func testAThrowingWitnessFallsBackToTheProbe() {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+        writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
+        let manager = SystemDNSManager(
+            privilegeClient: RecordingPrivilegeClient(error: PrivilegeClientError.communicationFailed("no helper")),
+            journal: journal,
+            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            resolverLiveness: { _ in .inconclusive }
+        )
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedInconclusiveProbe(witness: .helperUnavailable))
+    }
+
     func testRestoreIfNeededLeavesASlowSessionAlone() throws {
         let port = Int.random(in: 17000..<18000)
         let silentFD = createUDPSocket(port: port)
@@ -978,7 +1040,7 @@ final class SystemDNSManagerTests: XCTestCase {
 
         let outcome = manager.restoreIfNeeded(logger: nil)
 
-        XCTAssertEqual(outcome, .declinedInconclusiveProbe, "a timed-out probe is no evidence the session is gone")
+        XCTAssertEqual(outcome, .declinedInconclusiveProbe(witness: .noStatus), "a timed-out probe is no evidence the session is gone")
         XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)
         XCTAssertTrue(manager.hasSavedState(), "the next launch retries from the records")
     }
