@@ -111,6 +111,8 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         case rankedBehind = "ranked_behind"
         case superseded
         case keptProbeIgnored = "kept_probe_ignored"
+        /// A half-open probe exchange got no answer and the liveness probe was silent or refused too.
+        case reopened
     }
 
     // MARK: - Internal state
@@ -366,8 +368,29 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         }
     }
 
-    /// The endpoint behind this id changed, so what was learnt about its probe support is about another proxy.
-    package mutating func forgetProbeSupport() { probeSupport = .unknown }
+    /// The endpoint behind this id changed, so what was learnt about the old one, probe support and silence
+    /// alike, is about another proxy. A check in flight lands as superseded.
+    package mutating func forgetEndpoint() {
+        probeSupport = .unknown
+        silences.reset()
+        supersedeSilence()
+    }
+
+    /// A half-open probe exchange got no answer while the proxy answered its own request: the breaker was
+    /// opened by conclusive failures, so it stays half-open, and the slot is free for the next exchange.
+    @discardableResult
+    package mutating func releaseHalfOpenProbe() -> Bool {
+        guard state == .halfOpen, halfOpenProbeInFlight else { return false }
+        halfOpenProbeInFlight = false
+        return true
+    }
+
+    /// Take a half-open slot that `releaseHalfOpenProbe` freed, so the next exchange is the probe.
+    package mutating func armHalfOpenProbe() -> Bool {
+        guard state == .halfOpen, !halfOpenProbeInFlight else { return false }
+        halfOpenProbeInFlight = true
+        return true
+    }
 
     /// Try to transition `.open → .halfOpen`. Succeeds if `openUntil` has
     /// elapsed and no probe is currently in flight. Sets

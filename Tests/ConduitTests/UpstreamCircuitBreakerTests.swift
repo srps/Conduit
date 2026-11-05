@@ -409,7 +409,7 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         breaker.recordDiscovery(.silent)
         XCTAssertEqual(breaker.probeSupport, .answers, "a result outside a discovery changes nothing")
 
-        breaker.forgetProbeSupport()
+        breaker.forgetEndpoint()
         XCTAssertEqual(breaker.probeSupport, .unknown)
         XCTAssertTrue(breaker.beginDiscovery())
         breaker.recordDiscovery(.closed)
@@ -457,6 +457,38 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         XCTAssertTrue(lapsed.endRankingIfDue(now: now.addingTimeInterval(30)))
         lapsed.reset(reason: .vpnFlapRecovered, baseOpenInterval: 30)
         XCTAssertEqual(lapsed.silence, .none, "a reset ends it too")
+    }
+
+    func testAnEndpointChangeForgetsTheOldEndpointsSilenceToo() {
+        var ranked = decisivelySilent()
+        XCTAssertEqual(ranked.finishSilenceCheck(.silent, now: Date(), interval: 30), .rankedBehind)
+        ranked.forgetEndpoint()
+        XCTAssertEqual(ranked.silence, .none, "the replacement endpoint starts with no verdict")
+        XCTAssertFalse(ranked.recordUnanswered().verdict.isDecisive, "and with no streak")
+
+        var checking = decisivelySilent()
+        checking.forgetEndpoint()
+        XCTAssertEqual(checking.silence, .checking(superseded: true))
+        XCTAssertEqual(checking.finishSilenceCheck(.silent, now: Date(), interval: 30), .superseded, "a check in flight was about the old endpoint")
+    }
+
+    func testAHalfOpenSlotFreedByAnAnsweringProxyIsArmedAgainBySelection() {
+        var breaker = UpstreamCircuitBreaker()
+        let now = Date()
+        breaker.recordFailure(now: now, threshold: 1, windowSeconds: 0, baseOpenInterval: 30, maxOpenInterval: 300)
+        XCTAssertNotNil(breaker.tryHalfOpen(now: now.addingTimeInterval(30)))
+        XCTAssertFalse(breaker.armHalfOpenProbe(), "the slot is taken by the half-open probe")
+
+        XCTAssertTrue(breaker.releaseHalfOpenProbe())
+
+        XCTAssertEqual(breaker.state, .halfOpen, "the proxy answered for itself, but no exchange succeeded, so the breaker does not close")
+        XCTAssertFalse(breaker.halfOpenProbeInFlight)
+        XCTAssertFalse(breaker.releaseHalfOpenProbe(), "nothing to release twice")
+        XCTAssertTrue(breaker.armHalfOpenProbe(), "the next exchange is the probe")
+        XCTAssertTrue(breaker.halfOpenProbeInFlight)
+
+        var closed = UpstreamCircuitBreaker()
+        XCTAssertFalse(closed.releaseHalfOpenProbe(), "a closed breaker has no slot")
     }
 
     func testASilentOrRefusedCheckRanksTheUpstreamBehindForTheInterval() {

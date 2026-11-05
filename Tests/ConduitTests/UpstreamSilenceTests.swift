@@ -226,11 +226,50 @@ final class UpstreamSilenceTests: XCTestCase {
         try await upstream.close()
     }
 
-    func testAHealthCheckSilentOnAHalfOpenUpstreamFailsItsHalfOpenProbe() async throws {
+    func testAHealthCheckSilentOnAHalfOpenUpstreamThatAnswersTheProbeKeepsItHalfOpen() async throws {
+        let (pool, upstream, events, openedByRefusals) = try await halfOpenPoolInFrontOf(answers: 0)
+
+        let silent = await pool.healthCheck(urlString: "http://check.test/")
+
+        guard case .answerTimedOut? = silent.failure else {
+            return XCTFail("the upstream answered the probe, so only the origin was silent; got \(String(describing: silent.failure))")
+        }
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .halfOpen, "a proxy alive to its own request neither closes nor re-opens the breaker")
+        XCTAssertEqual(events.details("upstream.circuit_opened").count, openedByRefusals)
+        XCTAssertEqual(events.details("upstream.silence_check_started").last?.contains(" asked_by=half_open_probe "), true)
+        XCTAssertTrue(events.details("upstream.silence_check_finished").last?.contains(" outcome=answered verdict=kept ") == true,
+                      events.details("upstream.silence_check_finished").last ?? "none")
+        pool.closeAll()
+        try await upstream.close()
+    }
+
+    func testASilentHalfOpenExchangeWhoseUpstreamAnswersTheProbeKeepsTheSlotFree() async throws {
+        let (pool, upstream, events, openedByRefusals) = try await halfOpenPoolInFrontOf(answers: 0)
+
+        do {
+            _ = try await pool.exchange(head: Self.head(path: "/probe"), body: nil).get()
+            XCTFail("the upstream never answers requests")
+        } catch {
+            XCTAssertEqual(error as? ConnectionPoolError, .upstreamResponseTimedOut)
+        }
+        let settled = await Self.eventually { !events.details("upstream.silence_check_finished").isEmpty }
+
+        XCTAssertTrue(settled, "the half-open exchange's silence asked the probe")
+        XCTAssertTrue(events.details("upstream.silence_check_finished").first?.contains(" outcome=answered verdict=kept ") == true,
+                      events.details("upstream.silence_check_finished").first ?? "none")
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .halfOpen)
+        XCTAssertEqual(events.details("upstream.circuit_opened").count, openedByRefusals, "the proxy answered for itself, so nothing re-opened")
+        pool.closeAll()
+        try await upstream.close()
+    }
+
+    /// A pool whose one upstream's breaker was opened by refused connects, now pointed at a `CountingUpstream`;
+    /// the next selection forces it half-open.
+    private func halfOpenPoolInFrontOf(answers: Int) async throws -> (ConnectionPool, CountingUpstream, Events, opened: Int) {
         let released = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton).bind(host: "127.0.0.1", port: 0).get()
         let refusedPort = try XCTUnwrap(released.localAddress?.port)
         try await released.close().get()
-        let upstream = try await CountingUpstream.start(answers: 0)
+        let upstream = try await CountingUpstream.start(answers: answers)
         let events = Events()
         var config = Self.config(upstreams: [UpstreamProxy(name: "a", host: "127.0.0.1", port: refusedPort, priority: 0)])
         config.circuitFailureThreshold = 2
@@ -242,20 +281,8 @@ final class UpstreamSilenceTests: XCTestCase {
             XCTAssertFalse(refused.healthy)
         }
         XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open)
-        let openedByRefusals = events.details("upstream.circuit_opened").count
         current.withLockedValue { $0.upstreams[0].port = upstream.port }
-
-        let silent = await pool.healthCheck(urlString: "http://check.test/")
-
-        guard case .answerTimedOut? = silent.failure else {
-            return XCTFail("the upstream answered the probe, so only the origin was silent; got \(String(describing: silent.failure))")
-        }
-        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open, "the silent HEAD was the half-open probe, and failed it")
-        XCTAssertEqual(events.details("upstream.circuit_opened").count, openedByRefusals + 1)
-        XCTAssertTrue(events.details("upstream.circuit_opened").last?.contains(" reason=probe_failed ") == true,
-                      events.details("upstream.circuit_opened").last ?? "none")
-        pool.closeAll()
-        try await upstream.close()
+        return (pool, upstream, events, events.details("upstream.circuit_opened").count)
     }
 
     func testTwoConcurrentSlowRequestsBehindAHealthyPrimaryLeaveItServing() async throws {

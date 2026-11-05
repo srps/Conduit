@@ -575,7 +575,7 @@ package final class ConnectionPool: @unchecked Sendable {
 
     private static let silenceDetail = ConnectionPoolError.upstreamResponseTimedOut.displayDescription
 
-    private enum SilenceCheckStart { case silenceStands, probe(owns: Bool) }
+    private enum SilenceCheckStart { case silenceStands, probe(owns: Bool, halfOpen: Bool) }
 
     /// A standing ranking is decisive at once, so a ladder step's check costs R, not R plus the probe budget.
     private func judgeSilentHealthCheck(
@@ -585,12 +585,16 @@ package final class ConnectionPool: @unchecked Sendable {
         func unhealthy(_ failure: HealthCheckFailure) -> HealthCheckResult {
             .unhealthy(failure, responseTimeMS: Int(Date().timeIntervalSince(start) * 1_000))
         }
-        guard case .probe(let owns) = beginHealthCheckSilenceCheck(of: proxy) else { return unhealthy(.upstreamSilent(detail: detail)) }
-        let outcome = await probeLiveness(of: proxy)
-        if owns, finishSilenceCheck(of: proxy, outcome) == .superseded {
-            return unhealthy(.answerTimedOut(detail: "\(detail); an exchange answered while the liveness probe ran"))
+        guard case .probe(let owns, let halfOpen) = beginHealthCheckSilenceCheck(of: proxy) else {
+            return unhealthy(.upstreamSilent(detail: detail))
         }
-        let ignoresProbe = lock.withLock { breakers[proxy.id]?.probeSupport == .ignores }
+        let outcome = await probeLiveness(of: proxy)
+        if halfOpen { settleHalfOpenProbe(for: proxy, outcome) }
+        let verdict = owns ? finishSilenceCheck(of: proxy, outcome) : nil
+        let (ignoresProbe, closed) = lock.withLock { (breakers[proxy.id]?.probeSupport == .ignores, breakers[proxy.id]?.state == .closed) }
+        if verdict == .superseded, closed {
+            return unhealthy(.answerTimedOut(detail: "\(detail); an exchange answered or a reset landed while the liveness probe ran"))
+        }
         switch outcome {
         case .refused:
             return unhealthy(.unreachable(detail: "\(detail); a fresh connect was refused or missed its budget"))
@@ -616,19 +620,21 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    /// A silent `HEAD` on a half-open upstream was its half-open probe, and fails it as a silent exchange does.
+    /// A silent `HEAD` on a half-open upstream was its half-open probe; the liveness probe settles it as for a silent exchange.
     private func beginHealthCheckSilenceCheck(of proxy: UpstreamProxy) -> SilenceCheckStart {
-        let (start, consecutive, halfOpen): (SilenceCheckStart, Int, Bool) = lock.withLock {
+        let (start, consecutive): (SilenceCheckStart, Int) = lock.withLock {
             syncUpstreamStatesLocked(with: configProvider().enabledUpstreams)
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
-            let halfOpen = breaker.state == .halfOpen
-            if breaker.silenceStands { return (.silenceStands, 0, halfOpen) }
+            if breaker.silenceStands { return (.silenceStands, 0) }
             let owns = breaker.beginSilenceCheck()
             breakers[proxy.id] = breaker
-            return (.probe(owns: owns), breaker.silences.consecutive, halfOpen)
+            return (.probe(owns: owns, halfOpen: breaker.state == .halfOpen), breaker.silences.consecutive)
         }
-        if halfOpen { failHalfOpenProbe(for: proxy) }
-        if case .probe(owns: true) = start { publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "health_check") }
+        switch start {
+        case .probe(owns: true, halfOpen: _): publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "health_check")
+        case .probe(owns: false, halfOpen: true): publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "half_open_probe")
+        case .probe, .silenceStands: break
+        }
         return start
     }
 
@@ -1427,14 +1433,14 @@ package final class ConnectionPool: @unchecked Sendable {
     }
 
     private func recordSilence(for proxy: UpstreamProxy) {
-        enum Outcome { case halfOpenProbe, held, check(UnansweredStreak.Verdict) }
+        enum Outcome { case halfOpenProbe(consecutive: Int), held, check(UnansweredStreak.Verdict) }
         let config = configProvider()
         let outcome: Outcome = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
             switch breaker.state {
             case .closed: break
-            case .halfOpen: return .halfOpenProbe
+            case .halfOpen: return .halfOpenProbe(consecutive: breaker.silences.consecutive)
             case .open: return .held
             }
             let recorded = breaker.recordUnanswered()
@@ -1442,14 +1448,28 @@ package final class ConnectionPool: @unchecked Sendable {
             return recorded.step == .check ? .check(recorded.verdict) : .held
         }
         switch outcome {
-        case .halfOpenProbe:
-            failHalfOpenProbe(for: proxy)
+        case .halfOpenProbe(let consecutive):
+            publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "half_open_probe")
+            probeLiveness(of: proxy).whenSuccess { [weak self] outcome in self?.settleHalfOpenProbe(for: proxy, outcome) }
         case .held:
             break
         case .check(let verdict):
             publishSilenceCheckStarted(for: proxy, consecutive: verdict.consecutive, askedBy: "silences")
             probeLiveness(of: proxy).whenSuccess { [weak self] outcome in self?.finishSilenceCheck(of: proxy, outcome) }
         }
+    }
+
+    /// The breaker was opened by conclusive failures, so a half-open exchange's silence re-opens it only when the
+    /// proxy does not answer for itself either; a proxy that does keeps its half-open slot free for the next exchange.
+    private func settleHalfOpenProbe(for proxy: UpstreamProxy, _ outcome: UpstreamCircuitBreaker.SilenceCheckOutcome) {
+        let verdict: UpstreamCircuitBreaker.SilenceCheckVerdict
+        switch outcome {
+        case .silent, .refused:
+            verdict = failHalfOpenProbe(for: proxy) ? .reopened : .superseded
+        case .answered, .closed, .unasked:
+            verdict = lock.withLock { breakers[proxy.id]?.releaseHalfOpenProbe() == true } ? .kept : .superseded
+        }
+        publishSilenceCheckFinished(for: proxy, outcome: outcome, verdict: verdict)
     }
 
     private func publishSilenceCheckStarted(for proxy: UpstreamProxy, consecutive: Int, askedBy: String) {
@@ -1532,11 +1552,7 @@ package final class ConnectionPool: @unchecked Sendable {
             breakers[proxy.id] = breaker
             return (verdict, strike)
         }
-        var detail = "upstream=\(proxy.name) endpoint=\(proxy.endpoint) outcome=\(outcome.name) verdict=\(verdict.rawValue)"
-        if case .answered(let status, let latencyMS) = outcome { detail += " status=\(status) latency_ms=\(latencyMS)" }
-        let finished = RuntimeEvent(kind: .health, event: "upstream.silence_check_finished", detail: detail)
-        eventSink?(finished)
-        logger.log(.info, "Silence check of upstream \(proxy.name) finished: \(finished.detail ?? "")", category: .proxy)
+        publishSilenceCheckFinished(for: proxy, outcome: outcome, verdict: verdict)
         if verdict == .rankedBehind {
             let event = RuntimeEvent(
                 kind: .health, event: "upstream.deprioritized",
@@ -1549,9 +1565,22 @@ package final class ConnectionPool: @unchecked Sendable {
         return verdict
     }
 
-    private func failHalfOpenProbe(for proxy: UpstreamProxy) { recordFailure(for: proxy, onlyWhenHalfOpen: true) }
+    private func publishSilenceCheckFinished(
+        for proxy: UpstreamProxy, outcome: UpstreamCircuitBreaker.SilenceCheckOutcome, verdict: UpstreamCircuitBreaker.SilenceCheckVerdict
+    ) {
+        var detail = "upstream=\(proxy.name) endpoint=\(proxy.endpoint) outcome=\(outcome.name) verdict=\(verdict.rawValue)"
+        if case .answered(let status, let latencyMS) = outcome { detail += " status=\(status) latency_ms=\(latencyMS)" }
+        let finished = RuntimeEvent(kind: .health, event: "upstream.silence_check_finished", detail: detail)
+        eventSink?(finished)
+        logger.log(.info, "Silence check of upstream \(proxy.name) finished: \(finished.detail ?? "")", category: .proxy)
+    }
 
-    private func recordFailure(for proxy: UpstreamProxy, onlyWhenHalfOpen: Bool = false) {
+    /// Whether the breaker was half-open and re-opened.
+    @discardableResult
+    private func failHalfOpenProbe(for proxy: UpstreamProxy) -> Bool { recordFailure(for: proxy, onlyWhenHalfOpen: true) }
+
+    @discardableResult
+    private func recordFailure(for proxy: UpstreamProxy, onlyWhenHalfOpen: Bool = false) -> Bool {
         let config = configProvider()
         let proxies = config.enabledUpstreams
         let thresholds = breakerThresholds(from: config)
@@ -1572,6 +1601,7 @@ package final class ConnectionPool: @unchecked Sendable {
         if let emittedTransition {
             emitTransition(emittedTransition, for: proxy)
         }
+        return emittedTransition != nil
     }
 
     /// Reset every upstream's circuit breaker to closed without touching its
@@ -1616,7 +1646,7 @@ package final class ConnectionPool: @unchecked Sendable {
             // Refresh identity on every sync; the user may have renamed an
             // upstream or moved it to a new host without changing its UUID.
             if let known = upstreamIdentities[proxy.id], known.endpoint != proxy.endpoint {
-                breakers[proxy.id]?.forgetProbeSupport()
+                breakers[proxy.id]?.forgetEndpoint()
             }
             upstreamIdentities[proxy.id] = (proxy.name, proxy.endpoint)
         }
@@ -1665,13 +1695,9 @@ package final class ConnectionPool: @unchecked Sendable {
                     }
                 }
             case .halfOpen:
-                if !breaker.halfOpenProbeInFlight {
-                    // Defensive: half-open with no probe in flight is
-                    // unreachable in normal operation (every entry to
-                    // `.halfOpen` arms the slot via `tryHalfOpen`). Still
-                    // surface the upstream to the selection round so a
-                    // stuck pool can recover; the next recordSuccess /
-                    // recordFailure will re-anchor the breaker.
+                // A slot `releaseHalfOpenProbe` freed is taken again here, so the next exchange is the probe.
+                if breaker.armHalfOpenProbe() {
+                    breakers[proxy.id] = breaker
                     candidates.append(proxy)
                 }
             }

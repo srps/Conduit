@@ -111,15 +111,17 @@ final class UpstreamFailureClassTests: XCTestCase {
         await assertFails(with: .upstreamResponseTimedOut) {
             _ = try await pool.exchange(head: Self.head, body: nil).get()
         }
-        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open, "the silent exchange was the half-open probe")
-        XCTAssertEqual(events.count("upstream.circuit_opened"), 2)
+        let reopened = await eventually { events.count("upstream.circuit_opened") == 2 }
+        XCTAssertTrue(reopened, "the silent exchange was the half-open probe, and the upstream was silent to the liveness probe too")
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open)
 
         await assertFails(with: .upstreamResponseTimedOut) {
             _ = try await coordinator.connectUpstreamTunnel(target: "example.com:443").get()
         }
-        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open, "the silent tunnel was the half-open probe")
+        let reopenedAgain = await eventually { events.count("upstream.circuit_opened") == 3 }
+        XCTAssertTrue(reopenedAgain, "the silent tunnel was the half-open probe")
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open)
         XCTAssertEqual(events.count("upstream.circuit_half_opened"), 2)
-        XCTAssertEqual(events.count("upstream.circuit_opened"), 3)
         pool.closeAll()
         try await silent.close().get()
     }
@@ -139,6 +141,13 @@ final class UpstreamFailureClassTests: XCTestCase {
             group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(), configProvider: { config },
             authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "dGVzdA==") }, eventSink: events.record
         )
+    }
+
+    private func eventually(_ condition: () -> Bool) async -> Bool {
+        for _ in 0..<200 where !condition() {
+            do { try await Task.sleep(for: .milliseconds(10)) } catch { return condition() }
+        }
+        return condition()
     }
 
     private func assertFails(
