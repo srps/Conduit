@@ -98,8 +98,8 @@ public enum HelperProtocolVersion {
     /// `HelperResponse.dnsRelay` and `HelperResponse.features` (#201). Not a
     /// bump, on purpose. A v6 would make every installed v5 helper refuse
     /// every frame as unsupported, and the client's exact-match guard would
-    /// then send every privileged operation to an admin prompt until the
-    /// user reinstalls. Added this way, a v5 helper that predates the command
+    /// then send every privileged operation to an admin prompt, or fail a
+    /// scoped write outright, until the user reinstalls. Added this way, a v5 helper that predates the command
     /// cannot decode it and answers "Invalid request" stamped 5, which the
     /// client reads as "no witness" and nothing else; both fields are
     /// optional, so a client that predates them ignores the keys.

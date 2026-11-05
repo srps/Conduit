@@ -52,7 +52,8 @@ reports, not from a timed probe of `:53`.
 
 - **A version bump to v6:** every installed v5 helper would refuse every v6
   frame, and the client's exact-match guard would send every privileged
-  operation to an admin prompt until a reinstall.
+  operation to an admin prompt until a reinstall, except location-scoped
+  writes, which would fail outright.
 - **Probe the configured forwarder port from the app:** that port is a guess at
   the relay's target, which the helper alone knows.
 - **Have the orphaned relay answer SERVFAIL:** an older app's `:53` probe reads
@@ -68,8 +69,8 @@ A crash with "Manage system DNS" on is repaired at the next launch with no
 click, once the helper is reinstalled. Until then a v5 helper that predates the
 command answers "Invalid request", which the app reads as no witness and the
 #270 fallback handles. Old apps never send the command and ignore the new keys.
-A status read holds the helper's single accept loop for at most the 100 ms
-bound. A forwarder port another process takes between the crash and the
+A status read adds at most the 100 ms probe bound to the time it holds the
+helper's single accept loop. A forwarder port another process takes between the crash and the
 relaunch reads `answered` or `silent`, so recovery declines rather than
 restoring wrongly.
 
