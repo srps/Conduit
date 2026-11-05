@@ -1,7 +1,7 @@
 # 0042: Fall back to the liveness probe and a notice when no evidence decides launch recovery
 
 - Date: 2026-11-04
-- Decision: proposed
+- Decision: accepted (owner, 2026-11-05, [#270 comment](https://github.com/srps/Conduit/pull/270#issuecomment-6655448179): accepted this record as the fallback that 0041 names)
 - Implementation: implemented
 - Validation: none
 - Supersedes: none
