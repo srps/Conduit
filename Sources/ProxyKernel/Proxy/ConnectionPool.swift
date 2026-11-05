@@ -575,7 +575,11 @@ package final class ConnectionPool: @unchecked Sendable {
 
     private static let silenceDetail = ConnectionPoolError.upstreamResponseTimedOut.displayDescription
 
-    private enum SilenceCheckStart { case silenceStands, stale, probe(owns: Bool, halfOpen: Bool) }
+    /// Who settles the liveness probe a silent health check asks: the closed breaker's check it began, the half-open
+    /// slot, or nobody, when another check already runs for the upstream.
+    private enum ProbeAsker { case silenceCheck(generation: UInt64), halfOpenSlot, observer }
+
+    private enum SilenceCheckStart { case silenceStands, stale, probe(ProbeAsker) }
 
     /// A standing ranking is decisive at once, so a ladder step's check costs R, not R plus the probe budget.
     private func judgeSilentHealthCheck(
@@ -585,19 +589,17 @@ package final class ConnectionPool: @unchecked Sendable {
         func unhealthy(_ failure: HealthCheckFailure) -> HealthCheckResult {
             .unhealthy(failure, responseTimeMS: Int(Date().timeIntervalSince(start) * 1_000))
         }
-        let owns: Bool, halfOpen: Bool
+        let asker: ProbeAsker
         switch recordHealthCheckSilence(of: proxy, origin: ExchangeOrigin(head)) {
         case .silenceStands: return unhealthy(.upstreamSilent(detail: detail))
         case .stale: return unhealthy(.answerTimedOut(detail: "\(detail); the upstream's endpoint changed while the check ran"))
-        case .probe(let o, let h): (owns, halfOpen) = (o, h)
+        case .probe(let probeAsker): asker = probeAsker
         }
         let outcome = await probeLiveness(of: proxy)
-        let verdict: UpstreamCircuitBreaker.SilenceCheckVerdict? = if owns {
-            finishSilenceCheck(of: proxy, outcome)
-        } else if halfOpen {
-            settleHalfOpenProbe(for: proxy, outcome)
-        } else {
-            nil
+        let verdict: UpstreamCircuitBreaker.SilenceCheckVerdict? = switch asker {
+        case .silenceCheck(let generation): finishSilenceCheck(of: proxy, outcome, generation: generation)
+        case .halfOpenSlot: settleHalfOpenProbe(for: proxy, outcome)
+        case .observer: nil
         }
         let (ignoresProbe, closed) = lock.withLock { (breakers[proxy.id]?.probeSupport == .ignores, breakers[proxy.id]?.state == .closed) }
         if verdict == .superseded, closed {
@@ -629,21 +631,26 @@ package final class ConnectionPool: @unchecked Sendable {
     }
 
     private func recordHealthCheckSilence(of proxy: UpstreamProxy, origin: ExchangeOrigin) -> SilenceCheckStart {
-        enum Recorded { case stale, stands, rankedBehind([ExchangeOrigin]), reopen, probe(owns: Bool, halfOpen: Bool, consecutive: Int) }
+        enum Recorded {
+            case stale, stands, rankedBehind([ExchangeOrigin]), reopen(UpstreamCircuitBreaker.Transition?), probe(ProbeAsker, consecutive: Int)
+        }
         let config = configProvider()
-        let interval = breakerThresholds(from: config).baseOpenInterval
+        let thresholds = breakerThresholds(from: config)
+        let interval = thresholds.baseOpenInterval
         let recorded: Recorded = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
             guard namesEndpointLocked(proxy) else { return .stale }
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
-            let (verdict, consecutive) = breaker.recordUnanswered(origin: origin, source: .healthCheck, now: Date(), interval: interval)
+            let now = Date()
+            let (verdict, consecutive) = breaker.recordUnanswered(origin: origin, source: .healthCheck, now: now, interval: interval)
+            let reopened = verdict == .reopenHalfOpen ? thresholds.strike(&breaker, now: now) : nil
             breakers[proxy.id] = breaker
             switch verdict {
             case .acrossOrigins: return .rankedBehind(breaker.silences.origins)
-            case .reopenHalfOpen: return .reopen
-            case .askProbe: return .probe(owns: true, halfOpen: false, consecutive: consecutive)
-            case .halfOpenProbe: return .probe(owns: false, halfOpen: true, consecutive: consecutive)
-            case .held: return breaker.silenceStands ? .stands : .probe(owns: false, halfOpen: false, consecutive: consecutive)
+            case .reopenHalfOpen: return .reopen(reopened)
+            case .askProbe(let generation): return .probe(.silenceCheck(generation: generation), consecutive: consecutive)
+            case .halfOpenProbe: return .probe(.halfOpenSlot, consecutive: consecutive)
+            case .held: return breaker.silenceStands ? .stands : .probe(.observer, consecutive: consecutive)
             }
         }
         switch recorded {
@@ -651,16 +658,19 @@ package final class ConnectionPool: @unchecked Sendable {
             return .stale
         case .stands:
             return .silenceStands
-        case .reopen:
-            failHalfOpenProbe(for: proxy)
+        case .reopen(let reopened):
+            if let reopened { emitTransition(reopened, for: proxy) }
             return .silenceStands
         case .rankedBehind(let origins):
             publishDeprioritizedAcrossOrigins(proxy, origins: origins, interval: interval)
             return .silenceStands
-        case .probe(let owns, let halfOpen, let consecutive):
-            if owns { publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "health_check") }
-            if halfOpen { publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "half_open_probe") }
-            return .probe(owns: owns, halfOpen: halfOpen)
+        case .probe(let asker, let consecutive):
+            switch asker {
+            case .silenceCheck: publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "health_check")
+            case .halfOpenSlot: publishSilenceCheckStarted(for: proxy, consecutive: consecutive, askedBy: "half_open_probe")
+            case .observer: break
+            }
+            return .probe(asker)
         }
     }
 
@@ -904,7 +914,8 @@ package final class ConnectionPool: @unchecked Sendable {
             if !preferFreshConnection {
                 while let existing = idleConnections[proxy.id]?.popLast() {
                     guard allConnections[existing.id] != nil else { continue }
-                    if isConnectionExpired(existing, now: .now) || !existing.channel.isActive || existing.wasRetiredByVPNTransition {
+                    if isConnectionExpired(existing, now: .now) || !existing.channel.isActive || existing.wasRetiredByVPNTransition
+                        || existing.proxy.endpoint != proxy.endpoint {
                         retired.append(contentsOf: retireConnectionsLocked(ids: [existing.id]))
                         continue
                     }
@@ -1465,14 +1476,20 @@ package final class ConnectionPool: @unchecked Sendable {
 
     private func recordSilence(for proxy: UpstreamProxy, origin: ExchangeOrigin) {
         let config = configProvider()
-        let interval = breakerThresholds(from: config).baseOpenInterval
-        let recorded: (verdict: UpstreamCircuitBreaker.SilenceVerdict, consecutive: Int, origins: [ExchangeOrigin])? = lock.withLock {
+        let thresholds = breakerThresholds(from: config)
+        let interval = thresholds.baseOpenInterval
+        typealias Recorded = (
+            verdict: UpstreamCircuitBreaker.SilenceVerdict, consecutive: Int, origins: [ExchangeOrigin], reopened: UpstreamCircuitBreaker.Transition?
+        )
+        let recorded: Recorded? = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
             guard namesEndpointLocked(proxy) else { return nil }
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
-            let (verdict, consecutive) = breaker.recordUnanswered(origin: origin, source: .exchange, now: Date(), interval: interval)
+            let now = Date()
+            let (verdict, consecutive) = breaker.recordUnanswered(origin: origin, source: .exchange, now: now, interval: interval)
+            let reopened = verdict == .reopenHalfOpen ? thresholds.strike(&breaker, now: now) : nil
             breakers[proxy.id] = breaker
-            return (verdict, consecutive, breaker.silences.origins)
+            return (verdict, consecutive, breaker.silences.origins, reopened)
         }
         guard let recorded else { return }
         switch recorded.verdict {
@@ -1481,11 +1498,11 @@ package final class ConnectionPool: @unchecked Sendable {
         case .halfOpenProbe:
             publishSilenceCheckStarted(for: proxy, consecutive: recorded.consecutive, askedBy: "half_open_probe")
             probeLiveness(of: proxy).whenSuccess { [weak self] outcome in self?.settleHalfOpenProbe(for: proxy, outcome) }
-        case .askProbe:
+        case .askProbe(let generation):
             publishSilenceCheckStarted(for: proxy, consecutive: recorded.consecutive, askedBy: "silences")
-            probeLiveness(of: proxy).whenSuccess { [weak self] outcome in self?.finishSilenceCheck(of: proxy, outcome) }
+            probeLiveness(of: proxy).whenSuccess { [weak self] outcome in self?.finishSilenceCheck(of: proxy, outcome, generation: generation) }
         case .reopenHalfOpen:
-            failHalfOpenProbe(for: proxy)
+            if let reopened = recorded.reopened { emitTransition(reopened, for: proxy) }
         case .acrossOrigins:
             publishDeprioritizedAcrossOrigins(proxy, origins: recorded.origins, interval: interval)
         }
@@ -1506,23 +1523,26 @@ package final class ConnectionPool: @unchecked Sendable {
     private func settleHalfOpenProbe(
         for proxy: UpstreamProxy, _ outcome: UpstreamCircuitBreaker.SilenceCheckOutcome
     ) -> UpstreamCircuitBreaker.SilenceCheckVerdict {
-        let proxies = configProvider().enabledUpstreams
-        let (stillNamed, ignoresProbe) = lock.withLock {
-            syncUpstreamStatesLocked(with: proxies)
-            return (namesEndpointLocked(proxy), breakers[proxy.id]?.probeSupport == .ignores)
+        let config = configProvider()
+        let thresholds = breakerThresholds(from: config)
+        let (verdict, reopened): (UpstreamCircuitBreaker.SilenceCheckVerdict, UpstreamCircuitBreaker.Transition?) = lock.withLock {
+            syncUpstreamStatesLocked(with: config.enabledUpstreams)
+            guard namesEndpointLocked(proxy), var breaker = breakers[proxy.id] else { return (.superseded, nil) }
+            let verdict: UpstreamCircuitBreaker.SilenceCheckVerdict
+            var reopened: UpstreamCircuitBreaker.Transition?
+            switch outcome {
+            case .silent where breaker.probeSupport == .ignores:
+                verdict = breaker.releaseHalfOpenProbe() ? .keptProbeIgnored : .superseded
+            case .silent, .refused:
+                reopened = breaker.state == .halfOpen ? thresholds.strike(&breaker, now: Date()) : nil
+                verdict = reopened == nil ? .superseded : .reopened
+            case .answered, .closed, .unasked:
+                verdict = breaker.releaseHalfOpenProbe() ? .kept : .superseded
+            }
+            breakers[proxy.id] = breaker
+            return (verdict, reopened)
         }
-        func released() -> Bool { lock.withLock { breakers[proxy.id]?.releaseHalfOpenProbe() == true } }
-        let verdict: UpstreamCircuitBreaker.SilenceCheckVerdict
-        switch outcome {
-        case _ where !stillNamed:
-            verdict = .superseded
-        case .silent where ignoresProbe:
-            verdict = released() ? .keptProbeIgnored : .superseded
-        case .silent, .refused:
-            verdict = failHalfOpenProbe(for: proxy) ? .reopened : .superseded
-        case .answered, .closed, .unasked:
-            verdict = released() ? .kept : .superseded
-        }
+        if let reopened { emitTransition(reopened, for: proxy) }
         publishSilenceCheckFinished(for: proxy, outcome: outcome, verdict: verdict)
         return verdict
     }
@@ -1587,7 +1607,7 @@ package final class ConnectionPool: @unchecked Sendable {
 
     @discardableResult
     private func finishSilenceCheck(
-        of proxy: UpstreamProxy, _ outcome: UpstreamCircuitBreaker.SilenceCheckOutcome
+        of proxy: UpstreamProxy, _ outcome: UpstreamCircuitBreaker.SilenceCheckOutcome, generation: UInt64
     ) -> UpstreamCircuitBreaker.SilenceCheckVerdict {
         let config = configProvider()
         let thresholds = breakerThresholds(from: config)
@@ -1596,14 +1616,9 @@ package final class ConnectionPool: @unchecked Sendable {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
             guard var breaker = breakers[proxy.id], namesEndpointLocked(proxy) else { return (.superseded, nil) }
             let now = Date()
-            let verdict = breaker.finishSilenceCheck(outcome, now: now, interval: interval)
+            let verdict = breaker.finishSilenceCheck(outcome, generation: generation, now: now, interval: interval)
             var strike: UpstreamCircuitBreaker.Transition?
-            if verdict == .rankedBehind, outcome == .refused {
-                strike = breaker.recordFailure(
-                    now: now, threshold: thresholds.failureThreshold, windowSeconds: thresholds.windowSeconds,
-                    baseOpenInterval: thresholds.baseOpenInterval, maxOpenInterval: thresholds.maxOpenInterval
-                )
-            }
+            if verdict == .rankedBehind, outcome == .refused { strike = thresholds.strike(&breaker, now: now) }
             breakers[proxy.id] = breaker
             return (verdict, strike)
         }
@@ -1630,12 +1645,7 @@ package final class ConnectionPool: @unchecked Sendable {
         logger.log(.info, "Silence check of upstream \(proxy.name) finished: \(finished.detail ?? "")", category: .proxy)
     }
 
-    /// Whether the breaker was half-open and re-opened.
-    @discardableResult
-    private func failHalfOpenProbe(for proxy: UpstreamProxy) -> Bool { recordFailure(for: proxy, onlyWhenHalfOpen: true) }
-
-    @discardableResult
-    private func recordFailure(for proxy: UpstreamProxy, onlyWhenHalfOpen: Bool = false) -> Bool {
+    private func recordFailure(for proxy: UpstreamProxy) {
         let config = configProvider()
         let proxies = config.enabledUpstreams
         let thresholds = breakerThresholds(from: config)
@@ -1643,20 +1653,12 @@ package final class ConnectionPool: @unchecked Sendable {
         lock.withLockVoid {
             syncUpstreamStatesLocked(with: proxies)
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
-            guard !onlyWhenHalfOpen || breaker.state == .halfOpen else { return }
-            emittedTransition = breaker.recordFailure(
-                now: Date(),
-                threshold: thresholds.failureThreshold,
-                windowSeconds: thresholds.windowSeconds,
-                baseOpenInterval: thresholds.baseOpenInterval,
-                maxOpenInterval: thresholds.maxOpenInterval
-            )
+            emittedTransition = thresholds.strike(&breaker, now: Date())
             breakers[proxy.id] = breaker
         }
         if let emittedTransition {
             emitTransition(emittedTransition, for: proxy)
         }
-        return emittedTransition != nil
     }
 
     /// Reset every upstream's circuit breaker to closed without touching its
@@ -1797,6 +1799,13 @@ package final class ConnectionPool: @unchecked Sendable {
         var windowSeconds: TimeInterval
         var baseOpenInterval: TimeInterval
         var maxOpenInterval: TimeInterval
+
+        func strike(_ breaker: inout UpstreamCircuitBreaker, now: Date) -> UpstreamCircuitBreaker.Transition? {
+            breaker.recordFailure(
+                now: now, threshold: failureThreshold, windowSeconds: windowSeconds,
+                baseOpenInterval: baseOpenInterval, maxOpenInterval: maxOpenInterval
+            )
+        }
     }
 
     private func breakerThresholds(from config: ProxyConfig) -> BreakerThresholds {

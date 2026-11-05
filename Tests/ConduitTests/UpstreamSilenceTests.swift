@@ -562,8 +562,6 @@ final class UpstreamSilenceTests: XCTestCase {
         let pool = makePool(config: current, events: events)
         _ = try await pool.exchange(head: Self.head(path: "/warm"), body: nil).get()
         _ = await Self.eventually { !events.details("upstream.liveness_discovered").isEmpty }
-        // Idle connections are keyed by upstream id, so the warm socket would carry a check to the old endpoint.
-        _ = pool.closeAll(scope: .idleOnly)
         current.withLockedValue { $0.upstreams[0].port = refusedPort }
         for _ in 0..<2 { _ = await pool.healthCheck(urlString: "http://check.test/") }
         XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open)
@@ -607,6 +605,37 @@ final class UpstreamSilenceTests: XCTestCase {
         XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .open)
         pool.closeAll()
         try await upstream.close()
+    }
+
+    /// Two pooled sockets that have each answered once and sat idle; the discovery probe ran on its own.
+    private func twoIdleConnections(_ pool: ConnectionPool, to upstream: CountingUpstream, _ events: Events) async throws {
+        let exchanges = [pool.exchange(head: Self.head(host: "warm.test", path: "/1"), body: nil),
+                         pool.exchange(head: Self.head(host: "warm.test", path: "/2"), body: nil)]
+        for exchange in exchanges { _ = try await exchange.get() }
+        let discovered = await Self.eventually { !events.details("upstream.liveness_discovered").isEmpty }
+        XCTAssertTrue(discovered)
+        XCTAssertEqual(upstream.connections, 3, "two pooled sockets and the discovery probe's own")
+    }
+
+    func testIdleSocketsToAReplacedEndpointCarryNothingAndChargeTheNewEndpointNoSilence() async throws {
+        let old = try await CountingUpstream.start(answers: .max)
+        let replacement = try await CountingUpstream.start(answers: .max)
+        let events = Events()
+        let current = NIOLockedValueBox(Self.config(upstreams: [old.proxy(named: "a")]))
+        let pool = makePool(config: current, events: events)
+        try await twoIdleConnections(pool, to: old, events)
+        old.silenceOpenConnections()
+        current.withLockedValue { $0.upstreams[0].port = replacement.port }
+
+        var answered: [String] = []
+        for host in ["a.test", "b.test", "c.test"] { answered.append(await servedBy(pool, host: host)) }
+
+        XCTAssertEqual(answered, ["a", "a", "a"], "the sockets to the replaced endpoint carry no request")
+        XCTAssertEqual(replacement.methods.filter { $0 == "GET" }.count, 3)
+        XCTAssertEqual(events.details("upstream.deprioritized"), [], "the old endpoint's silence is not the new one's")
+        pool.closeAll()
+        try await old.close()
+        try await replacement.close()
     }
 
     private static let head = head(path: "/")

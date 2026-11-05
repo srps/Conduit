@@ -51,12 +51,13 @@ final class UpstreamSilencesTests: XCTestCase {
         XCTAssertEqual(silences.recordUnanswered(origin: origin("b:80"), source: .exchange), .init(consecutive: 1, origins: 1, asksProbe: false))
     }
 
+    private func head(_ method: HTTPMethod, _ uri: String, host: String? = nil) -> HTTPRequestHead {
+        var head = HTTPRequestHead(version: .http1_1, method: method, uri: uri)
+        if let host { head.headers.add(name: "Host", value: host) }
+        return head
+    }
+
     func testAnOriginIsTheTargetsHostAndPort() {
-        func head(_ method: HTTPMethod, _ uri: String, host: String? = nil) -> HTTPRequestHead {
-            var head = HTTPRequestHead(version: .http1_1, method: method, uri: uri)
-            if let host { head.headers.add(name: "Host", value: host) }
-            return head
-        }
         XCTAssertEqual(ExchangeOrigin(head(.GET, "http://Example.COM/a")).hostPort, "example.com:80")
         XCTAssertEqual(ExchangeOrigin(head(.GET, "https://example.com/a")).hostPort, "example.com:443")
         XCTAssertEqual(ExchangeOrigin(head(.GET, "http://example.com:8080/a")).hostPort, "example.com:8080")
@@ -64,5 +65,13 @@ final class UpstreamSilencesTests: XCTestCase {
         XCTAssertEqual(ExchangeOrigin(head(.CONNECT, "example.com:8443")).hostPort, "example.com:8443")
         XCTAssertEqual(ExchangeOrigin.connect("example.com").hostPort, "example.com:443")
         XCTAssertEqual(ExchangeOrigin.connect("[::1]").hostPort, "[::1]:443")
+    }
+
+    func testOneTargetSpelledTwoWaysIsOneOrigin() {
+        XCTAssertEqual(ExchangeOrigin(head(.GET, "/a", host: "example.com:080")), ExchangeOrigin(head(.GET, "http://example.com/a")))
+        XCTAssertEqual(ExchangeOrigin(head(.CONNECT, "example.com:0443")), .connect("example.com"))
+        XCTAssertEqual(ExchangeOrigin.connect("[0:0:0:0:0:0:0:1]:443"), .connect("[::1]"))
+        XCTAssertEqual(ExchangeOrigin(head(.GET, "http://[0:0::1]:80/a")), ExchangeOrigin(head(.GET, "/a", host: "[::1]")))
+        XCTAssertEqual(ExchangeOrigin.connect("example.com:https").hostPort, "example.com:https", "a port that does not parse stays as typed")
     }
 }

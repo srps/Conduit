@@ -65,6 +65,8 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
     /// Exchanges that connected and got no answer since the last answered one. They never count toward `consecutiveFailures`.
     package private(set) var silences = UpstreamSilences()
     package private(set) var silence: Silence = .none
+    /// Bumped by each `beginSilenceCheck`, so a probe's late result finishes only the check that asked it.
+    package private(set) var checkGeneration: UInt64 = 0
     /// Whether this upstream answers the liveness probe, a request a forward proxy answers itself.
     /// Learnt once per endpoint from the probe that follows the first answered exchange; `ignores`
     /// only when the upstream had just answered an exchange, so it was alive and still said nothing.
@@ -83,8 +85,8 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
 
     package enum SilenceVerdict: Equatable, Sendable {
         case held
-        /// The breaker is `.checking`: the caller owes it the liveness probe's outcome.
-        case askProbe
+        /// The breaker is `.checking`: the caller owes it the liveness probe's outcome, with this check's generation.
+        case askProbe(generation: UInt64)
         /// A half-open probe exchange: the caller settles the slot by the liveness probe's outcome.
         case halfOpenProbe
         /// Two distinct origins silent since the last answer: the breaker now ranks behind.
@@ -342,20 +344,24 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         }
         // A lapsed ranking's silence still stands for a health check, which is decisive at once; an exchange asks again.
         if silence == .lapsed, source == .healthCheck { return (.held, record.consecutive) }
-        guard record.asksProbe, beginSilenceCheck() else { return (.held, record.consecutive) }
-        return (.askProbe, record.consecutive)
+        guard record.asksProbe, let generation = beginSilenceCheck() else { return (.held, record.consecutive) }
+        return (.askProbe(generation: generation), record.consecutive)
     }
 
-    package mutating func beginSilenceCheck() -> Bool {
-        guard state == .closed, silence == .none || silence == .lapsed else { return false }
+    /// The new check's generation, or nil when one runs already or the breaker is not closed.
+    package mutating func beginSilenceCheck() -> UInt64? {
+        guard state == .closed, silence == .none || silence == .lapsed else { return nil }
         silence = .checking(superseded: false)
-        return true
+        checkGeneration += 1
+        return checkGeneration
     }
 
     /// The probe's answer is the proxy's own, not an exchange: it ends the streak and feeds neither the
     /// latency score nor the strike count.
-    package mutating func finishSilenceCheck(_ outcome: SilenceCheckOutcome, now: Date, interval: TimeInterval) -> SilenceCheckVerdict {
-        guard case .checking(let superseded) = silence else { return .superseded }
+    package mutating func finishSilenceCheck(
+        _ outcome: SilenceCheckOutcome, generation: UInt64, now: Date, interval: TimeInterval
+    ) -> SilenceCheckVerdict {
+        guard case .checking(let superseded) = silence, generation == checkGeneration else { return .superseded }
         silence = .none
         guard state == .closed else { return .superseded }
         switch outcome {

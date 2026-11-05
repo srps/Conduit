@@ -345,7 +345,7 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
 
         XCTAssertEqual(silence(&breaker), .held)
 
-        XCTAssertEqual(silence(&breaker), .askProbe)
+        XCTAssertEqual(silence(&breaker), .askProbe(generation: 1))
         XCTAssertEqual(breaker.silence, .checking(superseded: false))
         XCTAssertEqual(silence(&breaker), .held, "one check per upstream at a time")
         XCTAssertFalse(breaker.ranksBehind(at: Date()), "a silence alone ranks nothing")
@@ -361,7 +361,7 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         XCTAssertEqual(silence(&breaker, origin: "b.test:80", now: now), .acrossOrigins)
 
         XCTAssertTrue(breaker.ranksBehind(at: now.addingTimeInterval(29)))
-        XCTAssertEqual(breaker.finishSilenceCheck(.answered(status: 403, latencyMS: 1), now: now, interval: 30), .superseded,
+        XCTAssertEqual(breaker.finishSilenceCheck(.answered(status: 403, latencyMS: 1), generation: 1, now: now, interval: 30), .superseded,
                        "the proxy answering for itself says nothing about its egress")
         XCTAssertEqual(silence(&breaker, origin: "c.test:80"), .held, "a later silence does not extend a ranking")
         XCTAssertEqual(breaker.consecutiveFailures, 0, "a silence strikes nothing")
@@ -369,7 +369,7 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
 
     func testAnAnsweredProbeKeepsTheOriginsSilentSinceTheLastAnswer() {
         var breaker = decisivelySilent()
-        XCTAssertEqual(breaker.finishSilenceCheck(.answered(status: 403, latencyMS: 1), now: Date(), interval: 30), .kept)
+        XCTAssertEqual(breaker.finishSilenceCheck(.answered(status: 403, latencyMS: 1), generation: 1, now: Date(), interval: 30), .kept)
 
         XCTAssertEqual(silence(&breaker, origin: "b.test:80"), .acrossOrigins)
 
@@ -380,11 +380,11 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
 
     func testAHealthCheckAsksAtOnceUnlessItsSilenceAlreadyStands() {
         var fresh = UpstreamCircuitBreaker()
-        XCTAssertEqual(silence(&fresh, origin: "check.test:80", source: .healthCheck), .askProbe)
+        XCTAssertEqual(silence(&fresh, origin: "check.test:80", source: .healthCheck), .askProbe(generation: 1))
 
         var lapsed = decisivelySilent()
         let now = Date()
-        XCTAssertEqual(lapsed.finishSilenceCheck(.silent, now: now, interval: 30), .rankedBehind)
+        XCTAssertEqual(lapsed.finishSilenceCheck(.silent, generation: 1, now: now, interval: 30), .rankedBehind)
         XCTAssertTrue(lapsed.endRankingIfDue(now: now.addingTimeInterval(30)))
         XCTAssertEqual(silence(&lapsed, source: .healthCheck), .held, "nothing answered since the probe found it silent")
         XCTAssertTrue(lapsed.silenceStands)
@@ -409,13 +409,13 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         var breaker = UpstreamCircuitBreaker()
         breaker.recordFailure(now: Date(), threshold: 5, windowSeconds: 0, baseOpenInterval: 30, maxOpenInterval: 300)
 
-        XCTAssertEqual(silence(&breaker), .askProbe)
+        XCTAssertEqual(silence(&breaker), .askProbe(generation: 1))
     }
 
     func testAnAnsweredCheckKeepsTheUpstreamAndStartsANewStreak() {
         var breaker = decisivelySilent()
 
-        XCTAssertEqual(breaker.finishSilenceCheck(.answered(status: 403, latencyMS: 12), now: Date(), interval: 30), .kept)
+        XCTAssertEqual(breaker.finishSilenceCheck(.answered(status: 403, latencyMS: 12), generation: 1, now: Date(), interval: 30), .kept)
 
         XCTAssertEqual(breaker.silence, .none)
         XCTAssertNil(breaker.ewmaLatencyMS, "the probe is the proxy's own answer, not an exchange, so it scores no latency")
@@ -426,11 +426,11 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
     func testAClosedCheckKeepsTheUpstreamAndLearnsNothing() {
         var breaker = decisivelySilent()
 
-        XCTAssertEqual(breaker.finishSilenceCheck(.closed, now: Date(), interval: 30), .kept)
+        XCTAssertEqual(breaker.finishSilenceCheck(.closed, generation: 1, now: Date(), interval: 30), .kept)
 
         XCTAssertFalse(breaker.ranksBehind(at: Date()), "a peer that closed acted, so it is not silent")
         XCTAssertEqual(breaker.probeSupport, .unknown)
-        XCTAssertEqual(silence(&breaker), .askProbe, "the silences still stand, so the next one asks again")
+        XCTAssertEqual(silence(&breaker), .askProbe(generation: 2), "the silences still stand, so the next one asks again")
     }
 
     func testASilentCheckOnAnUpstreamThatIgnoresTheProbeRanksNothing() {
@@ -439,13 +439,13 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         breaker.recordDiscovery(.silent)
         XCTAssertEqual(breaker.probeSupport, .ignores)
         silence(&breaker)
-        XCTAssertEqual(silence(&breaker), .askProbe, "an ignoring upstream is still asked: a refused probe stays a measurement")
+        XCTAssertEqual(silence(&breaker), .askProbe(generation: 1), "an ignoring upstream is still asked: a refused probe stays a measurement")
 
-        XCTAssertEqual(breaker.finishSilenceCheck(.silent, now: Date(), interval: 30), .keptProbeIgnored)
+        XCTAssertEqual(breaker.finishSilenceCheck(.silent, generation: 1, now: Date(), interval: 30), .keptProbeIgnored)
         XCTAssertFalse(breaker.ranksBehind(at: Date()), "its silence says nothing about it")
 
         silence(&breaker)
-        XCTAssertEqual(breaker.finishSilenceCheck(.refused, now: Date(), interval: 30), .rankedBehind)
+        XCTAssertEqual(breaker.finishSilenceCheck(.refused, generation: 2, now: Date(), interval: 30), .rankedBehind)
     }
 
     func testDiscoveryRunsOncePerEndpointAndLearnsOnlyFromAnAnswerOrASilence() {
@@ -473,26 +473,26 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
 
     func testAHealthCheckBeginsASilenceCheckWithoutAStreakAndAnAnswerSupersedesIt() {
         var breaker = UpstreamCircuitBreaker()
-        XCTAssertTrue(breaker.beginSilenceCheck())
-        XCTAssertFalse(breaker.beginSilenceCheck(), "one check per upstream at a time")
+        XCTAssertEqual(breaker.beginSilenceCheck(), 1)
+        XCTAssertNil(breaker.beginSilenceCheck(), "one check per upstream at a time")
         XCTAssertEqual(silence(&breaker), .held)
 
         breaker.recordSuccess(latencyMS: 8)
         XCTAssertEqual(breaker.silence, .checking(superseded: true))
-        XCTAssertEqual(breaker.finishSilenceCheck(.silent, now: Date(), interval: 30), .superseded)
+        XCTAssertEqual(breaker.finishSilenceCheck(.silent, generation: 1, now: Date(), interval: 30), .superseded)
         XCTAssertFalse(breaker.ranksBehind(at: Date()))
 
         var ranked = UpstreamCircuitBreaker()
-        XCTAssertTrue(ranked.beginSilenceCheck())
-        XCTAssertEqual(ranked.finishSilenceCheck(.silent, now: Date(), interval: 30), .rankedBehind,
+        XCTAssertEqual(ranked.beginSilenceCheck(), 1)
+        XCTAssertEqual(ranked.finishSilenceCheck(.silent, generation: 1, now: Date(), interval: 30), .rankedBehind,
                        "a health check's first silence is decided by the probe alone, with no streak")
-        XCTAssertFalse(ranked.beginSilenceCheck(), "a ranked upstream is not asked again")
+        XCTAssertNil(ranked.beginSilenceCheck(), "a ranked upstream is not asked again")
     }
 
     func testARankingThatLapsesWithoutAnAnswerKeepsTheSilenceStanding() {
         var breaker = decisivelySilent()
         let now = Date()
-        XCTAssertEqual(breaker.finishSilenceCheck(.silent, now: now, interval: 30), .rankedBehind)
+        XCTAssertEqual(breaker.finishSilenceCheck(.silent, generation: 1, now: now, interval: 30), .rankedBehind)
         XCTAssertTrue(breaker.silenceStands)
 
         XCTAssertTrue(breaker.endRankingIfDue(now: now.addingTimeInterval(30)))
@@ -500,15 +500,15 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         XCTAssertEqual(breaker.silence, .lapsed)
         XCTAssertFalse(breaker.ranksBehind(at: now.addingTimeInterval(30)), "selection competes for it again")
         XCTAssertTrue(breaker.silenceStands, "nothing answered since the probe found it silent")
-        XCTAssertTrue(breaker.beginSilenceCheck(), "the data path may ask it again")
-        XCTAssertEqual(breaker.finishSilenceCheck(.silent, now: now.addingTimeInterval(31), interval: 30), .rankedBehind)
+        XCTAssertEqual(breaker.beginSilenceCheck(), 2, "the data path may ask it again")
+        XCTAssertEqual(breaker.finishSilenceCheck(.silent, generation: 2, now: now.addingTimeInterval(31), interval: 30), .rankedBehind)
 
         breaker.recordSuccess(latencyMS: 4)
         XCTAssertEqual(breaker.silence, .none)
         XCTAssertFalse(breaker.silenceStands, "an answer ends it")
 
         var lapsed = decisivelySilent()
-        XCTAssertEqual(lapsed.finishSilenceCheck(.silent, now: now, interval: 30), .rankedBehind)
+        XCTAssertEqual(lapsed.finishSilenceCheck(.silent, generation: 1, now: now, interval: 30), .rankedBehind)
         XCTAssertTrue(lapsed.endRankingIfDue(now: now.addingTimeInterval(30)))
         lapsed.reset(reason: .vpnFlapRecovered, baseOpenInterval: 30)
         XCTAssertEqual(lapsed.silence, .none, "a reset ends it too")
@@ -516,7 +516,7 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
 
     func testAnEndpointChangeForgetsTheOldEndpointsSilenceToo() {
         var ranked = decisivelySilent()
-        XCTAssertEqual(ranked.finishSilenceCheck(.silent, now: Date(), interval: 30), .rankedBehind)
+        XCTAssertEqual(ranked.finishSilenceCheck(.silent, generation: 1, now: Date(), interval: 30), .rankedBehind)
         ranked.forgetEndpoint()
         XCTAssertEqual(ranked.silence, .none, "the replacement endpoint starts with no verdict")
         XCTAssertEqual(silence(&ranked), .held, "and with no streak")
@@ -524,8 +524,8 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         var checking = decisivelySilent()
         checking.forgetEndpoint()
         XCTAssertEqual(checking.silence, .none, "nothing is checking the new endpoint")
-        XCTAssertEqual(checking.finishSilenceCheck(.silent, now: Date(), interval: 30), .superseded, "a check in flight was about the old endpoint")
-        XCTAssertTrue(checking.beginSilenceCheck(), "and the new endpoint can be asked")
+        XCTAssertEqual(checking.finishSilenceCheck(.silent, generation: 1, now: Date(), interval: 30), .superseded, "a check in flight was about the old endpoint")
+        XCTAssertEqual(checking.beginSilenceCheck(), 2, "and the new endpoint can be asked")
     }
 
     func testAnEndpointChangeFreesTheHalfOpenSlotTheOldEndpointHeld() {
@@ -564,23 +564,23 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
             var breaker = decisivelySilent()
             let now = Date()
 
-            XCTAssertEqual(breaker.finishSilenceCheck(outcome, now: now, interval: 30), .rankedBehind, outcome.name)
+            XCTAssertEqual(breaker.finishSilenceCheck(outcome, generation: 1, now: now, interval: 30), .rankedBehind, outcome.name)
 
             XCTAssertTrue(breaker.ranksBehind(at: now.addingTimeInterval(29)), outcome.name)
             XCTAssertEqual(silence(&breaker), .held, "a ranked upstream is not asked again: \(outcome.name)")
             XCTAssertFalse(breaker.endRankingIfDue(now: now.addingTimeInterval(29)))
             XCTAssertTrue(breaker.endRankingIfDue(now: now.addingTimeInterval(30)), "it competes again after the interval")
-            XCTAssertEqual(silence(&breaker), .askProbe, "the failure still stands, so the next silence asks at once")
+            XCTAssertEqual(silence(&breaker), .askProbe(generation: 2), "the failure still stands, so the next silence asks at once")
         }
     }
 
     func testAnUnaskedCheckChangesNothingAndTheNextSilenceAsksAgain() {
         var breaker = decisivelySilent()
 
-        XCTAssertEqual(breaker.finishSilenceCheck(.unasked, now: Date(), interval: 30), .kept)
+        XCTAssertEqual(breaker.finishSilenceCheck(.unasked, generation: 1, now: Date(), interval: 30), .kept)
 
         XCTAssertFalse(breaker.ranksBehind(at: Date()))
-        XCTAssertEqual(silence(&breaker), .askProbe)
+        XCTAssertEqual(silence(&breaker), .askProbe(generation: 2))
     }
 
     func testAnAnswerWhileTheCheckRunsSupersedesASilentCheck() {
@@ -589,7 +589,7 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         XCTAssertEqual(breaker.silence, .checking(superseded: true), "the check still runs, and only its outcome frees the slot")
         XCTAssertEqual(silence(&breaker), .held)
 
-        XCTAssertEqual(breaker.finishSilenceCheck(.silent, now: Date(), interval: 30), .superseded)
+        XCTAssertEqual(breaker.finishSilenceCheck(.silent, generation: 1, now: Date(), interval: 30), .superseded)
         XCTAssertFalse(breaker.ranksBehind(at: Date()), "the answer is newer evidence than the check")
     }
 
@@ -599,10 +599,10 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         silence(&breaker)
         XCTAssertEqual(silence(&breaker), .held, "the first check still runs")
 
-        XCTAssertEqual(breaker.finishSilenceCheck(.silent, now: Date(), interval: 30), .superseded,
+        XCTAssertEqual(breaker.finishSilenceCheck(.silent, generation: 1, now: Date(), interval: 30), .superseded,
                        "the check began before the answer, so it is older evidence")
         XCTAssertFalse(breaker.ranksBehind(at: Date()))
-        XCTAssertEqual(silence(&breaker), .askProbe, "the silences after the answer still stand, so the next one asks")
+        XCTAssertEqual(silence(&breaker), .askProbe(generation: 2), "the silences after the answer still stand, so the next one asks")
     }
 
     func testAResetWhileTheCheckRunsSupersedesIt() {
@@ -611,7 +611,7 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         silence(&breaker)
         XCTAssertEqual(silence(&breaker), .held, "the first check still runs")
 
-        XCTAssertEqual(breaker.finishSilenceCheck(.silent, now: Date(), interval: 30), .superseded,
+        XCTAssertEqual(breaker.finishSilenceCheck(.silent, generation: 1, now: Date(), interval: 30), .superseded,
                        "the check asked over the path the flap replaced")
         XCTAssertFalse(breaker.ranksBehind(at: Date()))
     }
@@ -619,12 +619,12 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
     func testAnAnswerOrAResetEndsARanking() {
         let now = Date()
         var answered = decisivelySilent()
-        _ = answered.finishSilenceCheck(.silent, now: now, interval: 30)
+        _ = answered.finishSilenceCheck(.silent, generation: 1, now: now, interval: 30)
         answered.recordSuccess(latencyMS: 10)
         XCTAssertFalse(answered.ranksBehind(at: now))
 
         var reset = decisivelySilent()
-        _ = reset.finishSilenceCheck(.silent, now: now, interval: 30)
+        _ = reset.finishSilenceCheck(.silent, generation: 1, now: now, interval: 30)
         reset.reset(reason: .vpnFlapRecovered, baseOpenInterval: 30)
         XCTAssertFalse(reset.ranksBehind(at: now))
         XCTAssertEqual(reset.silences, UpstreamSilences())
@@ -633,15 +633,30 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
     func testOpeningTheBreakerEndsARankingAndSupersedesACheck() {
         let now = Date()
         var ranked = decisivelySilent()
-        _ = ranked.finishSilenceCheck(.silent, now: now, interval: 30)
+        _ = ranked.finishSilenceCheck(.silent, generation: 1, now: now, interval: 30)
         ranked.recordFailure(now: now, threshold: 1, windowSeconds: 0, baseOpenInterval: 30, maxOpenInterval: 300)
         XCTAssertEqual(ranked.state, .open)
         XCTAssertFalse(ranked.ranksBehind(at: now), "selection must see the half-open probe once the backoff ends")
 
         var checking = decisivelySilent()
         checking.recordFailure(now: now, threshold: 1, windowSeconds: 0, baseOpenInterval: 30, maxOpenInterval: 300)
-        XCTAssertEqual(checking.finishSilenceCheck(.answered(status: 200, latencyMS: 5), now: now, interval: 30), .superseded)
+        XCTAssertEqual(checking.finishSilenceCheck(.answered(status: 200, latencyMS: 5), generation: 1, now: now, interval: 30), .superseded)
         XCTAssertEqual(checking.state, .open, "only the half-open probe closes an open breaker")
         XCTAssertEqual(checking.silence, .none)
+    }
+
+    func testALateProbeResultFinishesOnlyTheCheckThatAskedIt() {
+        var breaker = UpstreamCircuitBreaker()
+        silence(&breaker)
+        XCTAssertEqual(silence(&breaker), .askProbe(generation: 1))
+        XCTAssertEqual(silence(&breaker, origin: "b.test:80"), .acrossOrigins)
+        breaker.recordSuccess(latencyMS: 5)
+        silence(&breaker)
+        XCTAssertEqual(silence(&breaker), .askProbe(generation: 2), "the answer ended the ranking, so two new silences ask again")
+
+        XCTAssertEqual(breaker.finishSilenceCheck(.silent, generation: 1, now: Date(), interval: 30), .superseded,
+                       "the first probe was asked before the answer")
+        XCTAssertEqual(breaker.silence, .checking(superseded: false), "the second check still runs")
+        XCTAssertEqual(breaker.finishSilenceCheck(.answered(status: 403, latencyMS: 1), generation: 2, now: Date(), interval: 30), .kept)
     }
 }

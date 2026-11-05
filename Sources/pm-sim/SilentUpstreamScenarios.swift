@@ -572,8 +572,8 @@ enum SilentUpstreamScenarios {
                       deprioritized.count == 1 && deprioritized[0].hasPrefix("upstream=primary ") && deprioritized[0].contains(" reason=silent_origins ")),
                 .init("the silences opened no breaker and struck nothing",
                       events("upstream.circuit_opened").isEmpty && primaryStatus?.circuitState == .closed && primaryStatus?.consecutiveFailures == 0),
-                .init("the health check went healthy via the secondary, with no DIRECT",
-                      healthyViaSecondary() && !orchestrator.snapshot.directModeCause.isDirect),
+                .init("the health check went healthy via the secondary, with no DIRECT at any point",
+                      healthyViaSecondary() && !orchestrator.snapshot.directModeCause.isDirect && events("direct_mode.entered").isEmpty),
             ], notes: [
                 "R=\(responseTimeout)s I=\(checkInterval)s C=\(connectSlack)s T=\(period)s: the first check after the break is due within I and silent at R; the next request leaves within T; bound \(String(format: "%.2f", bound))s",
                 "secondary served \(served.map { String(format: "%.2f", $0) } ?? "never") s after the break, \(sent) requests sent after it",
