@@ -35,7 +35,8 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   half-open breaker in that state re-opens: no single slow origin can do that.
   A health check that connected and got no answer asks the same request: an
   upstream silent to it is found at the first failed check, as before this
-  change, and so is one whose check URL is that second silent origin; one that
+  change, and so is one whose check URL is that second silent origin (counted
+  from its fresh retry when its pooled socket had sat idle); one that
   answers it is otherwise held once (`health.inconclusive`), rechecked sooner,
   and counts only when it is the second in a row or follows a conclusive
   failure, so one slow check no longer starts the recovery ladder or falls to

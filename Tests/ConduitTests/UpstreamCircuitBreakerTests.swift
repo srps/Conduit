@@ -390,6 +390,23 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         XCTAssertTrue(lapsed.silenceStands)
     }
 
+    func testAHealthCheckOnAnIdleSocketNamesNoOriginAndItsFreshRetryNeverAsksTheProbe() {
+        var idle = UpstreamCircuitBreaker()
+        silence(&idle)
+        let origins = idle.silences.origins
+        XCTAssertEqual(idle.recordUnanswered(origin: nil, source: .healthCheck, now: Date(), interval: 30).verdict, .askProbe(generation: 1))
+        XCTAssertEqual(idle.silences.origins, origins, "a socket that sat idle says nothing about the egress")
+
+        var first = UpstreamCircuitBreaker()
+        XCTAssertEqual(silence(&first, origin: "check.test:80", source: .healthCheckRetry), .held)
+        XCTAssertEqual(first.silence, .none, "the retry begins no check")
+
+        var second = UpstreamCircuitBreaker()
+        silence(&second)
+        XCTAssertEqual(silence(&second, origin: "check.test:80", source: .healthCheckRetry), .acrossOrigins)
+        XCTAssertTrue(second.ranksBehind(at: Date()))
+    }
+
     func testAHalfOpenBreakerAsksTheProbeUntilItsSilenceSpansTwoOriginsAndAnOpenOneRecordsNothing() {
         var breaker = UpstreamCircuitBreaker()
         let now = Date()

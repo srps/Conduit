@@ -638,6 +638,48 @@ final class UpstreamSilenceTests: XCTestCase {
         try await replacement.close()
     }
 
+    func testAHealthCheckSilentOnAnIdleSocketAfterASilentOriginIsDecidedByItsFreshRetry() async throws {
+        let upstream = try await CountingUpstream.start(answers: .max)
+        let events = Events()
+        let pool = makePool(config: NIOLockedValueBox(Self.config(upstreams: [upstream.proxy(named: "a")])), events: events)
+        try await twoIdleConnections(pool, to: upstream, events)
+        upstream.silenceOpenConnections()
+        await expectSilent(pool, host: "a.test", "the request to origin a on the first stale socket")
+
+        let check = await pool.healthCheck(urlString: "http://check.test/")
+
+        XCTAssertTrue(check.healthy, "a socket that sat idle says nothing about the egress: \(check.summary)")
+        XCTAssertEqual(events.details("health.idle_connection_silent").count, 1)
+        XCTAssertEqual(events.details("upstream.deprioritized"), [])
+        pool.closeAll()
+        try await upstream.close()
+    }
+
+    func testAHealthCheckWhoseFreshRetryIsSilentTooIsTheSecondSilentOrigin() async throws {
+        let broken = NIOLockedValueBox(false)
+        let upstream = try await CountingUpstream.start(answers: .max) { _ in broken.withLockedValue { $0 } }
+        let events = Events()
+        let pool = makePool(config: NIOLockedValueBox(Self.config(upstreams: [upstream.proxy(named: "a")])), events: events)
+        try await twoIdleConnections(pool, to: upstream, events)
+        upstream.silenceOpenConnections()
+        broken.withLockedValue { $0 = true }
+        let optionsBefore = upstream.optionsRequests
+        await expectSilent(pool, host: "a.test", "the request to origin a on the first stale socket")
+
+        let check = await pool.healthCheck(urlString: "http://check.test/")
+
+        guard case .upstreamSilent? = check.failure else {
+            return XCTFail("a silent fresh retry after a silent origin is a dead egress, got \(String(describing: check.failure))")
+        }
+        XCTAssertEqual(events.details("health.idle_connection_silent").count, 1)
+        let deprioritized = events.details("upstream.deprioritized")
+        XCTAssertEqual(deprioritized.count, 1, "\(deprioritized)")
+        XCTAssertTrue(deprioritized.first?.contains(" reason=silent_origins origins=a.test:80,check.test:80") == true, deprioritized.first ?? "none")
+        XCTAssertEqual(upstream.optionsRequests - optionsBefore, 1, "the fresh retry's silence asks no second probe")
+        pool.closeAll()
+        try await upstream.close()
+    }
+
     private static let head = head(path: "/")
 
     private static func head(host: String = "example.com", path: String) -> HTTPRequestHead {

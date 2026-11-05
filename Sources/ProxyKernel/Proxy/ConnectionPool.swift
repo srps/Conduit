@@ -579,9 +579,10 @@ package final class ConnectionPool: @unchecked Sendable {
     /// slot, or nobody, when another check already runs for the upstream.
     private enum ProbeAsker { case silenceCheck(generation: UInt64), halfOpenSlot, observer }
 
-    private enum SilenceCheckStart { case silenceStands, stale, probe(ProbeAsker) }
+    private enum SilenceCheckStart { case silenceStands, stale, held, probe(ProbeAsker) }
 
     /// A standing ranking is decisive at once, so a ladder step's check costs R, not R plus the probe budget.
+    /// A silent socket that had sat idle may have died without a word, so it names no origin; the fresh retry's does.
     private func judgeSilentHealthCheck(
         head: HTTPRequestHead, via proxy: UpstreamProxy, ranOnAnIdledConnection: Bool, connectTimeout: TimeAmount, since start: Date
     ) async -> HealthCheckResult {
@@ -589,10 +590,12 @@ package final class ConnectionPool: @unchecked Sendable {
         func unhealthy(_ failure: HealthCheckFailure) -> HealthCheckResult {
             .unhealthy(failure, responseTimeMS: Int(Date().timeIntervalSince(start) * 1_000))
         }
+        let staleDetail = "\(detail); the upstream's endpoint changed while the check ran"
         let asker: ProbeAsker
-        switch recordHealthCheckSilence(of: proxy, origin: ExchangeOrigin(head)) {
+        switch recordHealthCheckSilence(of: proxy, origin: ranOnAnIdledConnection ? nil : ExchangeOrigin(head), source: .healthCheck) {
         case .silenceStands: return unhealthy(.upstreamSilent(detail: detail))
-        case .stale: return unhealthy(.answerTimedOut(detail: "\(detail); the upstream's endpoint changed while the check ran"))
+        case .stale: return unhealthy(.answerTimedOut(detail: staleDetail))
+        case .held: return unhealthy(.answerTimedOut(detail: detail))
         case .probe(let probeAsker): asker = probeAsker
         }
         let outcome = await probeLiveness(of: proxy)
@@ -626,13 +629,18 @@ package final class ConnectionPool: @unchecked Sendable {
             let fresh = await attemptBufferedExchange(
                 head: head, requestBody: nil, proxy: proxy, allowRetry: false, preferFreshConnection: true, authSource: nil, connectTimeout: connectTimeout
             ).outcome()
-            return Self.healthResult(fresh, since: start)
+            guard case .silent = fresh else { return Self.healthResult(fresh, since: start) }
+            switch recordHealthCheckSilence(of: proxy, origin: ExchangeOrigin(head), source: .healthCheckRetry) {
+            case .silenceStands: return unhealthy(.upstreamSilent(detail: "\(detail); a fresh connection got no answer either"))
+            case .stale: return unhealthy(.answerTimedOut(detail: staleDetail))
+            case .held, .probe: return unhealthy(.answerTimedOut(detail: detail))
+            }
         }
     }
 
-    private func recordHealthCheckSilence(of proxy: UpstreamProxy, origin: ExchangeOrigin) -> SilenceCheckStart {
+    private func recordHealthCheckSilence(of proxy: UpstreamProxy, origin: ExchangeOrigin?, source: SilenceSource) -> SilenceCheckStart {
         enum Recorded {
-            case stale, stands, rankedBehind([ExchangeOrigin]), reopen(UpstreamCircuitBreaker.Transition?), probe(ProbeAsker, consecutive: Int)
+            case stale, stands, held, rankedBehind([ExchangeOrigin]), reopen(UpstreamCircuitBreaker.Transition?), probe(ProbeAsker, consecutive: Int)
         }
         let config = configProvider()
         let thresholds = breakerThresholds(from: config)
@@ -642,7 +650,7 @@ package final class ConnectionPool: @unchecked Sendable {
             guard namesEndpointLocked(proxy) else { return .stale }
             var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
             let now = Date()
-            let (verdict, consecutive) = breaker.recordUnanswered(origin: origin, source: .healthCheck, now: now, interval: interval)
+            let (verdict, consecutive) = breaker.recordUnanswered(origin: origin, source: source, now: now, interval: interval)
             let reopened = verdict == .reopenHalfOpen ? thresholds.strike(&breaker, now: now) : nil
             breakers[proxy.id] = breaker
             switch verdict {
@@ -650,12 +658,15 @@ package final class ConnectionPool: @unchecked Sendable {
             case .reopenHalfOpen: return .reopen(reopened)
             case .askProbe(let generation): return .probe(.silenceCheck(generation: generation), consecutive: consecutive)
             case .halfOpenProbe: return .probe(.halfOpenSlot, consecutive: consecutive)
+            case .held where source == .healthCheckRetry: return .held
             case .held: return breaker.silenceStands ? .stands : .probe(.observer, consecutive: consecutive)
             }
         }
         switch recorded {
         case .stale:
             return .stale
+        case .held:
+            return .held
         case .stands:
             return .silenceStands
         case .reopen(let reopened):

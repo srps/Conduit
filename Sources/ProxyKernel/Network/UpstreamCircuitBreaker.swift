@@ -332,11 +332,14 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
     }
 
     package mutating func recordUnanswered(
-        origin: ExchangeOrigin, source: SilenceSource, now: Date, interval: TimeInterval
+        origin: ExchangeOrigin?, source: SilenceSource, now: Date, interval: TimeInterval
     ) -> (verdict: SilenceVerdict, consecutive: Int) {
         guard state != .open else { return (.held, silences.consecutive) }
         let record = silences.recordUnanswered(origin: origin, source: source)
-        if state == .halfOpen { return (record.acrossOrigins ? .reopenHalfOpen : .halfOpenProbe, record.consecutive) }
+        if state == .halfOpen {
+            if record.acrossOrigins { return (.reopenHalfOpen, record.consecutive) }
+            return (source == .healthCheckRetry ? .held : .halfOpenProbe, record.consecutive)
+        }
         if ranksBehind { return (.held, record.consecutive) }
         if record.acrossOrigins {
             silence = .ranksBehind(until: now.addingTimeInterval(interval))

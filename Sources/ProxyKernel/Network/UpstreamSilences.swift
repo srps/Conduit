@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// Who left the exchange unanswered. A health check asks the liveness probe at its first silence; the data path
-/// waits for `UpstreamSilences.probeAfter` in a row.
-package enum SilenceSource: Equatable, Sendable { case exchange, healthCheck }
+/// waits for `UpstreamSilences.probeAfter` in a row. A health check's fresh retry follows a probe that answered,
+/// so it never asks again.
+package enum SilenceSource: Equatable, Sendable { case exchange, healthCheck, healthCheckRetry }
 
 /// The silences one upstream left since its last answered exchange.
 ///
@@ -29,10 +30,11 @@ package struct UpstreamSilences: Equatable, Sendable {
 
     package init() {}
 
-    package mutating func recordUnanswered(origin: ExchangeOrigin, source: SilenceSource) -> Record {
+    /// A nil `origin` counts toward the probe trigger and names no origin.
+    package mutating func recordUnanswered(origin: ExchangeOrigin?, source: SilenceSource) -> Record {
         consecutive += 1
-        if !origins.contains(origin), origins.count < Self.decisiveOrigins { origins.append(origin) }
-        let asksProbe = source == .healthCheck || consecutive >= Self.probeAfter || failureStanding
+        if let origin, !origins.contains(origin), origins.count < Self.decisiveOrigins { origins.append(origin) }
+        let asksProbe = source != .healthCheckRetry && (source == .healthCheck || consecutive >= Self.probeAfter || failureStanding)
         return Record(consecutive: consecutive, origins: origins.count, asksProbe: asksProbe)
     }
 
