@@ -446,6 +446,10 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
 
     package func dnsRelayStatus() throws -> DNSRelayStatus? {
         let command = HelperCommand.dnsRelayStatus
+        guard FileManager.default.fileExists(atPath: binaryPath) else {
+            relayStatusUnavailable("reason=not_installed")
+            return nil
+        }
         let response: HelperResponse
         do {
             response = try sendRequest(HelperRequest(command: command, values: []))
