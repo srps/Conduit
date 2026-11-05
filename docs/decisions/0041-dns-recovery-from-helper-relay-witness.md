@@ -1,7 +1,7 @@
 # 0041: Decide DNS launch recovery from the helper's relay witness
 
 - Date: 2026-11-05
-- Decision: accepted (owner, 2026-11-05, #275: chose design B now and design C later, with the #270 notice kept as the fallback)
+- Decision: accepted (owner, 2026-11-05, [#275 comment](https://github.com/srps/Conduit/pull/275#issuecomment-6648861923): chose design B now and design C later, with the #270 notice kept as the fallback)
 - Implementation: partial
 - Validation: pending
 - Supersedes: none
