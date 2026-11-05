@@ -69,6 +69,16 @@ final class HelperDNSRelayStatusTests: XCTestCase {
         XCTAssertEqual(probe.events.withLockedValue { $0 }.first?.detail?.hasPrefix("reason=unreachable "), true)
     }
 
+    func testNoInstalledHelperIsNoStatusWithoutAsking() throws {
+        let helper = try FakeHelper(replies: [])
+        defer { helper.stop() }
+        let probe = clientProbe(helper.path, binaryPath: "/tmp/pm-no-helper-binary-\(UUID().uuidString.prefix(8))")
+
+        XCTAssertNil(try probe.client.dnsRelayStatus())
+        XCTAssertTrue(helper.commandsSeen.isEmpty)
+        XCTAssertEqual(probe.events.withLockedValue { $0 }.map(\.detail), ["reason=not_installed"])
+    }
+
     func testAHelperOnAnotherProtocolIsNoStatus() throws {
         var older = HelperResponse.error("Invalid request")
         older.protocolVersion = 4
@@ -143,7 +153,9 @@ final class HelperDNSRelayStatusTests: XCTestCase {
         var fallbackRan: NIOLockedValueBox<Bool>
     }
 
-    private func clientProbe(_ socketPath: String) -> ClientProbe {
+    /// `binaryPath` defaults to a file that exists, so the client asks the
+    /// fake helper on `socketPath` whether or not a real helper is installed.
+    private func clientProbe(_ socketPath: String, binaryPath: String = #filePath) -> ClientProbe {
         let events = NIOLockedValueBox<[RuntimeEvent]>([])
         let fallbackRan = NIOLockedValueBox(false)
         let client = HelperToolPrivilegeClient(
@@ -153,7 +165,8 @@ final class HelperDNSRelayStatusTests: XCTestCase {
                 fallbackRan.withLockedValue { $0 = true }
                 return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
             }),
-            transactionMilliseconds: 2_000
+            transactionMilliseconds: 2_000,
+            binaryPath: binaryPath
         )
         return ClientProbe(client: client, events: events, fallbackRan: fallbackRan)
     }
