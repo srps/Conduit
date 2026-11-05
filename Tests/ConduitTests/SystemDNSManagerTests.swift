@@ -1012,6 +1012,31 @@ final class SystemDNSManagerTests: XCTestCase {
         }
     }
 
+    func testAProbeDecisionNamesWhyTheWitnessDidNotDecide() {
+        let cases: [(DNSRelayStatus?, LoopbackLiveness, String)] = [
+            (nil, .notLive, "platform.launch_recovery_restored surface=systemDNS stale=false evidence=port_refused witness=no_status"),
+            (.notRunning, .live, "platform.launch_recovery_declined surface=systemDNS reason=live_listener evidence=port_answered witness=relay_not_running"),
+            (.relaying(targetPort: 5053, target: .silent), .notLive,
+             "platform.launch_recovery_restored surface=systemDNS stale=false evidence=port_refused witness=target_silent"),
+        ]
+        for (status, probe, expected) in cases {
+            let journal = PlatformStateJournal(fileURL: stateDirectory.appendingPathComponent("platform-state-\(UUID().uuidString).json"))
+            journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "192.168.1.1"])
+            journal.markApplied(surface: .systemDNS)
+            let helper = RecordingPrivilegeClient()
+            helper.relayStatus = status
+            let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+            let manager = SystemDNSManager(
+                privilegeClient: helper,
+                journal: journal,
+                commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+                resolverLiveness: { _ in probe }
+            )
+            let event = LaunchRecovery.event(for: manager.restoreIfNeeded(logger: nil), surface: .systemDNS)
+            XCTAssertEqual("\(event.event) \(event.detail ?? "")", expected)
+        }
+    }
+
     func testAThrowingWitnessFallsBackToTheProbe() {
         let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
         writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
