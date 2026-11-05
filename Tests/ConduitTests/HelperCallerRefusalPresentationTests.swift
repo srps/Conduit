@@ -21,7 +21,20 @@ final class HelperCallerRefusalPresentationTests: XCTestCase {
             .unauthorized
         )
         XCTAssertEqual(HelperToolPrivilegeClient.status(forPing: .refused(.noConsoleUser, "no console user yet")), .waitingForConsoleUser)
-        XCTAssertEqual(HelperToolPrivilegeClient.status(forPing: .ok()), .installed)
+        var current = HelperResponse.ok()
+        current.features = HelperFeature.allCases
+        XCTAssertEqual(HelperToolPrivilegeClient.status(forPing: current), .installed)
+    }
+
+    func testAHelperWithoutTheRelayWitnessIsOfferedAnUpdate() {
+        XCTAssertEqual(HelperToolPrivilegeClient.status(forPing: .ok()), .updateAvailable)
+        let status = HelperToolPrivilegeClient.Status.updateAvailable
+        XCTAssertTrue(status.serves)
+        XCTAssertEqual(HelperStatusPresentation.primaryActionTitle(for: status), "Update Helper")
+        XCTAssertEqual(HelperStatusPresentation.label(for: status), "Installed, update available")
+        XCTAssertNotNil(HelperStatusPresentation.remediation(for: status))
+        XCTAssertFalse(HelperStatusPresentation.suggestsInstall(for: status))
+        XCTAssertEqual(HelperStatusPresentation.privilegeHint(for: status), "(via helper)")
     }
 
     /// Reinstalling from the app re-derives the pin from this build (#121),

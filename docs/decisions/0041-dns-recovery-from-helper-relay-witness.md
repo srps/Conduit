@@ -2,7 +2,7 @@
 
 - Date: 2026-11-05
 - Decision: accepted (owner, 2026-11-05, [#275 comment](https://github.com/srps/Conduit/pull/275#issuecomment-6648861923): chose design B now and design C later, with the #270 notice kept as the fallback)
-- Implementation: partial
+- Implementation: implemented
 - Validation: pending
 - Supersedes: none
 - Superseded by: none
@@ -43,7 +43,7 @@ reports, not from a timed probe of `:53`.
 - Launch recovery restores on `refused`, or on `notRunning` with `:53` refusing.
   It declines as a live listener on `answered`. On `silent`, or when the helper
   gives no status, it keeps the fallback the #270 notice provides: decline,
-  and offer Start DNS and Restore DNS Settings.
+  and offer Start DNS and Restore DNS Settings ([0042](0042-fall-back-to-the-probe-and-a-notice.md)).
 - Design C, a helper that tracks its caller and restores on that caller's exit
   (the DNS slice of [#48](https://github.com/srps/Conduit/issues/48)), follows
   later under its own decisions. Its owner verdict is a further optional field.
@@ -87,7 +87,7 @@ crash that a reinstalled helper reports as anything but `refused`.
 
 ## Implementation evidence
 
-Partial. The helper and contract side:
+The helper and contract side:
 [`UDPRelay.status`](../../Sources/ProxyKernel/Network/UDPRelay.swift),
 [`HelperContract.swift`](../../Sources/ConduitShared/HelperContract.swift),
 [`HelperDaemon.swift`](../../Sources/ConduitHelper/HelperDaemon.swift) and
@@ -96,11 +96,44 @@ Partial. The helper and contract side:
 with [`UDPRelayTests`](../../Tests/ConduitTests/UDPRelayTests.swift),
 [`HelperDNSRelayStatusTests`](../../Tests/ConduitTests/HelperDNSRelayStatusTests.swift)
 and [`pm-sim dns-relay-witness`](../../Sources/pm-sim/DNSRelayWitnessScenarios.swift).
-Launch recovery does not read the witness yet; that, and the Settings prompt to
-update a helper without the feature, are the remaining work.
+
+Launch recovery reads it in #270: `SurfaceOwnership` in
+[`LaunchRecovery.swift`](../../Sources/PlatformMac/LaunchRecovery.swift) and
+`SystemDNSManager.ownership` in
+[`SystemDNSManager.swift`](../../Sources/PlatformMac/SystemDNSManager.swift).
+A refused target is read again after half a second and must still refuse on
+the same port, because a live forwarder that rebinds its port reads refused
+for that moment; the writer lease (0017) would settle only same-root sessions,
+and its role in recovery is still the open question below. Recovery that acts on
+a witnessed refusal also stops the orphaned relay, whatever it then ends in: a
+restore, no records (loopback settings with no record are the user's and stay),
+or a failure such as an unreadable journal, which still clears the residue it
+recognises. Where the witness does not decide and the `:53` probe does,
+the restore or decline event names why in `witness=`, and a machine with no
+helper binary reads `witness=no_status` without asking the socket. A helper whose ping lists no
+`dns-relay-status` feature shows as "Installed, update available" in Settings
+(`HelperToolPrivilegeClient.Status.updateAvailable`), and the same feature list
+tells a helper that predates the command from one that failed it. The ping's
+`features` decode strictly: a value that is not an array of strings breaks the
+frame, since only a foreign or broken helper sends one; unknown names in the
+array are dropped. Tests:
+[`SystemDNSManagerTests`](../../Tests/ConduitTests/SystemDNSManagerTests.swift)
+`testLaunchRecoveryDecidesSystemDNSOwnershipFromTheRelayWitnessFirst` and
+`testAProbeDecisionNamesWhyTheWitnessDidNotDecide`,
+[`NetworkLocationRecoveryTests`](../../Tests/ConduitTests/NetworkLocationRecoveryTests.swift)
+`testAWitnessedRefusalStopsTheRelayWhateverTheRestoreEndsIn`,
+[`AppStateHarnessTests`](../../Tests/ConduitTests/AppStateHarnessTests.swift)
+`testACrashedRunsSystemDNSIsRestoredAtLaunchWhenTheHelperFindsItsRelayTargetRefused`,
+`testALocationScopedCrashIsRestoredAtLaunchWhenTheHelperFindsItsRelayTargetRefused`,
+`testARefusalThatTheSecondReadingContradictsDeclinesAsALiveListener` and
+`testARelayTargetThatAnswersDeclinesAsALiveListener`, and
+[`pm-sim launch-recovery-ownership`](../../Sources/pm-sim/LaunchRecoveryScenarios.swift),
+which includes a real `UDPRelay` aimed at a closed port.
 
 Does not prove: the installed helper on `:53` as root, or recovery on a real
-machine after a crash.
+machine after a crash. A Mac that suppresses ICMP port-unreachable replies
+(`net.inet.udp.blackhole`) is inferred to read every dead target as `silent`
+and so always takes the 0042 fallback; not observed.
 
 ## Open questions
 

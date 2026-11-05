@@ -183,7 +183,7 @@ final class ConfigReapplyRetryTests: XCTestCase {
             privilegeClient: machine,
             journal: PlatformStateJournal(fileURL: directory.appendingPathComponent("platform-state.json")),
             commandRunner: { try machine.run($0, $1) },
-            portProbe: { _ in false }
+            portProbe: { _ in .notLive }
         )
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 3128

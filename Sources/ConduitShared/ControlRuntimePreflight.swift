@@ -40,6 +40,8 @@ package enum ControlHelperStatus: String, Codable, Sendable, Equatable, CaseIter
     case unauthorized
     /// Refusing this build. The helper's own explanation is not carried on the wire.
     case callerNotAccepted
+    /// Serving, but without a feature this build uses.
+    case updateAvailable
 }
 
 /// The integration and helper readings of one preflight pass.

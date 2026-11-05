@@ -84,21 +84,22 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
 
     /// Read the endpoints actually stored on the machine, including old configured ports.
     /// Probing only today's config misses a live session after a port/config change.
-    package func proxyListenerIsLive(config: ProxyConfig, probe: @Sendable (Int) -> Bool) throws -> Bool {
+    package func proxyListenerLiveness(config: ProxyConfig, probe: @Sendable (Int) -> LoopbackLiveness) throws -> LoopbackLiveness {
         let snapshot = try store.snapshot()
+        var ports: [Int] = []
         for service in snapshot.services where service.enabled && service.locationID == snapshot.activeLocationID {
             let current = service.proxies
             for prefix in ["HTTP", "HTTPS"] {
                 guard current[prefix + "Enable"] == .number(1), case .text(let host) = current[prefix + "Proxy"],
                       host == config.effectiveClientHost || Self.isLoopback(host),
                       case .number(let port) = current[prefix + "Port"], (1...65535).contains(port) else { continue }
-                if probe(port) { return true }
+                ports.append(port)
             }
             if current["ProxyAutoConfigEnable"] == .number(1),
                case .text(let text) = current["ProxyAutoConfigURLString"], let url = URL(string: text),
-               Self.isLoopback(url.host ?? ""), let port = url.port, (1...65535).contains(port), probe(port) { return true }
+               Self.isLoopback(url.host ?? ""), let port = url.port, (1...65535).contains(port) { ports.append(port) }
         }
-        return false
+        return .any(ports.lazy.map(probe))
     }
 
     static func isLoopback(_ host: String) -> Bool {
@@ -368,25 +369,36 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         try journal.forgetNetworkState(surface: surface(kind), scope: record.scope)
     }
 
-    package func recover(kind: NetworkSettingsKind, config: ProxyConfig, listenerIsLive: Bool) -> LaunchRecoveryOutcome {
+    /// Asks `ownership` only when there is something to restore: records, or our settings left on a service.
+    package func recover(kind: NetworkSettingsKind, config: ProxyConfig, ownership: () -> SurfaceOwnership) -> LaunchRecoveryOutcome {
         operations.withLock {
             do {
-                if listenerIsLive {
-                    let snapshot = try store.snapshot()
-                    let ours = residueIdentity(kind: kind, config: config)
-                    let residue = snapshot.services.contains {
-                        let current = fields($0, kind)
-                        return current != removeResidue(current, kind: kind, ours: ours)
-                    }
-                    if journal.hasRecords(for: surface(kind)) || residue { return .declinedLiveListener }
-                }
                 let hadRecords = journal.hasRecords(for: surface(kind))
-                try cleanLegacyAndRestore(kind: kind, config: config)
-                return hadRecords ? .restored(stale: false) : .nothingToDo(.nothingRecorded)
+                guard try hadRecords || hasResidue(kind: kind, config: config) else {
+                    try cleanLegacyAndRestore(kind: kind, config: config)
+                    return .nothingToDo(.nothingRecorded)
+                }
+                switch ownership() {
+                case .anotherSessionLive(let evidence):
+                    return .declinedLiveListener(evidence)
+                case .unknown(let witness):
+                    return .declinedInconclusiveProbe(witness: witness)
+                case .ownerGone(let evidence):
+                    try cleanLegacyAndRestore(kind: kind, config: config)
+                    return hadRecords ? .restored(.ownerGone(evidence)) : .nothingToDo(.nothingRecorded)
+                }
             } catch {
                 report("failed", "operation=recover reason=\(error.localizedDescription)")
                 return .failed(reason: error.localizedDescription)
             }
+        }
+    }
+
+    private func hasResidue(kind: NetworkSettingsKind, config: ProxyConfig) throws -> Bool {
+        let ours = residueIdentity(kind: kind, config: config)
+        return try store.snapshot().services.contains {
+            let current = fields($0, kind)
+            return current != removeResidue(current, kind: kind, ours: ours)
         }
     }
 

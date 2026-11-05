@@ -103,6 +103,64 @@ final class RuntimeHostDNSHealthTests: XCTestCase {
         XCTAssertGreaterThan(recovered.stamp.presentationRevision, degraded.stamp.presentationRevision)
     }
 
+    /// A launch that declined system DNS recovery keeps the decline while DNS runs on a relay that failed to start. The health timer's
+    /// alive reading for this run is the relay answering, so it clears the decline, as a written system DNS would.
+    @RuntimeActor func testAnAliveReadingClearsADeclinedSystemDNSRecovery() async throws {
+        let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: true)
+        self.harness = harness
+        let journal = PlatformStateJournal(fileURL: harness.environment.platformStateFile)
+        journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "192.0.2.1"])
+        journal.markApplied(surface: .systemDNS)
+        harness.machine.describe("Wi-Fi") { $0.dnsServers = ["127.0.0.1"] }
+        harness.dnsProbe = FakeDNSProbe(timingOut: [53])
+        let host = try await harness.makeHost()
+        XCTAssertTrue(host.systemDNSRecoveryDeclined, "the timed-out probe declined the restore")
+
+        harness.machine.privilege.failing = [.startDNSRelay]
+        try await host.startRuntime()
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running)
+        XCTAssertTrue(host.systemDNSRecoveryDeclined, "a relay that did not start leaves the machine as the decline found it")
+        harness.machine.privilege.failing = []
+
+        host.handleDNSHealthResult(alive: true, forwarderPort: forwarderPort(host), armedBy: host.lanes.dns.observationToken)
+        XCTAssertFalse(host.systemDNSRecoveryDeclined, "the relay answers this run")
+    }
+
+    /// A relay restart that a Stop superseded while its final probe was out says nothing about the machine the Stop left: a Stop that
+    /// could not put the recorded servers back keeps the decline.
+    @RuntimeActor func testASupersededRelayRestartKeepsADeclinedSystemDNSRecovery() async throws {
+        let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: true)
+        self.harness = harness
+        let journal = PlatformStateJournal(fileURL: harness.environment.platformStateFile)
+        journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "192.0.2.1"])
+        journal.markApplied(surface: .systemDNS)
+        harness.machine.describe("Wi-Fi") { $0.dnsServers = ["127.0.0.1"] }
+        harness.dnsProbe = FakeDNSProbe(timingOut: [53])
+        let host = try await harness.makeHost()
+        XCTAssertTrue(host.systemDNSRecoveryDeclined)
+
+        harness.machine.privilege.failing = [.startDNSRelay]
+        try await host.startRuntime()
+        harness.machine.privilege.failing = []
+        XCTAssertTrue(host.systemDNSRecoveryDeclined)
+
+        harness.dnsProbe.setAnswering([53])
+        let run = host.lanes.dns.observationToken
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, values in name == "dns-probe" && values == ["53"] }
+        host.handleDNSHealthResult(alive: false, forwarderPort: forwarderPort(host), armedBy: run)
+        await harness.hold.waitUntilReached()
+        harness.machine.privilege.failing = [.setDNSServers]
+        let stop = Task { await host.stopRuntime() }
+        let superseded = try await eventually { run.isSuperseded }
+        XCTAssertTrue(superseded, "the Stop began while the restart was out")
+        harness.hold.release()
+        await stop.value
+        await host.deliveries.drain()
+        harness.machine.privilege.failing = []
+        XCTAssertTrue(host.orchestrator.eventLog.events.contains { $0.event == "dns.relay_restarted" }, "the restart's result is reported")
+        XCTAssertTrue(host.systemDNSRecoveryDeclined, "the Stop could not restore, so system DNS still points at a relay nobody runs")
+    }
+
     /// Readings belong to the run whose timer armed them. A restart for run A whose final probe is held while a Stop begins reports its
     /// result, but sets no observation: the Stop superseded A. In run B, A's late failed reading restarts nothing and its late alive
     /// reading clears nothing; B's own failed reading is B's observation, and B's Stop clears it with its timer.

@@ -11,7 +11,7 @@ extension ControlRuntimeSnapshot {
         case tunnelsRunState, tunnelsError, directModeCause, vpnState, vpnInterfaceName, bindings
         case lastAuthOutcome, lastAuthOutcomeAt, lastAuthFallbackReason, metrics
         case dnsQueryCount, dnsDoHFallbackCount, dnsCacheHitCount, tunnelActiveCount, tunnelSessionCount
-        case tunnelDNSOverride, vpnFlap, collections, appliedState, displayNotices
+        case tunnelDNSOverride, vpnFlap, collections, appliedState, systemDNSRecoveryDeclined, displayNotices
     }
 
     /// The text this record displays, in the owner's canonical field order. It names every field of the owner, nil when absent.
@@ -63,6 +63,7 @@ extension ControlRuntimeSnapshot {
         vpnFlap = try container.decode(ControlVPNFlapMetrics.self, forKey: .vpnFlap)
         collections = try container.decode(ControlRuntimeCollections.self, forKey: .collections)
         appliedState = try container.decode(ControlAppliedState.self, forKey: .appliedState)
+        systemDNSRecoveryDeclined = try container.decodeIfPresent(Bool.self, forKey: .systemDNSRecoveryDeclined) ?? false
         displayNotices = try ControlDisplayCheck.decodeNotices(from: container, forKey: .displayNotices, owner: .snapshot)
         try ControlDisplayCheck.checkDecoded(
             owner: .snapshot, notices: displayNotices, values: displayValues, codingPath: decoder.codingPath
@@ -101,6 +102,7 @@ extension ControlRuntimeSnapshot {
         try container.encode(vpnFlap, forKey: .vpnFlap)
         try container.encode(collections, forKey: .collections)
         try container.encode(appliedState, forKey: .appliedState)
+        if systemDNSRecoveryDeclined { try container.encode(true, forKey: .systemDNSRecoveryDeclined) }
         try container.encode(displayNotices, forKey: .displayNotices)
     }
 }

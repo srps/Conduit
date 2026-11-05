@@ -41,19 +41,42 @@ final class HelperDNSRelayStatusTests: XCTestCase {
         XCTAssertNil(HelperAdmission.refusal(peerUID: 501, consoleUID: 0, lastConsoleUID: 501, command: .dnsRelayStatus))
     }
 
-    func testAHelperThatPredatesTheCommandIsNoStatusWithoutAPrompt() throws {
-        let helper = try FakeHelper(replies: [.error("Invalid request")])
+    func testAHelperThatPredatesTheCommandIsNoStatusWithoutAPromptAndToldApartFromAFailure() throws {
+        var current = HelperResponse.ok()
+        current.features = [.dnsRelayStatus]
+        for (ping, reason) in [(HelperResponse.ok(), "helper_predates_command"), (current, "helper_error")] {
+            let helper = try FakeHelper(replies: [.error("Invalid request"), ping])
+            defer { helper.stop() }
+            let probe = clientProbe(helper.path)
+
+            XCTAssertNil(try probe.client.dnsRelayStatus())
+            XCTAssertFalse(probe.fallbackRan.withLockedValue { $0 })
+            XCTAssertEqual(helper.commandsSeen, [.dnsRelayStatus, .ping])
+            XCTAssertEqual(probe.events.withLockedValue { $0 }.map(\.event), ["auth.privilege_helper_relay_status_unavailable"])
+            XCTAssertEqual(probe.events.withLockedValue { $0 }.first?.detail, "reason=\(reason) helper_error=Invalid request")
+        }
+    }
+
+    func testAFeatureListThatIsNotAnArrayBreaksTheFrame() {
+        let ping = Data(#"{"protocolVersion":5,"success":true,"features":"dns-relay-status"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(HelperResponse.self, from: ping))
+    }
+
+    func testAnUnreachableHelperIsReportedBeforeItThrows() {
+        let probe = clientProbe("/tmp/pm-no-helper-\(UUID().uuidString.prefix(8)).sock")
+        XCTAssertThrowsError(try probe.client.dnsRelayStatus())
+        XCTAssertEqual(probe.events.withLockedValue { $0 }.map(\.event), ["auth.privilege_helper_relay_status_unavailable"])
+        XCTAssertEqual(probe.events.withLockedValue { $0 }.first?.detail?.hasPrefix("reason=unreachable "), true)
+    }
+
+    func testNoInstalledHelperIsNoStatusWithoutAsking() throws {
+        let helper = try FakeHelper(replies: [])
         defer { helper.stop() }
-        let probe = clientProbe(helper.path)
+        let probe = clientProbe(helper.path, binaryPath: "/tmp/pm-no-helper-binary-\(UUID().uuidString.prefix(8))")
 
         XCTAssertNil(try probe.client.dnsRelayStatus())
-        XCTAssertFalse(probe.fallbackRan.withLockedValue { $0 })
-        XCTAssertEqual(helper.commandsSeen, [.dnsRelayStatus])
-        XCTAssertEqual(probe.events.withLockedValue { $0 }.map(\.event), ["auth.privilege_helper_relay_status_unavailable"])
-        XCTAssertEqual(
-            probe.events.withLockedValue { $0 }.first?.detail,
-            "reason=helper_error helper_error=Invalid request"
-        )
+        XCTAssertTrue(helper.commandsSeen.isEmpty)
+        XCTAssertEqual(probe.events.withLockedValue { $0 }.map(\.detail), ["reason=not_installed"])
     }
 
     func testAHelperOnAnotherProtocolIsNoStatus() throws {
@@ -130,7 +153,9 @@ final class HelperDNSRelayStatusTests: XCTestCase {
         var fallbackRan: NIOLockedValueBox<Bool>
     }
 
-    private func clientProbe(_ socketPath: String) -> ClientProbe {
+    /// `binaryPath` defaults to a file that exists, so the client asks the
+    /// fake helper on `socketPath` whether or not a real helper is installed.
+    private func clientProbe(_ socketPath: String, binaryPath: String = #filePath) -> ClientProbe {
         let events = NIOLockedValueBox<[RuntimeEvent]>([])
         let fallbackRan = NIOLockedValueBox(false)
         let client = HelperToolPrivilegeClient(
@@ -140,7 +165,8 @@ final class HelperDNSRelayStatusTests: XCTestCase {
                 fallbackRan.withLockedValue { $0 = true }
                 return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
             }),
-            transactionMilliseconds: 2_000
+            transactionMilliseconds: 2_000,
+            binaryPath: binaryPath
         )
         return ClientProbe(client: client, events: events, fallbackRan: fallbackRan)
     }

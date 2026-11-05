@@ -1295,7 +1295,7 @@ extension SystemProxyManagerTests {
             privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run,
-            portProbe: { _ in false }
+            portProbe: { _ in .notLive }
         )
         try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
@@ -1306,11 +1306,11 @@ extension SystemProxyManagerTests {
             privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run,
-            portProbe: { _ in false }
+            portProbe: { _ in .notLive }
         )
         runner.invocations.removeAll()
 
-        XCTAssertEqual(freshManager.restoreIfNeeded(logger: nil), .restored(stale: false))
+        XCTAssertEqual(freshManager.restoreIfNeeded(logger: nil), .restored(.ownerGone(.portRefused(witness: nil))))
 
         let script = try XCTUnwrap(runner.shellScripts.last, "orphaned settings must be restored at launch")
         XCTAssertTrue(script.contains("-setautoproxyurl 'Wi-Fi' 'http://mdm.corp.example/managed.pac'"))
@@ -1329,19 +1329,41 @@ extension SystemProxyManagerTests {
             privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run,
-            portProbe: { _ in true }
+            portProbe: { _ in .live }
         )
         try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
 
         runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"
         runner.invocations.removeAll()
 
-        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedLiveListener)
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedLiveListener(.portAnswered(witness: nil)))
 
         XCTAssertTrue(
             runner.shellScripts.isEmpty,
             "a proxy that is still being served is not orphaned"
         )
+    }
+
+    func testRestoreIfNeededLeavesAProxyWhoseProbeTimedOutAlone() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run,
+            portProbe: FakeLoopbackPortProbe(timingOut: [63145]).liveness(port:)
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil, endpoints: .configured(ProxyConfig.testFixture()))
+
+        runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"
+        runner.invocations.removeAll()
+
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedInconclusiveProbe(witness: nil))
+        XCTAssertTrue(runner.shellScripts.isEmpty)
+        XCTAssertTrue(manager.hasManagedState(), "the next launch retries from the records")
     }
 
     /// Nothing recorded means nothing of ours is outstanding, whatever the
@@ -1355,7 +1377,7 @@ extension SystemProxyManagerTests {
             privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run,
-            portProbe: { _ in false }
+            portProbe: { _ in .notLive }
         )
 
         XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .nothingToDo(.nothingRecorded))

@@ -310,6 +310,9 @@ package struct ControlRuntimeSnapshot: Codable, Sendable, Equatable {
     package var vpnFlap: ControlVPNFlapMetrics
     package var collections: ControlRuntimeCollections
     package var appliedState: ControlAppliedState
+    /// Launch recovery left the previous session's system DNS in place because its probe timed out, and no DNS Start or Stop has
+    /// written system DNS since (#201). Absent on the wire when false.
+    package var systemDNSRecoveryDeclined: Bool
     /// The notices of the display text above, in canonical order. Each names a field whose text was shortened or omitted.
     package var displayNotices: [ControlDisplayNotice]
 
@@ -346,6 +349,7 @@ package struct ControlRuntimeSnapshot: Codable, Sendable, Equatable {
         vpnFlap: ControlVPNFlapMetrics,
         collections: ControlRuntimeCollections,
         appliedState: ControlAppliedState,
+        systemDNSRecoveryDeclined: Bool = false,
         displayNotices: [ControlDisplayNotice] = []
     ) {
         self.stamp = stamp
@@ -375,6 +379,7 @@ package struct ControlRuntimeSnapshot: Codable, Sendable, Equatable {
         self.vpnFlap = vpnFlap
         self.collections = collections
         self.appliedState = appliedState
+        self.systemDNSRecoveryDeclined = systemDNSRecoveryDeclined
         self.displayNotices = displayNotices
     }
 }

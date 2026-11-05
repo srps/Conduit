@@ -82,14 +82,14 @@ extension RuntimeHost {
         }
         guard generation == preflight.generation, !workflow.isTerminal else { return .failed(.staleRevision) }
         let verdict = held.updated(by: reading)
-        let becameAvailable = verdict == .installed && preflight.heldHelperStatus != .installed
+        let becameAvailable = verdict.serves && !preflight.heldHelperStatus.serves
         preflight.heldHelperStatus = verdict
         if reading != .busy { preflight.verdictStale = false }
         if becameAvailable {
             deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
         }
         // The raw read, not the held verdict: `busy` keeps `installed` on display, but is no evidence the helper takes writes (#210).
-        observeHelperForSplitDNS(available: reading == .installed, trigger: "helper_available")
+        observeHelperForSplitDNS(available: reading.serves, trigger: "helper_available")
         return preflightCompleted(stamp, reading: .observed(RuntimePreflightProjection.items(evaluated, helper: verdict, readBusy: reading == .busy)))
     }
 
@@ -145,6 +145,7 @@ enum RuntimePreflightProjection {
         case .waitingForConsoleUser: .waitingForConsoleUser
         case .unauthorized: .unauthorized
         case .callerNotAccepted: .callerNotAccepted
+        case .updateAvailable: .updateAvailable
         }
     }
 }

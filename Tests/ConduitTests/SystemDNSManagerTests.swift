@@ -125,6 +125,17 @@ final class SystemDNSManagerTests: XCTestCase {
         )
     }
 
+    func testALocationReconcileReportsWhetherItPointedSystemDNSAtTheRelay() throws {
+        XCTAssertFalse(try makeManager().reconcileLocation(apply: true, forwarderPort: 5354), "no location store, no write")
+
+        let locations = NetworkLocationFixture.store()
+        let manager = SystemDNSManager(privilegeClient: recording, journal: journal,
+                                       locationRecovery: LocationSettingsRecovery(store: locations, journal: journal, emit: { _ in }))
+        XCTAssertTrue(try manager.reconcileLocation(apply: true, forwarderPort: 5354))
+        XCTAssertEqual(recording.commands(matching: .startDNSRelay).last, ["5354"])
+        XCTAssertFalse(try manager.reconcileLocation(apply: false, forwarderPort: 5354), "a restore points nothing at the relay")
+    }
+
     /// Manager under test on a described machine, so the launch-time recovery
     /// decision can be pinned without depending on what this host's interfaces
     /// happen to hold.
@@ -133,7 +144,7 @@ final class SystemDNSManagerTests: XCTestCase {
             privilegeClient: recording,
             journal: journal,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            relayIsLive: { relayIsLive }
+            resolverLiveness: { _ in relayIsLive ? .live : .notLive }
         )
     }
 
@@ -190,7 +201,7 @@ final class SystemDNSManagerTests: XCTestCase {
             privilegeClient: recording,
             journal: journal,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            relayIsLive: { stopDuringProbe.run(); return false }
+            resolverLiveness: { _ in stopDuringProbe.run(); return .notLive }
         )
         try manager.saveCurrentDNS(logger: nil)
         try manager.apply(forwarderPort: 5353, logger: nil)
@@ -771,7 +782,7 @@ final class SystemDNSManagerTests: XCTestCase {
         // Port 53 free, as the name says, whatever this machine runs there: the
         // real probe waited two seconds where nothing answered, and skipped
         // the restore where Conduit's relay did.
-        let manager = SystemDNSManager(privilegeClient: recording, journal: journal, relayIsLive: { false })
+        let manager = SystemDNSManager(privilegeClient: recording, journal: journal, resolverLiveness: { _ in .notLive })
         let realServices = try manager.connectedNetworkServices()
         guard let service = realServices.first else {
             throw XCTSkip("No connected network services")
@@ -819,9 +830,9 @@ final class SystemDNSManagerTests: XCTestCase {
             journal: journal,
             legacySnapshotFile: legacy,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            relayIsLive: { false }
+            resolverLiveness: { _ in .notLive }
         )
-        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(stale: false))
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(.ownerGone(.portRefused(witness: .noStatus))))
 
         XCTAssertEqual(recording.commands(matching: .setDNSServers), [["Wi-Fi", "192.168.1.1", "1.1.1.1"]])
         XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path), "removed after a successful import")
@@ -838,7 +849,7 @@ final class SystemDNSManagerTests: XCTestCase {
             journal: journal,
             legacySnapshotFile: legacy,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            relayIsLive: { false }
+            resolverLiveness: { _ in .notLive }
         )
 
         try manager.saveCurrentDNS(logger: nil)
@@ -890,13 +901,15 @@ final class SystemDNSManagerTests: XCTestCase {
     /// `SIGKILL` it is still bound to 53 and still forwarding to a forwarder
     /// port that nothing answers on. "Is the port held?" is therefore `true` in
     /// exactly the crash this recovery exists for, and gating on it skipped the
-    /// restore. Whether anything still *resolves* is the question being asked.
+    /// restore. Whether anything still *resolves* is the question being asked;
+    /// since #201 only a refusal answers it, and a relay that is silent waits
+    /// for a later launch (`testRestoreIfNeededLeavesASlowSessionAlone`).
     func testRestoreIfNeededRestoresWhenTheLeftoverRelayNoLongerResolves() {
         let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
         writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
 
         let manager = makeManager(machine: machine, relayIsLive: false)
-        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(stale: false))
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(.ownerGone(.portRefused(witness: .noStatus))))
 
         XCTAssertEqual(
             recording.commands(matching: .setDNSServers),
@@ -923,7 +936,7 @@ final class SystemDNSManagerTests: XCTestCase {
         ]))
 
         let manager = makeManager(machine: machine, relayIsLive: true)
-        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedLiveListener)
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedLiveListener(.portAnswered(witness: .noStatus)))
 
         XCTAssertTrue(
             manager.hasSavedState(),
@@ -949,6 +962,135 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)
     }
 
+    func testLaunchRecoveryDecidesSystemDNSOwnershipFromTheRelayWitnessFirst() {
+        struct Case {
+            var first: DNSRelayStatus?
+            var second: DNSRelayStatus?
+            var probe: LoopbackLiveness
+            var expected: LaunchRecoveryOutcome
+        }
+        let cases = [
+            Case(first: .relaying(targetPort: 5053, target: .refused), second: .relaying(targetPort: 5053, target: .refused),
+                 probe: .inconclusive, expected: .restored(.ownerGone(.relayTargetRefused))),
+            Case(first: .relaying(targetPort: 5053, target: .refused), second: .relaying(targetPort: 5053, target: .answered),
+                 probe: .inconclusive, expected: .declinedLiveListener(.relayTargetAnswered)),
+            Case(first: .relaying(targetPort: 5053, target: .refused), second: .relaying(targetPort: 5054, target: .answered),
+                 probe: .notLive, expected: .declinedLiveListener(.relayTargetAnswered)),
+            Case(first: .relaying(targetPort: 5053, target: .refused), second: .relaying(targetPort: 5054, target: .refused),
+                 probe: .inconclusive, expected: .declinedInconclusiveProbe(witness: .refusalUnconfirmed)),
+            Case(first: .relaying(targetPort: 5053, target: .refused), second: nil,
+                 probe: .notLive, expected: .restored(.ownerGone(.portRefused(witness: .refusalUnconfirmed)))),
+            Case(first: .relaying(targetPort: 5053, target: .answered), second: nil,
+                 probe: .notLive, expected: .declinedLiveListener(.relayTargetAnswered)),
+            Case(first: .relaying(targetPort: 5053, target: .silent), second: nil,
+                 probe: .inconclusive, expected: .declinedInconclusiveProbe(witness: .targetSilent)),
+            Case(first: .notRunning, second: nil, probe: .notLive, expected: .restored(.ownerGone(.portRefused(witness: .relayNotRunning)))),
+            Case(first: .notRunning, second: nil, probe: .inconclusive, expected: .declinedInconclusiveProbe(witness: .relayNotRunning)),
+            Case(first: nil, second: nil, probe: .inconclusive, expected: .declinedInconclusiveProbe(witness: .noStatus)),
+        ]
+        for testCase in cases {
+            let journal = PlatformStateJournal(fileURL: stateDirectory.appendingPathComponent("platform-state-\(UUID().uuidString).json"))
+            journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "192.168.1.1"])
+            journal.markApplied(surface: .systemDNS)
+            let helper = RecordingPrivilegeClient()
+            helper.relayStatus = testCase.first
+            let pauses = LockedLog<TimeInterval>()
+            let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+            let manager = SystemDNSManager(
+                privilegeClient: helper,
+                journal: journal,
+                commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+                resolverLiveness: { _ in testCase.probe },
+                relayRecheckPause: { delay in
+                    pauses.append(delay)
+                    helper.relayStatus = testCase.second
+                }
+            )
+            XCTAssertEqual(manager.restoreIfNeeded(logger: nil), testCase.expected, "\(testCase)")
+            let refusedFirst = testCase.first == .relaying(targetPort: 5053, target: .refused)
+            XCTAssertEqual(pauses.values, refusedFirst ? [SystemDNSManager.relayRefusalRecheckDelay] : [], "only a refusal is read twice: \(testCase)")
+        }
+    }
+
+    func testAProbeDecisionNamesWhyTheWitnessDidNotDecide() {
+        let cases: [(DNSRelayStatus?, LoopbackLiveness, String)] = [
+            (nil, .notLive, "platform.launch_recovery_restored surface=systemDNS stale=false evidence=port_refused witness=no_status"),
+            (.notRunning, .live, "platform.launch_recovery_declined surface=systemDNS reason=live_listener evidence=port_answered witness=relay_not_running"),
+            (.relaying(targetPort: 5053, target: .silent), .notLive,
+             "platform.launch_recovery_restored surface=systemDNS stale=false evidence=port_refused witness=target_silent"),
+        ]
+        for (status, probe, expected) in cases {
+            let journal = PlatformStateJournal(fileURL: stateDirectory.appendingPathComponent("platform-state-\(UUID().uuidString).json"))
+            journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "192.168.1.1"])
+            journal.markApplied(surface: .systemDNS)
+            let helper = RecordingPrivilegeClient()
+            helper.relayStatus = status
+            let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+            let manager = SystemDNSManager(
+                privilegeClient: helper,
+                journal: journal,
+                commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+                resolverLiveness: { _ in probe }
+            )
+            let event = LaunchRecovery.event(for: manager.restoreIfNeeded(logger: nil), surface: .systemDNS)
+            XCTAssertEqual("\(event.event) \(event.detail ?? "")", expected)
+        }
+    }
+
+    func testAThrowingWitnessFallsBackToTheProbe() {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+        writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
+        let manager = SystemDNSManager(
+            privilegeClient: RecordingPrivilegeClient(error: PrivilegeClientError.communicationFailed("no helper")),
+            journal: journal,
+            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            resolverLiveness: { _ in .inconclusive }
+        )
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedInconclusiveProbe(witness: .helperUnavailable))
+    }
+
+    func testRestoreIfNeededLeavesASlowSessionAlone() throws {
+        let port = Int.random(in: 17000..<18000)
+        let silentFD = createUDPSocket(port: port)
+        guard silentFD >= 0 else { throw XCTSkip("Could not bind a silent socket on port \(port)") }
+        defer { close(silentFD) }
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+        writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
+        let manager = SystemDNSManager(
+            privilegeClient: recording,
+            journal: journal,
+            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            resolverLiveness: { _ in SystemDNSManager.dnsLiveness(onPort: port, timeoutMilliseconds: 50) }
+        )
+
+        let outcome = manager.restoreIfNeeded(logger: nil)
+
+        XCTAssertEqual(outcome, .declinedInconclusiveProbe(witness: .noStatus), "a timed-out probe is no evidence the session is gone")
+        XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)
+        XCTAssertTrue(manager.hasSavedState(), "the next launch retries from the records")
+    }
+
+    func testDNSLivenessReadsARelayWhoseForwarderIsGoneAsInconclusive() throws {
+        let listenPort = Int.random(in: 18000..<19000)
+        let deadForwarder = createUDPSocket(port: listenPort + 1)
+        guard deadForwarder >= 0 else { throw XCTSkip("Could not reserve the forwarder port \(listenPort + 1)") }
+        close(deadForwarder)
+        let relay = UDPRelay()
+        try relay.start(listenPort: listenPort, targetPort: listenPort + 1)
+        defer { relay.stop() }
+
+        XCTAssertEqual(SystemDNSManager.dnsLiveness(onPort: listenPort, timeoutMilliseconds: 300), .inconclusive)
+    }
+
+    func testDNSLivenessReportsAClosedPortAsRefused() throws {
+        let port = Int.random(in: 17000..<18000)
+        let fd = createUDPSocket(port: port)
+        guard fd >= 0 else { throw XCTSkip("Could not bind a socket on port \(port)") }
+        close(fd)
+
+        XCTAssertEqual(SystemDNSManager.dnsLiveness(onPort: port, timeoutMilliseconds: 2_000), .notLive)
+    }
+
     // MARK: - Liveness probe
 
     func testProbeLivenessReturnsFalseWhenNoListener() {
@@ -956,7 +1098,7 @@ final class SystemDNSManagerTests: XCTestCase {
         // the whole poll, and how long does not change the answer.
         let manager = SystemDNSManager(
             privilegeClient: recording, journal: journal,
-            respondsOnPort: { SystemDNSManager.dnsResponds(onPort: $0, timeoutMilliseconds: 200) }
+            resolverLiveness: { SystemDNSManager.dnsLiveness(onPort: $0, timeoutMilliseconds: 200) }
         )
         let port = Int.random(in: 17000..<18000)
         XCTAssertFalse(manager.probeLiveness(port: port), "Should fail with nothing on the port")

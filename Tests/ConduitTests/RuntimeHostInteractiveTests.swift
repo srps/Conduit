@@ -93,6 +93,8 @@ final class InteractiveHostHarness {
         let hold = HeldCall()
         /// The ports the host's injected DNS probe was asked, in order. Each probe is offered to `hold` first as `("dns-probe", [port])`.
         let dnsProbes = LockedLog<Int>()
+        /// What the injected DNS probe answers; a launch-recovery test names one that times out before `makeHost()`.
+        var dnsProbe = FakeDNSProbe()
         let vpn = FakeVPNStatusObserver()
         /// The PAC evaluator the orchestrator fetches through; a test that holds a Start before its bind names a `HeldPACFetch`.
         var pacEvaluator: any PacEvaluator = FakePacEvaluator()
@@ -126,7 +128,7 @@ final class InteractiveHostHarness {
             let hold = self.hold
             let vpn = self.vpn
             let dnsProbes = self.dnsProbes
-            let dnsProbe = FakeDNSProbe()
+            let dnsProbe = self.dnsProbe
             let helperStatus = self.helperStatus.map { HoldingHelperStatus(base: $0, hold: hold) }
             let built = try await RuntimeHost.open(
                 stateSession: session,
@@ -143,16 +145,17 @@ final class InteractiveHostHarness {
                     gss: .injected { RefusingGSS() },
                     pacEvaluator: pacEvaluator,
                     portHolderProbe: FakeListenerPortHolderProbe(),
-                    loopbackPortProbe: FakeLoopbackPortProbe().isServed(port:),
+                    loopbackPortProbe: FakeLoopbackPortProbe().liveness(port:),
                     commandRunner: { launchPath, arguments in
                         hold.pass(launchPath, arguments)
                         return try machine.run(launchPath, arguments)
                     },
-                    dnsResponds: { port in
+                    dnsProbe: { port in
                         dnsProbes.append(port)
                         hold.pass("dns-probe", [String(port)])
-                        return dnsProbe.responds(onPort: port)
+                        return dnsProbe.liveness(onPort: port)
                     },
+                    relayRecheckPause: { _ in },
                     networkPath: FakeNetworkPathObserver(),
                     networkLocation: FakeNetworkLocationObserver(),
                     networkLocationStoreFactory: { _ in nil },
@@ -319,8 +322,8 @@ private final class SlotHold {
     }
 }
 
-/// A TCP listener the test holds on a loopback port it chose, so a tunnel's bind on that port fails as a contended port does.
-private final class HeldTCPListener {
+/// A TCP listener the test holds on a loopback port it chose, so a proxy or tunnel bind on that port fails as a contended port does.
+final class HeldTCPListener {
     let port: Int
     private let descriptor: Int32
 
@@ -482,6 +485,30 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         XCTAssertEqual(fenced.conditionalDNS, .fenced, "and its companion leaves the stopped DNS down")
         XCTAssertNotEqual(host.orchestrator.snapshot.dnsRunState, .running)
         XCTAssertEqual(harness.savedDNSEnabled, false)
+    }
+
+    /// After a declined recovery, a DNS Start whose forwarder cannot bind restores system DNS. A restore that could not list the network
+    /// services returns normally but keeps the record, so the Mac still points at the relay and the decline stays.
+    @RuntimeActor func testAFailedDNSStartWhoseRestoreKeptTheRecordKeepsTheDecline() async throws {
+        let held = try HeldUDPPort()
+        let harness = try makeHarness(platform: proxyAndDNS, dnsForwarderEnabled: true, dnsForwarderPort: held.port)
+        self.harness = harness
+        let journal = PlatformStateJournal(fileURL: harness.environment.platformStateFile)
+        journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "192.0.2.1"])
+        journal.markApplied(surface: .systemDNS)
+        harness.machine.describe("Wi-Fi") { $0.dnsServers = ["127.0.0.1"] }
+        harness.dnsProbe = FakeDNSProbe(timingOut: [53])
+        let host = try await harness.makeHost()
+        XCTAssertTrue(host.systemDNSRecoveryDeclined)
+
+        harness.machine.failsServiceListing = true
+        let dns = try await host.startDNS()
+        harness.machine.failsServiceListing = false
+        XCTAssertEqual(dns.modules.dns, .failed)
+        XCTAssertTrue(journal.hasRecords(for: .systemDNS), "the restore kept the record for retry")
+        XCTAssertEqual(harness.machine.service("Wi-Fi").dnsServers, ["127.0.0.1"])
+        XCTAssertTrue(host.systemDNSRecoveryDeclined, "nothing put the recorded servers back")
+        withExtendedLifetime(held) {}
     }
 
     /// A companion whose forwarder cannot bind reports its own failure: the proxy stays up, the system DNS it captured is restored, and

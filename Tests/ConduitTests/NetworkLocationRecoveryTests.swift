@@ -65,7 +65,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
     func testFreshJournalPreservesUserLoopbackDNSAndRestoresItAfterApply() throws {
         try withRecovery { store, _, recovery, _ in
             store.edit { $0.services[0].dns = localDNS }
-            XCTAssertEqual(recovery.recover(kind: .dns, config: ProxyConfig(), listenerIsLive: false), .nothingToDo(.nothingRecorded))
+            XCTAssertEqual(recovery.recover(kind: .dns, config: ProxyConfig(), ownership: { .ownerGone(.portRefused(witness: nil)) }), .nothingToDo(.nothingRecorded))
             XCTAssertEqual(try store.snapshot().services[0].dns, localDNS)
             try recovery.apply(kind: .dns, desired: localDNS, config: ProxyConfig())
             try recovery.clear(kind: .dns, config: ProxyConfig())
@@ -82,7 +82,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             let userPAC: [String: NetworkSettingValue] = ["ProxyAutoConfigEnable": .number(1), "ProxyAutoConfigURLString": .text(url)]
             store.edit { $0.services[0].proxies = userPAC }
             let original = try store.snapshot()
-            XCTAssertEqual(recovery.recover(kind: .proxies, config: config, listenerIsLive: false), .nothingToDo(.nothingRecorded))
+            XCTAssertEqual(recovery.recover(kind: .proxies, config: config, ownership: { .ownerGone(.portRefused(witness: nil)) }), .nothingToDo(.nothingRecorded))
             XCTAssertEqual(try store.snapshot(), original)
             for mode in [SystemProxyMode.manual, .pac] {
                 try recovery.apply(kind: .proxies, desired: SystemProxyManager.locationFields(config: config, mode: mode, endpoints: .configured(config, localPACURL: url)), config: config)
@@ -108,7 +108,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         let events = RuntimeEventLog()
         let recovery = LocationSettingsRecovery(store: store, journal: journal, emit: { events.append($0) })
         for kind in [NetworkSettingsKind.proxies, .dns] {
-            guard case .failed = recovery.recover(kind: kind, config: ProxyConfig(), listenerIsLive: false) else {
+            guard case .failed = recovery.recover(kind: kind, config: ProxyConfig(), ownership: { .ownerGone(.portRefused(witness: nil)) }) else {
                 XCTFail("Unreadable recovery must report unknown prior state")
                 return
             }
@@ -157,7 +157,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
     func testCorruptJournalClearsOwnEphemeralProxyAndKeepsForeignLoopbackProxy() throws {
         try crashedSession(desired: ephemeral, config: portConfig(0)) { store, file, corrupt in
             let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { _ in })
-            guard case .failed = recovery.recover(kind: .proxies, config: portConfig(0), listenerIsLive: false) else {
+            guard case .failed = recovery.recover(kind: .proxies, config: portConfig(0), ownership: { .ownerGone(.portRefused(witness: nil)) }) else {
                 return XCTFail("Unreadable recovery must report unknown prior state")
             }
             let services = try store.snapshot().services
@@ -175,7 +175,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         try crashedSession(desired: fixed, config: portConfig(3128)) { store, file, corrupt in
             store.edit { $0.services[0].proxies = self.ephemeral }
             let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { _ in })
-            guard case .failed = recovery.recover(kind: .proxies, config: portConfig(3128), listenerIsLive: false) else {
+            guard case .failed = recovery.recover(kind: .proxies, config: portConfig(3128), ownership: { .ownerGone(.portRefused(witness: nil)) }) else {
                 return XCTFail("Unreadable recovery must report unknown prior state")
             }
             let services = try store.snapshot().services
@@ -196,7 +196,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             XCTAssertEqual(witness.read(), .present(AdvertisedProxyEndpoint(host: "127.0.0.1", port: 52870)))
             let events = RuntimeEventLog()
             let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { events.append($0) })
-            _ = recovery.recover(kind: .proxies, config: portConfig(0), listenerIsLive: false)
+            _ = recovery.recover(kind: .proxies, config: portConfig(0), ownership: { .ownerGone(.portRefused(witness: nil)) })
             XCTAssertEqual(identityDetails(events), ["surface=proxies source=witness host=127.0.0.1 port=52870"])
             XCTAssertEqual(witness.read(), .absent)
         }
@@ -207,7 +207,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             try FileProxyEndpointWitness.beside(journalFile: file).retire()
             let events = RuntimeEventLog()
             let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { events.append($0) })
-            _ = recovery.recover(kind: .proxies, config: portConfig(0), listenerIsLive: false)
+            _ = recovery.recover(kind: .proxies, config: portConfig(0), ownership: { .ownerGone(.portRefused(witness: nil)) })
             let services = try store.snapshot().services
             XCTAssertEqual(services.first { $0.serviceID == homeService }?.proxies["HTTPPort"], .number(52870))
             XCTAssertEqual(services.first { $0.serviceID == usbService }?.proxies, foreign)
@@ -229,7 +229,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
                 try bytes.write(to: witness.fileURL)
                 let events = RuntimeEventLog()
                 let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { events.append($0) })
-                _ = recovery.recover(kind: .proxies, config: portConfig(0), listenerIsLive: false)
+                _ = recovery.recover(kind: .proxies, config: portConfig(0), ownership: { .ownerGone(.portRefused(witness: nil)) })
                 let services = try store.snapshot().services
                 XCTAssertEqual(services.first { $0.serviceID == homeService }?.proxies["HTTPPort"], .number(52870), reason)
                 XCTAssertEqual(services.first { $0.serviceID == usbService }?.proxies, foreign, reason)
@@ -312,7 +312,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             try LocationSettingsRecovery(store: store, journal: journal, witness: witness, emit: { _ in })
                 .apply(kind: .proxies, desired: ephemeral, config: portConfig(0))
             let relaunched = LocationSettingsRecovery(store: store, journal: journal, witness: witness, emit: { _ in })
-            XCTAssertEqual(relaunched.recover(kind: .proxies, config: portConfig(0), listenerIsLive: false), .restored(stale: false))
+            XCTAssertEqual(relaunched.recover(kind: .proxies, config: portConfig(0), ownership: { .ownerGone(.portRefused(witness: nil)) }), .restored(.ownerGone(.portRefused(witness: nil))))
             XCTAssertEqual(try store.snapshot().services, original.services)
             XCTAssertEqual(witness.current, .absent)
         }
@@ -324,7 +324,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             let journal = PlatformStateJournal(fileURL: file.deletingLastPathComponent().appendingPathComponent("fresh.json"))
             let recovery = LocationSettingsRecovery(store: store, journal: journal, witness: witness, emit: { _ in })
             let before = try store.snapshot()
-            XCTAssertEqual(recovery.recover(kind: .proxies, config: portConfig(0), listenerIsLive: true), .declinedLiveListener)
+            XCTAssertEqual(recovery.recover(kind: .proxies, config: portConfig(0), ownership: { .anotherSessionLive(.portAnswered(witness: nil)) }), .declinedLiveListener(.portAnswered(witness: nil)))
             XCTAssertEqual(try store.snapshot(), before)
             XCTAssertEqual(witness.current, .present(AdvertisedProxyEndpoint(host: "127.0.0.1", port: 52870)))
         }
@@ -335,7 +335,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             let localhost: [String: NetworkSettingValue] = ["HTTPProxy": .text("localhost"), "HTTPPort": .number(52870), "HTTPEnable": .number(1)]
             store.edit { $0.services[0].proxies = localhost }
             let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { _ in })
-            _ = recovery.recover(kind: .proxies, config: portConfig(0), listenerIsLive: false)
+            _ = recovery.recover(kind: .proxies, config: portConfig(0), ownership: { .ownerGone(.portRefused(witness: nil)) })
             XCTAssertEqual(try store.snapshot().services.first { $0.serviceID == homeService }?.proxies, localhost)
         }
     }
@@ -347,7 +347,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             let before = try store.snapshot().services
             let events = RuntimeEventLog()
             let recovery = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { events.append($0) })
-            guard case .failed = recovery.recover(kind: .proxies, config: portConfig(8080), listenerIsLive: false) else {
+            guard case .failed = recovery.recover(kind: .proxies, config: portConfig(8080), ownership: { .ownerGone(.portRefused(witness: nil)) }) else {
                 return XCTFail("Unreadable recovery must report unknown prior state")
             }
             XCTAssertEqual(try store.snapshot().services, before)
@@ -369,7 +369,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             try recovery.apply(kind: .proxies, desired: fixed, config: portConfig(3128))
             XCTAssertTrue(journal.hasRecords(for: .systemProxy))
             XCTAssertEqual(LocationSettingsRecovery(store: store, journal: journal, witness: witness, emit: { events.append($0) })
-                .recover(kind: .proxies, config: portConfig(3128), listenerIsLive: false), .restored(stale: false))
+                .recover(kind: .proxies, config: portConfig(3128), ownership: { .ownerGone(.portRefused(witness: nil)) }), .restored(.ownerGone(.portRefused(witness: nil))))
             XCTAssertEqual(try store.snapshot().services, original.services)
             try recovery.apply(kind: .proxies, desired: fixed, config: portConfig(3128))
             try recovery.clear(kind: .proxies, config: portConfig(3128))
@@ -948,9 +948,9 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         try first.apply(kind: .dns, desired: localDNS, config: ProxyConfig())
         store.edit { $0.activeLocationID = office }
         let second = LocationSettingsRecovery(store: store, journal: PlatformStateJournal(fileURL: file), emit: { _ in })
-        XCTAssertEqual(second.recover(kind: .dns, config: ProxyConfig(), listenerIsLive: false), .restored(stale: false))
+        XCTAssertEqual(second.recover(kind: .dns, config: ProxyConfig(), ownership: { .ownerGone(.portRefused(witness: nil)) }), .restored(.ownerGone(.portRefused(witness: nil))))
         XCTAssertEqual(try store.snapshot().services, original.services)
-        XCTAssertEqual(second.recover(kind: .dns, config: ProxyConfig(), listenerIsLive: false), .nothingToDo(.nothingRecorded))
+        XCTAssertEqual(second.recover(kind: .dns, config: ProxyConfig(), ownership: { .ownerGone(.portRefused(witness: nil)) }), .nothingToDo(.nothingRecorded))
     }
 
     func testRecoveryProtectsALiveListenerOnThePreviouslyConfiguredPort() throws {
@@ -959,11 +959,30 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             try recovery.apply(kind: .proxies, desired: desired, config: ProxyConfig())
             var changedConfig = ProxyConfig()
             changedConfig.localPort = 8888
-            let live = try recovery.proxyListenerIsLive(config: changedConfig, probe: { $0 == 7777 })
-            XCTAssertTrue(live)
-            XCTAssertEqual(recovery.recover(kind: .proxies, config: changedConfig, listenerIsLive: live), .declinedLiveListener)
+            let live = try recovery.proxyListenerLiveness(config: changedConfig, probe: { $0 == 7777 ? .live : .notLive })
+            XCTAssertEqual(live, .live)
+            XCTAssertEqual(recovery.recover(kind: .proxies, config: changedConfig, ownership: { SurfaceOwnership(probe: live, witness: nil) }), .declinedLiveListener(.portAnswered(witness: nil)))
             XCTAssertEqual(try store.snapshot().services[0].proxies["HTTPPort"], .number(7777))
             XCTAssertTrue(journal.hasRecords(for: .systemProxy))
+        }
+    }
+
+    func testRecoveryDeclinesOnATimedOutProbeAndRestoresOnARefusal() throws {
+        try withRecovery { store, journal, recovery, _ in
+            let original = try store.snapshot()
+            let desired: [String: NetworkSettingValue] = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(7777), "HTTPEnable": .number(1)]
+            try recovery.apply(kind: .proxies, desired: desired, config: ProxyConfig())
+
+            let slow = try recovery.proxyListenerLiveness(config: ProxyConfig(), probe: FakeLoopbackPortProbe(timingOut: [7777]).liveness(port:))
+            XCTAssertEqual(slow, .inconclusive)
+            XCTAssertEqual(recovery.recover(kind: .proxies, config: ProxyConfig(), ownership: { SurfaceOwnership(probe: slow, witness: nil) }), .declinedInconclusiveProbe(witness: nil))
+            XCTAssertEqual(try store.snapshot().services[0].proxies["HTTPPort"], .number(7777))
+            XCTAssertTrue(journal.hasRecords(for: .systemProxy))
+
+            let gone = try recovery.proxyListenerLiveness(config: ProxyConfig(), probe: FakeLoopbackPortProbe().liveness(port:))
+            XCTAssertEqual(gone, .notLive)
+            XCTAssertEqual(recovery.recover(kind: .proxies, config: ProxyConfig(), ownership: { SurfaceOwnership(probe: gone, witness: nil) }), .restored(.ownerGone(.portRefused(witness: nil))))
+            XCTAssertEqual(try store.snapshot().services[0].proxies, original.services[0].proxies)
         }
     }
 
@@ -972,11 +991,11 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             let disabled: [String: NetworkSettingValue] = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(7777), "HTTPEnable": .number(0),
                                                           "ProxyAutoConfigEnable": .number(0), "ProxyAutoConfigURLString": .text("http://localhost:7777/proxy.pac")]
             store.edit { $0.services[0].proxies = disabled; $0.services[1].proxies = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(7777), "HTTPEnable": .number(1)] }
-            XCTAssertFalse(try recovery.proxyListenerIsLive(config: ProxyConfig(), probe: { _ in true }))
+            XCTAssertEqual(try recovery.proxyListenerLiveness(config: ProxyConfig(), probe: { _ in .live }), .notLive)
             store.edit { $0.services[0].proxies["HTTPEnable"] = .number(1); $0.services[0].enabled = false }
-            XCTAssertFalse(try recovery.proxyListenerIsLive(config: ProxyConfig(), probe: { _ in true }))
+            XCTAssertEqual(try recovery.proxyListenerLiveness(config: ProxyConfig(), probe: { _ in .live }), .notLive)
             store.edit { $0.services[0].enabled = true }
-            XCTAssertTrue(try recovery.proxyListenerIsLive(config: ProxyConfig(), probe: { _ in true }))
+            XCTAssertEqual(try recovery.proxyListenerLiveness(config: ProxyConfig(), probe: { _ in .live }), .live)
         }
     }
 
@@ -1076,6 +1095,42 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             XCTAssertEqual(try store.snapshot().services[0].dns, localDNS)
             try dns.clear(logger: nil)
         }
+    }
+
+    /// Decision 0041: a target the helper's relay finds refused twice means the
+    /// relay is an orphan, so recovery stops it on every path that acts on that
+    /// verdict, not only the one that ends in a restore.
+    func testAWitnessedRefusalStopsTheRelayWhateverTheRestoreEndsIn() throws {
+        func manager(_ journal: PlatformStateJournal, _ recovery: LocationSettingsRecovery, _ status: DNSRelayStatus) -> (SystemDNSManager, RecordingPrivilegeClient) {
+            let privilege = RecordingPrivilegeClient()
+            privilege.relayStatus = status
+            return (SystemDNSManager(privilegeClient: privilege, journal: journal, resolverLiveness: { _ in .inconclusive },
+                                     relayRecheckPause: { _ in }, locationRecovery: recovery), privilege)
+        }
+        let refused = DNSRelayStatus.relaying(targetPort: 5053, target: .refused)
+        try withRecovery { store, journal, recovery, _ in
+            store.edit { $0.services[0].dns = localDNS }
+            let (dns, privilege) = manager(journal, recovery, refused)
+            XCTAssertEqual(dns.restoreIfNeeded(logger: nil), .nothingToDo(.nothingRecorded))
+            XCTAssertEqual(privilege.commands(matching: .stopDNSRelay).count, 1, "leftover settings and no records")
+
+            let (answered, untouched) = manager(journal, recovery, .relaying(targetPort: 5053, target: .answered))
+            XCTAssertEqual(answered.restoreIfNeeded(logger: nil), .declinedLiveListener(.relayTargetAnswered))
+            XCTAssertTrue(untouched.commands(matching: .stopDNSRelay).isEmpty, "a live session keeps its relay")
+        }
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("location-unreadable-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        try Data("not json".utf8).write(to: file)
+        let store = machine()
+        store.edit { $0.services[0].dns = localDNS }
+        let journal = PlatformStateJournal(fileURL: file)
+        let (dns, privilege) = manager(journal, LocationSettingsRecovery(store: store, journal: journal, emit: { _ in }), refused)
+        guard case .failed = dns.restoreIfNeeded(logger: nil) else { return XCTFail("an unreadable journal fails the recovery") }
+        XCTAssertNotEqual(try store.snapshot().services[0].dns, localDNS, "the leftover settings were cleared")
+        XCTAssertEqual(privilege.commands(matching: .stopDNSRelay).count, 1, "and the relay they pointed at was stopped")
     }
 
     func testLoginwindowDeferredRestorationStopsDNSRelayAndRetainsPrior() throws {

@@ -14,7 +14,7 @@ final class LoopbackPortProbeTests: XCTestCase {
         let (fd, port) = try makeListener()
         defer { close(fd) }
 
-        XCTAssertTrue(LoopbackPortProbe.isServed(port: port))
+        XCTAssertEqual(LoopbackPortProbe.liveness(port: port), .live)
     }
 
     /// The case that matters: after a crash the recorded settings point at a
@@ -23,13 +23,13 @@ final class LoopbackPortProbeTests: XCTestCase {
         let (fd, port) = try makeListener()
         close(fd)
 
-        XCTAssertFalse(LoopbackPortProbe.isServed(port: port))
+        XCTAssertEqual(LoopbackPortProbe.liveness(port: port), .notLive)
     }
 
     func testRejectsPortsOutsideTheValidRange() {
-        XCTAssertFalse(LoopbackPortProbe.isServed(port: 0))
-        XCTAssertFalse(LoopbackPortProbe.isServed(port: -1))
-        XCTAssertFalse(LoopbackPortProbe.isServed(port: 65_536))
+        XCTAssertEqual(LoopbackPortProbe.liveness(port: 0), .notLive)
+        XCTAssertEqual(LoopbackPortProbe.liveness(port: -1), .notLive)
+        XCTAssertEqual(LoopbackPortProbe.liveness(port: 65_536), .notLive)
     }
 
     /// Binds `127.0.0.1:0` and returns the port the kernel assigned.

@@ -9,39 +9,6 @@ import ConduitShared
 import ProxyControlBridge
 import RuntimeEvents
 
-/// A loopback TCP listener the test holds, so a proxy that binds its port fails as on a contended port.
-private final class HeldTCPListener {
-    let port: Int
-    private let descriptor: Int32
-
-    init() throws {
-        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }
-        var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-        let bound = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
-        }
-        var chosen = sockaddr_in()
-        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let named = withUnsafeMutablePointer(to: &chosen) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.getsockname(fd, $0, &length) }
-        }
-        guard bound == 0, Darwin.listen(fd, 1) == 0, named == 0 else {
-            Darwin.close(fd)
-            throw CocoaError(.fileWriteUnknown)
-        }
-        descriptor = fd
-        port = Int(UInt16(bigEndian: chosen.sin_port))
-    }
-
-    deinit {
-        Darwin.close(descriptor)
-    }
-}
-
 /// The actual framed client, except that every subscription it opens takes its slot and then ends at once, as a stream the host ended early.
 private struct EarlyEndingClient: RuntimeClient {
     let inner: any RuntimeClient

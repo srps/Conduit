@@ -192,6 +192,9 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     private var _services: [String: Service]
     private var _launchdEnvironment: [String: String] = [:]
     private var _dnsRelayRunning = false
+    private var _dnsRelayTargetPort: Int?
+    private var _relayTarget: DNSRelayTargetVerdict?
+    private var _relayStatusFailure: (any Error)?
     private var _refusedScripts: [String] = []
     private var _failingSetenv: Set<String> = []
 
@@ -224,6 +227,23 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
 
     package var dnsRelayRunning: Bool {
         lock.withLock { _dnsRelayRunning }
+    }
+
+    /// What a query to the relay's target finds, as the helper reports it. `nil`, the default, is a helper that predates
+    /// `dns-relay-status`.
+    package var relayTarget: DNSRelayTargetVerdict? {
+        get { lock.withLock { _relayTarget } }
+        set { lock.withLock { _relayTarget = newValue } }
+    }
+
+    /// Thrown by `dnsRelayStatus`, as a helper that cannot be reached would.
+    package var relayStatusFailure: (any Error)? {
+        get { lock.withLock { _relayStatusFailure } }
+        set { lock.withLock { _relayStatusFailure = newValue } }
+    }
+
+    package func leaveRelayRunning(targetPort: Int) {
+        lock.withLock { _dnsRelayRunning = true; _dnsRelayTargetPort = targetPort }
     }
 
     /// Variable names whose `launchctl setenv` fails, as a launchd that
@@ -300,10 +320,18 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
         }
     }
 
+    private var _failsServiceListing = false
+    /// `networksetup -listallnetworkservices` fails, as it can mid-teardown, while every other command still runs.
+    package var failsServiceListing: Bool {
+        get { lock.withLock { _failsServiceListing } }
+        set { lock.withLock { _failsServiceListing = newValue } }
+    }
+
     private func runNetworksetup(_ arguments: [String]) -> CommandResult {
         guard let command = arguments.first else { return Self.failure("networksetup: no command") }
         return lock.withLock {
             if command == "-listallnetworkservices" {
+                guard !_failsServiceListing else { return Self.failure("networksetup: could not list network services") }
                 let lines = ["An asterisk (*) denotes that a network service is disabled."] + serviceNames
                 return Self.success(lines.joined(separator: "\n"))
             }
@@ -345,7 +373,12 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     // MARK: PrivilegeClient
 
     package func dnsRelayStatus() throws -> DNSRelayStatus? {
-        try privilege.dnsRelayStatus()
+        try lock.withLock {
+            if let _relayStatusFailure { throw _relayStatusFailure }
+            guard let _relayTarget else { return nil }
+            guard _dnsRelayRunning, let _dnsRelayTargetPort else { return .notRunning }
+            return .relaying(targetPort: _dnsRelayTargetPort, target: _relayTarget)
+        }
     }
 
     package func execute(_ operation: PrivilegedOperation, values: [String]) throws {
@@ -377,9 +410,9 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
             guard let domain = values.first else { return }
             try? FileManager.default.removeItem(at: resolverDirectory.appendingPathComponent(domain))
         case .startDNSRelay:
-            lock.withLock { _dnsRelayRunning = true }
+            lock.withLock { _dnsRelayRunning = true; _dnsRelayTargetPort = values.first.flatMap { Int($0) } }
         case .stopDNSRelay:
-            lock.withLock { _dnsRelayRunning = false }
+            lock.withLock { _dnsRelayRunning = false; _dnsRelayTargetPort = nil }
         case .startTCPRelay, .stopTCPRelay, .ping:
             break
         case .applySystemProxy, .clearSystemProxy, .setProxyBypass, .setAutoproxyURL,
@@ -578,9 +611,15 @@ package final class FakeKerberosTicketRecovery: KerberosTicketRecovering, @unche
 package final class FakeDNSProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var answering: Set<Int>
-    package init(answering: Set<Int> = []) { self.answering = answering }
+    private var timingOut: Set<Int>
+    package init(answering: Set<Int> = [], timingOut: Set<Int> = []) {
+        self.answering = answering
+        self.timingOut = timingOut
+    }
     package func setAnswering(_ ports: Set<Int>) { lock.withLock { answering = ports } }
-    package func responds(onPort port: Int) -> Bool { lock.withLock { answering.contains(port) } }
+    package func liveness(onPort port: Int) -> LoopbackLiveness {
+        lock.withLock { answering.contains(port) ? .live : timingOut.contains(port) ? .inconclusive : .notLive }
+    }
 }
 
 // MARK: - InMemorySecretStore
@@ -706,6 +745,7 @@ package final class FakeNetworkLocationStore: NetworkLocationStoring, @unchecked
     private var nextActiveLocation: String?
     package init(snapshot: NetworkLocationSnapshot) { state = snapshot }
     package func snapshot() throws -> NetworkLocationSnapshot { lock.withLock { state } }
+    package var activeLocationID: String { lock.withLock { state.activeLocationID } }
     package func edit(_ body: (inout NetworkLocationSnapshot) -> Void) { lock.withLock { body(&state) } }
     package func refuseWrites(_ refuse: Bool) { lock.withLock { failWrites = refuse } }
     private var compareFailuresRemaining = 0
@@ -749,10 +789,17 @@ package final class FakeNetworkLocationObserver: NetworkLocationObserving, @unch
     private let lock = NSLock()
     private var callback: (@Sendable (Result<String, NetworkSettingsError>) -> Void)?
     private var settingsCallback: (@Sendable () -> Void)?
+    private var store: FakeNetworkLocationStore?
     package init() {}
+    package func reportsActiveLocation(of store: FakeNetworkLocationStore?) { lock.withLock { self.store = store } }
     package func start(onChange: @escaping @Sendable (Result<String, NetworkSettingsError>) -> Void,
                        onSettingsChange: @escaping @Sendable () -> Void) {
-        lock.withLock { callback = onChange; settingsCallback = onSettingsChange }
+        let initial = lock.withLock { () -> String? in
+            callback = onChange
+            settingsCallback = onSettingsChange
+            return store?.activeLocationID
+        }
+        if let initial { onChange(.success(initial)) }
     }
     package func stop() { lock.withLock { callback = nil; settingsCallback = nil } }
     package func emit(_ locationID: String) { lock.withLock { callback }?(.success(locationID)) }
@@ -800,11 +847,13 @@ package struct UnplannedFakeEffect: Error, Equatable, CustomStringConvertible {
 package final class FakeLoopbackPortProbe: @unchecked Sendable {
     private let lock = NSLock()
     private let served: Set<Int>
+    private let timingOut: Set<Int>
     private var count = 0
     private var last: Int?
 
-    package init(served: Set<Int> = []) {
+    package init(served: Set<Int> = [], timingOut: Set<Int> = []) {
         self.served = served
+        self.timingOut = timingOut
     }
 
     /// How many questions were asked.
@@ -813,12 +862,12 @@ package final class FakeLoopbackPortProbe: @unchecked Sendable {
     /// The port of the most recent question.
     package var lastAsked: Int? { lock.withLock { last } }
 
-    package func isServed(port: Int) -> Bool {
+    package func liveness(port: Int) -> LoopbackLiveness {
         lock.withLock {
             count += 1
             last = port
         }
-        return served.contains(port)
+        return served.contains(port) ? .live : timingOut.contains(port) ? .inconclusive : .notLive
     }
 }
 

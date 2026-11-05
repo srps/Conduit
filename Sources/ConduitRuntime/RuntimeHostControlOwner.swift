@@ -161,7 +161,7 @@ extension RuntimeHost: ControlCommandOwner {
         if dnsRelayUnresponsive, kernel.dnsRunState == .running, kernel.dnsError == nil {
             kernel.dnsError = Self.dnsRelayUnresponsiveError
         }
-        let projected: ControlRuntimeSnapshot
+        var projected: ControlRuntimeSnapshot
         do {
             projected = try RuntimeSnapshotControlProjection.snapshot(
                 kernel, stamp: stamp, profileName: config.profileName, collectionRevisions: collections.revisions(of: kernel)
@@ -170,6 +170,7 @@ extension RuntimeHost: ControlCommandOwner {
             // The projection names no value in its error, and none is kept. The read that asked fails closed.
             return snapshotUnavailable(.projectionFailed)
         }
+        projected.systemDNSRecoveryDeclined = systemDNSRecoveryDeclined
         guard let stamped = presentation.stamp(projected) else { return snapshotUnavailable(.revisionExhausted) }
         return stamped
     }

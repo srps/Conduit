@@ -81,7 +81,7 @@ final class PlatformOperationLockTests: XCTestCase {
                 hold.pass(launchPath, arguments)
                 return try machine.run(launchPath, arguments)
             },
-            portProbe: { _ in false }
+            portProbe: { _ in .notLive }
         )
         var config = ProxyConfig.testFixture()
         config.localPort = 3128

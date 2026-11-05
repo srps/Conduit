@@ -64,14 +64,10 @@ package final class SystemDNSManager: @unchecked Sendable {
     /// machine holds cannot pin that decision.
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
 
-    /// Whether a local resolver is actually answering on the DNS port.
-    /// Injectable so `restoreIfNeeded` is testable without a live relay,
-    /// mirroring `SystemProxyManager`'s `portProbe`.
-    private let relayIsLive: @Sendable () -> Bool
-    /// Whether a resolver answers on `127.0.0.1:port`: `probeLiveness`, and
-    /// `relayIsLive` when none is given. A host under test passes its fake
-    /// machine's answer, so it never waits on, or reads, the real port 53.
-    private let respondsOnPort: @Sendable (Int) -> Bool
+    /// A host under test passes its fake machine's answer, so it never waits
+    /// on, or reads, the real port 53.
+    private let resolverLiveness: @Sendable (Int) -> LoopbackLiveness
+    private let relayRecheckPause: @Sendable (TimeInterval) -> Void
     /// 0.1.x snapshot, imported into the journal on first launch. See
     /// `PlatformStateJournal.importLegacyDNSSnapshot`. Comes from the same
     /// `RuntimeEnvironment` as the journal — never `userDefault()` — so an
@@ -86,24 +82,26 @@ package final class SystemDNSManager: @unchecked Sendable {
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         },
-        relayIsLive: (@Sendable () -> Bool)? = nil,
-        respondsOnPort: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
+        resolverLiveness: @escaping @Sendable (Int) -> LoopbackLiveness = { SystemDNSManager.dnsLiveness(onPort: $0) },
+        relayRecheckPause: @escaping @Sendable (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
         locationRecovery: LocationSettingsRecovery? = nil,
         configProvider: @escaping @Sendable () -> ProxyConfig = { ProxyConfig() }
     ) {
         self.privilegeClient = privilegeClient
         self.journal = journal
         self.commandRunner = commandRunner
-        self.relayIsLive = relayIsLive ?? { respondsOnPort(53) }
-        self.respondsOnPort = respondsOnPort
+        self.resolverLiveness = resolverLiveness
+        self.relayRecheckPause = relayRecheckPause
         self.legacySnapshotFile = legacySnapshotFile
         self.locationRecovery = locationRecovery
         self.configProvider = configProvider
     }
 
-    package func reconcileLocation(apply: Bool, forwarderPort: Int, logger: (any LogSink)? = nil) throws {
+    /// Returns whether it started the relay and pointed system DNS at it.
+    @discardableResult
+    package func reconcileLocation(apply: Bool, forwarderPort: Int, logger: (any LogSink)? = nil) throws -> Bool {
         try operations.withLock {
-            guard let locationRecovery else { return }
+            guard let locationRecovery else { return false }
             // Old locations must recover even if relay readiness fails.
             try locationRecovery.restore(kind: .dns, inactiveOnly: apply)
             if apply {
@@ -112,6 +110,7 @@ package final class SystemDNSManager: @unchecked Sendable {
                 // relay started. Its idempotent start must succeed first.
                 try self.apply(forwarderPort: forwarderPort, logger: logger)
             }
+            return apply
         }
     }
 
@@ -359,60 +358,85 @@ package final class SystemDNSManager: @unchecked Sendable {
         defer { operations.unlock() }
         importLegacySnapshotIfPresent(logger: logger)
         if let locationRecovery {
-            return locationRecovery.recover(kind: .dns, config: configProvider(), listenerIsLive: relayIsLive())
+            // A twice-refused target makes the relay an orphan whatever the
+            // restore then ends in: cleared leftovers, no records, or a failure.
+            var relayOrphaned = false
+            let outcome = locationRecovery.recover(kind: .dns, config: configProvider()) {
+                let verdict = ownership()
+                relayOrphaned = verdict == .ownerGone(.relayTargetRefused)
+                return verdict
+            }
+            if relayOrphaned { stopRelay(logger: logger) }
+            return outcome
         }
         guard hasSavedInterfaces(), let savedAt = journal.oldestRecordDate(for: .systemDNS) else {
             return .nothingToDo(.nothingRecorded)
         }
 
         let stalenessThreshold: TimeInterval = 7 * 24 * 3600
-        let isStale = Date().timeIntervalSince(savedAt) > stalenessThreshold
-
-        if isStale {
-            return performRestore(stale: true, logger: logger)
+        if Date().timeIntervalSince(savedAt) > stalenessThreshold {
+            return performRestore(.stale, logger: logger)
         }
 
-        // "Is anything holding port 53?" was the wrong question, and repairing
-        // the `lsof` path that made it always answer "no" is what exposed that.
-        // The relay does not run in the app: it runs inside the privileged
-        // LaunchDaemon, which is `KeepAlive` and outlives us. A `SIGKILL`
-        // therefore leaves it listening on 53 and forwarding to a forwarder
-        // port nothing serves any more — so the port is held in precisely the
-        // crash this function exists to repair, and gating on "held" switched
-        // launch-time recovery off at the moment it was needed.
-        //
-        // Liveness answers what is actually being asked. A resolver that still
-        // answers belongs to a session serving this machine, and taking its DNS
-        // away would break every client on it. One that answers nothing is
-        // residue, whoever is holding the socket.
-        if relayIsLive() {
-            // Any interface, not `isApplied()`'s every interface. A machine
-            // where only some services still point at 127.0.0.1 — a VPN
-            // interface that came back with its own resolvers, a service added
-            // since — reads as "not applied", and deleting on that basis throws
-            // away the recorded servers for the interfaces that are still
-            // pinned. That branch was unreachable while the probe always said
-            // "port free"; it is not any more.
+        switch ownership() {
+        case .anotherSessionLive(let evidence):
             if loopbackResidueExists() {
-                return .declinedLiveListener
+                return .declinedLiveListener(evidence)
             }
             deleteSavedState()
             return .discardedStaleRecords
+        case .unknown(let witness):
+            return .declinedInconclusiveProbe(witness: witness)
+        case .ownerGone(let evidence):
+            return performRestore(.ownerGone(evidence), logger: logger)
         }
+    }
 
-        return performRestore(stale: false, logger: logger)
+    static let relayRefusalRecheckDelay: TimeInterval = 0.5
+
+    private func ownership() -> SurfaceOwnership {
+        let gap: RelayWitnessGap
+        switch readRelay() {
+        case .reading(.relaying(let port, .refused)):
+            relayRecheckPause(Self.relayRefusalRecheckDelay)
+            switch readRelay() {
+            case .reading(.relaying(port, .refused)): return .ownerGone(.relayTargetRefused)
+            case .reading(.relaying(_, .answered)): return .anotherSessionLive(.relayTargetAnswered)
+            default: gap = .refusalUnconfirmed
+            }
+        case .reading(.relaying(_, .answered)): return .anotherSessionLive(.relayTargetAnswered)
+        case .reading(.relaying(_, .silent)): gap = .targetSilent
+        case .reading(.notRunning): gap = .relayNotRunning
+        case .noStatus: gap = .noStatus
+        case .unavailable: gap = .helperUnavailable
+        }
+        return SurfaceOwnership(probe: resolverLiveness(53), witness: gap)
+    }
+
+    private enum RelayReading {
+        case reading(DNSRelayStatus)
+        case noStatus
+        case unavailable
+    }
+
+    private func readRelay() -> RelayReading {
+        do {
+            return try privilegeClient.dnsRelayStatus().map(RelayReading.reading) ?? .noStatus
+        } catch {
+            return .unavailable
+        }
     }
 
     /// A restore that throws, or that keeps records because some interface
     /// could not be put back, is a failure of recovery: the records are what
     /// the next launch retries from.
-    private func performRestore(stale: Bool, logger: (any LogSink)?) -> LaunchRecoveryOutcome {
+    private func performRestore(_ ground: LaunchRecoveryOutcome.RestoreGround, logger: (any LogSink)?) -> LaunchRecoveryOutcome {
         do {
             try clear(logger: logger)
         } catch {
             return .failed(reason: error.displayDescription)
         }
-        return hasSavedInterfaces() ? .failed(reason: "records_kept") : .restored(stale: stale)
+        return hasSavedInterfaces() ? .failed(reason: "records_kept") : .restored(ground)
     }
 
     // MARK: - State Detection
@@ -496,7 +520,7 @@ package final class SystemDNSManager: @unchecked Sendable {
         if let started { return started }
         // Outside the lock: the probe waits up to two seconds, and a stop on
         // the main actor should not wait that out.
-        guard relayIsLive() else {
+        guard resolverLiveness(53) == .live else {
             // A stop that ran during the probe took the relay down on
             // purpose. That is not a pipeline to report as unresponsive.
             return operations.withLock { hasSavedInterfaces() } ? .unresponsive : .notManaged
@@ -667,20 +691,16 @@ package final class SystemDNSManager: @unchecked Sendable {
     // MARK: - Liveness probe
 
     package func probeLiveness(port: Int = 53) -> Bool {
-        respondsOnPort(port)
+        resolverLiveness(port) == .live
     }
 
-    /// Whether a resolver on `127.0.0.1:port` answers a query at all.
-    ///
-    /// Static because it is also the default for `relayIsLive`, which has to be
-    /// supplied before `self` exists. The generous timeout is deliberate on
-    /// that path: reading a live-but-slow relay as dead makes launch-time
-    /// recovery tear the DNS out from under a session that is serving the
-    /// machine, which is worse than the second it costs to be sure.
-    package static func dnsResponds(onPort port: Int, timeoutMilliseconds: Int32 = 2_000) -> Bool {
+    /// The socket is connected, so a port nothing holds is refused at once
+    /// instead of waited out.
+    package static func dnsLiveness(onPort port: Int, timeoutMilliseconds: Int32 = 2_000) -> LoopbackLiveness {
+        guard (1...65_535).contains(port) else { return .notLive }
         let query = DNSWireFormat.buildQuery(domain: DNSWireFormat.livenessProbeDomain, txID: 0xFACE)
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
-        guard fd >= 0 else { return false }
+        guard fd >= 0 else { return .inconclusive }
         defer { close(fd) }
 
         var addr = sockaddr_in()
@@ -689,22 +709,22 @@ package final class SystemDNSManager: @unchecked Sendable {
         addr.sin_port = UInt16(port).bigEndian
         addr.sin_addr.s_addr = inet_addr("127.0.0.1")
 
-        let sent = query.withUnsafeBufferPointer { buf in
-            withUnsafePointer(to: &addr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                    sendto(fd, buf.baseAddress, buf.count, 0, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
+        let connected = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        guard sent > 0 else { return false }
+        guard connected == 0 else { return .inconclusive }
+        let sent = query.withUnsafeBufferPointer { buf in Darwin.send(fd, buf.baseAddress, buf.count, 0) }
+        guard sent == query.count else { return errno == ECONNREFUSED ? .notLive : .inconclusive }
 
         var pollFD = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-        let ready = poll(&pollFD, 1, timeoutMilliseconds)
-        guard ready > 0, pollFD.revents & Int16(POLLIN) != 0 else { return false }
+        guard poll(&pollFD, 1, timeoutMilliseconds) > 0 else { return .inconclusive }
 
         var buf = [UInt8](repeating: 0, count: 512)
         let n = recv(fd, &buf, buf.count, 0)
-        return n >= 12
+        if n < 0 { return errno == ECONNREFUSED ? .notLive : .inconclusive }
+        return n >= 12 ? .live : .notLive
     }
 
 }

@@ -253,7 +253,7 @@ final class MainThreadPark: @unchecked Sendable {
 /// A privilege client that offers every step to a `HeldCall` before
 /// handing the batch to the machine behind it.
 final class HoldingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
-    func dnsRelayStatus() throws -> DNSRelayStatus? { nil }
+    func dnsRelayStatus() throws -> DNSRelayStatus? { try base.dnsRelayStatus() }
 
     private let base: any PrivilegeClient
     private let hold: HeldCall

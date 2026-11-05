@@ -291,6 +291,12 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         /// build (#121), which is the remedy; `message` is the helper's own
         /// explanation.
         case callerNotAccepted(message: String)
+        /// Installed and serving, but without a feature this build uses
+        /// (`HelperFeature`): it predates them. Everything it had still
+        /// works; updating adds the rest.
+        case updateAvailable
+
+        package var serves: Bool { self == .installed || self == .updateAvailable }
     }
 
     package var status: Status {
@@ -339,7 +345,8 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         guard response.protocolVersion == HelperProtocolVersion.current else {
             return .outdated
         }
-        return response.success ? .installed : .notResponding
+        guard response.success else { return .notResponding }
+        return Set(HelperFeature.allCases).isSubset(of: response.features ?? []) ? .installed : .updateAvailable
     }
 
     package func execute(_ operation: PrivilegedOperation, values: [String]) throws {
@@ -439,13 +446,17 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
 
     package func dnsRelayStatus() throws -> DNSRelayStatus? {
         let command = HelperCommand.dnsRelayStatus
+        guard FileManager.default.fileExists(atPath: binaryPath) else {
+            relayStatusUnavailable("reason=not_installed")
+            return nil
+        }
         let response: HelperResponse
         do {
             response = try sendRequest(HelperRequest(command: command, values: []))
-        } catch let error as PrivilegeClientError {
-            throw error
         } catch {
-            throw PrivilegeClientError.communicationFailed(error.displayDescription)
+            let failure = error as? PrivilegeClientError ?? .communicationFailed(error.displayDescription)
+            relayStatusUnavailable("reason=unreachable error=\(failure.displayDescription)")
+            throw failure
         }
         if let refusal = response.refusal {
             throw refused(refusal, command: command, message: response.errorMessage)
@@ -454,14 +465,27 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         if response.protocolVersion != HelperProtocolVersion.current {
             reason = "reason=protocol_mismatch protocol=\(response.protocolVersion)"
         } else if !response.success {
-            reason = "reason=helper_error helper_error=\(response.errorMessage ?? "none")"
+            reason = "reason=\(failedStatusReason()) helper_error=\(response.errorMessage ?? "none")"
         } else if let wire = response.dnsRelay, let status = DNSRelayStatus(wire) {
             return status
         } else {
             reason = "reason=unreadable_status"
         }
-        eventSink?(RuntimeEvent(kind: .auth, event: "auth.privilege_helper_relay_status_unavailable", detail: reason))
+        relayStatusUnavailable(reason)
         return nil
+    }
+
+    private func failedStatusReason() -> String {
+        do {
+            let ping = try sendRequest(HelperRequest(command: .ping, values: []))
+            return ping.success && !(ping.features ?? []).contains(.dnsRelayStatus) ? "helper_predates_command" : "helper_error"
+        } catch {
+            return "helper_error ping_error=\(error.displayDescription)"
+        }
+    }
+
+    private func relayStatusUnavailable(_ detail: String) {
+        eventSink?(RuntimeEvent(kind: .auth, event: "auth.privilege_helper_relay_status_unavailable", detail: detail))
     }
 
     package func ping() -> Bool {

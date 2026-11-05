@@ -115,6 +115,7 @@ final class AppState: ObservableObject {
     private var helperChangeInFlight = false
     /// The DNS module's last observed error while it ran, for the degraded notification's transition.
     private var lastDNSError: String?
+    private var lastSnapshotDeclinedSystemDNSRecovery = false
     /// One explicit reload at a time; a second request while one runs is refused with a message.
     private(set) var reloading = false
     /// The login item refused the last registration; the next verified Settings save or successful proxy Start tries again.
@@ -868,6 +869,24 @@ final class AppState: ObservableObject {
         send(.testDNS) { _ in }
     }
 
+    /// A running DNS whose relay start failed keeps the decline until its health timer restarts the relay; a Start then has nothing to do.
+    var mayStartDNSAfterDeclinedRecovery: Bool {
+        MenuBarPresentation.moduleToggleAction(for: runtime.dnsRunState) == .start
+    }
+
+    func startDNSAfterDeclinedRecovery() {
+        guard mayStartDNSAfterDeclinedRecovery else { return }
+        toggleDNS()
+    }
+
+    func restoreSystemDNSByStoppingDNS() {
+        guard controlsEnabled else { return }
+        send(.stop(.dns)) { _ in }
+    }
+
+    static let systemDNSRecoveryDeclinedTitle = "System DNS still points at Conduit"
+    static let systemDNSRecoveryDeclinedBody = "Its relay is not answering, so names may not resolve. Start DNS, or restore your DNS settings."
+
     /// One command through the framed client and its settlement. A saved command's own causal writes are handed to the editor.
     ///
     /// A Stop is never dropped behind ordinary work: each module has a Stop lane of its own, as the host's Stop lanes do, outside the
@@ -1076,6 +1095,10 @@ final class AppState: ObservableObject {
             notificationManager.post(title: "DNS Forwarder Degraded", body: dnsError)
         }
         lastDNSError = dnsError
+        if snapshot.systemDNSRecoveryDeclined, !lastSnapshotDeclinedSystemDNSRecovery {
+            notificationManager.post(title: Self.systemDNSRecoveryDeclinedTitle, body: Self.systemDNSRecoveryDeclinedBody)
+        }
+        lastSnapshotDeclinedSystemDNSRecovery = snapshot.systemDNSRecoveryDeclined
     }
 
     /// Typed recovery events classify the generic notifications; no event is paired with a snapshot.
@@ -1637,6 +1660,7 @@ extension HelperToolPrivilegeClient.Status {
         case .waitingForConsoleUser: self = .waitingForConsoleUser
         case .unauthorized: self = .unauthorized
         case .callerNotAccepted: self = .callerNotAccepted(message: "")
+        case .updateAvailable: self = .updateAvailable
         }
     }
 }

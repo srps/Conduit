@@ -23,8 +23,9 @@ import RuntimeEvents
 ///
 /// It checks a failed start on a held port, a restart on the same host, and a stop, against the fakes; then the configuration workflow;
 /// then a stop admitted before a held start binds, and the next start; then the connection audit of one served loopback request and of
-/// a burst of connections under mixed-priority owner load; and, last,
-/// a reload's flag action held on the platform queue while a Stop is admitted, with the main thread parked throughout.
+/// a burst of connections under mixed-priority owner load; then
+/// a reload's flag action held on the platform queue while a Stop is admitted, with the main thread parked throughout; and, last, a
+/// declined launch recovery whose restores the first location report withholds.
 /// Every path after
 /// the root is taken ends in one release step: the root's reference is dropped, a fresh acquisition proves the lease
 /// closed, and the scratch directory is removed only when that proof and the close-failure count both agree. A shutdown
@@ -150,15 +151,23 @@ enum RuntimeHostEffectsScenario {
                 assertions += flagged.assertions
                 notes += flagged.notes
             }
+            var declined = Shutdown(quiesced: false, assertions: [], notes: [], pinnedHost: nil)
             if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
                 && captured.quiesced && modules.quiesced && woken.quiesced && audited.quiesced && flagged.quiesced {
+                declined = await exerciseDeclinedRecoveryLocationReport(session: session!, environment: environment, fakes: fakes, home: home)
+                assertions += declined.assertions
+                notes += declined.notes
+            }
+            if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
+                && captured.quiesced && modules.quiesced && woken.quiesced && audited.quiesced && flagged.quiesced
+                && declined.quiesced {
                 releaseRoot(&session, environment: environment, scratch: scratch, releaseFailures: releaseFailures,
                             assertions: &assertions, notes: &notes)
             } else {
                 // The host keeps its session, so the root stays claimed for the rest of the process. The slot is the
                 // only reference this scenario keeps, and the scratch directory stays on disk for inspection.
                 // The latest exercise's host first, as each one runs only after the one before it quiesced.
-                let exercises = [flagged, audited, woken, modules, captured, respelling, source, lifecycle, workflow, shutdown]
+                let exercises = [declined, flagged, audited, woken, modules, captured, respelling, source, lifecycle, workflow, shutdown]
                 unconfirmedHost = exercises.lazy.compactMap(\.pinnedHost).first
                 assertions.append(.init("the shutdown is confirmed", false))
                 notes.append("shutdown not confirmed: host pinned until process exit; root and scratch kept at \(scratch.path)")
@@ -184,7 +193,8 @@ enum RuntimeHostEffectsScenario {
     private static func effects(
         _ fakes: Fakes, home: URL, pac: (any PacEvaluator)? = nil, wake: FakeSystemWakeObserver = FakeSystemWakeObserver(),
         hold: HeldSetenv? = nil, vpn: FakeVPNStatusObserver = FakeVPNStatusObserver(),
-        path: FakeNetworkPathObserver = FakeNetworkPathObserver()
+        path: FakeNetworkPathObserver = FakeNetworkPathObserver(),
+        locations: FakeNetworkLocationStore? = nil
     ) -> RuntimeHostEffects {
         let machine = fakes.machine
         return RuntimeHostEffects(
@@ -194,15 +204,20 @@ enum RuntimeHostEffectsScenario {
             gss: .injected { fakes.gss },
             pacEvaluator: pac ?? fakes.pac,
             portHolderProbe: fakes.probe,
-            loopbackPortProbe: fakes.loopback.isServed(port:),
+            loopbackPortProbe: fakes.loopback.liveness(port:),
             commandRunner: { launchPath, arguments in
                 hold?.pass(launchPath, arguments)
                 return try machine.run(launchPath, arguments)
             },
-            dnsResponds: fakes.dns.responds(onPort:),
+            dnsProbe: fakes.dns.liveness(onPort:),
+            relayRecheckPause: { _ in },
             networkPath: path,
-            networkLocation: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil },
+            networkLocation: {
+                let observer = FakeNetworkLocationObserver()
+                observer.reportsActiveLocation(of: locations)
+                return observer
+            }(),
+            networkLocationStoreFactory: { _ in locations },
             vpnStatusMonitor: { _, _ in vpn },
             wake: wake,
             homeDirectory: home,
@@ -1277,6 +1292,98 @@ enum RuntimeHostEffectsScenario {
             await host.shutdown()
             quiesced = await settledAndFlushed()
             assertions.append(.init("the wake error path settled the host and confirmed its flush", quiesced))
+        }
+        return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    @RuntimeActor
+    private static func exerciseDeclinedRecoveryLocationReport(
+        session: StateRootSession,
+        environment: RuntimeEnvironment,
+        fakes: Fakes,
+        home: URL
+    ) async -> Shutdown {
+        var assertions: [ScenarioAssertion] = []
+        var notes: [String] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+        let homeLocation = "11111111-1111-1111-1111-111111111111"
+        let locations = FakeNetworkLocationStore(snapshot: .init(activeLocationID: homeLocation, services: [
+            LocationServiceSettings(locationID: homeLocation, serviceID: "33333333-3333-3333-3333-333333333333", name: "Wi-Fi",
+                                    enabled: true, proxies: ["HTTPProxy": .text("home.example"), "HTTPPort": .number(8080),
+                                                             "HTTPEnable": .number(1)],
+                                    dns: ["ServerAddresses": .list(["192.0.2.1"])]),
+        ]))
+        let crashedPort = 47113
+        let slow = Fakes(machine: fakes.machine, probe: fakes.probe, loopback: FakeLoopbackPortProbe(timingOut: [crashedPort]),
+                         pac: fakes.pac, gss: fakes.gss, helper: fakes.helper, secrets: fakes.secrets,
+                         dns: FakeDNSProbe(timingOut: [53]))
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.localPACEnabled = false
+        config.pacRoutingEnabled = false
+        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        let journal = PlatformStateJournal(fileURL: environment.platformStateFile)
+        let host: RuntimeHost
+        let earlier: Int
+        let crashed: NetworkLocationSnapshot
+        do {
+            earlier = try recordedEvents(in: environment.eventsFile).count
+            try ProxyConfigPersistence.save(config, in: environment)
+            try PlatformConfigPersistence.save(PlatformIntegrationConfig(manageSystemProxy: true, manageSystemDNS: true), in: environment)
+            let crashedRun = LocationSettingsRecovery(store: locations, journal: journal, emit: { _ in })
+            try crashedRun.apply(kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])], config: config)
+            try crashedRun.apply(kind: .proxies, desired: ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(crashedPort),
+                                                           "HTTPEnable": .number(1)], config: config)
+            crashed = try locations.snapshot()
+            host = try await RuntimeHost.open(
+                stateSession: session,
+                logger: DiscardingLogSink(),
+                startupAllowsMissing: false,
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                terminalExit: {},
+                effects: effects(slow, home: home, locations: locations)
+            )
+        } catch {
+            notes.append("declined-recovery host did not open: \(error.localizedDescription)")
+            check("the declined-recovery host opened over the crashed run's records", false)
+            return Shutdown(quiesced: true, assertions: assertions, notes: notes, pinnedHost: nil)
+        }
+        func withheld() async throws -> [String] {
+            _ = await host.flushEvents()
+            return try recordedEvents(in: environment.eventsFile).dropFirst(earlier)
+                .filter { $0.event == "platform.location_restore_withheld" }.compactMap(\.detail)
+        }
+        func settledAndFlushed() async -> Bool {
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            let flush = await host.flushEvents()
+            return settled == .settled && flush.allConfirmed
+        }
+
+        var quiesced = false
+        do {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            var reported = try await withheld()
+            while reported.count < 2, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+                reported = try await withheld()
+            }
+            check("the first location report withholds both declined restores with an event", reported == [
+                "surface=proxies reason=launch_recovery_declined", "surface=dns reason=launch_recovery_declined",
+            ])
+            check("the declined settings stay as the crashed run left them", try locations.snapshot() == crashed)
+            let nextLaunchJournal = PlatformStateJournal(fileURL: environment.platformStateFile)
+            check("the declined records stay for the user or a later launch",
+                  nextLaunchJournal.hasRecords(for: .systemDNS) && nextLaunchJournal.hasRecords(for: .systemProxy))
+            await host.shutdown()
+            quiesced = await settledAndFlushed()
+            check("the declined-recovery host settles and its observability flush is confirmed", quiesced)
+        } catch {
+            check("the declined-recovery exercise completed without error", false)
+            notes.append("declined-recovery exercise error: \(error.localizedDescription)")
+            await host.shutdown()
+            quiesced = await settledAndFlushed()
+            assertions.append(.init("the declined-recovery error path settled the host and confirmed its flush", quiesced))
         }
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
     }

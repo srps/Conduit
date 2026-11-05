@@ -108,7 +108,7 @@ enum SettingsRetryScenarios {
             privilegeClient: machine,
             journal: journal,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            portProbe: { _ in false }
+            portProbe: { _ in .notLive }
         )
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 3128
