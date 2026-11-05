@@ -1097,6 +1097,42 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    /// Decision 0041: a target the helper's relay finds refused twice means the
+    /// relay is an orphan, so recovery stops it on every path that acts on that
+    /// verdict, not only the one that ends in a restore.
+    func testAWitnessedRefusalStopsTheRelayWhateverTheRestoreEndsIn() throws {
+        func manager(_ journal: PlatformStateJournal, _ recovery: LocationSettingsRecovery, _ status: DNSRelayStatus) -> (SystemDNSManager, RecordingPrivilegeClient) {
+            let privilege = RecordingPrivilegeClient()
+            privilege.relayStatus = status
+            return (SystemDNSManager(privilegeClient: privilege, journal: journal, resolverLiveness: { _ in .inconclusive },
+                                     relayRecheckPause: { _ in }, locationRecovery: recovery), privilege)
+        }
+        let refused = DNSRelayStatus.relaying(targetPort: 5053, target: .refused)
+        try withRecovery { store, journal, recovery, _ in
+            store.edit { $0.services[0].dns = localDNS }
+            let (dns, privilege) = manager(journal, recovery, refused)
+            XCTAssertEqual(dns.restoreIfNeeded(logger: nil), .nothingToDo(.nothingRecorded))
+            XCTAssertEqual(privilege.commands(matching: .stopDNSRelay).count, 1, "leftover settings and no records")
+
+            let (answered, untouched) = manager(journal, recovery, .relaying(targetPort: 5053, target: .answered))
+            XCTAssertEqual(answered.restoreIfNeeded(logger: nil), .declinedLiveListener(.relayTargetAnswered))
+            XCTAssertTrue(untouched.commands(matching: .stopDNSRelay).isEmpty, "a live session keeps its relay")
+        }
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("location-unreadable-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        try Data("not json".utf8).write(to: file)
+        let store = machine()
+        store.edit { $0.services[0].dns = localDNS }
+        let journal = PlatformStateJournal(fileURL: file)
+        let (dns, privilege) = manager(journal, LocationSettingsRecovery(store: store, journal: journal, emit: { _ in }), refused)
+        guard case .failed = dns.restoreIfNeeded(logger: nil) else { return XCTFail("an unreadable journal fails the recovery") }
+        XCTAssertNotEqual(try store.snapshot().services[0].dns, localDNS, "the leftover settings were cleared")
+        XCTAssertEqual(privilege.commands(matching: .stopDNSRelay).count, 1, "and the relay they pointed at was stopped")
+    }
+
     func testLoginwindowDeferredRestorationStopsDNSRelayAndRetainsPrior() throws {
         try withRecovery { store, journal, recovery, _ in
             let privilege = RecordingPrivilegeClient()
