@@ -442,7 +442,7 @@ final class UDPRelayTests: XCTestCase {
         defer { relay.stop() }
 
         let started = Date()
-        XCTAssertEqual(relay.status(boundMilliseconds: 30_000), .relaying(targetPort: targetPort, target: .refused))
+        XCTAssertEqual(try relay.status(boundMilliseconds: 30_000), .relaying(targetPort: targetPort, target: .refused))
         XCTAssertLessThan(Date().timeIntervalSince(started), 10, "a refusal is the kernel's answer, not the end of the bound")
     }
 
@@ -454,7 +454,7 @@ final class UDPRelayTests: XCTestCase {
         try relay.start(listenPort: 0, targetPort: try boundPort(target))
         defer { relay.stop() }
 
-        XCTAssertEqual(relay.status(boundMilliseconds: 50), .relaying(targetPort: try boundPort(target), target: .silent))
+        XCTAssertEqual(try relay.status(boundMilliseconds: 50), .relaying(targetPort: try boundPort(target), target: .silent))
     }
 
     func testAStatusOfATargetThatRepliesIsAnswered() throws {
@@ -470,19 +470,19 @@ final class UDPRelayTests: XCTestCase {
             return response
         }
 
-        XCTAssertEqual(relay.status(boundMilliseconds: 30_000), .relaying(targetPort: try boundPort(target), target: .answered))
+        XCTAssertEqual(try relay.status(boundMilliseconds: 30_000), .relaying(targetPort: try boundPort(target), target: .answered))
         answer.join()
     }
 
     func testAStatusOfARelayThatIsNotListeningIsNotRunning() throws {
         let relay = UDPRelay()
-        XCTAssertEqual(relay.status(boundMilliseconds: 50), .notRunning)
+        XCTAssertEqual(try relay.status(boundMilliseconds: 50), .notRunning)
         let target = createUDPSocket(port: 0)
         XCTAssertGreaterThanOrEqual(target, 0)
         defer { close(target) }
         try relay.start(listenPort: 0, targetPort: try boundPort(target))
         relay.stop()
-        XCTAssertEqual(relay.status(boundMilliseconds: 50), .notRunning)
+        XCTAssertEqual(try relay.status(boundMilliseconds: 50), .notRunning)
     }
 
     private final class Responder: @unchecked Sendable {

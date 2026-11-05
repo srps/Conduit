@@ -95,6 +95,26 @@ package struct PrivilegedBatchStep: Sendable, Equatable {
     }
 }
 
+/// What the helper's DNS relay on `127.0.0.1:53` is doing, as the helper
+/// measured it. The kernel's reading of the wire's `HelperDNSRelayStatus`.
+package enum DNSRelayStatus: Sendable, Equatable {
+    case notRunning
+    /// The relay holds the port and forwards to `targetPort`; `target` is what
+    /// a fresh query to that port found.
+    case relaying(targetPort: Int, target: DNSRelayTargetVerdict)
+}
+
+package enum DNSRelayTargetVerdict: String, Sendable, Equatable {
+    /// The kernel refused the port: nothing is bound there. The forwarder the
+    /// relay was started for has exited.
+    case refused
+    /// Something bound to the port replied.
+    case answered
+    /// Nothing came back within the bound. Proves neither a live nor a dead
+    /// forwarder.
+    case silent
+}
+
 package protocol PrivilegeClient: Sendable {
     func execute(_ operation: PrivilegedOperation, values: [String]) throws
 
