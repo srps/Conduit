@@ -42,6 +42,23 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   network-location reconcile that runs as the app starts no longer undoes the
   declined restore one moment later.
 
+- A slow origin behind a healthy upstream proxy no longer trips that proxy's
+  circuit breaker (#197). A response timeout on its own leaves the breaker
+  where it was; silence counts against an upstream only once it has left two
+  distinct origins unanswered with no answer in between, and an answer from
+  any origin, a 5xx or a 407 included, clears the pending silences. Connect
+  failures, refused connects, connect timeouts and 5xx answers count exactly
+  as before. A health check
+  that gets no answer on an idle pooled connection asks once more on a fresh
+  one, and only that silence counts. Each counted silence is an
+  `upstream.silence_counted` event. A half-open probe that meets one slow
+  origin frees its slot without a verdict (`upstream.probe_released`), so
+  the next request probes again, and an upstream whose backoff ended but
+  that lost the latency comparison stays eligible instead of waiting on a
+  probe that never went out. Disabling and re-enabling an upstream, or
+  editing its endpoint, drops its pending silences, and an idle connection to
+  the old endpoint is never reused for the new one.
+
 - With the proxy port set to 0 ("choose a port"), the system proxy, the shell
   profiles and the launchd `HTTP(S)_PROXY` variables now name the port the
   listener actually bound, instead of port 0 (#251). Start, config reapply,
