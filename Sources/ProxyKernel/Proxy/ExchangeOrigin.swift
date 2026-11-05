@@ -42,6 +42,6 @@ package struct ExchangeOrigin: Hashable, Sendable, CustomStringConvertible {
         guard inet_pton(AF_INET6, String(lowered.dropFirst().dropLast()), &address) == 1 else { return lowered }
         var text = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
         guard inet_ntop(AF_INET6, &address, &text, socklen_t(text.count)) != nil else { return lowered }
-        return "[\(String(cString: text))]"
+        return "[\(String(decoding: text.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))]"
     }
 }
