@@ -106,8 +106,9 @@ the same port, because a live forwarder that rebinds its port reads refused
 for that moment; the writer lease (0017) would settle only same-root sessions,
 and its role in recovery is still the open question below. Recovery that acts on
 a witnessed refusal also stops the orphaned relay, whatever it then ends in: a
-restore, leftover settings cleared with no records, or a failure such as an
-unreadable journal. Where the witness does not decide and the `:53` probe does,
+restore, no records (loopback settings with no record are the user's and stay),
+or a failure such as an unreadable journal, which still clears the residue it
+recognises. Where the witness does not decide and the `:53` probe does,
 the restore or decline event names why in `witness=`, and a machine with no
 helper binary reads `witness=no_status` without asking the socket. A helper whose ping lists no
 `dns-relay-status` feature shows as "Installed, update available" in Settings
