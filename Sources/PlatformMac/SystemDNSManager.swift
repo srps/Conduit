@@ -358,8 +358,15 @@ package final class SystemDNSManager: @unchecked Sendable {
         defer { operations.unlock() }
         importLegacySnapshotIfPresent(logger: logger)
         if let locationRecovery {
-            let outcome = locationRecovery.recover(kind: .dns, config: configProvider(), ownership: ownership)
-            if outcome == .restored(.ownerGone(.relayTargetRefused)) { stopRelay(logger: logger) }
+            // A twice-refused target makes the relay an orphan whatever the
+            // restore then ends in: cleared leftovers, no records, or a failure.
+            var relayOrphaned = false
+            let outcome = locationRecovery.recover(kind: .dns, config: configProvider()) {
+                let verdict = ownership()
+                relayOrphaned = verdict == .ownerGone(.relayTargetRefused)
+                return verdict
+            }
+            if relayOrphaned { stopRelay(logger: logger) }
             return outcome
         }
         guard hasSavedInterfaces(), let savedAt = journal.oldestRecordDate(for: .systemDNS) else {
