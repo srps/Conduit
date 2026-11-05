@@ -67,7 +67,6 @@ package final class SystemDNSManager: @unchecked Sendable {
     /// A host under test passes its fake machine's answer, so it never waits
     /// on, or reads, the real port 53.
     private let resolverLiveness: @Sendable (Int) -> LoopbackLiveness
-    /// Waits between the two relay readings that confirm a refused target.
     private let relayRecheckPause: @Sendable (TimeInterval) -> Void
     /// 0.1.x snapshot, imported into the journal on first launch. See
     /// `PlatformStateJournal.importLegacyDNSSnapshot`. Comes from the same
@@ -360,7 +359,6 @@ package final class SystemDNSManager: @unchecked Sendable {
         importLegacySnapshotIfPresent(logger: logger)
         if let locationRecovery {
             let outcome = locationRecovery.recover(kind: .dns, config: configProvider(), ownership: ownership)
-            // The witness saw the crashed run's relay still holding :53; `clear` would stop it, and this restore must too.
             if outcome == .restored(.ownerGone(.relayTargetRefused)) { stopRelay(logger: logger) }
             return outcome
         }
@@ -375,10 +373,6 @@ package final class SystemDNSManager: @unchecked Sendable {
 
         switch ownership() {
         case .anotherSessionLive(let evidence):
-            // Any interface, not every interface: a machine where only some
-            // services still point at 127.0.0.1 (a VPN interface that came back
-            // with its own resolvers, a service added since) still holds pinned
-            // interfaces whose recorded servers must not be thrown away.
             if loopbackResidueExists() {
                 return .declinedLiveListener(evidence)
             }
@@ -391,19 +385,8 @@ package final class SystemDNSManager: @unchecked Sendable {
         }
     }
 
-    /// How long a refused relay target must stay refused before recovery
-    /// believes it. A live forwarder that rebinds its port reads refused for
-    /// that moment.
     static let relayRefusalRecheckDelay: TimeInterval = 0.5
 
-    /// Who owns system DNS, from the helper's relay witness first.
-    ///
-    /// The relay runs in the helper, which outlives the app, so after a crash
-    /// it still holds `:53` and forwards to a port nothing serves. Asked
-    /// directly, `:53` is then silent, which cannot tell a dead session from a
-    /// slow one. The helper can: it queries its own target, and the kernel
-    /// refuses a port nothing holds. The `:53` probe decides only when the
-    /// witness cannot.
     private func ownership() -> SurfaceOwnership {
         let gap: RelayWitnessGap
         switch readRelay() {
@@ -426,7 +409,6 @@ package final class SystemDNSManager: @unchecked Sendable {
     private enum RelayReading {
         case reading(DNSRelayStatus)
         case noStatus
-        /// The client surfaced why with its own event.
         case unavailable
     }
 

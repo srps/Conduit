@@ -962,8 +962,6 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)
     }
 
-    /// The helper's relay witness decides before the `:53` probe; the probe decides only what the witness could not. A refusal
-    /// counts only when a second reading of the same target agrees.
     func testLaunchRecoveryDecidesSystemDNSOwnershipFromTheRelayWitnessFirst() {
         struct Case {
             var first: DNSRelayStatus?

@@ -238,8 +238,6 @@ package final class RuntimeHost {
     private(set) var dnsRelayUnresponsive = false {
         didSet { if dnsRelayUnresponsive != oldValue { onControlStateChange?() } }
     }
-    /// Each surface whose launch restore recovery declined, with that decline, until this run writes the surface. Only a DNS decline
-    /// that no evidence decided is shown: a live listener needs nothing from the user.
     private(set) var declinedLaunchRecovery: [PlatformSurface: LaunchRecoveryOutcome] = [:] {
         didSet {
             if systemDNSRecoveryDeclined != Self.isUndecided(oldValue[.systemDNS]) { onControlStateChange?() }
@@ -1438,8 +1436,6 @@ package final class RuntimeHost {
                 do { try await Task.sleep(for: delay) }
                 catch { return }
                 guard self?.splitDNSRepair.pending != nil else { break }
-                // A raw reading: `.busy` does not serve, so a helper
-                // still serving another request is no evidence (#210).
                 let reading = await withCheckedContinuation { continuation in
                     DispatchQueue.global(qos: .utility).async { continuation.resume(returning: helper.status) }
                 }

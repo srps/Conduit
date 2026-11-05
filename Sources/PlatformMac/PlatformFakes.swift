@@ -242,7 +242,6 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
         set { lock.withLock { _relayStatusFailure = newValue } }
     }
 
-    /// The relay a crashed run left in the helper, still forwarding to that run's port.
     package func leaveRelayRunning(targetPort: Int) {
         lock.withLock { _dnsRelayRunning = true; _dnsRelayTargetPort = targetPort }
     }
@@ -373,8 +372,6 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
 
     // MARK: PrivilegeClient
 
-    /// The relay's status as a helper with the witness reports it: what a query to its target finds while it runs, `.notRunning`
-    /// otherwise. Without a `relayTarget` the helper predates the witness and reports nothing.
     package func dnsRelayStatus() throws -> DNSRelayStatus? {
         try lock.withLock {
             if let _relayStatusFailure { throw _relayStatusFailure }

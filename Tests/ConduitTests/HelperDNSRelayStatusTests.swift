@@ -41,7 +41,6 @@ final class HelperDNSRelayStatusTests: XCTestCase {
         XCTAssertNil(HelperAdmission.refusal(peerUID: 501, consoleUID: 0, lastConsoleUID: 501, command: .dnsRelayStatus))
     }
 
-    /// Both fail the command as "Invalid request"; the ping's feature list says which helper this is.
     func testAHelperThatPredatesTheCommandIsNoStatusWithoutAPromptAndToldApartFromAFailure() throws {
         var current = HelperResponse.ok()
         current.features = [.dnsRelayStatus]
@@ -58,8 +57,6 @@ final class HelperDNSRelayStatusTests: XCTestCase {
         }
     }
 
-    /// The feature list is decoded strictly: helpers this client talks to send an array of strings, so anything else is a broken
-    /// frame, not an empty list. Unknown names inside the array are still dropped.
     func testAFeatureListThatIsNotAnArrayBreaksTheFrame() {
         let ping = Data(#"{"protocolVersion":5,"success":true,"features":"dns-relay-status"}"#.utf8)
         XCTAssertThrowsError(try JSONDecoder().decode(HelperResponse.self, from: ping))

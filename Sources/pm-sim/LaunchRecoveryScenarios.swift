@@ -7,7 +7,6 @@ import ProxyKernel
 enum LaunchRecoveryScenarios {
     private struct Failure: Error, CustomStringConvertible { let description: String }
 
-    /// A helper whose relay is a real `UDPRelay` on an ephemeral port: its status is what the relay measures, and a stop stops it.
     private final class RelayHelper: PrivilegeClient, @unchecked Sendable {
         let relay = UDPRelay()
         let recording = RecordingPrivilegeClient()
@@ -144,7 +143,6 @@ enum LaunchRecoveryScenarios {
         return events.events
     }
 
-    /// A loopback UDP port that was just free: bound, read, and released.
     private static func closedPort() throws -> Int {
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { throw Failure(description: "socket: \(String(cString: strerror(errno)))") }

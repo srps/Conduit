@@ -51,7 +51,6 @@ final class AppStateHarness {
     /// Fetches no PAC from the network; a scenario that plans PAC work injects its own before `launch()`.
     var pacEvaluator: any PacEvaluator = FakePacEvaluator()
     var dnsProbe = FakeDNSProbe()
-    /// Runs between the two relay readings that confirm a refused target; a scenario can change the fake helper's answer here.
     var relayRecheckPause: @Sendable (TimeInterval) -> Void = { _ in }
     var loopbackPortProbe = FakeLoopbackPortProbe()
     /// The host store's file access; a scenario that holds or refuses a store step names its own before `launch()`.
@@ -591,7 +590,6 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(port)], "the relay forwards to this run")
     }
 
-    /// What the crashed run's helper still holds: the relay on `:53`, forwarding to that run's forwarder port, which `:53` makes silent.
     private func leaveACrashedRunsRelay(_ harness: AppStateHarness, target: DNSRelayTargetVerdict) {
         harness.machine.leaveRelayRunning(targetPort: 53_531)
         harness.machine.relayTarget = target
@@ -603,8 +601,6 @@ final class AppStateHarnessTests: XCTestCase {
         }.map(String.init)
     }
 
-    /// The crash #201 is about, with a helper that has the witness: its relay's target refuses, so the next launch puts the user's
-    /// DNS back on its own and stops the orphaned relay. No notice, nothing to click.
     func testACrashedRunsSystemDNSIsRestoredAtLaunchWhenTheHelperFindsItsRelayTargetRefused() async throws {
         let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
         leaveACrashedRunsDNS(harness)
@@ -635,8 +631,6 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(state.runtime.systemDNSRecoveryDeclined)
     }
 
-    /// A live forwarder that rebinds its port reads refused for a moment, so one refusal is not enough: an answer on the second
-    /// reading is a session serving the machine.
     func testARefusalThatTheSecondReadingContradictsDeclinesAsALiveListener() async throws {
         let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
         leaveACrashedRunsDNS(harness)
@@ -667,7 +661,6 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(launchRecoveryEvent(harness, surface: .systemDNS)?.contains("reason=live_listener evidence=relay_target_answered"), true)
     }
 
-    /// No witness to ask, or one that cannot be reached, and a silent `:53`: the fallback declines and shows the notice.
     func testWithoutAWitnessASilentRelayKeepsTheNotice() async throws {
         for (failure, witness) in [(nil, "no_status"), (PrivilegeClientError.timedOut("busy") as Error?, "helper_unavailable")] {
             let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))

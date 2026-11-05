@@ -296,7 +296,6 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         /// works; updating adds the rest.
         case updateAvailable
 
-        /// Whether the helper serves this build's privileged operations.
         package var serves: Bool { self == .installed || self == .updateAvailable }
     }
 
@@ -472,8 +471,6 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         return nil
     }
 
-    /// A helper that predates `dns-relay-status` fails it as "Invalid request", which a helper-side failure could also say. Its
-    /// ping's feature list tells them apart.
     private func failedStatusReason() -> String {
         do {
             let ping = try sendRequest(HelperRequest(command: .ping, values: []))

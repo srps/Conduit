@@ -26,7 +26,6 @@ final class HelperCallerRefusalPresentationTests: XCTestCase {
         XCTAssertEqual(HelperToolPrivilegeClient.status(forPing: current), .installed)
     }
 
-    /// A helper that serves but predates the relay witness (#201) is offered an update, not a repair: everything it had still works.
     func testAHelperWithoutTheRelayWitnessIsOfferedAnUpdate() {
         XCTAssertEqual(HelperToolPrivilegeClient.status(forPing: .ok()), .updateAvailable)
         let status = HelperToolPrivilegeClient.Status.updateAvailable
