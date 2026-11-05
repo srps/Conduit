@@ -138,7 +138,6 @@ package enum OwnershipEvidence: Equatable, Sendable {
     case portRefused(witness: RelayWitnessGap?)
     case portAnswered(witness: RelayWitnessGap?)
 
-    /// The event fields: `evidence=`, then `witness=` when the probe decided for system DNS.
     var detail: String {
         switch self {
         case .relayTargetRefused: "evidence=relay_target_refused"
