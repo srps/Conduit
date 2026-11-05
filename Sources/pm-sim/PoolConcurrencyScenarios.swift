@@ -73,8 +73,12 @@ enum PoolConcurrencyScenarios {
         config.upstreams = [UpstreamProxy(name: "Held response", host: "127.0.0.1", port: port, priority: 0)]
         config.upstreamResponseTimeoutSeconds = responseTimeoutSeconds
         let frozenConfig = config
+        let discovered = NIOLockedValueBox(false)
         let pool = ConnectionPool(group: group, logger: logger, configProvider: { frozenConfig },
-                                  authenticatorProvider: { _ in MockAuthenticator() })
+                                  authenticatorProvider: { _ in MockAuthenticator() },
+                                  eventSink: { event in
+                                      if event.event == "upstream.liveness_discovered" { discovered.withLockedValue { $0 = true } }
+                                  })
         ScenarioCleanup.register { pool.closeAll() }
 
         let first = pool.exchange(head: head, body: nil)
@@ -84,6 +88,7 @@ enum PoolConcurrencyScenarios {
         pool.resetAuthentication()
         try await within(held.writeAndFlush(ByteBuffer(string: HeldFirstResponseUpstream.ok)), "the held response to be written")
         let firstResponse = try await within(first, "the held exchange to end")
+        try await untilTheProbeConnectionHasClosed(pool, discovered: discovered)
         let afterHeld = pool.allConnectionSnapshot
         let reauthenticationPending = afterHeld.count == 1 && afterHeld.allSatisfy { !$0.authenticated && !$0.inUse }
 
@@ -105,7 +110,7 @@ enum PoolConcurrencyScenarios {
         let seen = observed.withLockedValue { $0 }
         let presence = seen.credentialPresence
         let ids = [inFlight, afterHeld, afterSecond, afterThird].map { $0.map(\.id) }
-        let oneConnection = seen.accepted == 1 && ids.allSatisfy { $0.count == 1 && $0 == ids[0] }
+        let oneConnection = seen.connectionsCarryingRequests == 1 && ids.allSatisfy { $0.count == 1 && $0 == ids[0] }
         let completed = [firstResponse, second, third].filter { $0.head.status == .ok }.count
         return ScenarioResult(
             name: name, clientCount: requestCount, clientsOpened: completed, clientsWithFirstByte: completed,
@@ -125,7 +130,7 @@ enum PoolConcurrencyScenarios {
                 .init("teardown retired the one pooled connection", retired == 1),
             ],
             notes: [
-                "requests=\(presence.count) acceptedConnections=\(seen.accepted)",
+                "requests=\(presence.count) acceptedConnections=\(seen.accepted) carryingRequests=\(seen.connectionsCarryingRequests) livenessProbes=\(seen.probes)",
                 "credentials=\(presence.map { $0 ? "present" : "absent" }.joined(separator: ","))",
                 "Mock Negotiate credentials over loopback; Proxy-Authorization recorded as presence only",
             ]
@@ -143,6 +148,15 @@ enum PoolConcurrencyScenarios {
             bounded.completeWith(result)
         }
         return try await bounded.futureResult.get()
+    }
+
+    /// The liveness probe that follows the first answered exchange has a connection of its own, closed once answered.
+    private static func untilTheProbeConnectionHasClosed(_ pool: ConnectionPool, discovered: NIOLockedValueBox<Bool>) async throws {
+        let deadline = NIODeadline.now() + fixtureBound
+        while !discovered.withLockedValue({ $0 }) || pool.allConnectionSnapshot.count > 1 {
+            guard NIODeadline.now() < deadline else { throw FixtureDeadline(waitingFor: "the liveness probe's connection to close") }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     private static func closeFixture(_ channel: Channel, _ what: String) async throws {
@@ -169,6 +183,9 @@ private struct UpstreamObservation: Sendable {
     static let requestCapacity = 4
 
     var accepted = 0
+    /// Connections that carried a request; the pool's liveness probe has one of its own.
+    var connectionsCarryingRequests = 0
+    var probes = 0
     var refused = 0
     /// Whether each request carried `Proxy-Authorization`, in arrival order.
     var credentialPresence: [Bool] = []
@@ -183,12 +200,14 @@ private final class HeldFirstResponseUpstream: ChannelInboundHandler, @unchecked
     typealias OutboundOut = ByteBuffer
 
     static let ok = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
+    static let forbidden = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     private static let headCapacity = 8_192
     private static let credentialHeader = "proxy-authorization:"
 
     private let observed: NIOLockedValueBox<UpstreamObservation>
     private let firstRequest: EventLoopPromise<Channel>
     private var received = ""
+    private var carriedARequest = false
 
     init(observed: NIOLockedValueBox<UpstreamObservation>, firstRequest: EventLoopPromise<Channel>) {
         self.observed = observed
@@ -206,7 +225,16 @@ private final class HeldFirstResponseUpstream: ChannelInboundHandler, @unchecked
         while let end = received.range(of: "\r\n\r\n") {
             let lines = received[..<end.lowerBound].split(separator: "\r\n")
             received.removeSubrange(..<end.upperBound)
+            if lines.first?.hasPrefix("OPTIONS ") == true {
+                observed.withLockedValue { $0.probes += 1 }
+                context.writeAndFlush(wrapOutboundOut(ByteBuffer(string: Self.forbidden))).whenComplete { _ in context.close(promise: nil) }
+                continue
+            }
             guard lines.first?.hasPrefix("GET ") == true else { continue }
+            if !carriedARequest {
+                carriedARequest = true
+                observed.withLockedValue { $0.connectionsCarryingRequests += 1 }
+            }
             // Only the header name is compared; the value is never read.
             let credentials = lines.dropFirst().contains {
                 $0.prefix(Self.credentialHeader.count).lowercased() == Self.credentialHeader
