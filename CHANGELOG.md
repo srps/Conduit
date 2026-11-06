@@ -12,32 +12,35 @@ release.
 
 ## 0.6.2
 
-This release makes recovery after a crash quiet and correct, stops a slow
-origin from tripping a healthy upstream's circuit breaker, and makes the
-"choose a port" setting (port 0) advertise the port actually bound. Helper
-protocol v5 is unchanged, and the schema-two settings files, the
-platform-state journal and the v1 control protocol keep their formats, so
-0.6.1 can still read what this version writes. The new
-`platform-state.proxy-endpoint.json` is written only while a port-0 session
-runs.
+This release makes recovery after a crash quiet and correct (with an updated
+helper), stops a slow origin from tripping a healthy upstream's circuit
+breaker, and makes the "choose a port" setting (port 0) advertise the port
+actually bound. Helper protocol v5 is unchanged (one read-only command and two
+optional reply fields are added within it), the schema-two settings files and
+the platform-state journal keep their formats, and the v1 control protocol
+only gains optional additions, so 0.6.1 can still read the files this version
+writes. The new `platform-state.proxy-endpoint.json` exists only while a port-0
+session runs, or after one crashed until the next launch's recovery; 0.6.1
+ignores it.
 
-Reinstalling the helper is recommended (Settings shows "Installed, update
-available"). A 0.6.1 helper keeps working, but it cannot report its DNS
-relay's status, so after a crash with "Manage system DNS" on, the next launch
-falls back to a liveness probe and may ask you to restore DNS instead of
-restoring it on its own.
+Updating the helper is recommended: Settings → General shows it as
+"Installed, update available" with **Update Helper**. A 0.6.1 helper keeps
+working, but it cannot report its DNS relay's status. After a crash with
+"Manage system DNS" on, the next launch then falls back to a liveness probe,
+and while the old relay still holds port 53 it usually asks you to restore
+DNS instead of restoring it on its own.
 
 ### Added
 
 - The status menu, the Help menu and General settings link to the project on
   GitHub, so people who find Conduit useful can star it or report an issue.
   They are plain links; nothing is counted or remembered.
-
 - The privileged helper can report what its DNS relay is doing: which port it
   forwards to, and whether that port refuses, answers or stays silent (#201).
-  Run `sudo ./install-helper.sh` to get it; an older helper keeps working and
-  reports no status, and Settings shows it as "Installed, update available"
-  with Update Helper.
+  Update it once from Settings → General → **Update Helper** (one admin
+  prompt), or with `sudo ./install-helper.sh` from a source checkout. An older
+  helper keeps working and reports no status; Settings shows it as
+  "Installed, update available".
 
 ### Fixed
 
@@ -61,7 +64,6 @@ restoring it on its own.
   Restore DNS Settings; either one clears it, as do Quit and a reboot. The
   network-location reconcile that runs as the app starts no longer undoes the
   declined restore one moment later.
-
 - A slow origin behind a healthy upstream proxy no longer trips that proxy's
   circuit breaker (#197). A response timeout on its own leaves the breaker
   where it was; silence counts against an upstream only once it has left two
@@ -78,14 +80,12 @@ restoring it on its own.
   probe that never went out. Disabling and re-enabling an upstream, or
   editing its endpoint, drops its pending silences, and an idle connection to
   the old endpoint is never reused for the new one.
-
 - With the proxy port set to 0 ("choose a port"), the system proxy, the shell
   profiles and the launchd `HTTP(S)_PROXY` variables now name the port the
   listener actually bound, instead of port 0 (#251). Start, config reapply,
   drift repair, retries and network-location reconciliation all take the
   advertised endpoint from the live bindings, and `config.client_endpoint_resolved`
   records the port chosen. The saved port stays 0, and fixed ports are unchanged.
-
 - If a session with the proxy port set to 0 crashed and the recovery journal
   was then unreadable, the next launch left the system proxy pointing at the
   dead ephemeral port (#269). Conduit now keeps the advertised endpoint in
@@ -100,12 +100,10 @@ restoring it on its own.
   listener holds; with the port set to 0 it used to dial port 0 and never
   worked (#266). The rebind is recorded as `proxy.listener_recycled`. Fixed
   ports are unchanged.
-
 - VPN flap durations are measured on a monotonic clock, so a wall-clock change
   during a flap can no longer make the total flap time negative and leave the
   control status unavailable (#252). The recovery time shown for the last flap
   still uses the wall clock.
-
 - A network change drops the cached PAC answers and resets the DNS-over-HTTPS
   connections as soon as it is seen, instead of 2 seconds after the network
   stops changing. While a network kept changing, as on a roam or a wake,
