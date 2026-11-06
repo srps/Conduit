@@ -62,6 +62,9 @@ struct DevLaunchOptions: Equatable {
     /// The one upstream in the seeded config. Point it at a running
     /// `pm-proxy` for a real "Proxied via" state.
     var upstream: Endpoint?
+    /// Start the proxy once the runtime can take a Start, as the menu's
+    /// switch would, so a screenshot shows a serving instance without a click.
+    var start = false
 
     static var defaultStateDirectory: URL {
         URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -115,7 +118,7 @@ struct DevLaunchOptions: Equatable {
         protectedDirectories: [URL] = productionStateDirectories
     ) throws -> DevLaunchOptions? {
         let args = Array(arguments.dropFirst())
-        let devFlags: Set<String> = ["--dev-state-dir", "--section", "--vpn", "--upstream"]
+        let devFlags: Set<String> = ["--dev-state-dir", "--section", "--vpn", "--upstream", "--start"]
         let flagged = args.contains(flag)
         guard flagged || isDevBundle(bundleIdentifier) else {
             if let stray = args.first(where: { devFlags.contains($0) }) {
@@ -162,6 +165,8 @@ struct DevLaunchOptions: Equatable {
                 }
             case "--upstream":
                 options.upstream = try endpoint(from: try value())
+            case "--start":
+                options.start = true
             default:
                 break
             }
@@ -356,6 +361,44 @@ enum DevLaunch {
         if let section = session.options.section {
             openAppWindow(on: section, appState: appState)
         }
+        if session.options.start {
+            startProxyWhenReady(appState: appState, session: session)
+        }
+    }
+
+    /// The runtime takes a Start only once the app state is ready and the
+    /// first snapshot has named the module revisions, which is a moment after
+    /// the windows. Waits for that, then sends the Start the menu's switch
+    /// sends. The fake VPN observer delivers nothing until the proxy starts
+    /// it, so the `--vpn` state sent at opening was dropped; it is sent again
+    /// once the proxy runs. Each wait is ten seconds at most.
+    @MainActor
+    private static func startProxyWhenReady(appState: AppState, session: Session) {
+        Task { @MainActor in
+            guard await poll({ appState.controlsEnabled && appState.runtime.stamp?.modules != nil }) else {
+                appState.logStore.log(.warning, "Dev mode: --start gave up; the runtime could not take a Start within ten seconds.", category: .system)
+                return
+            }
+            appState.logStore.log(.notice, "Dev mode: starting the proxy (--start).", category: .system)
+            appState.toggleProxy()
+            guard let vpnState = session.options.vpn else { return }
+            guard await poll({ appState.runtime.runtimeStatus.state == .running }) else {
+                appState.logStore.log(.warning, "Dev mode: the proxy was not running within ten seconds, so --vpn was not sent again.", category: .system)
+                return
+            }
+            session.vpn.connectedInterfaceName = session.options.vpnInterfaceName
+            session.vpn.emit(vpnState)
+        }
+    }
+
+    /// Checks `condition` every 100 ms for ten seconds. False on timeout or cancellation.
+    @MainActor
+    private static func poll(_ condition: () -> Bool) async -> Bool {
+        for _ in 0..<100 {
+            if condition() { return true }
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return false }
+        }
+        return condition()
     }
 
     /// The one path from AppKit into the SwiftUI window is the command SwiftUI

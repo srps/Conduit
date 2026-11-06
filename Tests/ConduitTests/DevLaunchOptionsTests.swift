@@ -58,13 +58,14 @@ final class DevLaunchOptionsTests: XCTestCase {
     func testEveryFlagLands() throws {
         let options = try XCTUnwrap(try parse([
             "--dev", "--dev-state-dir", "/tmp/elsewhere", "--section", "dns",
-            "--vpn", "utun4", "--upstream", "127.0.0.1:3129", "--port", "0",
+            "--vpn", "utun4", "--upstream", "127.0.0.1:3129", "--start", "--port", "0",
         ]))
         XCTAssertEqual(options.stateDirectory.path, "/tmp/elsewhere")
         XCTAssertEqual(options.section, .dns)
         XCTAssertEqual(options.vpn, .connected)
         XCTAssertEqual(options.vpnInterfaceName, "utun4")
         XCTAssertEqual(options.upstream, DevLaunchOptions.Endpoint(host: "127.0.0.1", port: 3129))
+        XCTAssertTrue(options.start)
     }
 
     func testVPNOffReportsDisconnectedWithNoInterface() throws {
