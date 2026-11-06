@@ -17,7 +17,7 @@ Pillars: **[Rel]** Reliability, **[Sec]** Security, **[Eff]** Efficiency,
 `[ ]` means planned; `[~]` means partially implemented; `[x]` means implemented,
 with remaining validation called out separately. An item needs a pillar fit.
 
-See also [Product Pillars](./README.md#product-pillars), [`AGENTS.md`](./AGENTS.md),
+See also [Product Pillars](./CONTRIBUTING.md#product-pillars), [`AGENTS.md`](./AGENTS.md),
 and [`docs/STYLE.md`](./docs/STYLE.md).
 
 ## Immediate priorities (2026-10-29)

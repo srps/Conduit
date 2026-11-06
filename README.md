@@ -1,387 +1,208 @@
+<div align="center">
+
 # Conduit
 
-A **macOS-native corporate proxy manager** built with SwiftUI and SwiftNIO. If you run macOS inside an AD-Kerberos/NTLM enterprise with legacy explicit proxies, Conduit is built for you. If you run a generic HTTP/SOCKS5 upstream, it works there too.
+A macOS menu-bar proxy manager for corporate networks: Kerberos, NTLM, PAC, and upstream failover in one native app.
 
-**Kerberos + NTLMv2 + PAC + SOCKS5 + DoH forwarding + tunnels + health-probed failover**, all in one native menu-bar app.
+[![Latest release](https://img.shields.io/github/v/release/srps/Conduit?sort=semver)](https://github.com/srps/Conduit/releases/latest)
+[![CI](https://github.com/srps/Conduit/actions/workflows/swift.yml/badge.svg?branch=main)](https://github.com/srps/Conduit/actions/workflows/swift.yml)
+[![License](https://img.shields.io/github/license/srps/Conduit)](LICENSE)
+![macOS 26+](https://img.shields.io/badge/macOS-26%2B-black?logo=apple)
+![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-black)
 
-> I built Conduit out of my own necessity. Daily-driving macOS behind a corporate proxy, the constant proxy/VPN connection flakiness was a real drag, and I wanted a single reliable tool that just worked whether I was on VPN or off it. PAC support and automatic proxy re-routing were my biggest pain point, so that's the core the rest is built around. Everything else (SOCKS5, DoH forwarding, tunnels, the menu-bar UI) started as nice-to-haves layered on top. It's open-sourced in case it saves someone else the same trouble.
+<img src="docs/assets/conduit-demo.gif" width="720" alt="Conduit's menu bar popover, then the Overview, Connections, Upstreams and Routing, and Events views of a running proxy">
 
-## Why Conduit?
+</div>
 
-| Tool | macOS-native UI | NTLM | Kerberos | PAC | SOCKS5 | Tunnels | Real failover |
-|------|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| **px** (Python) | - | ✓ | ✓ | ✓ | - | - | comma-list, no health |
-| **alpaca** (Go) | - | ✓ | - | ✓ | - | - | PAC-list only |
-| **proxydetox** (Rust) | - | - | ✓ | ✓ | - | - | PAC-list only |
-| **cntlm** (C) | - | ✓ | ✓ | ✓ | - | - | round-robin |
-| **Conduit** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | **health-probed, circuit-breaker, auto-recovery** |
+## Why Conduit
 
-## Quick Start
+Your company runs an explicit proxy that wants Kerberos or NTLM, a PAC file decides which hosts go where, and the VPN drops a few times a day. Browsers cope. Terminals, package managers, Docker, and Electron apps often do not. Conduit runs a local proxy on your Mac that handles the authentication for them, follows the PAC file, checks the health of every upstream, and moves traffic to a working route when the network changes. A generic HTTP or SOCKS5 upstream works too.
 
-Download a ready-to-install disk image from [Releases](https://github.com/srps/Conduit/releases).
-Builds are for Apple Silicon Macs (M1 or later) on macOS 26 or later; Intel
-Macs are no longer supported. Open the disk image, drag Conduit into Applications, and open it.
-No Xcode or local build is required. Releases are signed with Conduit's
-self-signed release certificate ([release signing](docs/release-signing.md)) and
-are not notarized; if macOS blocks the first launch, use System Settings >
-Privacy & Security > Open Anyway. From 0.5 the app updates itself from GitHub
-Releases (**Check for Updates…**, or the daily check in General → Updates);
-see [release installation](docs/release-installation.md).
+> I built Conduit out of my own necessity. Daily-driving macOS behind a corporate proxy, the constant proxy and VPN flakiness was a real drag, and I wanted one reliable tool that just worked whether I was on VPN or off it. PAC support and automatic proxy re-routing were my biggest pain point, so that's the core the rest is built around. Everything else (SOCKS5, DoH forwarding, tunnels, the menu-bar UI) started as nice-to-haves on top. It's open source in case it saves someone else the same trouble.
 
-To build from source instead:
+## Install
+
+> [!IMPORTANT]
+> Conduit runs on Apple Silicon Macs (M1 or later) with macOS 26 or later. Intel Macs are not supported.
+
+**Homebrew**
 
 ```bash
-# Build
-swift build
-
-# Run headless proxy on port 3128
-swift run pm-proxy --port 3128 --state-dir /tmp/pm-test
-
-# Test it works
-curl -x http://localhost:3128 https://httpbin.org/ip
-
-# Or install the GUI app
-./bundle-app.sh --install
+brew install --cask srps/tap/conduit
 ```
 
-See [`docs/getting-started.md`](docs/getting-started.md) for full setup instructions.
+**Disk image.** Download the arm64 `.dmg` from [Releases](https://github.com/srps/Conduit/releases/latest), open it, and drag **Conduit** into **Applications**. No Xcode or Swift install is needed.
 
-## Product Pillars
+**From source.** You need Xcode 26 (Swift 6.2). `bundle-app.sh` uses Xcode by default; a bare `swift build` also works with the Command Line Tools.
 
-Every change is measured against these axes. A proposed feature either lands under one of these pillars or it doesn't ship.
+```bash
+git clone https://github.com/srps/Conduit.git && cd Conduit
+./bundle-app.sh --release --install   # builds, then installs to /Applications
+```
 
-| Pillar | What it means | How it's measured |
-|---|---|---|
-| **Reliability** | No daily-driver regressions; survives Wi-Fi ↔ VPN ↔ captive portal transitions | Daily use; `pm-sim` chaos suite green; zero "I had to restart it" moments per quarter |
-| **Security** | No secret leaks; PAC evaluation sandboxed; tunnel credentials rotatable | Reviewed threat model; Keychain audit; `Proxy-Authorization` never logged |
-| **Efficiency** | < 40 MB RSS idle, < 3% CPU idle, < 50 ms added latency at p99 | Instruments profile under `pm-sim multi-100`; long-run baseline |
-| **Observability** | Every routing/auth/failover/health decision is a typed `RuntimeEvent` | `ProxyOrchestratorSnapshot` is machine-consumable; NDJSON status stream; agent harness asserts behaviour from events alone |
-| **Great UI** | Menu bar handles 90% of daily tasks; main window is HIG-correct | Toggle proxy / switch profile / test upstream / view health without opening the app |
-| **Daemon-first** | The runtime runs with no UI attached; UI is a client | `pm-proxy` serves traffic even with the GUI force-quit |
-| **Simulators & demos** | Every runtime behaviour is testable and demonstrable | Every new behaviour ships with a `pm-sim` scenario; demo mode visualizes the event stream live |
+`bundle-app.sh --install` quits and replaces a running Conduit. [`CONTRIBUTING.md`](CONTRIBUTING.md) covers source builds in full.
+
+### First launch
+
+> [!NOTE]
+> Releases are signed with Conduit's self-signed release certificate ([release signing](docs/release-signing.md)) and are not notarized. If macOS blocks the first launch, open **System Settings > Privacy & Security** and click **Open Anyway**.
+
+- **Updates.** Conduit updates itself from GitHub Releases through Sparkle. Use **Check for Updates…** in the Conduit menu or the menu bar popover, or turn on **Check for updates automatically** in **General > Updates**. Nothing installs until you choose to.
+- **Privileged helper (optional).** **Manage macOS proxy settings** and **Manage system DNS** need the privileged helper, version 5. Dragging the app does not install it. Install it from Conduit's Settings. Everything else runs without it.
+
+[Release installation](docs/release-installation.md) covers the helper's signing pin, rollback, and the update checks in detail. [Getting started](docs/getting-started.md) walks through the first configuration.
 
 ## Features
 
-### Core Proxy
+| Routing and auth | Network resilience | DNS |
+| --- | --- | --- |
+| Kerberos (Negotiate) and NTLMv2 to the upstream | Upstream health probes, circuit breaker, and automatic recovery | Local DNS forwarder with DNS-over-HTTPS fallback |
+| PAC evaluation through macOS CFNetwork, the engine Safari uses | Ordered failover. A failed CONNECT retries the next upstream | Internal domains go to corporate DNS first |
+| HTTP, HTTPS `CONNECT`, and SOCKS5 (IPv6 included) | Direct mode when off VPN and the upstreams are unreachable | Optional system DNS management, restored on stop or after a crash |
+| `NO_PROXY` matching and `forceProxyHosts` overrides | VPN and network-change detection that drops stale PAC and DNS answers | VPN-aware: new interfaces are redirected, stale ones pruned |
+
+| Menu bar and app | System integration | Advanced |
+| --- | --- | --- |
+| Menu bar glyph shows stopped, direct, proxied, or needs attention | macOS system proxy settings and local PAC serving | TCP tunnels and port forwards |
+| Popover with switches, upstream lights, and the last three events | `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` for your shell | Gateway mode for Docker, VMs, and the LAN, with an allowed-client list |
+| Filterable event list with copy buttons for LLM analysis | Split DNS through `/etc/resolver` | Transparent proxy for apps that ignore `HTTP_PROXY` (DNS intercept plus TLS SNI) |
+| Optional global shortcut ⌃⌥⌘P to toggle the proxy | Login item, notifications, and config import and export | Credentials in the login keychain, never in plaintext |
+
+Every routing, auth, failover, health, and config decision is a typed event. The app, `pmctl`, and the `pm-sim` simulator all read the same events, listed in the [event catalogue](docs/events.md).
+
+<details>
+<summary><strong>Full feature list</strong></summary>
+
+### Core proxy
 
 - Local HTTP proxy listener with configurable bind host and port
-- NTLMv2 upstream authentication (compatible with corporate proxy infrastructure)
+- NTLMv2 upstream authentication, compatible with corporate proxy infrastructure
+- Kerberos (Negotiate) upstream authentication through the system GSS framework
 - HTTPS tunneling via `CONNECT`
 - Plain HTTP forwarding
 - Bundled presets for generic setups, corporate proxy fleets, and self-hosted Squid
-- Draggable upstream proxy ordering: top-to-bottom order is persisted as failover priority
-- Upstream reachability probing without rewriting configured priority order
-- Automatic upstream failover: when a CONNECT tunnel fails, the coordinator retries through remaining upstreams before returning an error
-- Automatic direct-connect detection with configurable TTL cache and progressive timeout backoff
+- Draggable upstream proxy ordering. The top-to-bottom order is saved as the failover priority.
+- Upstream reachability probing without rewriting the configured priority order
+- Automatic upstream failover. When a CONNECT tunnel fails, the coordinator retries through the remaining upstreams before it returns an error.
+- Automatic direct-connect detection with a configurable TTL cache and progressive timeout backoff
 - Off-VPN `directMode` that bypasses corporate upstreams when they are unreachable
 - `NO_PROXY`-style matching for direct connections
 - `forceProxyHosts` overrides for domains that must always use the upstream proxy
 - Configurable connection timeout, direct-connect TTL, strict mode, and verbose logging
 
-### PAC-Aware Routing
+### PAC-aware routing
 
-- Fetches and caches corporate PAC files (supports `http://` PAC URLs via ATS-safe curl fallback)
-- Evaluates `FindProxyForURL()` through macOS CFNetwork (Safari-parity, OS-patched PAC engine)
-- Preserves PAC fallback-chain order (`PROXY -> PROXY -> DIRECT`) within the configurable usable-route cap (default 32, range 1–128); DIRECT is used only when policy permits and retained in the chain. See [PAC route admission](docs/pac-route-bounds.md).
-- Native PAC DNS resolution: `dnsResolve()`, `myIpAddress()`, and `isResolvable()` implemented via Swift callbacks with per-evaluation DNS cache. `isInNet()` subnet checks work correctly for hostnames
-- PAC helper functions: `isPlainHostName`, `localHostOrDomainIs`, `dnsDomainLevels`, `shExpMatch`, `dnsDomainIs` with proper semantics
-- Upstream PAC routing toggle: enable/disable PAC-based internal routing without clearing the PAC URL
-- Adaptive local PAC serving: macOS can point at `127.0.0.1:<localPACPort>/proxy.pac` while Conduit keeps the upstream PAC URL as its internal routing source
-- Works in manual proxy mode: system proxy stays on localhost (so CLI tools work), but routing decisions use PAC internally
+- Fetches and caches corporate PAC files. `http://` PAC URLs work through an ATS-safe curl fallback.
+- Evaluates `FindProxyForURL()` through macOS CFNetwork, the OS-patched PAC engine Safari uses
+- Keeps the PAC fallback-chain order (`PROXY -> PROXY -> DIRECT`) within the usable-route cap, which defaults to 32 and accepts 1 to 128. DIRECT is used only when policy permits and stays in the chain. See [PAC route admission](docs/pac-route-bounds.md).
+- Native PAC DNS resolution. `dnsResolve()`, `myIpAddress()`, and `isResolvable()` run as Swift callbacks with a per-evaluation DNS cache, so `isInNet()` subnet checks work for hostnames.
+- PAC helper functions `isPlainHostName`, `localHostOrDomainIs`, `dnsDomainLevels`, `shExpMatch`, and `dnsDomainIs` with their standard semantics
+- Upstream PAC routing toggle that turns PAC-based internal routing on or off without clearing the PAC URL
+- Adaptive local PAC serving. macOS can point at `127.0.0.1:<localPACPort>/proxy.pac` while Conduit keeps the upstream PAC URL as its internal routing source.
+- Works in manual proxy mode. The system proxy stays on localhost, so CLI tools work, and routing decisions still use PAC internally.
 
-### DNS over HTTPS (DoH) Forwarder
+### DNS-over-HTTPS forwarder
 
-- Local UDP DNS forwarder that intercepts and resolves queries
-- Response cache: LRU with TTL from minimum RR TTL, NXDOMAIN negative caching, 2048 entry limit
+- Local UDP DNS forwarder that answers the machine's queries
+- Response cache with LRU eviction, TTLs from the smallest record TTL, NXDOMAIN negative caching, and a 2,048-entry limit
 - Internal domains (configurable) go through corporate DNS servers first
-- External domains fall back to configurable DoH providers (default: Cloudflare, Quad9, Google)
-- Smart connection cascade for DoH: tries direct, then upstream corporate proxy, then local proxy -- for each provider in order
-- DNS intercept rules: wildcard pattern matching (e.g., `*.cursor.sh`) returns a synthetic loopback IP for transparent proxying
-- Optional system DNS management: sets macOS DNS to 127.0.0.1 on all connected interfaces so all apps (including Cursor/Electron `getaddrinfo`) use the forwarder. Uses a native Swift UDP relay on port 53 running inside the privileged helper daemon. DNS pipeline liveness probe runs every 30 seconds with auto-recovery.
-- VPN-aware DNS reconciliation: when interfaces appear or disappear (VPN connect/disconnect), new interfaces are automatically redirected to the forwarder and stale entries pruned from saved state
-- Crash recovery: original DNS servers are saved to disk and restored on stop or automatically on next app launch if the app was force-quit. Tolerates vanished interfaces, detects stale state (>7 days), and handles port-53 conflicts intelligently
-- Runs independently as `pm-dns` CLI or integrated in the GUI app
-- Fixes DNS resolution on VPN where corporate DNS returns NXDOMAIN for public domains
+- External domains fall back to configurable DoH providers. The defaults are Cloudflare, Quad9, and Google.
+- Connection cascade for DoH. For each provider in order, it tries a direct connection, then the upstream corporate proxy, then the local proxy.
+- DNS intercept rules with wildcard patterns, such as `*.cursor.sh`, that return a synthetic loopback IP for transparent proxying
+- Optional system DNS management. It sets macOS DNS to 127.0.0.1 on all connected interfaces, so every app uses the forwarder, including Cursor and other Electron apps that call `getaddrinfo`. A native Swift UDP relay on port 53 runs inside the privileged helper. A DNS pipeline liveness probe runs every 30 seconds and recovers the pipeline when it fails.
+- VPN-aware DNS reconciliation. When interfaces appear or disappear on VPN connect or disconnect, new interfaces are redirected to the forwarder and stale entries are pruned from saved state.
+- Crash recovery. Conduit saves the original DNS servers to disk and restores them on stop. After a crash or force quit, the next launch restores them unless another session still serves the machine. It tolerates vanished interfaces, detects stale state older than 7 days, and handles port-53 conflicts.
+- Runs on its own as the `pm-dns` CLI or inside the app
+- Fixes DNS resolution on VPNs where corporate DNS returns NXDOMAIN for public domains
 
-### System Integration
+### System integration
 
 - macOS system proxy configuration via `networksetup`
-- PAC toggle: enable/disable automatic proxy configuration without losing the PAC URL
+- PAC toggle that turns automatic proxy configuration on or off without losing the PAC URL
 - Shell environment variable management for `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`
 - Split DNS support via `/etc/resolver`
 - PAC file fetching and evaluation preview
 - Login-item support
 - Bundled `.app` wrapper script for local development builds
-- Activation preflight that detects whether admin will be needed before enabling/disabling
-- No-op detection: skips privileged operations when current state already matches
-- Privileged helper daemon for one-time authorized system proxy, DNS management, and DNS relay
+- Activation preflight that detects whether admin rights are needed before enabling or disabling
+- No-op detection that skips privileged operations when the current state already matches
+- Privileged helper daemon for one-time authorized system proxy, DNS management, and the DNS relay
 
 ### Reliability
 
 - Connection pooling and keep-alive reuse
-- Configurable health-check timeout (reads `connectionCheckTimeoutMS` in config, default 2000 ms)
+- Configurable health-check timeout (`connectionCheckTimeoutMS` in the config, default 2000 ms)
 - Health checking and auto-recovery when upstream mode is active
+- A slow origin behind a healthy upstream does not trip that upstream's circuit breaker on its own
 - Stalled connection cleanup
-- VPN/network change detection
-- Port-retry logic on restart so the proxy recovers cleanly after quick restarts
-- NIO event loop safety: all cross-channel operations use `.hop(to:)` or Channel-level thread-safe APIs
+- VPN and network change detection
+- Port-retry logic on restart, so the proxy recovers cleanly after quick restarts
+- NIO event loop safety. All cross-channel operations use `.hop(to:)` or Channel-level thread-safe APIs.
 
 ### UI
 
-- Menu bar icon whose glyph carries the state (stopped, direct, proxied, needs attention) and a non-scrolling popover with the state line, switches for the proxy, DNS forwarder and tunnels, upstream traffic lights, an activity line, the last three events, and Open / Restart / Copy Diagnostics / Quit
-- One app window with a sidebar: Overview (module rows with switches, route, telemetry, upstream health), Connections, Events, and one Configure section per subsystem (Proxy, Upstreams & Routing, Authentication, DNS, Tunnels, Shell Environment, General, Advanced), each pairing the subsystem's live state with its settings
-- Per-module error tracking: proxy, DNS and tunnel errors appear on their Overview rows; non-module errors show in a dismissible banner
+- Menu bar icon whose glyph carries the state (stopped, direct, proxied, needs attention), and a non-scrolling popover with the state line, switches for the proxy, DNS forwarder, and tunnels, upstream traffic lights, an activity line, the last three events, and Open, Restart, Copy Diagnostics, Check for Updates, and Quit
+- One app window with a sidebar. It has Overview (module rows with switches, route, telemetry, and upstream health), Connections, Events, and one Configure section per subsystem (Proxy, Upstreams & Routing, Authentication, DNS, Tunnels, Shell Environment, General, Advanced). Each section pairs the subsystem's live state with its settings.
+- Per-module error tracking. Proxy, DNS, and tunnel errors appear on their Overview rows. Other errors show in a dismissible banner.
 - Inline validation on Configure sections, using the same validators as the config boundary
-- Filterable event list with category chips (PAC, Proxy, Auth, Network, System), level picker, text search, and copy buttons for LLM analysis
-- First-run setup sheet presented at launch when NTLM credentials are missing; re-runnable from Authentication
+- Filterable event list with category chips (General, Proxy, PAC, Auth, Network, System, Tunnel), a level picker, text search, and copy buttons for LLM analysis
+- First-run setup sheet at launch when NTLM credentials are missing, re-runnable from Authentication
 - Keep-window-on-top option for demos and screen sharing
 - Optional global shortcut (⌃⌥⌘P) to toggle the proxy from any app
 - Notifications when run as an app bundle
-- Config import/export
-- Config files carry a `schemaVersion`; older unversioned configs are normalized and rewritten automatically on load
+- Config import and export
+- Config files carry a `schemaVersion`. Older unversioned configs are normalized and rewritten on load.
 
-### Advanced Features
+### Advanced
 
 - SOCKS5 proxy server with IPv6 support (ATYP 4)
-- Gateway mode (`0.0.0.0`) for Docker / VM / LAN usage
+- Gateway mode (`0.0.0.0`) for Docker, VM, and LAN use
 - Allowed-client list for gateway deployments
-- Cloud metadata endpoint blocking in gateway mode (prevents SSRF to `169.254.169.254`, link-local, loopback)
-- TCP tunnel / port-forward definitions
-- Transparent TCP proxy for apps that bypass `HTTP_PROXY` (e.g., Cursor `http2.connect()`): DNS intercept + TLS SNI extraction + authenticated CONNECT tunnel, with Cursor preset rules in Settings
-- Configurable max upstream connections and inbound connection limits (warn + reject thresholds)
-- Configurable request body buffer limit (default 16 MB; oversized bodies are rejected before forwarding)
-- Verbose logging toggle (gates stderr output; in-app ring buffer always captures all levels)
+- Cloud metadata endpoint blocking in gateway mode, which prevents SSRF to `169.254.169.254`, link-local, and loopback addresses
+- TCP tunnel and port-forward definitions
+- Transparent TCP proxy for apps that bypass `HTTP_PROXY`, such as Cursor's `http2.connect()`. It combines DNS intercept, TLS SNI extraction, and an authenticated CONNECT tunnel, with Cursor preset rules in Settings.
+- Configurable max upstream connections and inbound connection limits, with warn and reject thresholds
+- Configurable request body buffer limit, default 16 MiB. Oversized bodies are rejected before forwarding.
+- Verbose logging toggle. It gates stderr output. The in-app ring buffer always captures all levels.
 - Optional file logging to `~/Library/Logs/Conduit/proxy.log`
 
 ### Security
 
-- Credentials stored in macOS login keychain (traditional keychain; no entitlements required)
-- NT hash derived once and stored securely
+- Credentials stored in the macOS login keychain (the traditional keychain, so no entitlements are required)
+- The NT hash is derived once and stored in the keychain
 - No plaintext password persistence
-- Helper daemon socket restricted to `root:staff` group with `getpeereid` peer validation
-- `setAutoproxyURL` URL scheme validation (http/https only) to prevent PAC URL injection
-- CONNECT tunnel dedicated connections exempt from stalled connection reaper (prevents false kill of active tunnels)
+- Helper daemon socket restricted to the `root:staff` group, with `getpeereid` peer validation and an optional caller-signing pin
+- `setAutoproxyURL` URL scheme validation (http and https only) to prevent PAC URL injection
+- Dedicated CONNECT tunnel connections are exempt from the stalled-connection reaper, so active tunnels are not killed by mistake
+- `Proxy-Authorization` and `Authorization` headers are masked in every log sink
 
-### Tests
+</details>
 
-- 1,100+ automated tests across 83 test files
-- Coverage includes NTLM, PAC routing and CFNetwork PAC evaluation, DoH DNS forwarder, DNS wire format and poisoning resistance, UDP/TCP relay forwarding, system DNS management, config migration, upstream failover, circuit breaker/EWMA, direct-connect detection, event loop safety, helper contract, keychain credential management, metadata blocklist, tunnel exemption, IPv6 parsing, body buffering, SNI parser (ClientHello parsing, hostname validation, random-garbage false-positive coverage), DNS intercept rules, transparent proxy config, logging sanitization, local PAC serving, and autoproxy URL validation
+## How it compares
 
-## Architecture
+Conduit is the only one of these that ships a native macOS app. proxydetox has a basic menu-bar app you build from source; the others are command-line tools. This table reflects each project's README or documentation as of November 2026.
 
-The module split separated the monolithic library into four targets along the import-fence: portable kernel, auth crypto, PAC evaluation, macOS-specific glue. See `[docs/design-module-split.md](./docs/design-module-split.md)` for the file-by-file destination map and the protocol surfaces that cross target boundaries.
+| Tool | Native macOS UI | NTLM | Kerberos | PAC | SOCKS5 | Tunnels | Upstream failover |
+| --- | :-: | :-: | :-: | :-: | :-: | :-: | --- |
+| [px](https://github.com/genotrance/px) (Python) | - | ✓ | ✓ | ✓ | - | - | Comma-separated list. Retries a proxy blocked by repeated 407s. |
+| [alpaca](https://github.com/samuong/alpaca) (Go) | - | ✓ | macOS only | ✓ | SOCKS5 upstreams from PAC, opt-in | - | PAC order. Goes direct while the PAC proxies are unreachable. |
+| [proxydetox](https://github.com/kiron1/proxydetox) (Rust) | Build from source | - | ✓ (Negotiate) | ✓ | - | - | PAC order |
+| [cntlm](https://github.com/versat/cntlm) (C) | - | ✓ | [versat fork](https://github.com/versat/cntlm) | [versat fork](https://github.com/versat/cntlm) | ✓ | ✓ | Tries each parent proxy in order. Goes direct while all are unavailable. |
+| **Conduit** (Swift) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | Health probes, circuit breaker, and automatic recovery |
 
-```
-ProxyKernel  (Foundation + Dispatch + NIO* only - no Apple frameworks)
-ProxyAuth    (+ GSS, CommonCrypto)              depends on ProxyKernel
-ProxyPAC     (+ CFNetwork PAC evaluator)             depends on ProxyKernel
-PlatformMac  (+ Security, SMAppService, etc.)   depends on ProxyKernel + ConduitShared
-ConduitShared                              <- helper IPC wire contract
+## Current limitations
 
-Executables / consumers:
-  Conduit           (GUI app)         <- ProxyKernel + ProxyAuth + ProxyPAC + PlatformMac + Shared
-  pm-proxy               (headless daemon) <- ProxyKernel + ProxyAuth + ProxyPAC  (no PlatformMac - fence test)
-  pm-sim                 (fault injection) <- ProxyKernel + ProxyAuth + NIO
-  pm-tunnel              (TCP forwarder)   <- ProxyKernel + ProxyAuth
-  pm-dns                 (DoH forwarder)   <- ProxyKernel
-  pm-vpn-check           (diagnostic)      <- ProxyKernel + PlatformMac
-  pm-auth-check          (diagnostic)      <- ProxyKernel
-  pm-tls-check           (diagnostic)      <- PlatformMac   (TLS inspection / CA export)
-  ConduitHelper     (LaunchDaemon)    <- ProxyKernel + Shared
-  ConduitTests      (1,100+ tests)       <- everything
-```
-
-- **ProxyKernel**: portable library with all non-UI, non-platform-specific code. Pure Swift + SwiftNIO. The headless daemon `pm-proxy` runs entirely off this target - its `Package.swift` deliberately does not list `PlatformMac`, and the build is the test.
-- **ProxyAuth / ProxyPAC**: opt-in capability layers. NTLM/Kerberos and PAC evaluation respectively. ProxyPAC uses macOS CFNetwork for Safari-parity PAC execution.
-- **PlatformMac**: macOS-specific glue (Keychain, networksetup, SMAppService, SCDynamicStore, NWPathMonitor, helper XPC, `/etc/resolver` writer, TLS-inspection diagnostics). Linked by the GUI app and the `pm-vpn-check` / `pm-tls-check` diagnostics.
-- **Conduit**: GUI app. Thin orchestration shell importing the kernel + capability layers + platform glue.
-- **ConduitHelper**: privileged helper for system proxy, DNS changes, and UDP relay on port 53.
-
-Cross-target calls go through protocols in `Sources/ProxyKernel/Abstractions/`: `LogSink`, `CredentialProvider`, `PacEvaluator`, `PrivilegeClient`, `ProxyAuthenticator`, `VPNStatusObserving`, `TunnelResolverApplying`. Kernel types use Swift's `package` access level (visible within the SwiftPM package but not outside).
-
-## Current Limitations
-
-- Hot reload is not implemented yet; restart is still required after config changes outside the app
-- The standalone user-session daemon (`ConduitDaemon`) is still a runtime-host skeleton without its own control socket; `pm-proxy` is the primary headless runtime surface, and `pmctl` drives its control socket
-- The privileged helper uses a LaunchDaemon with Unix socket communication; this works for all developers building from source but does not use Apple's `SMAppService` signed-helper flow needed for Jamf/MDM distribution
-
-## Open In Xcode
-
-Open the cloned `Conduit` package directory directly in Xcode. Xcode can
-open Swift packages natively, resolve the `swift-nio` dependency graph, and run
-the macOS app target.
-
-## Build And Run
-
-Building needs only the Command Line Tools (Swift 6.2+); Xcode is not required to
-build. Build from Terminal:
-
-```bash
-cd Conduit
-swift build
-```
-
-> Running the test suite *does* need Xcode, because XCTest ships with Xcode
-> rather than the Command Line Tools - see [Run Tests](#run-tests).
-
-Create a local app bundle (stays in the project directory):
-
-```bash
-./bundle-app.sh
-open Conduit.app
-```
-
-Run a dev instance beside the installed app (debug builds only). It runs over a fake
-machine and a scratch state directory, so nothing it does reaches the system proxy, the
-shell environment, the resolver files or the helper, and it shows the menu bar popover in
-a plain "Popover preview" window for screenshots and the accessibility inspector:
-
-```bash
-open -n -a "$PWD/Conduit.app" --args --dev --section dns --vpn utun4
-```
-
-`open -n` starts a new instance instead of activating the installed app. Running the
-executable directly works from a terminal, but from a script or an agent session it has no
-window server access and shows nothing, so `open -n` is the form to script. The dev
-instance keeps a Dock icon and a dot badge on its menu bar glyph so the two are told
-apart. For a "proxied" state, point it at a side-effect-free `pm-proxy`:
-
-```bash
-swift run pm-proxy --port 3129 --state-dir /tmp/pm-dev --status-interval 5      # terminal 1
-open -n -a "$PWD/Conduit.app" --args --dev --upstream 127.0.0.1:3129            # terminal 2
-```
-
-The state directory's `proxy.log` says when the preview window and the app window came
-up, which is what a script checks instead of a screenshot.
-
-State lives under `$TMPDIR/conduit-dev`, or `--dev-state-dir PATH`. The production flags
-`--port`, `--no-system-proxy` and `--no-env` still work on their own for a second real
-instance, which talks to the real helper.
-
-## Run pm-dns Standalone
-
-```bash
-swift run pm-dns --minimal --port 5353 --verbose
-```
-
-Then point your system DNS at `127.0.0.1` and queries for internal domains go through corporate DNS, external domains resolve via DoH. Or enable "Manage system DNS" in the GUI to have it done automatically.
-
-## Install As A Normal App
-
-Build, bundle, and install to `/Applications` in one step:
-
-```bash
-./bundle-app.sh --install
-```
-
-For an optimized release build:
-
-```bash
-./bundle-app.sh --release --install
-```
-
-Once installed the app can be found in Spotlight, Launchpad, and Finder > Applications. Pin it to the Dock by right-clicking its Dock icon > Options > Keep in Dock. The "Launch at Login" setting also requires the app to be in `/Applications`.
-
-On first launch macOS may show a Gatekeeper warning ("cannot verify the developer") because the app is not notarized (release and locally built apps carry self-signed or ad-hoc signatures). Right-click the app > **Open** > click **Open** in the dialog. This is only needed once.
-
-To create an optimized test build for another Mac with the same architecture:
-
-```bash
-./bundle-app.sh --share
-```
-
-Send the ZIP under `.build/share/`. It preserves executable permissions and uses
-ad-hoc signing instead of the builder's local signing certificate. The app
-requires macOS 26 or later. This build is not notarized; the recipient may need
-to approve it in System Settings > Privacy & Security. It does not install or
-replace the app on the builder's Mac. An existing helper pinned to a different
-signing identity will refuse this build. Managed proxy and system DNS settings
-require helper v5; see [release installation](docs/release-installation.md) for
-the bundled installer and signing-policy implications.
-
-Maintainers can run `bash scripts/package-release.sh` to also create a disk
-image with an Applications shortcut and SHA-256 checksums. `VERSION` controls
-the app and asset versions. The Release packages workflow builds and tests
-the Apple Silicon package on pull requests that change packaging, or when run
-manually. After merging, push a matching `v<version>` tag to prepare a draft
-GitHub release with the installable packages attached. Review the draft and
-publish it when ready.
-
-## Run Tests
-
-```bash
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
-```
-
-## Privileged Helper (One-Time Setup)
-
-Managed system proxy and system DNS settings require helper v5. Resolver writes and the DNS port 53 relay also require admin authorization. Install the privileged helper once:
-
-```bash
-./bundle-app.sh --install
-sudo ./install-helper.sh
-```
-
-The install script finds the helper binary from the installed app bundle in `/Applications`, the local bundle, or the build directory (in that order). It installs a LaunchDaemon that runs as root. The app communicates with it over a Unix domain socket at `/var/run/io.github.srps.Conduit.Helper.sock`. After installation, proxy enable/disable, DNS changes, and the port 53 relay happen without any further admin prompts.
-
-You can also install/uninstall the helper from within the app: **Conduit > General > Privileged Helper**.
-
-**Caller identity.** The helper admits any process of the console user unless it is told which program to trust. To pin it to Conduit, create a local signing identity once, then build, install, and install the helper:
-
-```bash
-scripts/create-signing-identity.sh      # once; self-signed "Conduit Local Signing" in your login keychain
-./bundle-app.sh --release --install     # signs with it and the hardened runtime
-sudo ./install-helper.sh                # pins that certificate for the helper's callers
-```
-
-The pin is the certificate, so later app builds signed with the same identity need no helper reinstall. When the app carries the published release certificate (`Resources/release-signing.pem`, bundled beside `install-helper.sh`), the pin admits that certificate too, so GitHub releases keep working beside your local builds; see [release signing](docs/release-signing.md). `./install-helper.sh --print-caller-requirement /Applications/Conduit.app` shows the pin without installing anything. An app signed ad-hoc is refused by a pinned helper with a message pointing here; reinstalling the helper from an ad-hoc app removes the pin. `ConduitDaemon` is not bundled; to run it against a pinned helper, sign it as the pin expects: `codesign -f -o runtime -s "Conduit Local Signing" -i io.github.srps.Conduit.Daemon <path to ConduitDaemon>`.
-
-**Important**: after updating the app, reinstall the helper to pick up new helper commands:
-
-```bash
-sudo ./install-helper.sh
-```
-
-To remove the helper:
-
-```bash
-sudo ./uninstall-helper.sh
-```
-
-Location-scoped proxy and system DNS operations do not fall back to admin prompts when the helper is missing or outdated. Update it before enabling those settings.
-
-The helper logs to the unified log, and the app mirrors its own log lines there under the same subsystem, so one query reads both processes in order:
-
-```bash
-/usr/bin/log show --predicate 'subsystem == "io.github.srps.Conduit"' --info --last 1d
-```
-
-(`/usr/bin/log` because zsh has a `log` builtin that shadows the command.)
-
-The app's own log file is `~/Library/Logs/Conduit/proxy.log` (on by default, 5 MiB × 3).
-
-## Targets
-
-- `ProxyKernel`: portable library with all non-UI, non-platform logic (proxy, PAC routing, DoH, UDP relay, models, kernel-side abstractions). Foundation + Dispatch + NIO* only.
-- `ProxyAuth` / `ProxyPAC` / `PlatformMac`: capability layers split out of the original monolith - see Architecture above.
-- `Conduit`: the macOS GUI app
-- `pm-dns`: standalone DoH DNS forwarder CLI
-- `ConduitHelper`: helper executable for privileged operations and DNS relay
-- `ConduitShared`: shared types between the app and helper (helper command contract)
-- `ConduitTests`: automated regression tests
+- Conduit does not watch its config files. After an outside edit, Settings will not save over the file, and Overview offers **Reload from Disk**, which applies the changes it can.
+- `ConduitDaemon` runs the shared runtime host, but it has no production control socket or LaunchAgent lifecycle yet. `pm-proxy` is the headless runtime, and `pmctl` drives its control socket.
+- The privileged helper is a LaunchDaemon that talks over a Unix socket. It does not use Apple's `SMAppService` signed-helper flow, which Jamf and MDM distribution need.
+- Builds are not notarized, and only Apple Silicon is supported.
 
 ## Contributing
 
-Contributions are welcome. Before you open a PR, a few things worth knowing:
+Contributions are welcome. [`CONTRIBUTING.md`](CONTRIBUTING.md) covers building, the dev instance that runs beside your installed app, tests, the privileged helper from a source build, and the [product pillars](CONTRIBUTING.md#product-pillars) every change is measured against. [`docs/architecture.md`](docs/architecture.md) has the module graph. [`AGENTS.md`](AGENTS.md) holds the guardrails that humans and AI assistants both follow. To report a vulnerability, see [`SECURITY.md`](SECURITY.md).
 
-- **Priorities and status** live in [`ROADMAP.md`](./ROADMAP.md); implementation rationale and acceptance criteria live in [`docs/planning.md`](./docs/planning.md). The [Product Pillars](#product-pillars) at the top of this README are the contributor contract - any proposed change that doesn't fit Reliability, Security, Efficiency, Observability, Great UI, Daemon-first, or Simulators & demos should include a short rationale for why it still belongs here.
-- **Engineering discipline** lives in [`docs/STYLE.md`](./docs/STYLE.md): bounded everything, assert invariants, structured events first, validate at the boundary, no silent failures, explicit resource lifetime, side-effects behind protocols, security-first, deterministic where possible.
-- **Agent and contributor guardrails** (toolchain commands, import fences, judgment boundaries) live in [`AGENTS.md`](./AGENTS.md). Both humans and AI assistants read that file first; it supersedes informal conventions.
-- **Tests are not optional.** New runtime behaviour adds a `pm-sim` scenario and unit tests before it ships. The full suite must stay green on Xcode's toolchain (`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test`).
-- **Never commit secrets.** Credentials, tokens, and `.env` files don't belong in the repo or in log output.
+Planned work lives in [`ROADMAP.md`](ROADMAP.md), and shipped changes in [`CHANGELOG.md`](CHANGELOG.md).
 
-If you're unsure whether a change fits the pillars, open a draft PR or an issue first - "should we do this?" is a better conversation to have before the code than after.
+## License
 
-## Roadmap
-
-See [ROADMAP.md](ROADMAP.md) for current, next, and later milestones.
+[Apache License 2.0](LICENSE). Third-party notices are in [`NOTICE`](NOTICE).
