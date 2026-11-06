@@ -28,7 +28,7 @@ Every change is measured against these pillars. A proposed feature either lands 
 ## Prerequisites
 
 - macOS 26 (Tahoe) or later on Apple Silicon
-- A Swift 6.2 or later toolchain. The Command Line Tools are enough to **build**. **Running the test suite** also needs Xcode 26 or later, because XCTest ships with Xcode rather than the Command Line Tools.
+- A Swift 6.2 or later toolchain. The Command Line Tools are enough for `swift build`; `bundle-app.sh` uses Xcode unless you set `DEVELOPER_DIR`. **Running the test suite** also needs Xcode 26 or later, because XCTest ships with Xcode rather than the Command Line Tools.
 - Git
 
 ## Build
@@ -131,7 +131,7 @@ open Conduit.app
 
 Once installed, the app is in Spotlight, Launchpad, and **Finder > Applications**. To pin it to the Dock, right-click its Dock icon and choose **Options > Keep in Dock**. The **Launch at Login** setting needs the app in `/Applications`.
 
-On first launch macOS may show a Gatekeeper warning ("cannot verify the developer"), because the app is not notarized. Release builds carry a self-signed certificate and local builds a self-signed or ad-hoc signature. Right-click the app, choose **Open**, and click **Open** in the dialog. You need to do this only once.
+On first launch macOS may show a Gatekeeper warning ("cannot verify the developer"), because the app is not notarized. Release builds carry a self-signed certificate and local builds a self-signed or ad-hoc signature. Open **System Settings > Privacy & Security** and choose **Open Anyway**. You need to do this only once.
 
 ### Share a test build
 
@@ -203,7 +203,7 @@ The helper logs to the unified log. The app mirrors its own log lines there unde
 
 Use `/usr/bin/log`, because zsh has a `log` builtin that shadows the command.
 
-The app's own log file is `~/Library/Logs/Conduit/proxy.log`. It is on by default and rotates at 5 MiB, keeping three files.
+The app's own log file is `~/Library/Logs/Conduit/proxy.log`. It is on by default and rotates at 5 MiB, keeping three archives beside the live file.
 
 ## Run the tests
 

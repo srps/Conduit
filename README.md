@@ -33,7 +33,7 @@ brew install --cask srps/tap/conduit
 
 **Disk image.** Download the arm64 `.dmg` from [Releases](https://github.com/srps/Conduit/releases/latest), open it, and drag **Conduit** into **Applications**. No Xcode or Swift install is needed.
 
-**From source.** You need a Swift 6.2 toolchain. The Command Line Tools are enough to build.
+**From source.** You need Xcode 26 (Swift 6.2). `bundle-app.sh` uses Xcode by default; a bare `swift build` also works with the Command Line Tools.
 
 ```bash
 git clone https://github.com/srps/Conduit.git && cd Conduit
@@ -57,7 +57,7 @@ git clone https://github.com/srps/Conduit.git && cd Conduit
 | Routing and auth | Network resilience | DNS |
 | --- | --- | --- |
 | Kerberos (Negotiate) and NTLMv2 to the upstream | Upstream health probes, circuit breaker, and automatic recovery | Local DNS forwarder with DNS-over-HTTPS fallback |
-| PAC evaluation through macOS CFNetwork, the engine Safari uses | Ordered failover: a failed CONNECT retries the next upstream | Internal domains go to corporate DNS first |
+| PAC evaluation through macOS CFNetwork, the engine Safari uses | Ordered failover. A failed CONNECT retries the next upstream | Internal domains go to corporate DNS first |
 | HTTP, HTTPS `CONNECT`, and SOCKS5 (IPv6 included) | Direct mode when off VPN and the upstreams are unreachable | Optional system DNS management, restored on stop or after a crash |
 | `NO_PROXY` matching and `forceProxyHosts` overrides | VPN and network-change detection that drops stale PAC and DNS answers | VPN-aware: new interfaces are redirected, stale ones pruned |
 
@@ -141,11 +141,11 @@ Every routing, auth, failover, health, and config decision is a typed event. The
 
 ### UI
 
-- Menu bar icon whose glyph carries the state (stopped, direct, proxied, needs attention), and a non-scrolling popover with the state line, switches for the proxy, DNS forwarder, and tunnels, upstream traffic lights, an activity line, the last three events, and Open, Restart, Copy Diagnostics, and Quit
+- Menu bar icon whose glyph carries the state (stopped, direct, proxied, needs attention), and a non-scrolling popover with the state line, switches for the proxy, DNS forwarder, and tunnels, upstream traffic lights, an activity line, the last three events, and Open, Restart, Copy Diagnostics, Check for Updates, and Quit
 - One app window with a sidebar. It has Overview (module rows with switches, route, telemetry, and upstream health), Connections, Events, and one Configure section per subsystem (Proxy, Upstreams & Routing, Authentication, DNS, Tunnels, Shell Environment, General, Advanced). Each section pairs the subsystem's live state with its settings.
 - Per-module error tracking. Proxy, DNS, and tunnel errors appear on their Overview rows. Other errors show in a dismissible banner.
 - Inline validation on Configure sections, using the same validators as the config boundary
-- Filterable event list with category chips (PAC, Proxy, Auth, Network, System), a level picker, text search, and copy buttons for LLM analysis
+- Filterable event list with category chips (General, Proxy, PAC, Auth, Network, System, Tunnel), a level picker, text search, and copy buttons for LLM analysis
 - First-run setup sheet at launch when NTLM credentials are missing, re-runnable from Authentication
 - Keep-window-on-top option for demos and screen sharing
 - Optional global shortcut (⌃⌥⌘P) to toggle the proxy from any app
@@ -180,19 +180,19 @@ Every routing, auth, failover, health, and config decision is a typed event. The
 
 ## How it compares
 
-Conduit is the only one of these with a native macOS UI. The others are cross-platform command-line tools. This table reflects each project's README as of November 2026.
+Conduit is the only one of these that ships a native macOS app. proxydetox has a basic menu-bar app you build from source; the others are command-line tools. This table reflects each project's README or documentation as of November 2026.
 
 | Tool | Native macOS UI | NTLM | Kerberos | PAC | SOCKS5 | Tunnels | Upstream failover |
 | --- | :-: | :-: | :-: | :-: | :-: | :-: | --- |
 | [px](https://github.com/genotrance/px) (Python) | - | ✓ | ✓ | ✓ | - | - | Comma-separated list. Retries a proxy blocked by repeated 407s. |
 | [alpaca](https://github.com/samuong/alpaca) (Go) | - | ✓ | macOS only | ✓ | SOCKS5 upstreams from PAC, opt-in | - | PAC order. Goes direct while the PAC proxies are unreachable. |
-| [proxydetox](https://github.com/kiron1/proxydetox) (Rust) | - | - | ✓ (Negotiate) | ✓ | - | - | PAC order |
-| [cntlm](https://github.com/versat/cntlm) (C) | - | ✓ | [versat fork](https://github.com/versat/cntlm) | [versat fork](https://github.com/versat/cntlm) | ✓ | ✓ | Tries each parent proxy in order |
+| [proxydetox](https://github.com/kiron1/proxydetox) (Rust) | Build from source | - | ✓ (Negotiate) | ✓ | - | - | PAC order |
+| [cntlm](https://github.com/versat/cntlm) (C) | - | ✓ | [versat fork](https://github.com/versat/cntlm) | [versat fork](https://github.com/versat/cntlm) | ✓ | ✓ | Tries each parent proxy in order. Goes direct while all are unavailable. |
 | **Conduit** (Swift) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | Health probes, circuit breaker, and automatic recovery |
 
 ## Current limitations
 
-- Conduit does not watch its config files. After an outside edit, Settings will not save over the file and offers **Reload**, which applies the changes it can.
+- Conduit does not watch its config files. After an outside edit, Settings will not save over the file, and Overview offers **Reload from Disk**, which applies the changes it can.
 - `ConduitDaemon` runs the shared runtime host, but it has no production control socket or LaunchAgent lifecycle yet. `pm-proxy` is the headless runtime, and `pmctl` drives its control socket.
 - The privileged helper is a LaunchDaemon that talks over a Unix socket. It does not use Apple's `SMAppService` signed-helper flow, which Jamf and MDM distribution need.
 - Builds are not notarized, and only Apple Silicon is supported.
