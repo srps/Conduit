@@ -41,6 +41,7 @@ package final class FakeVPNStatusObserver: VPNStatusObserving, @unchecked Sendab
     private let onChangeBox = NIOLockedValueBox<(@Sendable (VPNObservedState) -> Void)?>(nil)
     private let startedBox = NIOLockedValueBox<Bool>(false)
     private let interfaceBox = NIOLockedValueBox<String?>(nil)
+    private let primedBox = NIOLockedValueBox<VPNObservedState?>(nil)
 
     package init() {}
 
@@ -56,8 +57,22 @@ package final class FakeVPNStatusObserver: VPNStatusObserving, @unchecked Sendab
         onChangeBox.withLockedValue { $0 = onChange }
     }
 
+    /// The state `start()` reports, the way the production monitor reads the
+    /// current tunnels when it starts. `nil`, the default, reports nothing.
+    package var primedState: VPNObservedState? {
+        get { primedBox.withLockedValue { $0 } }
+        set { primedBox.withLockedValue { $0 = newValue } }
+    }
+
+    /// Delivers `primedState`, if any, on each stopped-to-started transition,
+    /// on the calling thread. A repeated `start()` delivers nothing.
     package func start() {
-        startedBox.withLockedValue { $0 = true }
+        let wasStarted = startedBox.withLockedValue { started -> Bool in
+            defer { started = true }
+            return started
+        }
+        guard !wasStarted, let primed = primedState else { return }
+        onChangeBox.withLockedValue { $0 }?(primed)
     }
 
     package func stop() {
