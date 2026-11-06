@@ -362,32 +362,28 @@ enum DevLaunch {
             openAppWindow(on: section, appState: appState)
         }
         if session.options.start {
-            startProxyWhenReady(appState: appState, session: session)
+            startProxyWhenReady(appState: appState)
         }
     }
 
     /// The runtime takes a Start only once the app state is ready and the
     /// first snapshot has named the module revisions, which is a moment after
-    /// the windows. Waits for that, then sends the Start the menu's switch
-    /// sends. The fake VPN observer delivers nothing until the proxy starts
-    /// it, so the `--vpn` state sent at opening was dropped; it is sent again
-    /// once the proxy runs. Each wait is ten seconds at most.
+    /// the windows. Waits for that, ten seconds at most, then sends the Start
+    /// the menu's switch sends, unless the proxy is already up.
     @MainActor
-    private static func startProxyWhenReady(appState: AppState, session: Session) {
+    private static func startProxyWhenReady(appState: AppState) {
         Task { @MainActor in
             guard await poll({ appState.controlsEnabled && appState.runtime.stamp?.modules != nil }) else {
                 appState.logStore.log(.warning, "Dev mode: --start gave up; the runtime could not take a Start within ten seconds.", category: .system)
                 return
             }
-            appState.logStore.log(.notice, "Dev mode: starting the proxy (--start).", category: .system)
-            appState.toggleProxy()
-            guard let vpnState = session.options.vpn else { return }
-            guard await poll({ appState.runtime.runtimeStatus.state == .running }) else {
-                appState.logStore.log(.warning, "Dev mode: the proxy was not running within ten seconds, so --vpn was not sent again.", category: .system)
-                return
+            switch appState.runtime.runtimeStatus.state {
+            case .stopped, .failed:
+                appState.logStore.log(.notice, "Dev mode: starting the proxy (--start).", category: .system)
+                appState.toggleProxy()
+            default:
+                appState.logStore.log(.notice, "Dev mode: --start found the proxy already starting or up and sent nothing.", category: .system)
             }
-            session.vpn.connectedInterfaceName = session.options.vpnInterfaceName
-            session.vpn.emit(vpnState)
         }
     }
 
@@ -490,6 +486,9 @@ enum DevLaunch {
 
         let machine = FakeMachine(resolverDirectory: resolverDirectory)
         let vpn = FakeVPNStatusObserver()
+        // The host starts the observer with the first Start and stops it after the last Stop; each start reports this state.
+        vpn.connectedInterfaceName = options.vpnInterfaceName
+        vpn.primedState = options.vpn
         let loginItems = FakeLoginItems()
         // The helper's status and install/uninstall, and the saved password, which the app writes and the host reads: without these the
         // dev instance would reach the installed helper and the login Keychain.
@@ -501,15 +500,6 @@ enum DevLaunch {
         let state = AppState(stateSession: stateSession, composition: composition)
         if let section = options.section {
             state.selectedSection = section
-        }
-        // The host starts its VPN observer when it opens, so the emit waits for the opening.
-        if let vpnState = options.vpn {
-            let interfaceName = options.vpnInterfaceName
-            Task { @MainActor in
-                await state.opening?.value
-                vpn.connectedInterfaceName = interfaceName
-                vpn.emit(vpnState)
-            }
         }
         // Not the path: the log sanitizer redacts a long hex run, and a temporary directory has one. Names what is still real.
         state.logStore.log(

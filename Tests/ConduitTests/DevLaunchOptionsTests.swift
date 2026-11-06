@@ -78,6 +78,9 @@ final class DevLaunchOptionsTests: XCTestCase {
         XCTAssertThrowsError(try parse(["--section", "dns"])) { error in
             XCTAssertEqual(error.localizedDescription, "--section needs --dev")
         }
+        XCTAssertThrowsError(try parse(["--start"])) { error in
+            XCTAssertEqual(error.localizedDescription, "--start needs --dev")
+        }
     }
 
     func testBadValuesAreRefusedByName() {
