@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="docs/assets/conduit-icon.png" width="128" height="128" alt="Conduit app icon">
-
 # Conduit
 
 A macOS menu-bar proxy manager for corporate networks: Kerberos, NTLM, PAC, and upstream failover in one native app.
@@ -12,7 +10,7 @@ A macOS menu-bar proxy manager for corporate networks: Kerberos, NTLM, PAC, and 
 ![macOS 26+](https://img.shields.io/badge/macOS-26%2B-black?logo=apple)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-black)
 
-<img src="docs/assets/conduit-demo.gif" width="720" alt="Conduit's menu bar popover showing the proxy, DNS forwarder, and tunnel switches, upstream health lights, and recent events">
+<img src="docs/assets/conduit-demo.gif" width="720" alt="Conduit's menu bar popover, then the Overview, Connections, Upstreams and Routing, and Events views of a running proxy">
 
 </div>
 
