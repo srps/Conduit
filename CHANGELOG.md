@@ -7,6 +7,26 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
+The 0.6.2 notes below are prepared for packaging. 0.6.1 is the latest published
+release.
+
+## 0.6.2
+
+This release makes recovery after a crash quiet and correct, stops a slow
+origin from tripping a healthy upstream's circuit breaker, and makes the
+"choose a port" setting (port 0) advertise the port actually bound. Helper
+protocol v5 is unchanged, and the schema-two settings files, the
+platform-state journal and the v1 control protocol keep their formats, so
+0.6.1 can still read what this version writes. The new
+`platform-state.proxy-endpoint.json` is written only while a port-0 session
+runs.
+
+Reinstalling the helper is recommended (Settings shows "Installed, update
+available"). A 0.6.1 helper keeps working, but it cannot report its DNS
+relay's status, so after a crash with "Manage system DNS" on, the next launch
+falls back to a liveness probe and may ask you to restore DNS instead of
+restoring it on its own.
+
 ### Added
 
 - The status menu, the Help menu and General settings link to the project on
@@ -145,7 +165,7 @@ part of this release.
 - If `config.json`, `platform.json` or `preferences.json` is changed outside
   Conduit, Settings no longer saves over it. It keeps your unsaved edit and asks
   you to reload. Reload checks the file and applies what it can, without
-  overwriting the file or discarding your edit.
+  overwriting the file. It discards unsaved Settings edits (#286).
 - Start and Restart use the saved settings as they are when the Start begins
   preparing. A settings change saved after that can interrupt an unfinished
   Start. For example, enabling DNS while a proxy Start is applying can supersede
