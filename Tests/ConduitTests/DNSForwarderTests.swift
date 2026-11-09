@@ -904,7 +904,33 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         XCTAssertEqual(DNSWireFormat.extractRCode(from: response), 0)
         XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: response)?.ip, "203.0.113.7")
         XCTAssertEqual(ownedForwarder?.cachedResponseCount, 0, "A public stand-in answer for an internal name must not be cached")
+        XCTAssertEqual(ownedForwarder?.metricCounts?.dohFallbacks, 1)
     }
+    /// Only A and AAAA have a DoH lookup. Any other type under a split-DNS
+    /// domain gets REFUSED off the VPN without asking a provider, and that is
+    /// not a DoH answer.
+    @MainActor
+    func testSplitDNSNameOfAnotherTypeIsRefusedWithoutAskingDoH() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let doh = try await AnsweringDoHProvider.start(group: group, ip: "203.0.113.7")
+        defer { doh.channel.close(promise: nil) }
+        let silentServer = try await Self.silentInternalServer(group: group)
+        defer { silentServer.close(promise: nil) }
+
+        let port = try await startForwarder(
+            internalDomain: "corp.internal.test", dohPort: doh.port,
+            tuning: try Self.quickInternalAttempt(against: silentServer)
+        )
+        let srv: UInt16 = 33
+        let query = DNSWireFormat.buildQuery(domain: "_ldap._tcp.corp.internal.test", txID: 0x6020, qtype: srv)
+        let reply = try await Self.ask(query, port: port, group: group)
+        let response = try XCTUnwrap(reply, "The forwarder must answer")
+
+        XCTAssertEqual(DNSWireFormat.extractRCode(from: response), 5, "REFUSED")
+        XCTAssertEqual(doh.requestCount(), 0)
+        XCTAssertEqual(ownedForwarder?.metricCounts?.dohFallbacks, 0, "A synthesized REFUSED is not a DoH fallback")
+    }
+
 
     /// A reply from the internal server is its verdict, NXDOMAIN included: the
     /// name stays off public DNS whenever the corporate server answers.

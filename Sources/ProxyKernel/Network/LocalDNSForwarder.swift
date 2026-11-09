@@ -734,8 +734,9 @@ private final class DNSResolutionCore: @unchecked Sendable {
                DNSWireFormat.isUnderEnabledDNSEntry(domain, config: config),
                !DNSWireFormat.isMulticastDNSName(domain) {
                 logger.log(.debug, "DNS: internal server \(primaryDNS) did not answer for \(domain), trying DoH.", category: .network)
-                response = await resolveViaDoH(query: queryBytes, config: config)
-                usedDoH = response != nil
+                let doh = await resolveViaDoH(query: queryBytes, config: config)
+                response = doh.response
+                usedDoH = doh.isProviderAnswer
             }
         } else {
             let internalResponse = await forwardUDP(
@@ -743,14 +744,16 @@ private final class DNSResolutionCore: @unchecked Sendable {
             )
             if DNSWireFormat.shouldFallbackToPublicDoH(internalResponse: internalResponse) {
                 logger.log(.debug, "DNS: \(domain) not resolved internally, trying DoH.", category: .network)
-                let dohResponse = await resolveViaDoH(query: queryBytes, config: config)
-                if let dohResponse {
+                switch await resolveViaDoH(query: queryBytes, config: config) {
+                case .answered(let dohResponse):
                     // DoH found an answer. Prefer it: the corporate
                     // server's NXDOMAIN was just "I don't know about
                     // this name", not authoritative.
                     response = dohResponse
                     usedDoH = true
-                } else {
+                case .notAsked(let refusal):
+                    response = refusal ?? internalResponse
+                case .unanswered:
                     // DoH failed (no providers reachable, all timed
                     // out, blocked by a filtering proxy, or the upstream
                     // proxy is down). Fall back to whatever the corporate
@@ -853,14 +856,39 @@ private final class DNSResolutionCore: @unchecked Sendable {
         }
     }
 
-    private func resolveViaDoH(query: [UInt8], config: ProxyConfig) async -> [UInt8]? {
+    /// What the DoH stage produced for one query.
+    private enum DoHOutcome {
+        /// A provider answered.
+        case answered([UInt8])
+        /// The query type has no DoH lookup here (only A and AAAA do), so no
+        /// provider was asked; `refusal` is the REFUSED reply, nil when the
+        /// query cannot be echoed.
+        case notAsked(refusal: [UInt8]?)
+        /// Providers were asked and none answered.
+        case unanswered
+
+        var response: [UInt8]? {
+            switch self {
+            case .answered(let response): response
+            case .notAsked(let refusal): refusal
+            case .unanswered: nil
+            }
+        }
+
+        var isProviderAnswer: Bool {
+            if case .answered = self { return true }
+            return false
+        }
+    }
+
+    private func resolveViaDoH(query: [UInt8], config: ProxyConfig) async -> DoHOutcome {
         let qtype = DNSWireFormat.extractQueryType(from: query)
         let typeName: String
         switch qtype {
         case 1: typeName = "A"
         case 28: typeName = "AAAA"
         default:
-            return DNSWireFormat.emptyRefusedResponse(originalQuery: query)
+            return .notAsked(refusal: DNSWireFormat.emptyRefusedResponse(originalQuery: query))
         }
 
         // The empty-list fallback must be the shipped default, not a literal:
@@ -895,7 +923,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         var handle = currentHandle()
         if !handle.beginUse() {
             handle = currentHandle()
-            guard handle.beginUse() else { return nil }
+            guard handle.beginUse() else { return .unanswered }
         }
         defer { handle.endUse() }
         let sessions = handle.transports.sessions(preferProxyPath: preferProxyPathForDoH())
@@ -947,7 +975,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
             }
         }
 
-        return answer
+        return answer.map(DoHOutcome.answered) ?? .unanswered
     }
 
     private static func tryDoHJSONFetch(
