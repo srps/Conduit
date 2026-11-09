@@ -1085,7 +1085,10 @@ private final class DNSResolutionCore: @unchecked Sendable {
                                     channel.close(promise: nil)
                                 }
                             case .failure(let error):
-                                continuation.resume(throwing: error)
+                                // Through the collector, never the continuation
+                                // itself: a cancel that landed while the connect
+                                // was pending has already resumed it.
+                                handler.fail(with: error)
                             }
                         }
                 }
@@ -1792,7 +1795,9 @@ private final class UDPResponseCollector: ChannelInboundHandler, @unchecked Send
         }
     }
 
-    private func fail(with error: Error) {
+    /// Ends the wait with `error`, unless something already ended it. The
+    /// one path to the continuation's failure, from any thread.
+    func fail(with error: Error) {
         lock.withLock {
             continuation?.resume(throwing: error)
             continuation = nil
