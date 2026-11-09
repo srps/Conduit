@@ -304,6 +304,25 @@ final class DNSWireFormatTests: XCTestCase {
         XCTAssertEqual(DNSWireFormat.responseByClampingTTL(Array(response.prefix(20)), to: 5), Array(response.prefix(20)), "a truncated response is returned as it is")
     }
 
+    /// An OPT pseudo-record's TTL field is the extended RCODE, the EDNS
+    /// version and the DO flag (RFC 6891), not a lifetime: the clamp leaves
+    /// it alone and still cuts the records around it.
+    func testResponseByClampingTTLLeavesTheOPTRecordAlone() throws {
+        let query = DNSWireFormat.buildQuery(domain: "host.corp.example", txID: 0x1235)
+        let json = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"192.0.2.1"}]}"#
+        var response = try XCTUnwrap(DNSWireFormat.synthesizeDNSResponse(originalQuery: query, jsonResponse: json))
+        // Root name, TYPE 41, UDP payload size 4096, extended RCODE 0, version 0, DO set, no options.
+        let opt: [UInt8] = [0x00, 0x00, 0x29, 0x10, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00]
+        response[11] += 1 // ARCOUNT
+        response += opt
+
+        let clamped = DNSWireFormat.responseByClampingTTL(response, to: 5)
+
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: clamped)?.ttl, 5, "the A record is cut")
+        XCTAssertEqual(Array(clamped.suffix(opt.count)), opt, "the OPT record keeps its DO flag")
+        XCTAssertEqual(clamped.count, response.count)
+    }
+
     // MARK: - isInternalDomain
 
     func testInternalDomainMatchesConfiguredDNSEntry() {

@@ -136,6 +136,9 @@ package enum DNSWireFormat {
         return minimum
     }
 
+    /// TYPE of the EDNS OPT pseudo-record (RFC 6891).
+    private static let optRecordType: UInt16 = 41
+
     /// `response` with every record's TTL cut to at most `maximum` seconds.
     /// Records that cannot be walked (a truncated response) are left as they
     /// are, together with everything after them.
@@ -156,13 +159,16 @@ package enum DNSWireFormat {
         }
         for _ in 0..<(Int(answerCount) + Int(authorityCount) + Int(additionalCount)) {
             guard skipName(in: response, offset: &offset), offset + 10 <= response.count else { return clamped }
-            offset += 4 // TYPE + CLASS
+            guard let type = readUInt16(from: response, at: &offset) else { return clamped }
+            offset += 2 // CLASS
             let ttlOffset = offset
             guard let ttl = readUInt32(from: response, at: &offset),
                   let rdLength = readUInt16(from: response, at: &offset) else {
                 return clamped
             }
-            if ttl > maximum {
+            // An OPT pseudo-record (EDNS, RFC 6891) has no TTL: the field
+            // holds the extended RCODE, the version and the DO flag.
+            if type != optRecordType, ttl > maximum {
                 clamped[ttlOffset] = UInt8(maximum >> 24)
                 clamped[ttlOffset + 1] = UInt8((maximum >> 16) & 0xFF)
                 clamped[ttlOffset + 2] = UInt8((maximum >> 8) & 0xFF)
