@@ -15,7 +15,7 @@ The default `swift` may be Command Line Tools, which fails with `no such module 
 | Before pushing | Every step of `.github/workflows/swift.yml`, not only `swift test`: at least `pm-sim all`, the `scripts/check-*.py` and `scripts/test-*.py` checks (including `check-decisions.py` and `test-decisions.py`) and `scripts/perf-gate.sh` |
 | Headless proxy | `pm-proxy --state-dir "$(mktemp -d /tmp/pm-test-XXXX)" --port 0 --dns-port 0 --status-interval 2` (keep the state dir path short; it holds a control socket) |
 | One simulator scenario | `swift run pm-sim <scenario>`; scenarios live in `Sources/pm-sim/` |
-| Dev app beside the installed one | `./bundle-app.sh --dev`, then `open -n -a "$PWD/Conduit Dev.app" --args [--section dns] [--vpn utun4] [--upstream host:port] [--dev-state-dir PATH]` |
+| Dev app beside the installed one | `./bundle-app.sh --dev`, then `open -n -a "$PWD/Conduit Dev.app" --args [--section dns] [--vpn utun4] [--upstream host:port] [--start] [--dev-state-dir PATH]` |
 | Install app | `./bundle-app.sh --release --install` (quits and replaces the running Conduit) |
 | Install helper | `sudo ./install-helper.sh`, required after any change to `Sources/ConduitHelper/` |
 
