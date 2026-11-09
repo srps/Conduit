@@ -177,20 +177,23 @@ package enum DNSWireFormat {
     }
 
     package static func isInternalDomain(_ domain: String, config: ProxyConfig) -> Bool {
+        enabledDNSEntryDomain(containing: domain, config: config) != nil || isMulticastDNSName(domain)
+    }
+
+    /// The domain of the first enabled split-DNS entry that `domain` is at or
+    /// under, lowercased, or nil when there is none.
+    package static func enabledDNSEntryDomain(containing domain: String, config: ProxyConfig) -> String? {
         let lower = domain.lowercased()
-        let internalPatterns = config.dnsEntries.filter(\.enabled).map { $0.domain.lowercased() }
-        for pattern in internalPatterns {
-            if lower == pattern || lower.hasSuffix(".\(pattern)") {
-                return true
-            }
-        }
-        let builtins = ["local"]
-        for suffix in builtins {
-            if lower == suffix || lower.hasSuffix(".\(suffix)") {
-                return true
-            }
-        }
-        return false
+        return config.dnsEntries.filter(\.enabled).lazy
+            .map { $0.domain.lowercased() }
+            .first { lower == $0 || lower.hasSuffix(".\($0)") }
+    }
+
+    /// Whether `domain` is a `.local` name, which belongs to multicast DNS and
+    /// never has a public answer.
+    package static func isMulticastDNSName(_ domain: String) -> Bool {
+        let lower = domain.lowercased()
+        return lower == "local" || lower.hasSuffix(".local")
     }
 
     package static func synthesizeDNSResponse(originalQuery: [UInt8], jsonResponse: String, queryType: UInt16 = 1) -> [UInt8]? {

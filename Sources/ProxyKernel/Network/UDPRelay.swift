@@ -11,7 +11,9 @@ package final class UDPRelay: @unchecked Sendable {
     /// closes them and the next `start()` is handed the same numbers back.
     private var generation: UInt64 = 0
     private let lock = NSLock()
-    private let staleTimeoutSeconds: TimeInterval = 10
+    /// How long a forwarded query waits for its reply before the relay
+    /// forgets it; a reply after that is dropped.
+    package static let staleTimeoutSeconds: TimeInterval = 10
     private let willServiceDescriptors: @Sendable (Int32, Int32) -> Void
     private let loopDidExit: @Sendable () -> Void
 
@@ -262,7 +264,7 @@ package final class UDPRelay: @unchecked Sendable {
             }
 
             let now = Date()
-            pending = pending.filter { now.timeIntervalSince($0.value.sentAt) < staleTimeoutSeconds }
+            pending = pending.filter { now.timeIntervalSince($0.value.sentAt) < Self.staleTimeoutSeconds }
             if ready > 0 { willServiceDescriptors(listenFD, forwardFD) }
 
             // Readiness above may describe a descriptor `stop()` has since

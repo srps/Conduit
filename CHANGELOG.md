@@ -24,7 +24,8 @@ release.
 
 This release makes recovery after a crash quiet and correct (with an updated
 helper), stops a slow origin from tripping a healthy upstream's circuit
-breaker, and makes the "choose a port" setting (port 0) advertise the port
+breaker, lets a VPN client resolve its gateway off the VPN when the gateway's
+hostname is under a split-DNS domain, and makes the "choose a port" setting (port 0) advertise the port
 actually bound. Helper protocol v5 is unchanged (one read-only command and two
 optional reply fields are added within it), the schema-two settings files and
 the platform-state journal keep their formats, and the v1 control protocol
@@ -54,6 +55,19 @@ DNS instead of restoring it on its own.
 
 ### Fixed
 
+- Off the VPN, a name under a split-DNS domain now resolves through public
+  DNS (the configured DoH providers) when the corporate DNS server gives no
+  answer at all. A VPN client such as Cisco Secure Client whose gateway
+  hostname sits under that domain can connect again from a hotspot or a home
+  network; before, the lookup failed until the VPN was up, which it never
+  could be. A reply from the corporate server, NXDOMAIN included, is still the
+  answer, and `.local` names never leave the machine. Only address lookups (A
+  and AAAA) fall back; other types, such as SRV and PTR, get REFUSED off the
+  network. Conduit does not cache the public answer, so its next lookup after
+  the VPN comes up gets the corporate answer; macOS and browsers can keep the
+  public one for its TTL. While the corporate server is out of reach, those
+  names are sent to the DoH providers. Each fallback emits
+  `dns.split_dns_doh_fallback`, at most once a minute per domain and outcome.
 - After Conduit crashes with "Manage system DNS" on, the next launch puts the
   user's DNS back on its own and stops the helper's orphaned relay, with no
   notice and nothing to click (#201). It asks the helper, whose relay still
