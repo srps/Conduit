@@ -180,13 +180,10 @@ package enum DNSWireFormat {
         enabledDNSEntryDomain(containing: domain, config: config) != nil || isMulticastDNSName(domain)
     }
 
-    /// The domain of the first enabled split-DNS entry that `domain` is at or
-    /// under, lowercased, or nil when there is none.
+    /// The domain of the enabled split-DNS entry that `domain` is at or under,
+    /// the longest when several match, lowercased, or nil when there is none.
     package static func enabledDNSEntryDomain(containing domain: String, config: ProxyConfig) -> String? {
-        let lower = domain.lowercased()
-        return config.dnsEntries.filter(\.enabled).lazy
-            .map { $0.domain.lowercased() }
-            .first { lower == $0 || lower.hasSuffix(".\($0)") }
+        SplitDNSTable(entries: config.dnsEntries).rule(matching: domain)?.domain
     }
 
     /// Whether `domain` is a `.local` name, which belongs to multicast DNS and
