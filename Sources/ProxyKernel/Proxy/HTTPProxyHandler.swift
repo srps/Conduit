@@ -1221,9 +1221,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     /// a memo repeat, a transient path change) and stays out of the event
     /// stream, which the popover shows.
     ///
-    /// `suppressed` is the number of identical failures a
-    /// `ConnectFailureLog` held back since the last report; a summary
-    /// carries it in both the event and the line.
+    /// `heldBack` is what a `ConnectFailureLog` window counted instead of
+    /// reporting; the event and the line both carry it.
     static func reportConnectFailure(
         _ event: String?,
         level: LogLevel,
@@ -1235,8 +1234,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         eventSink: (@Sendable (RuntimeEvent) -> Void)?,
         eventAtAnyLevel: Bool = false,
         kind: ConnectFailureKind? = nil,
-        suppressed: Int = 0,
-        windowSeconds: Int = 0
+        heldBack: HeldBackConnectFailures? = nil
     ) {
         if let event, eventAtAnyLevel || level >= .warning {
             // `upstream=` precedes `reason=`, whose value may hold spaces.
@@ -1244,10 +1242,18 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             if let upstream { detail += " upstream=\(upstream)" }
             detail += " reason=\(error.displayDescription)"
             if let kind { detail += " kind=\(kind.rawValue)" }
-            if suppressed > 0 { detail += " suppressed=\(suppressed) windowSeconds=\(windowSeconds)" }
+            if let heldBack {
+                detail += " suppressed=\(heldBack.count) windowSeconds=\(heldBack.windowSeconds)"
+                detail += " lastAt=\(String(format: "%.3f", heldBack.lastAt.timeIntervalSince1970)) lastSecondsAgo=\(heldBack.lastSecondsAgo)"
+                if heldBack.isSummary { detail += " summary=true" }
+            }
             eventSink?(RuntimeEvent(kind: .connection, event: event, detail: detail))
         }
-        let line = suppressed > 0 ? "\(message) (suppressed=\(suppressed) in the last \(windowSeconds)s)" : message
+        var line = message
+        if let heldBack {
+            let summary = heldBack.isSummary ? "summary: " : ""
+            line += " (\(summary)suppressed=\(heldBack.count) in the last \(heldBack.windowSeconds)s, last \(heldBack.lastSecondsAgo)s ago)"
+        }
         logger.log(level, line, category: .proxy)
     }
 

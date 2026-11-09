@@ -10,6 +10,16 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 The 0.6.2 notes below are prepared for packaging. 0.6.1 is the latest published
 release.
 
+### Fixed
+
+- A coalesced connect-failure summary no longer reads as a fresh failure
+  (#293). After a VPN drop, routing can go direct within seconds while
+  summaries of the upstream failures before it keep arriving for up to a
+  minute, longer after a sleep. The summary's event now adds `summary=true`,
+  `lastAt=` (when the last counted failure happened) and `lastSecondsAgo=`,
+  and its log line reads `(summary: suppressed=7 in the last 60s, last 59s
+  ago)`. `suppressed=` and `windowSeconds=` are unchanged.
+
 ## 0.6.2
 
 This release makes recovery after a crash quiet and correct (with an updated
