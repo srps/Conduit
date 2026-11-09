@@ -953,15 +953,15 @@ private final class DNSResolutionCore: @unchecked Sendable {
         var attempt = InternalAttempt()
         for server in servers where !Task.isCancelled && attempt.asked.count < askingAtMost {
             if serverHealth.isOpen(server) {
-                if serverHealth.beginProbe(server) {
-                    probe(server: server, query: query, timeout: timeout)
+                if let generation = serverHealth.beginProbe(server) {
+                    probe(server: server, query: query, timeout: timeout, startedIn: generation)
                 }
                 continue
             }
             attempt.asked.append(server)
             let response = await forwardUDP(query: query, server: server, timeout: timeout)
             guard !Task.isCancelled else { return attempt }
-            record(response: response, from: server)
+            report(serverHealth.record(replied: response != nil, from: server), server: server)
             if let response {
                 attempt.response = response
                 return attempt
@@ -973,20 +973,14 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// Sends `query` to a server whose circuit is open, outside the lookup
     /// that skipped it, so the lookup does not wait on it. At most one probe
     /// per server is in flight; the UDP timeout bounds it.
-    private func probe(server: String, query: [UInt8], timeout: TimeAmount) {
-        let generation = serverHealth.generation
+    private func probe(server: String, query: [UInt8], timeout: TimeAmount, startedIn generation: Int) {
         Task.detached { [self] in
             let response = await forwardUDP(query: query, server: server, timeout: timeout)
-            serverHealth.endProbe(server)
-            // A reset in between closed every circuit already; this probe
-            // says nothing about the new path.
-            guard serverHealth.generation == generation else { return }
-            record(response: response, from: server)
+            report(serverHealth.endProbe(server, startedIn: generation, replied: response != nil), server: server)
         }
     }
 
-    private func record(response: [UInt8]?, from server: String) {
-        let transition = response == nil ? serverHealth.recordSilence(server) : serverHealth.recordReply(server)
+    private func report(_ transition: InternalServerHealth.Transition?, server: String) {
         switch transition {
         case .opened(let silences):
             reportCircuit(server: server, event: "dns.internal_server_circuit_opened", extra: " silences=\(silences)")
@@ -1861,13 +1855,9 @@ private final class InternalServerHealth: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
     private var touches = 0
+    /// Advanced by every `reset()`; a probe records its result only in the
+    /// generation it began in.
     private var resets = 0
-
-    /// Advanced by every `reset()`, so a probe that began before one knows to
-    /// discard its result.
-    var generation: Int {
-        lock.withLock { resets }
-    }
 
     func isOpen(_ server: String) -> Bool {
         lock.withLock {
@@ -1876,46 +1866,55 @@ private final class InternalServerHealth: @unchecked Sendable {
         }
     }
 
-    /// Claims the one probe slot of an open circuit. False when the circuit
-    /// is closed or a probe is already in flight.
-    func beginProbe(_ server: String) -> Bool {
+    /// Claims the one probe slot of an open circuit and returns the reset
+    /// generation the probe starts in. Nil when the circuit is closed or a
+    /// probe is already in flight.
+    func beginProbe(_ server: String) -> Int? {
         lock.withLock {
-            guard case .open(probing: false) = entries[server]?.circuit else { return false }
+            guard case .open(probing: false) = entries[server]?.circuit else { return nil }
             update(server) { $0 = .open(probing: true) }
-            return true
+            return resets
         }
     }
 
-    func endProbe(_ server: String) {
+    /// Frees the probe slot and records the probe's result in one step. A
+    /// reset since `generation` closed every circuit and dropped the slot
+    /// already, and the probe says nothing about the new path: nothing is
+    /// recorded.
+    func endProbe(_ server: String, startedIn generation: Int, replied: Bool) -> Transition? {
         lock.withLock {
-            guard case .open = entries[server]?.circuit else { return }
-            update(server) { $0 = .open(probing: false) }
-        }
-    }
-
-    func recordReply(_ server: String) -> Transition? {
-        lock.withLock {
-            let wasOpen: Bool
-            if case .open = entries[server]?.circuit { wasOpen = true } else { wasOpen = false }
-            update(server) { $0 = .closed(silences: 0) }
-            return wasOpen ? .closed : nil
-        }
-    }
-
-    func recordSilence(_ server: String) -> Transition? {
-        lock.withLock {
-            switch entries[server]?.circuit ?? .closed(silences: 0) {
-            case .open:
-                return nil
-            case .closed(let silences):
-                let now = silences + 1
-                if now >= Self.openAfterConsecutiveSilences {
-                    update(server) { $0 = .open(probing: false) }
-                    return .opened(silences: now)
-                }
-                update(server) { $0 = .closed(silences: now) }
-                return nil
+            guard resets == generation else { return nil }
+            if case .open = entries[server]?.circuit {
+                update(server) { $0 = .open(probing: false) }
             }
+            return recordLocked(replied: replied, from: server)
+        }
+    }
+
+    /// Counts a lookup's reply or silence from `server`.
+    func record(replied: Bool, from server: String) -> Transition? {
+        lock.withLock { recordLocked(replied: replied, from: server) }
+    }
+
+    /// Caller holds the lock.
+    private func recordLocked(replied: Bool, from server: String) -> Transition? {
+        let circuit = entries[server]?.circuit ?? .closed(silences: 0)
+        if replied {
+            update(server) { $0 = .closed(silences: 0) }
+            if case .open = circuit { return .closed }
+            return nil
+        }
+        switch circuit {
+        case .open:
+            return nil
+        case .closed(let silences):
+            let now = silences + 1
+            if now >= Self.openAfterConsecutiveSilences {
+                update(server) { $0 = .open(probing: false) }
+                return .opened(silences: now)
+            }
+            update(server) { $0 = .closed(silences: now) }
+            return nil
         }
     }
 
