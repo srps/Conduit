@@ -953,6 +953,29 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         XCTAssertEqual(doh.requestCount(), 0, "A .local name must never reach a public resolver")
     }
 
+    /// An AD-style split-DNS domain under `.local` is still multicast DNS's
+    /// namespace: its names match the entry, and the silence fallback must
+    /// still leave them at SERVFAIL.
+    @MainActor
+    func testNameUnderLocalSplitDNSEntryDoesNotFallBackToDoH() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let doh = try await AnsweringDoHProvider.start(group: group, ip: "203.0.113.7")
+        defer { doh.channel.close(promise: nil) }
+        let silentServer = try await Self.silentInternalServer(group: group)
+        defer { silentServer.close(promise: nil) }
+
+        let port = try await startForwarder(
+            internalDomain: "corp.local", dohPort: doh.port,
+            tuning: try Self.quickInternalAttempt(against: silentServer)
+        )
+        let query = DNSWireFormat.buildQuery(domain: "fileserver.corp.local", txID: 0x6004)
+        let reply = try await Self.ask(query, port: port, group: group)
+        let response = try XCTUnwrap(reply, "The forwarder must answer")
+
+        XCTAssertEqual(DNSWireFormat.extractRCode(from: response), 2)
+        XCTAssertEqual(doh.requestCount(), 0, "A name under a .local split-DNS entry must never reach a public resolver")
+    }
+
     /// Starts the owned forwarder with one split-DNS domain on the loopback
     /// internal server `tuning` names and one cleartext DoH provider on
     /// `dohPort`, and returns its UDP port.
