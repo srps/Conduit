@@ -282,6 +282,28 @@ final class DNSWireFormatTests: XCTestCase {
         XCTAssertEqual(DNSWireFormat.minimumTTL(in: response), 10)
     }
 
+    func testResponseByClampingTTLCutsOnlyLongerTTLs() throws {
+        let query = DNSWireFormat.buildQuery(domain: "host.corp.example", txID: 0x1234)
+        // Two records, each at the synthesizer's 60 s.
+        let json = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"192.0.2.1"},{"type":1,"TTL":60,"data":"192.0.2.2"}]}"#
+        let response = try XCTUnwrap(DNSWireFormat.synthesizeDNSResponse(originalQuery: query, jsonResponse: json))
+
+        let clamped = DNSWireFormat.responseByClampingTTL(response, to: 5)
+
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: clamped)?.ttl, 5)
+        XCTAssertEqual(DNSWireFormat.minimumTTL(in: clamped), 5, "every record is cut")
+        XCTAssertEqual(clamped.count, response.count)
+        XCTAssertTrue(DNSWireFormat.responseQuestionMatches(query: query, response: clamped))
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: clamped)?.ip, "192.0.2.1", "only the TTL bytes change")
+
+        // A 5 s record stays 5 s under a 60 s bound.
+        let short = try XCTUnwrap(DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: "192.0.2.3"))
+        XCTAssertEqual(DNSWireFormat.responseByClampingTTL(short, to: 60), short, "a TTL already under the bound is kept")
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: DNSWireFormat.responseByClampingTTL(short, to: 2))?.ttl, 2)
+
+        XCTAssertEqual(DNSWireFormat.responseByClampingTTL(Array(response.prefix(20)), to: 5), Array(response.prefix(20)), "a truncated response is returned as it is")
+    }
+
     // MARK: - isInternalDomain
 
     func testInternalDomainMatchesConfiguredDNSEntry() {

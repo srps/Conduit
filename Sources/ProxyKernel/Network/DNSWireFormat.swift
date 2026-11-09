@@ -136,6 +136,44 @@ package enum DNSWireFormat {
         return minimum
     }
 
+    /// `response` with every record's TTL cut to at most `maximum` seconds.
+    /// Records that cannot be walked (a truncated response) are left as they
+    /// are, together with everything after them.
+    package static func responseByClampingTTL(_ response: [UInt8], to maximum: UInt32) -> [UInt8] {
+        guard response.count >= 12 else { return response }
+        var clamped = response
+        var offset = 4
+        guard let questionCount = readUInt16(from: response, at: &offset),
+              let answerCount = readUInt16(from: response, at: &offset),
+              let authorityCount = readUInt16(from: response, at: &offset),
+              let additionalCount = readUInt16(from: response, at: &offset) else {
+            return response
+        }
+        offset = 12
+        for _ in 0..<questionCount {
+            guard skipName(in: response, offset: &offset), offset + 4 <= response.count else { return response }
+            offset += 4
+        }
+        for _ in 0..<(Int(answerCount) + Int(authorityCount) + Int(additionalCount)) {
+            guard skipName(in: response, offset: &offset), offset + 10 <= response.count else { return clamped }
+            offset += 4 // TYPE + CLASS
+            let ttlOffset = offset
+            guard let ttl = readUInt32(from: response, at: &offset),
+                  let rdLength = readUInt16(from: response, at: &offset) else {
+                return clamped
+            }
+            if ttl > maximum {
+                clamped[ttlOffset] = UInt8(maximum >> 24)
+                clamped[ttlOffset + 1] = UInt8((maximum >> 16) & 0xFF)
+                clamped[ttlOffset + 2] = UInt8((maximum >> 8) & 0xFF)
+                clamped[ttlOffset + 3] = UInt8(maximum & 0xFF)
+            }
+            guard offset + Int(rdLength) <= response.count else { return clamped }
+            offset += Int(rdLength)
+        }
+        return clamped
+    }
+
     /// First `A` record in the answer section, with its TTL.
     ///
     /// CNAMEs share the answer section with the addresses they resolve to and

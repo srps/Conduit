@@ -5,10 +5,11 @@ import NIOPosix
 import XCTest
 @testable import ProxyKernel
 
-/// The forwarder across network changes (#292, #296): an unsatisfied path
-/// answers at once, a transports reset cancels the lookups in flight, the
-/// returned path answers, and no entry means no internal attempt. Every
-/// server is a loopback fake; nothing leaves the machine.
+/// The forwarder across network changes (#292, #296, #290 part 1): an
+/// unsatisfied path answers at once, a transports reset cancels the lookups
+/// in flight, no entry means no internal attempt, a silent internal server
+/// opens its circuit, an entry's servers are tried in order and the longest
+/// suffix wins. Every server is a loopback fake; nothing leaves the machine.
 final class DNSForwarderHealthTests: XCTestCase {
     private var ownedForwarder: LocalDNSForwarder?
     private var ownedChannels: [Channel] = []
@@ -35,8 +36,8 @@ final class DNSForwarderHealthTests: XCTestCase {
         let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
         let doh = try await provider(ip: "198.51.100.7")
         let port = try await startForwarder(
-            entries: [DomainDNSEntry(domain: "corp.example", servers: ["127.0.0.1"])],
-            internalPort: internalServer.port, dohPort: doh.port, internalTimeout: .seconds(5)
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .seconds(5)
         )
         ownedForwarder?.updateNetworkPath(satisfied: false)
 
@@ -59,7 +60,7 @@ final class DNSForwarderHealthTests: XCTestCase {
     func testUnsatisfiedPathStillAnswersFromInterceptAndCache() async throws {
         let doh = try await provider(ip: "198.51.100.7")
         let port = try await startForwarder(
-            entries: [], internalPort: 53, dohPort: doh.port, internalTimeout: .seconds(5),
+            entries: [], endpoints: [:], dohPort: doh.port, internalTimeout: .seconds(5),
             interceptRules: [DNSInterceptRule(pattern: "*.intercept.example", interceptIP: "127.44.3.9", enabled: true)]
         )
         let cached = DNSWireFormat.buildQuery(domain: "news.example", txID: 0x7100)
@@ -84,8 +85,8 @@ final class DNSForwarderHealthTests: XCTestCase {
         let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
         let doh = try await provider(ip: "198.51.100.7")
         let port = try await startForwarder(
-            entries: [DomainDNSEntry(domain: "corp.example", servers: ["127.0.0.1"])],
-            internalPort: internalServer.port, dohPort: doh.port, internalTimeout: .seconds(20)
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .seconds(20)
         )
         let forwarder = try XCTUnwrap(ownedForwarder)
         let queries = (0..<8).map { DNSWireFormat.buildQuery(domain: "host-\($0).corp.example", txID: 0x7200 + UInt16($0)) }
@@ -108,8 +109,8 @@ final class DNSForwarderHealthTests: XCTestCase {
         let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
         let doh = try await provider(ip: "198.51.100.7")
         let port = try await startForwarder(
-            entries: [DomainDNSEntry(domain: "corp.example", servers: ["127.0.0.1"])],
-            internalPort: internalServer.port, dohPort: doh.port, internalTimeout: .milliseconds(50)
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .milliseconds(50)
         )
         let forwarder = try XCTUnwrap(ownedForwarder)
         forwarder.updateNetworkPath(satisfied: false)
@@ -133,11 +134,13 @@ final class DNSForwarderHealthTests: XCTestCase {
     func testNoEnabledSplitDNSEntrySkipsTheInternalAttempt() async throws {
         let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
         let doh = try await provider(ip: "198.51.100.7")
-        // The disabled entry's server is on the internal port, so an attempt
-        // on any address the forwarder made up would reach it too.
+        // The disabled entry's server is the only one the forwarder could
+        // pick; its port is also the default internal port, so an attempt on
+        // any address the forwarder made up would reach it too.
         let port = try await startForwarder(
-            entries: [DomainDNSEntry(domain: "corp.example", servers: ["127.0.0.1"], enabled: false)],
-            internalPort: internalServer.port, dohPort: doh.port, internalTimeout: .seconds(2)
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"], enabled: false)],
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .seconds(2),
+            defaultInternalPort: internalServer.port
         )
         let reply = try await ask(DNSWireFormat.buildQuery(domain: "public.example", txID: 0x7400), port: port)
 
@@ -147,19 +150,148 @@ final class DNSForwarderHealthTests: XCTestCase {
         XCTAssertEqual(ownedForwarder?.metricCounts?.dohFallbacks, 1)
     }
 
+    // MARK: - #290: per-server circuits
+
+    @MainActor
+    func testSilentServerOpensItsCircuitAfterThreeSilencesAndIsSkipped() async throws {
+        let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
+        let doh = try await provider(ip: "198.51.100.7")
+        let port = try await startForwarder(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .milliseconds(50)
+        )
+        for index in 0..<3 {
+            let reply = try await ask(DNSWireFormat.buildQuery(domain: "wait-\(index).corp.example", txID: 0x7500 + UInt16(index)), port: port)
+            XCTAssertEqual(reply.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "198.51.100.7", "silence falls back")
+        }
+        XCTAssertEqual(internalServer.queryCount, 3, "each of the first three lookups waited on the server")
+        let opened = events(named: "dns.internal_server_circuit_opened")
+        XCTAssertEqual(opened.map(\.detail), ["server=192.0.2.1 silences=3 suppressed=0"])
+        XCTAssertEqual(opened.first?.kind, .health)
+
+        for index in 0..<3 {
+            let reply = try await ask(DNSWireFormat.buildQuery(domain: "skip-\(index).corp.example", txID: 0x7510 + UInt16(index)), port: port)
+            XCTAssertEqual(reply.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "198.51.100.7")
+        }
+        XCTAssertEqual(internalServer.queryCount, 4, "three skipped lookups sent one probe between them")
+        XCTAssertEqual(events(named: "dns.internal_server_circuit_closed").count, 0)
+        XCTAssertEqual(ownedForwarder?.metricCounts?.dohFallbacks, 6)
+    }
+
+    @MainActor
+    func testProbeReplyClosesTheCircuit() async throws {
+        let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: 3, answering: "192.0.2.80")
+        let doh = try await provider(ip: "198.51.100.7")
+        let port = try await startForwarder(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .milliseconds(50)
+        )
+        for index in 0..<3 {
+            _ = try await ask(DNSWireFormat.buildQuery(domain: "wait-\(index).corp.example", txID: 0x7600 + UInt16(index)), port: port)
+        }
+        XCTAssertEqual(events(named: "dns.internal_server_circuit_opened").count, 1)
+
+        let skipped = try await ask(DNSWireFormat.buildQuery(domain: "probe.corp.example", txID: 0x7610), port: port)
+        XCTAssertEqual(skipped.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "198.51.100.7", "the skipping lookup takes the fallback")
+        try await settle(until: { self.events(named: "dns.internal_server_circuit_closed").count == 1 }, "the probe's reply closes the circuit")
+        XCTAssertEqual(events(named: "dns.internal_server_circuit_closed").first?.detail, "server=192.0.2.1 suppressed=0")
+        XCTAssertEqual(internalServer.queryCount, 4)
+
+        let internalAnswer = try await ask(DNSWireFormat.buildQuery(domain: "back.corp.example", txID: 0x7611), port: port)
+        XCTAssertEqual(internalAnswer.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "192.0.2.80", "the next lookup asks the server again")
+        XCTAssertEqual(internalServer.queryCount, 5)
+    }
+
+    @MainActor
+    func testTransportsResetClosesOpenCircuits() async throws {
+        let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
+        let doh = try await provider(ip: "198.51.100.7")
+        let port = try await startForwarder(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .milliseconds(50)
+        )
+        for index in 0..<3 {
+            _ = try await ask(DNSWireFormat.buildQuery(domain: "wait-\(index).corp.example", txID: 0x7700 + UInt16(index)), port: port)
+        }
+        XCTAssertEqual(events(named: "dns.internal_server_circuit_opened").count, 1)
+
+        ownedForwarder?.resetUpstreamTransports(reason: "vpn_connected")
+
+        _ = try await ask(DNSWireFormat.buildQuery(domain: "again.corp.example", txID: 0x7710), port: port)
+        XCTAssertEqual(internalServer.queryCount, 4, "after the reset the lookup itself asks the server")
+        XCTAssertEqual(events(named: "dns.internal_server_circuit_closed").count, 0, "a reset closes without a probe and without an event")
+    }
+
+    // MARK: - #290: per-entry servers
+
+    @MainActor
+    func testSecondServerIsAskedWhenTheFirstIsSilent() async throws {
+        let silent = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
+        let answering = try await ScriptedInternalServer.start(group: group, silentFor: 0, answering: "192.0.2.81")
+        let doh = try await provider(ip: "198.51.100.7")
+        let port = try await startForwarder(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1", "192.0.2.2"])],
+            endpoints: ["192.0.2.1": silent.port, "192.0.2.2": answering.port], dohPort: doh.port, internalTimeout: .milliseconds(50)
+        )
+        let reply = try await ask(DNSWireFormat.buildQuery(domain: "mail.corp.example", txID: 0x7800), port: port)
+
+        XCTAssertEqual(reply.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "192.0.2.81", "the second server's answer")
+        XCTAssertEqual(silent.queryCount, 1)
+        XCTAssertEqual(answering.queryCount, 1)
+        XCTAssertEqual(doh.requestCount(), 0, "an internal reply is the answer; no fallback")
+        XCTAssertEqual(events(named: "dns.split_dns_doh_fallback").count, 0)
+    }
+
+    @MainActor
+    func testLongestSuffixEntryServersAreAsked() async throws {
+        let parent = try await ScriptedInternalServer.start(group: group, silentFor: 0, answering: "192.0.2.80")
+        let child = try await ScriptedInternalServer.start(group: group, silentFor: 0, answering: "192.0.2.81")
+        let doh = try await provider(ip: "198.51.100.7")
+        let port = try await startForwarder(
+            entries: [
+                DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"]),
+                DomainDNSEntry(domain: "eu.corp.example", servers: ["192.0.2.2"]),
+            ],
+            endpoints: ["192.0.2.1": parent.port, "192.0.2.2": child.port], dohPort: doh.port, internalTimeout: .milliseconds(50)
+        )
+        let eu = try await ask(DNSWireFormat.buildQuery(domain: "host.eu.corp.example", txID: 0x7900), port: port)
+        let global = try await ask(DNSWireFormat.buildQuery(domain: "host.corp.example", txID: 0x7901), port: port)
+
+        XCTAssertEqual(eu.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "192.0.2.81", "the eu entry's server answers its names")
+        XCTAssertEqual(global.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "192.0.2.80")
+        XCTAssertEqual(parent.queryCount, 1)
+        XCTAssertEqual(child.queryCount, 1)
+    }
+
+    @MainActor
+    func testSplitDNSFallbackAnswerHasAShortTTL() async throws {
+        let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
+        let doh = try await provider(ip: "198.51.100.7")
+        let port = try await startForwarder(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .milliseconds(50)
+        )
+        let fallback = try await ask(DNSWireFormat.buildQuery(domain: "vpn.corp.example", txID: 0x7A00), port: port)
+        XCTAssertEqual(fallback.flatMap(DNSWireFormat.firstIPv4Answer)?.ttl, 5, "the provider said 60 s")
+
+        let publicAnswer = try await ask(DNSWireFormat.buildQuery(domain: "public.example", txID: 0x7A01), port: port)
+        XCTAssertEqual(publicAnswer.flatMap(DNSWireFormat.firstIPv4Answer)?.ttl, 60, "a public answer keeps its TTL")
+    }
+
     // MARK: - Fixtures
 
-    /// Starts the owned forwarder: `entries` as the split-DNS table, their
-    /// servers asked on loopback port `internalPort`, one cleartext DoH
-    /// provider on `dohPort`, and both internal timeouts set to
-    /// `internalTimeout`. Returns the UDP port.
+    /// Starts the owned forwarder: `entries` as the split-DNS table, each
+    /// configured server address reached on its loopback port in
+    /// `endpoints`, one cleartext DoH provider on `dohPort`, and both internal
+    /// timeouts set to `internalTimeout`. Returns the UDP port.
     @MainActor
     private func startForwarder(
         entries: [DomainDNSEntry],
-        internalPort: Int,
+        endpoints: [String: Int],
         dohPort: Int,
         internalTimeout: TimeAmount,
-        interceptRules: [DNSInterceptRule] = []
+        interceptRules: [DNSInterceptRule] = [],
+        defaultInternalPort: Int = 53
     ) async throws -> Int {
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -170,7 +302,8 @@ final class DNSForwarderHealthTests: XCTestCase {
         config.localPort = 9
         let frozen = config
         var tuning = DNSForwarderTuning()
-        tuning.internalServerPort = internalPort
+        tuning.internalServerPort = defaultInternalPort
+        tuning.internalServerEndpoint = { server in ("127.0.0.1", endpoints[server] ?? defaultInternalPort) }
         tuning.internalDomainTimeout = internalTimeout
         tuning.internalAttemptTimeout = internalTimeout
         let events = events

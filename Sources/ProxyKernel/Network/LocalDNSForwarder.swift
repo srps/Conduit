@@ -24,6 +24,11 @@ package enum DNSForwarderStartError: Error, LocalizedError, Equatable {
 package struct DNSForwarderTuning: Sendable {
     /// The port internal (split-DNS) servers are asked on.
     package var internalServerPort = 53
+    /// Where a configured internal server is reached instead of itself on
+    /// `internalServerPort`. macOS has one loopback address, so a test that
+    /// needs two distinct servers maps each configured address onto its own
+    /// loopback port here. Production leaves it nil.
+    package var internalServerEndpoint: (@Sendable (_ server: String) -> (host: String, port: Int))?
     /// How long an internal server may take for a name under a managed
     /// domain. Its reply is the answer; only its silence goes on to DoH.
     package var internalDomainTimeout: TimeAmount = .milliseconds(2000)
@@ -515,9 +520,18 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// falls back, and nothing caches the answer, so the event would
     /// otherwise fire on every query.
     private let splitDNSFallbackGate = RuntimeEventRepeatGate()
+    /// Holds `dns.internal_server_circuit_opened` and `_closed` to one per
+    /// server and direction per minute.
+    private let circuitEventGate = RuntimeEventRepeatGate()
     /// Holds `dns.unsatisfied_path_servfail` to one per 5 s: a wake with no
     /// network brings a burst of lookups, and every one of them is refused.
     private let unsatisfiedPathGate = RuntimeEventRepeatGate(repeatInterval: 5)
+    private let serverHealth = InternalServerHealth()
+    /// A split-DNS name's DoH fallback answer is a public stand-in for an
+    /// internal answer, so its TTL is cut to what the intercept path uses:
+    /// once the VPN is up, the OS and browser caches let the internal answer
+    /// through within seconds (decision 0043, #290).
+    static let splitDNSFallbackTTL: UInt32 = 5
     private let lock = NSLock()
     private var queryCount = 0
     private var dohCount = 0
@@ -625,7 +639,8 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// on belongs to the path that just went away, and each one held a slot
     /// for up to the internal timeout plus the DoH resource timeout. A
     /// cancelled lookup answers SERVFAIL, so the client retries on the new
-    /// path. Returns the lookups cancelled.
+    /// path. The internal-server circuits close as well: silence on the old
+    /// path says nothing about the new one. Returns the lookups cancelled.
     @discardableResult
     func resetUpstreamTransports() -> Int {
         let fresh = DoHTransportsHandle(transports: DoHTransports(config: configProvider(), boundPort: localProxyPort()))
@@ -643,6 +658,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         // use window closes when `resolveViaDoH` returns, as before.
         old.retire()
         responseCache.clear()
+        serverHealth.reset()
         return cancelInFlightQueries()
     }
 
@@ -773,12 +789,13 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// Resolves one query. Never throws, and answers whenever a well-formed
     /// answer is possible — see the type doc for why nil is so narrow.
     ///
-    /// After an intercept rule and the cache, an unsatisfied network path
-    /// answers SERVFAIL at once (#292). With no enabled split-DNS entry there
-    /// is no internal server, so no internal attempt is made and a public
-    /// name goes straight to DoH (#296). A cancelled lookup
-    /// (`resetUpstreamTransports`) answers SERVFAIL as soon as its attempt
-    /// returns and starts no further one.
+    /// The ladder, after an intercept rule and the cache: an unsatisfied
+    /// network path answers SERVFAIL at once (#292); a split-DNS name asks its
+    /// entry's servers in order, skipping open circuits, and falls back to
+    /// DoH on silence (decision 0043); any other name asks the first internal
+    /// server whose circuit is closed, if there is one (#296), then DoH. A
+    /// cancelled lookup (`resetUpstreamTransports`) answers SERVFAIL as soon
+    /// as its attempt returns and starts no further one.
     ///
     /// - Precondition: the caller holds a slot from `admitQuery()` and releases
     ///   it with `releaseQuery(_:)` once this returns.
@@ -787,10 +804,9 @@ private final class DNSResolutionCore: @unchecked Sendable {
 
         let domain = DNSWireFormat.extractDomainName(from: queryBytes)
         let config = configProvider()
-        // Nil with no enabled entry: there is nothing to ask, and a made-up
-        // address only cost every public lookup the attempt timeout (#296).
-        let primaryDNS = config.dnsEntries.filter(\.enabled).flatMap(\.servers).first
-        let isInternal = DNSWireFormat.isInternalDomain(domain, config: config)
+        let table = SplitDNSTable(entries: config.dnsEntries)
+        let rule = table.rule(matching: domain)
+        let isInternal = rule != nil || DNSWireFormat.isMulticastDNSName(domain)
         let queryType = DNSWireFormat.extractQueryType(from: queryBytes)
         let cacheKey = DNSCacheKey(domain: domain.lowercased(), queryType: queryType)
 
@@ -827,29 +843,34 @@ private final class DNSResolutionCore: @unchecked Sendable {
         var usedDoH = false
 
         if isInternal {
-            if let primaryDNS {
-                response = await forwardUDP(query: queryBytes, server: primaryDNS, timeout: tuning.internalDomainTimeout)
-            }
+            // A `.local` name under no entry is asked of the first servers,
+            // as it always was; it never falls back.
+            let servers = rule?.servers ?? table.firstServers
+            let attempt = await askInternalServers(servers, query: queryBytes, timeout: tuning.internalDomainTimeout)
+            response = attempt.response
             // Off the VPN the internal server cannot be reached, and the VPN
             // gateway's own hostname is often under a split-DNS domain: asking
             // only that server would keep the VPN from ever coming up. So
             // silence, and only silence, falls through to public DNS. Any reply
             // from the internal server, NXDOMAIN included, stays its verdict.
-            // The answer is not cached (internal names never are), so the
-            // internal server's answer wins again once it is reachable.
+            // The answer is not cached (internal names never are) and its TTL
+            // is clamped, so the internal server's answer wins again soon
+            // after it is reachable.
             if response == nil, !Task.isCancelled,
-               let entryDomain = DNSWireFormat.enabledDNSEntryDomain(containing: domain, config: config),
+               let rule,
                !DNSWireFormat.isMulticastDNSName(domain) {
                 let doh = await resolveViaDoH(query: queryBytes, config: config)
-                response = doh.response
+                response = doh.response.map { DNSWireFormat.responseByClampingTTL($0, to: Self.splitDNSFallbackTTL) }
                 usedDoH = doh.isProviderAnswer
-                reportSplitDNSFallback(entryDomain: entryDomain, name: domain, server: primaryDNS ?? "none", outcome: doh)
+                reportSplitDNSFallback(entryDomain: rule.domain, name: domain, servers: attempt.asked, outcome: doh)
             }
         } else {
-            var internalResponse: [UInt8]?
-            if let primaryDNS {
-                internalResponse = await forwardUDP(query: queryBytes, server: primaryDNS, timeout: tuning.internalAttemptTimeout)
-            }
+            // One internal attempt for a public name, on the first server
+            // whose circuit is closed. With no enabled entry there is no
+            // server, and nothing to wait on (#296).
+            let internalResponse = await askInternalServers(
+                table.firstServers, query: queryBytes, timeout: tuning.internalAttemptTimeout, askingAtMost: 1
+            ).response
             if Task.isCancelled {
                 response = nil
             } else if DNSWireFormat.shouldFallbackToPublicDoH(internalResponse: internalResponse) {
@@ -912,6 +933,81 @@ private final class DNSResolutionCore: @unchecked Sendable {
         return responseBytes
     }
 
+    /// What asking the internal servers produced: the first reply, and the
+    /// servers actually asked (an open circuit is skipped, not asked).
+    private struct InternalAttempt {
+        var response: [UInt8]?
+        var asked: [String] = []
+    }
+
+    /// Asks `servers` in order until one replies, or `askingAtMost` have
+    /// been asked. A server whose circuit is open is skipped, and the first
+    /// lookup to skip it sends the query as a detached probe; its reply
+    /// closes the circuit. Each silence counts towards the server's circuit,
+    /// each reply resets it. Stops at a cancellation.
+    private func askInternalServers(
+        _ servers: [String], query: [UInt8], timeout: TimeAmount, askingAtMost: Int = .max
+    ) async -> InternalAttempt {
+        var attempt = InternalAttempt()
+        for server in servers where !Task.isCancelled && attempt.asked.count < askingAtMost {
+            if serverHealth.isOpen(server) {
+                if serverHealth.beginProbe(server) {
+                    probe(server: server, query: query, timeout: timeout)
+                }
+                continue
+            }
+            attempt.asked.append(server)
+            let response = await forwardUDP(query: query, server: server, timeout: timeout)
+            guard !Task.isCancelled else { return attempt }
+            record(response: response, from: server)
+            if let response {
+                attempt.response = response
+                return attempt
+            }
+        }
+        return attempt
+    }
+
+    /// Sends `query` to a server whose circuit is open, outside the lookup
+    /// that skipped it, so the lookup does not wait on it. At most one probe
+    /// per server is in flight; the UDP timeout bounds it.
+    private func probe(server: String, query: [UInt8], timeout: TimeAmount) {
+        let generation = serverHealth.generation
+        Task.detached { [self] in
+            let response = await forwardUDP(query: query, server: server, timeout: timeout)
+            serverHealth.endProbe(server)
+            // A reset in between closed every circuit already; this probe
+            // says nothing about the new path.
+            guard serverHealth.generation == generation else { return }
+            record(response: response, from: server)
+        }
+    }
+
+    private func record(response: [UInt8]?, from server: String) {
+        let transition = response == nil ? serverHealth.recordSilence(server) : serverHealth.recordReply(server)
+        switch transition {
+        case .opened(let silences):
+            reportCircuit(server: server, event: "dns.internal_server_circuit_opened", extra: " silences=\(silences)")
+        case .closed:
+            reportCircuit(server: server, event: "dns.internal_server_circuit_closed", extra: "")
+        case nil:
+            break
+        }
+    }
+
+    private func reportCircuit(server: String, event: String, extra: String) {
+        let opened = event.hasSuffix("opened")
+        let what = opened
+            ? "DNS: internal server \(server) gave no reply \(InternalServerHealth.openAfterConsecutiveSilences) times in a row; lookups skip it until a probe is answered."
+            : "DNS: internal server \(server) answered a probe; lookups ask it again."
+        guard let suppressed = circuitEventGate.admit(host: server, reason: opened ? "opened" : "closed") else {
+            logger.log(.debug, what, category: .network)
+            return
+        }
+        eventSink?(RuntimeEvent(kind: .health, event: event, detail: "server=\(server)\(extra) suppressed=\(suppressed)"))
+        logger.log(opened ? .warning : .notice, what, category: .network)
+    }
+
     /// Emits `dns.unsatisfied_path_servfail` unless `unsatisfiedPathGate`
     /// holds it back, then logs the line derived from it.
     private func reportUnsatisfiedPath(name: String) {
@@ -940,7 +1036,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// without waiting out `timeout`.
     private func forwardUDP(query clientQuery: [UInt8], server: String, timeout: TimeAmount) async -> [UInt8]? {
         guard clientQuery.count >= 12, !Task.isCancelled else { return nil }
-        let (host, port) = (server, tuning.internalServerPort)
+        let (host, port) = tuning.internalServerEndpoint?(server) ?? (server, tuning.internalServerPort)
         var query = clientQuery
         let wireID = UInt16.random(in: .min ... .max)
         query[0] = UInt8(wireID >> 8)
@@ -1039,8 +1135,11 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// Emits `dns.split_dns_doh_fallback` unless `splitDNSFallbackGate` holds
     /// it back, then logs the line derived from it. A held-back fallback logs
     /// at debug only.
-    private func reportSplitDNSFallback(entryDomain: String, name: String, server: String, outcome: DoHOutcome) {
-        let silence = server == "none" ? "the entry names no internal server" : "internal server \(server) did not answer"
+    private func reportSplitDNSFallback(entryDomain: String, name: String, servers: [String], outcome: DoHOutcome) {
+        let server = servers.isEmpty ? "none" : servers.joined(separator: ",")
+        let silence = servers.isEmpty
+            ? "no internal server was asked (every circuit open, or the entry names none)"
+            : "internal server \(server) did not answer"
         guard let suppressed = splitDNSFallbackGate.admit(host: entryDomain, reason: outcome.eventOutcome) else {
             logger.log(
                 .debug,
@@ -1704,4 +1803,119 @@ private final class UDPResponseCollector: ChannelInboundHandler, @unchecked Send
 private enum DNSForwarderError: Error {
     case timeout
     case cancelled
+}
+
+/// One circuit per internal (split-DNS) server (#290). A server that gave no
+/// reply `openAfterConsecutiveSilences` times in a row is open: lookups skip
+/// it and go to their fallback at once instead of waiting out its timeout,
+/// and the first lookup to skip it sends its query as a probe; a reply to the
+/// probe, or to a lookup that was already waiting, closes the circuit. Every
+/// transports reset closes every circuit: silence on the old path says
+/// nothing about the new one.
+///
+/// Bounded: at most `maximumTrackedServers` servers are tracked, the least
+/// recently touched making room. The configuration allows more (256 entries
+/// of 8 servers), but only servers a lookup has reached are tracked, and a
+/// server dropped from the table is merely closed again.
+private final class InternalServerHealth: @unchecked Sendable {
+    static let openAfterConsecutiveSilences = 3
+    static let maximumTrackedServers = 64
+
+    enum Circuit: Equatable {
+        case closed(silences: Int)
+        case open(probing: Bool)
+    }
+
+    enum Transition: Equatable {
+        case opened(silences: Int)
+        case closed
+    }
+
+    private struct Entry {
+        var circuit: Circuit
+        var touched: Int
+    }
+
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+    private var touches = 0
+    private var resets = 0
+
+    /// Advanced by every `reset()`, so a probe that began before one knows to
+    /// discard its result.
+    var generation: Int {
+        lock.withLock { resets }
+    }
+
+    func isOpen(_ server: String) -> Bool {
+        lock.withLock {
+            if case .open = entries[server]?.circuit { return true }
+            return false
+        }
+    }
+
+    /// Claims the one probe slot of an open circuit. False when the circuit
+    /// is closed or a probe is already in flight.
+    func beginProbe(_ server: String) -> Bool {
+        lock.withLock {
+            guard case .open(probing: false) = entries[server]?.circuit else { return false }
+            update(server) { $0 = .open(probing: true) }
+            return true
+        }
+    }
+
+    func endProbe(_ server: String) {
+        lock.withLock {
+            guard case .open = entries[server]?.circuit else { return }
+            update(server) { $0 = .open(probing: false) }
+        }
+    }
+
+    func recordReply(_ server: String) -> Transition? {
+        lock.withLock {
+            let wasOpen: Bool
+            if case .open = entries[server]?.circuit { wasOpen = true } else { wasOpen = false }
+            update(server) { $0 = .closed(silences: 0) }
+            return wasOpen ? .closed : nil
+        }
+    }
+
+    func recordSilence(_ server: String) -> Transition? {
+        lock.withLock {
+            switch entries[server]?.circuit ?? .closed(silences: 0) {
+            case .open:
+                return nil
+            case .closed(let silences):
+                let now = silences + 1
+                if now >= Self.openAfterConsecutiveSilences {
+                    update(server) { $0 = .open(probing: false) }
+                    return .opened(silences: now)
+                }
+                update(server) { $0 = .closed(silences: now) }
+                return nil
+            }
+        }
+    }
+
+    /// Closes every circuit and forgets every probe.
+    func reset() {
+        lock.withLock {
+            entries.removeAll()
+            resets += 1
+        }
+    }
+
+    /// Caller holds the lock. Touches `server` for the eviction order and
+    /// evicts the least recently touched entry when a new one would exceed
+    /// the bound.
+    private func update(_ server: String, _ change: (inout Circuit) -> Void) {
+        touches += 1
+        var circuit = entries[server]?.circuit ?? .closed(silences: 0)
+        change(&circuit)
+        if entries[server] == nil, entries.count >= Self.maximumTrackedServers,
+           let oldest = entries.min(by: { $0.value.touched < $1.value.touched })?.key {
+            entries.removeValue(forKey: oldest)
+        }
+        entries[server] = Entry(circuit: circuit, touched: touches)
+    }
 }

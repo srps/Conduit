@@ -33,8 +33,8 @@ The [2026-09-09 review](../review-2026-09-09.md) noted that recognized internal 
 
 - Off the VPN, A and AAAA lookups for names under split-DNS domains go to the configured DoH providers. They are corporate names, so this reveals them to those providers while the internal server is out of reach.
 - Off the VPN, other query types under split-DNS domains (SRV, PTR and similar) get REFUSED, as public names of those types already do.
-- A lookup for such a name off the VPN costs the 2 s internal wait plus the DoH round trip, on every lookup, because Conduit caches nothing for it. That typically stays well inside the helper relay's 10 s pending window (`UDPRelay.staleTimeoutSeconds`). The worst case, the 2 s wait plus the DoH resource timeout (8 s), reaches that window, so a provider answering after about 8 s has its reply dropped by the relay and the client retries.
-- After the VPN comes up, clients can keep using a public answer they cached for up to its TTL. Clamping the TTL of a fallback answer is in #290's scope.
+- A lookup for such a name off the VPN costs the 2 s internal wait plus the DoH round trip, on every lookup, because Conduit caches nothing for it. Since #290 part 1 the wait is paid by the first three lookups only: the server's circuit then opens and later lookups go to DoH at once while a probe asks the server. That typically stays well inside the helper relay's 10 s pending window (`UDPRelay.staleTimeoutSeconds`). The worst case, the 2 s wait plus the DoH resource timeout (8 s), reaches that window, so a provider answering after about 8 s has its reply dropped by the relay and the client retries.
+- After the VPN comes up, clients can keep using a public answer they cached for up to its TTL. Since #290 part 1 the fallback answer's TTLs are cut to 5 s (`DNSResolutionCore.splitDNSFallbackTTL`), what the intercept path uses, so those caches drop it within seconds.
 - On the VPN with an internal server that has stopped answering, an internal name may get a public address where one exists. A reply of any kind from the internal server prevents this.
 
 ## Invariants and verification
@@ -50,5 +50,5 @@ Does not prove: that the VPN client connects from an off-VPN network with an ins
 
 ## Open questions
 
-- Only the first configured internal server is asked; #290 covers asking the others and the VPN's own resolvers.
+- Resolved by #290 part 1: the servers of the entry the name matched (longest suffix) are asked in order, a server whose circuit is open is skipped, and the event's `server=` lists the servers asked or `none`. The VPN's own resolvers are #290 part 2.
 - Whether public DoH fallback for names outside the internal-domain list is permitted, the [2026-09-09 review](../review-2026-09-09.md)'s question, is not decided here.
