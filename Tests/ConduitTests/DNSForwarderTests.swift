@@ -905,7 +905,36 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: response)?.ip, "203.0.113.7")
         XCTAssertEqual(ownedForwarder?.cachedResponseCount, 0, "A public stand-in answer for an internal name must not be cached")
         XCTAssertEqual(ownedForwarder?.metricCounts?.dohFallbacks, 1)
+        XCTAssertEqual(
+            splitDNSFallbackEvents().map(\.detail),
+            ["domain=corp.internal.test name=vpn-gateway.corp.internal.test server=127.0.0.1 outcome=answered suppressed=0"]
+        )
     }
+
+    /// Off the VPN every lookup under the domain falls back and none is
+    /// cached, so the event is held to one per domain and outcome per minute.
+    @MainActor
+    func testSplitDNSFallbackEventIsThrottledPerDomainAndOutcome() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let doh = try await AnsweringDoHProvider.start(group: group, ip: "203.0.113.7")
+        defer { doh.channel.close(promise: nil) }
+        let silentServer = try await Self.silentInternalServer(group: group)
+        defer { silentServer.close(promise: nil) }
+
+        let port = try await startForwarder(
+            internalDomain: "corp.internal.test", dohPort: doh.port,
+            tuning: try Self.quickInternalAttempt(against: silentServer)
+        )
+        for (index, host) in ["vpn-gateway", "mail", "intranet"].enumerated() {
+            let query = DNSWireFormat.buildQuery(domain: "\(host).corp.internal.test", txID: 0x6010 + UInt16(index))
+            let reply = try await Self.ask(query, port: port, group: group)
+            XCTAssertEqual(reply.map(DNSWireFormat.extractRCode), 0, "\(host) must get the DoH answer")
+        }
+
+        XCTAssertEqual(ownedForwarder?.metricCounts?.dohFallbacks, 3, "Every fallback still counts")
+        XCTAssertEqual(splitDNSFallbackEvents().count, 1, "Three fallbacks inside the minute report once")
+    }
+
     /// Only A and AAAA have a DoH lookup. Any other type under a split-DNS
     /// domain gets REFUSED off the VPN without asking a provider, and that is
     /// not a DoH answer.
@@ -929,8 +958,8 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         XCTAssertEqual(DNSWireFormat.extractRCode(from: response), 5, "REFUSED")
         XCTAssertEqual(doh.requestCount(), 0)
         XCTAssertEqual(ownedForwarder?.metricCounts?.dohFallbacks, 0, "A synthesized REFUSED is not a DoH fallback")
+        XCTAssertEqual(splitDNSFallbackEvents().compactMap(\.detail).map { $0.contains("outcome=refused_qtype") }, [true])
     }
-
 
     /// A reply from the internal server is its verdict, NXDOMAIN included: the
     /// name stays off public DNS whenever the corporate server answers.
@@ -955,6 +984,7 @@ final class DNSForwarderIntegrationTests: XCTestCase {
 
         XCTAssertEqual(DNSWireFormat.extractRCode(from: response), 3, "The internal NXDOMAIN must reach the client")
         XCTAssertEqual(doh.requestCount(), 0, "DoH must not be asked about a name the internal server answered")
+        XCTAssertEqual(splitDNSFallbackEvents().count, 0, "An internal reply is not a fallback")
     }
 
     /// `.local` is multicast DNS and never public, so a silent server leaves
@@ -1000,6 +1030,7 @@ final class DNSForwarderIntegrationTests: XCTestCase {
 
         XCTAssertEqual(DNSWireFormat.extractRCode(from: response), 2)
         XCTAssertEqual(doh.requestCount(), 0, "A name under a .local split-DNS entry must never reach a public resolver")
+        XCTAssertEqual(splitDNSFallbackEvents().count, 0)
     }
 
     /// Starts the owned forwarder with one split-DNS domain on the loopback
@@ -1014,15 +1045,24 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         config.localHost = "127.0.0.1"
         config.localPort = 9
         let frozen = config
+        let events = forwarderEvents
         let forwarder = LocalDNSForwarder(
             group: MultiThreadedEventLoopGroup.singleton,
             logger: RecordingLogSink(minLevel: .debug),
             configProvider: { frozen },
-            tuning: tuning
+            tuning: tuning,
+            eventSink: { event in events.withLockedValue { $0.append(event) } }
         )
         ownedForwarder = forwarder
         try await forwarder.start(host: "127.0.0.1", port: 0)
         return try XCTUnwrap(forwarder.listeningPort)
+    }
+
+    /// The events the forwarder `startForwarder` started has emitted.
+    private let forwarderEvents = NIOLockedValueBox<[RuntimeEvent]>([])
+
+    private func splitDNSFallbackEvents() -> [RuntimeEvent] {
+        forwarderEvents.withLockedValue { $0 }.filter { $0.event == "dns.split_dns_doh_fallback" }
     }
 
     /// Sends one query to the forwarder on `port` and returns its first

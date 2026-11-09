@@ -169,7 +169,8 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             preferProxyPathForDoH: preferProxyPathForDoH,
             localProxyPort: localProxyPort,
             onMetrics: onMetrics,
-            tuning: tuning
+            tuning: tuning,
+            eventSink: eventSink
         )
         self.core = core
 
@@ -479,6 +480,12 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private let localProxyPort: @Sendable () -> Int?
     private let onMetrics: (@Sendable () -> Void)?
     private let tuning: DNSForwarderTuning
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
+    /// Holds `dns.split_dns_doh_fallback` to one event per split-DNS domain
+    /// and outcome per minute. Off the VPN every lookup under the domain
+    /// falls back, and nothing caches the answer, so the event would
+    /// otherwise fire on every query.
+    private let splitDNSFallbackGate = RuntimeEventRepeatGate()
     private let lock = NSLock()
     private var queryCount = 0
     private var dohCount = 0
@@ -527,9 +534,11 @@ private final class DNSResolutionCore: @unchecked Sendable {
         preferProxyPathForDoH: @escaping @Sendable () -> Bool,
         localProxyPort: @escaping @Sendable () -> Int?,
         onMetrics: (@Sendable () -> Void)? = nil,
-        tuning: DNSForwarderTuning
+        tuning: DNSForwarderTuning,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) {
         self.tuning = tuning
+        self.eventSink = eventSink
         self.group = group
         self.logger = logger
         self.configProvider = configProvider
@@ -731,12 +740,12 @@ private final class DNSResolutionCore: @unchecked Sendable {
             // The answer is not cached (internal names never are), so the
             // internal server's answer wins again once it is reachable.
             if response == nil,
-               DNSWireFormat.isUnderEnabledDNSEntry(domain, config: config),
+               let entryDomain = DNSWireFormat.enabledDNSEntryDomain(containing: domain, config: config),
                !DNSWireFormat.isMulticastDNSName(domain) {
-                logger.log(.debug, "DNS: internal server \(primaryDNS) did not answer for \(domain), trying DoH.", category: .network)
                 let doh = await resolveViaDoH(query: queryBytes, config: config)
                 response = doh.response
                 usedDoH = doh.isProviderAnswer
+                reportSplitDNSFallback(entryDomain: entryDomain, name: domain, server: primaryDNS, outcome: doh)
             }
         } else {
             let internalResponse = await forwardUDP(
@@ -879,6 +888,40 @@ private final class DNSResolutionCore: @unchecked Sendable {
             if case .answered = self { return true }
             return false
         }
+
+        /// The `outcome=` value of `dns.split_dns_doh_fallback`.
+        var eventOutcome: String {
+            switch self {
+            case .answered: "answered"
+            case .notAsked: "refused_qtype"
+            case .unanswered: "unanswered"
+            }
+        }
+    }
+
+    /// Emits `dns.split_dns_doh_fallback` unless `splitDNSFallbackGate` holds
+    /// it back, then logs the line derived from it. A held-back fallback logs
+    /// at debug only.
+    private func reportSplitDNSFallback(entryDomain: String, name: String, server: String, outcome: DoHOutcome) {
+        guard let suppressed = splitDNSFallbackGate.admit(host: entryDomain, reason: outcome.eventOutcome) else {
+            logger.log(
+                .debug,
+                "DNS: internal server \(server) did not answer for \(name); DoH fallback outcome=\(outcome.eventOutcome).",
+                category: .network
+            )
+            return
+        }
+        eventSink?(RuntimeEvent(
+            kind: .routing,
+            event: "dns.split_dns_doh_fallback",
+            detail: "domain=\(entryDomain) name=\(name) server=\(server) outcome=\(outcome.eventOutcome) suppressed=\(suppressed)"
+        ))
+        let held = suppressed > 0 ? " \(suppressed) more for this domain and outcome were not logged since the last line." : ""
+        logger.log(
+            .info,
+            "DNS: internal server \(server) did not answer for \(name) (split-DNS domain \(entryDomain)); DoH fallback outcome=\(outcome.eventOutcome).\(held)",
+            category: .network
+        )
     }
 
     private func resolveViaDoH(query: [UInt8], config: ProxyConfig) async -> DoHOutcome {
