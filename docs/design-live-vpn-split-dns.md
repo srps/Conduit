@@ -174,7 +174,18 @@ What is read from the DNS dictionary, in this order of preference, the first non
 
 The parent-domain inference `DetectedDNSConfig.toDNSEntries()` performs today (an entry for `corp.example` when the tunnel pushed `eu.corp.example`) is not carried into the live set. The tunnel's own scoping is what macOS itself uses for those names.
 
-**To confirm on the owner's machine while connected.** This Mac had no tunnel during the design, so the exact keys a Cisco Secure Client tunnel publishes under `State:/Network/Service/<id>/DNS` (which of the three domain keys, whether `InterfaceName` sits in the DNS or the IPv4 dictionary) are from the `configd` sources and prior readings, not observed here. The first implementation PR records a masked `scutil` dump of both dictionaries from the owner's VPN in the decision record, and the parser is written against that fixture. `VPNStatusMonitor` recorded the absence of `/Link` keys for utun the same way.
+**Observed on the owner's machine (2026-11-09, Cisco Secure Client connected, full tunnel).** The values below are masked: `corp.example` for the pushed domain and RFC 5737 addresses for the servers. The parser fixture uses this shape.
+
+- The service ID is not a UUID. Cisco publishes `State:/Network/Service/com.cisco.anyconnect/DNS` and `State:/Network/Service/com.cisco.anyconnect/IPv4`. The physical service (`State:/Network/Service/<UUID>/DNS`, the hotspot resolver) is listed alongside them, and the `InterfaceName` filter skips it. So the monitor must not assume UUID-shaped service IDs.
+- The DNS dictionary has `DomainName` (`corp.example`), `SearchDomains` (`[corp.example]`), `SearchOrder` (`1`) and `ServerAddresses` (two servers, for example `[192.0.2.53, 198.51.100.53]`). There is **no `SupplementalMatchDomains`**, so the preference order above falls through to `SearchDomains`.
+- The IPv4 dictionary carries `InterfaceName` (`utun6`), `Addresses`, `Router` and **`OverridePrimary : 1`**. As the monitor expects, `InterfaceName` sits in the IPv4 dictionary, not in the DNS dictionary.
+- `State:/Network/Global/DNS` mirrors the tunnel's servers and search domain, with `__CONFIGURATION_ID__ : Default: com.cisco.anyconnect 0`. The VPN is the machine's **primary** resolver, not a supplemental one. `scutil --dns` shows the tunnel resolver scoped to `utun6`, while Conduit's relay (`127.0.0.1`) stays resolver #1 on the physical interface.
+
+What this changes:
+
+- **A full-tunnel VPN pushes a default resolver plus a search domain, not a list of split domains.** For this VPN, the detected set is the one search domain and its servers, which equals today's manual entry.
+- **The pushed servers are the VPN's default resolver.** In a full-tunnel profile they are meant to answer every name. Today Conduit sends public names to DoH even while the VPN is up. Whether a full tunnel with `OverridePrimary` should instead route public names to the pushed servers is owner decision 9 below. The recommendation is to keep DoH for public names, which is the current behaviour, and record `OverridePrimary` on the reading so that a later change can act on it.
+- **The fixture needs a split-tunnel case too.** It should cover `SupplementalMatchDomains` present and no `OverridePrimary`. That reading comes from the configd sources, not from an observation.
 
 Owner decision 5 covers the alternative, the private `dnsinfo.h` API (`dns_configuration_copy`), which returns exactly the parsed list `scutil --dns` prints but is not in the public SDK.
 
@@ -298,6 +309,7 @@ The CHANGELOG entry says that imported entries are now redundant on networks tha
 6. **Bounds.** Recommend at most 16 detected domains and the existing `DomainResourceLimits.dnsServers` per domain, with excess reported by `dns.split_resolver_ignored reason=over_limit`. Two new ceilings require the owner's approval per the AGENTS.md rule on bounded collections.
 7. **The switch and its default.** Recommend `dns.followVPNResolvers`, default on, in the DNS section. Off means the monitor does not start and the table holds manual entries only.
 8. **Parent-domain inference.** Recommend dropping it for the live set and keeping whatever parent entries users already have as manual entries. Inferring `corp.example` from a pushed `eu.corp.example` sends names the tunnel never claimed to its servers.
+9. **Full-tunnel default resolver.** In a full-tunnel profile (`OverridePrimary : 1`) the pushed servers are the VPN's default resolver. Recommend keeping DoH for public names, as today, and recording `OverridePrimary` on the reading so that a later change can act on it. Sending every public name to the pushed servers would follow the VPN's intent, but it would make public resolution depend on the internal servers staying healthy.
 
 ## Sequencing
 
@@ -307,4 +319,4 @@ Five verifiable units, each green on its own, in this order.
 2. **Platform inputs.** `PushedResolver`, `PushedResolverObserving`, `PushedResolverMonitor`, the fake, `LiveSplitDNSPolicy`. Pure tests and the parser fixture from the owner's VPN.
 3. **Host wiring.** `RuntimeHostEffects.pushedResolvers`, the policy in `RuntimeHost`, `applySplitDNSTable`, the four events, the snapshot field and its sizing, the three pm-sim scenarios, `events.md`.
 4. **App.** Settings groups, wizard, `VPNDNSDetector` deleted, compositions supply the observer.
-5. **Record.** A decision record for owner decisions 1, 2, 4, 5, 6, 7 and 8 with the owner's validation evidence, and 0043's open question on the first server closed by reference.
+5. **Record.** A decision record for owner decisions 1, 2, 4, 5, 6, 7, 8 and 9 with the owner's validation evidence, and 0043's open question on the first server closed by reference.
