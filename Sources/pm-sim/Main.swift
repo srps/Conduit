@@ -95,6 +95,9 @@ enum PMSim {
               dns-upstream-spoof      DNS: wrong-ID and QR-clear replies are dropped, never answered or cached
               dns-internal-unreachable-falls-back  DNS: a split-DNS name whose server is silent resolves through DoH
               dns-ephemeral-pair-rebind  DNS: a taken TCP twin moves the port-0 UDP+TCP pair to a fresh port
+              dns-unsatisfied-path    DNS: no network path answers SERVFAIL at once, a reset cancels lookups in flight, the returned path answers (#292)
+              dns-no-split-entries    DNS: with no enabled split-DNS entry a public name makes no internal attempt (#296)
+              dns-internal-server-circuit  DNS: a silent internal server's circuit opens, is skipped, probed closed and reset; servers in order; longest suffix (#290)
               observable-target-redaction  Query/fragment privacy across observations
               private-config-boundary  Private configuration frame: cap, read schedules, redaction and refusals
               private-editor-codec  Private editor read and reply: correlation, admission, observation, reply cap and kinds
@@ -290,6 +293,9 @@ enum PMSim {
         "dns-upstream-spoof",
         "dns-internal-unreachable-falls-back",
         "dns-ephemeral-pair-rebind",
+        "dns-unsatisfied-path",
+        "dns-no-split-entries",
+        "dns-internal-server-circuit",
         "observable-target-redaction",
         "private-config-boundary",
         "private-editor-codec",
@@ -483,6 +489,12 @@ enum PMSim {
             return [try await DNSResolverScenarios.internalUnreachableFallsBack(verbose: verbose)]
         case "dns-ephemeral-pair-rebind":
             return [try await DNSResolverScenarios.ephemeralPairRebind(verbose: verbose)]
+        case "dns-unsatisfied-path":
+            return [try await DNSHealthScenarios.unsatisfiedPath(verbose: verbose)]
+        case "dns-no-split-entries":
+            return [try await DNSHealthScenarios.noSplitEntries(verbose: verbose)]
+        case "dns-internal-server-circuit":
+            return [try await DNSHealthScenarios.internalServerCircuit(verbose: verbose)]
         case "observable-target-redaction":
             return [try await ObservableTargetScenarios.redaction()]
         case "private-config-boundary":
