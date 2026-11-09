@@ -25,7 +25,7 @@ package struct DNSForwarderTuning: Sendable {
     /// The port internal (split-DNS) servers are asked on.
     package var internalServerPort = 53
     /// How long an internal server may take for a name under a managed
-    /// domain, where it is the only answer.
+    /// domain. Its reply is the answer; only its silence goes on to DoH.
     package var internalDomainTimeout: TimeAmount = .milliseconds(2000)
     /// How long the internal attempt for any other name may take before the
     /// DoH stage begins.
@@ -169,7 +169,8 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             preferProxyPathForDoH: preferProxyPathForDoH,
             localProxyPort: localProxyPort,
             onMetrics: onMetrics,
-            tuning: tuning
+            tuning: tuning,
+            eventSink: eventSink
         )
         self.core = core
 
@@ -479,6 +480,12 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private let localProxyPort: @Sendable () -> Int?
     private let onMetrics: (@Sendable () -> Void)?
     private let tuning: DNSForwarderTuning
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
+    /// Holds `dns.split_dns_doh_fallback` to one event per split-DNS domain
+    /// and outcome per minute. Off the VPN every lookup under the domain
+    /// falls back, and nothing caches the answer, so the event would
+    /// otherwise fire on every query.
+    private let splitDNSFallbackGate = RuntimeEventRepeatGate()
     private let lock = NSLock()
     private var queryCount = 0
     private var dohCount = 0
@@ -527,9 +534,11 @@ private final class DNSResolutionCore: @unchecked Sendable {
         preferProxyPathForDoH: @escaping @Sendable () -> Bool,
         localProxyPort: @escaping @Sendable () -> Int?,
         onMetrics: (@Sendable () -> Void)? = nil,
-        tuning: DNSForwarderTuning
+        tuning: DNSForwarderTuning,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) {
         self.tuning = tuning
+        self.eventSink = eventSink
         self.group = group
         self.logger = logger
         self.configProvider = configProvider
@@ -723,20 +732,37 @@ private final class DNSResolutionCore: @unchecked Sendable {
             response = await forwardUDP(
                 query: queryBytes, server: primaryDNS, port: tuning.internalServerPort, timeout: tuning.internalDomainTimeout
             )
+            // Off the VPN the internal server cannot be reached, and the VPN
+            // gateway's own hostname is often under a split-DNS domain: asking
+            // only that server would keep the VPN from ever coming up. So
+            // silence, and only silence, falls through to public DNS. Any reply
+            // from the internal server, NXDOMAIN included, stays its verdict.
+            // The answer is not cached (internal names never are), so the
+            // internal server's answer wins again once it is reachable.
+            if response == nil,
+               let entryDomain = DNSWireFormat.enabledDNSEntryDomain(containing: domain, config: config),
+               !DNSWireFormat.isMulticastDNSName(domain) {
+                let doh = await resolveViaDoH(query: queryBytes, config: config)
+                response = doh.response
+                usedDoH = doh.isProviderAnswer
+                reportSplitDNSFallback(entryDomain: entryDomain, name: domain, server: primaryDNS, outcome: doh)
+            }
         } else {
             let internalResponse = await forwardUDP(
                 query: queryBytes, server: primaryDNS, port: tuning.internalServerPort, timeout: tuning.internalAttemptTimeout
             )
             if DNSWireFormat.shouldFallbackToPublicDoH(internalResponse: internalResponse) {
                 logger.log(.debug, "DNS: \(domain) not resolved internally, trying DoH.", category: .network)
-                let dohResponse = await resolveViaDoH(query: queryBytes, config: config)
-                if let dohResponse {
+                switch await resolveViaDoH(query: queryBytes, config: config) {
+                case .answered(let dohResponse):
                     // DoH found an answer. Prefer it: the corporate
                     // server's NXDOMAIN was just "I don't know about
                     // this name", not authoritative.
                     response = dohResponse
                     usedDoH = true
-                } else {
+                case .notAsked(let refusal):
+                    response = refusal ?? internalResponse
+                case .unanswered:
                     // DoH failed (no providers reachable, all timed
                     // out, blocked by a filtering proxy, or the upstream
                     // proxy is down). Fall back to whatever the corporate
@@ -839,14 +865,73 @@ private final class DNSResolutionCore: @unchecked Sendable {
         }
     }
 
-    private func resolveViaDoH(query: [UInt8], config: ProxyConfig) async -> [UInt8]? {
+    /// What the DoH stage produced for one query.
+    private enum DoHOutcome {
+        /// A provider answered.
+        case answered([UInt8])
+        /// The query type has no DoH lookup here (only A and AAAA do), so no
+        /// provider was asked; `refusal` is the REFUSED reply, nil when the
+        /// query cannot be echoed.
+        case notAsked(refusal: [UInt8]?)
+        /// Providers were asked and none answered.
+        case unanswered
+
+        var response: [UInt8]? {
+            switch self {
+            case .answered(let response): response
+            case .notAsked(let refusal): refusal
+            case .unanswered: nil
+            }
+        }
+
+        var isProviderAnswer: Bool {
+            if case .answered = self { return true }
+            return false
+        }
+
+        /// The `outcome=` value of `dns.split_dns_doh_fallback`.
+        var eventOutcome: String {
+            switch self {
+            case .answered: "answered"
+            case .notAsked: "refused_qtype"
+            case .unanswered: "unanswered"
+            }
+        }
+    }
+
+    /// Emits `dns.split_dns_doh_fallback` unless `splitDNSFallbackGate` holds
+    /// it back, then logs the line derived from it. A held-back fallback logs
+    /// at debug only.
+    private func reportSplitDNSFallback(entryDomain: String, name: String, server: String, outcome: DoHOutcome) {
+        guard let suppressed = splitDNSFallbackGate.admit(host: entryDomain, reason: outcome.eventOutcome) else {
+            logger.log(
+                .debug,
+                "DNS: internal server \(server) did not answer for \(name); DoH fallback outcome=\(outcome.eventOutcome).",
+                category: .network
+            )
+            return
+        }
+        eventSink?(RuntimeEvent(
+            kind: .routing,
+            event: "dns.split_dns_doh_fallback",
+            detail: "domain=\(entryDomain) name=\(name) server=\(server) outcome=\(outcome.eventOutcome) suppressed=\(suppressed)"
+        ))
+        let held = suppressed > 0 ? " \(suppressed) more for this domain and outcome were not logged since the last line." : ""
+        logger.log(
+            .info,
+            "DNS: internal server \(server) did not answer for \(name) (split-DNS domain \(entryDomain)); DoH fallback outcome=\(outcome.eventOutcome).\(held)",
+            category: .network
+        )
+    }
+
+    private func resolveViaDoH(query: [UInt8], config: ProxyConfig) async -> DoHOutcome {
         let qtype = DNSWireFormat.extractQueryType(from: query)
         let typeName: String
         switch qtype {
         case 1: typeName = "A"
         case 28: typeName = "AAAA"
         default:
-            return DNSWireFormat.emptyRefusedResponse(originalQuery: query)
+            return .notAsked(refusal: DNSWireFormat.emptyRefusedResponse(originalQuery: query))
         }
 
         // The empty-list fallback must be the shipped default, not a literal:
@@ -881,7 +966,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         var handle = currentHandle()
         if !handle.beginUse() {
             handle = currentHandle()
-            guard handle.beginUse() else { return nil }
+            guard handle.beginUse() else { return .unanswered }
         }
         defer { handle.endUse() }
         let sessions = handle.transports.sessions(preferProxyPath: preferProxyPathForDoH())
@@ -933,7 +1018,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
             }
         }
 
-        return answer
+        return answer.map(DoHOutcome.answered) ?? .unanswered
     }
 
     private static func tryDoHJSONFetch(
