@@ -25,7 +25,7 @@ package struct DNSForwarderTuning: Sendable {
     /// The port internal (split-DNS) servers are asked on.
     package var internalServerPort = 53
     /// How long an internal server may take for a name under a managed
-    /// domain, where it is the only answer.
+    /// domain. Its reply is the answer; only its silence goes on to DoH.
     package var internalDomainTimeout: TimeAmount = .milliseconds(2000)
     /// How long the internal attempt for any other name may take before the
     /// DoH stage begins.
@@ -723,6 +723,20 @@ private final class DNSResolutionCore: @unchecked Sendable {
             response = await forwardUDP(
                 query: queryBytes, server: primaryDNS, port: tuning.internalServerPort, timeout: tuning.internalDomainTimeout
             )
+            // Off the VPN the internal server cannot be reached, and the VPN
+            // gateway's own hostname is often under a split-DNS domain: asking
+            // only that server would keep the VPN from ever coming up. So
+            // silence, and only silence, falls through to public DNS. Any reply
+            // from the internal server, NXDOMAIN included, stays its verdict.
+            // The answer is not cached (internal names never are), so the
+            // internal server's answer wins again once it is reachable.
+            if response == nil,
+               DNSWireFormat.isUnderEnabledDNSEntry(domain, config: config),
+               !DNSWireFormat.isMulticastDNSName(domain) {
+                logger.log(.debug, "DNS: internal server \(primaryDNS) did not answer for \(domain), trying DoH.", category: .network)
+                response = await resolveViaDoH(query: queryBytes, config: config)
+                usedDoH = response != nil
+            }
         } else {
             let internalResponse = await forwardUDP(
                 query: queryBytes, server: primaryDNS, port: tuning.internalServerPort, timeout: tuning.internalAttemptTimeout

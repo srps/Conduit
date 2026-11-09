@@ -66,3 +66,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0040](0040-proxy-endpoint-witness.md) | Witness a port-0 session's advertised proxy endpoint in the state root | accepted | implemented | none |
 | [0041](0041-dns-recovery-from-helper-relay-witness.md) | Decide DNS launch recovery from the helper's relay witness | accepted | implemented | passed |
 | [0042](0042-fall-back-to-the-probe-and-a-notice.md) | Fall back to the liveness probe and a notice when no evidence decides launch recovery | accepted | implemented | none |
+| [0043](0043-split-dns-names-fall-back-to-doh-on-silence.md) | Split-DNS names fall back to public DoH when the internal server is silent | proposed | implemented | pending |

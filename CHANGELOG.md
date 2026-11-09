@@ -44,6 +44,15 @@ DNS instead of restoring it on its own.
 
 ### Fixed
 
+- Off the VPN, a name under a split-DNS domain now resolves through public
+  DNS (the configured DoH providers) when the corporate DNS server gives no
+  answer at all. A VPN client such as Cisco Secure Client whose gateway
+  hostname sits under that domain can connect again from a hotspot or a home
+  network; before, the lookup failed until the VPN was up, which it never
+  could be. A reply from the corporate server, NXDOMAIN included, is still the
+  answer, `.local` names never leave the machine, and the public answer is not
+  cached, so the corporate answer takes over once the VPN is up. While the
+  corporate server is out of reach, those names are sent to the DoH providers.
 - After Conduit crashes with "Manage system DNS" on, the next launch puts the
   user's DNS back on its own and stops the helper's orphaned relay, with no
   notice and nothing to click (#201). It asks the helper, whose relay still
