@@ -50,5 +50,8 @@ final class SplitDNSTableTests: XCTestCase {
         XCTAssertEqual(SplitDNSTable(entries: entries).firstServers, ["192.0.2.10", "192.0.2.11"])
         XCTAssertEqual(SplitDNSTable.empty.firstServers, [])
         XCTAssertNil(SplitDNSTable.empty.rule(matching: "anything.example"))
+        let leadingEmpty = [DomainDNSEntry(domain: "corp.example", servers: [])] + entries
+        XCTAssertEqual(SplitDNSTable(entries: leadingEmpty).firstServers, ["192.0.2.10", "192.0.2.11"],
+                       "an entry without servers must not hide the next entry's servers")
     }
 }

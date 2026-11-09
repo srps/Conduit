@@ -7,8 +7,8 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
-The 0.6.2 notes below are prepared for packaging. 0.6.1 is the latest published
-release.
+The fixes below come after 0.6.2. The 0.6.2 notes further down are prepared for
+packaging; 0.6.1 is the latest published release.
 
 ### Fixed
 

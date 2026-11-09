@@ -60,10 +60,12 @@ package struct SplitDNSTable: Hashable, Sendable {
         return best
     }
 
-    /// The servers of the first rule, the ones a name under no rule is tried
-    /// against before public DNS. Empty with no rule.
+    /// The servers of the first rule that has any, the ones a name under no
+    /// rule is tried against before public DNS. An entry without servers
+    /// claims its names but does not hide the next entry's servers. Empty
+    /// when no rule has a server.
     package var firstServers: [String] {
-        rules.first?.servers ?? []
+        rules.first { !$0.servers.isEmpty }?.servers ?? []
     }
 
     private static func normalize(_ domain: String) -> String {

@@ -107,7 +107,9 @@ package final class NetworkMonitor: NetworkPathObserving, @unchecked Sendable {
         case .satisfied: return .satisfied
         case .unsatisfied: return .unsatisfied
         case .requiresConnection: return .requiresConnection
-        @unknown default: return .unsatisfied
+        // A status this SDK does not know: let DNS attempt, as on
+        // `.requiresConnection`, rather than refuse every lookup.
+        @unknown default: return .requiresConnection
         }
     }
 
