@@ -81,6 +81,14 @@ package struct NetworkPathState: Sendable, Equatable {
 
     package var satisfied: Bool { status == .satisfied }
 
+    /// Whether a lookup may try the internal servers and DoH
+    /// (`LocalDNSForwarder.updateNetworkPath`, #292). Only `unsatisfied`, no
+    /// interface at all, refuses lookups at once. A `requiresConnection` path
+    /// is one a connection attempt would bring up, an on-demand VPN for one,
+    /// and a lookup may be the attempt that does; refusing it at once could
+    /// keep the path from ever coming up, so it is attempted as before.
+    package var allowsDNSAttempts: Bool { status != .unsatisfied }
+
     /// The material fields that differ from `previous`, in `Field` order.
     /// Empty means the update changes nothing the proxy acts on.
     package func changedFields(from previous: NetworkPathState) -> [Field] {

@@ -2684,7 +2684,7 @@ package final class ProxyOrchestrator {
         guard previous == nil || !fields.isEmpty else { return false }
         // Running or not: a forwarder started while the path is down must
         // refuse from its first lookup (#292).
-        dnsForwarder.updateNetworkPath(satisfied: path.satisfied)
+        dnsForwarder.updateNetworkPath(satisfied: path.allowsDNSAttempts)
         let change = NetworkPathChange(path: path, previous: previous, changedFields: fields, unchangedBefore: 0)
         let resetsDNS = snapshot.dnsRunState == .running
         let dnsDecision = resetsDNS ? "reset" : "idle"
