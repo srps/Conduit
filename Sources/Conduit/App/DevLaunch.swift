@@ -62,6 +62,9 @@ struct DevLaunchOptions: Equatable {
     /// The one upstream in the seeded config. Point it at a running
     /// `pm-proxy` for a real "Proxied via" state.
     var upstream: Endpoint?
+    /// Start the proxy once the runtime can take a Start, as the menu's
+    /// switch would, so a screenshot shows a serving instance without a click.
+    var start = false
 
     static var defaultStateDirectory: URL {
         URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -115,7 +118,7 @@ struct DevLaunchOptions: Equatable {
         protectedDirectories: [URL] = productionStateDirectories
     ) throws -> DevLaunchOptions? {
         let args = Array(arguments.dropFirst())
-        let devFlags: Set<String> = ["--dev-state-dir", "--section", "--vpn", "--upstream"]
+        let devFlags: Set<String> = ["--dev-state-dir", "--section", "--vpn", "--upstream", "--start"]
         let flagged = args.contains(flag)
         guard flagged || isDevBundle(bundleIdentifier) else {
             if let stray = args.first(where: { devFlags.contains($0) }) {
@@ -162,6 +165,8 @@ struct DevLaunchOptions: Equatable {
                 }
             case "--upstream":
                 options.upstream = try endpoint(from: try value())
+            case "--start":
+                options.start = true
             default:
                 break
             }
@@ -356,6 +361,40 @@ enum DevLaunch {
         if let section = session.options.section {
             openAppWindow(on: section, appState: appState)
         }
+        if session.options.start {
+            startProxyWhenReady(appState: appState)
+        }
+    }
+
+    /// The runtime takes a Start only once the app state is ready and the
+    /// first snapshot has named the module revisions, which is a moment after
+    /// the windows. Waits for that, ten seconds at most, then sends the Start
+    /// the menu's switch sends, unless the proxy is already up.
+    @MainActor
+    private static func startProxyWhenReady(appState: AppState) {
+        Task { @MainActor in
+            guard await poll({ appState.controlsEnabled && appState.runtime.stamp?.modules != nil }) else {
+                appState.logStore.log(.warning, "Dev mode: --start gave up; the runtime could not take a Start within ten seconds.", category: .system)
+                return
+            }
+            switch appState.runtime.runtimeStatus.state {
+            case .stopped, .failed:
+                appState.logStore.log(.notice, "Dev mode: starting the proxy (--start).", category: .system)
+                appState.toggleProxy()
+            default:
+                appState.logStore.log(.notice, "Dev mode: --start found the proxy already starting or up and sent nothing.", category: .system)
+            }
+        }
+    }
+
+    /// Checks `condition` every 100 ms for ten seconds. False on timeout or cancellation.
+    @MainActor
+    private static func poll(_ condition: () -> Bool) async -> Bool {
+        for _ in 0..<100 {
+            if condition() { return true }
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return false }
+        }
+        return condition()
     }
 
     /// The one path from AppKit into the SwiftUI window is the command SwiftUI
@@ -447,6 +486,9 @@ enum DevLaunch {
 
         let machine = FakeMachine(resolverDirectory: resolverDirectory)
         let vpn = FakeVPNStatusObserver()
+        // The host starts the observer with the first Start and stops it after the last Stop; each start reports this state.
+        vpn.connectedInterfaceName = options.vpnInterfaceName
+        vpn.primedState = options.vpn
         let loginItems = FakeLoginItems()
         // The helper's status and install/uninstall, and the saved password, which the app writes and the host reads: without these the
         // dev instance would reach the installed helper and the login Keychain.
@@ -458,15 +500,6 @@ enum DevLaunch {
         let state = AppState(stateSession: stateSession, composition: composition)
         if let section = options.section {
             state.selectedSection = section
-        }
-        // The host starts its VPN observer when it opens, so the emit waits for the opening.
-        if let vpnState = options.vpn {
-            let interfaceName = options.vpnInterfaceName
-            Task { @MainActor in
-                await state.opening?.value
-                vpn.connectedInterfaceName = interfaceName
-                vpn.emit(vpnState)
-            }
         }
         // Not the path: the log sanitizer redacts a long hex run, and a temporary directory has one. Names what is still real.
         state.logStore.log(

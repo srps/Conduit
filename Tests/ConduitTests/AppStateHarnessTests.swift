@@ -415,6 +415,30 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(state.runtime.runtimeStatus.state, .stopped, "the toggle before readiness started nothing")
     }
 
+    /// A primed fake VPN reports its state each time the host starts its observer, as the production monitor reads the tunnels when it
+    /// starts: the first Start shows it, and a Start after a Stop shows whatever is primed then. `Conduit Dev.app`'s `--vpn` relies on it.
+    func testAPrimedVPNIsReportedOnEveryStart() async throws {
+        let harness = try makeHarness()
+        harness.vpn.connectedInterfaceName = "utun4"
+        harness.vpn.primedState = .connected
+        let state = await harness.ready()
+        XCTAssertEqual(state.runtime.vpnState, .unknown, "nothing is reported before the observer starts")
+
+        state.toggleProxy()
+        await harness.settle("the first Start reports the primed tunnel") {
+            state.runtime.vpnState == .connected && state.runtime.vpnInterfaceName == "utun4"
+        }
+        state.toggleProxy()
+        await harness.settle("the proxy stops") { state.runtime.runtimeStatus.state == .stopped }
+
+        harness.vpn.connectedInterfaceName = nil
+        harness.vpn.primedState = .disconnected(reason: .userInitiated)
+        state.toggleProxy()
+        await harness.settle("the next Start reports what is primed now") {
+            state.runtime.vpnState == .disconnected(reason: .userInitiated)
+        }
+    }
+
     /// A corrupt configuration refuses the open: the bytes stay, the journal's configless recovery restores the machine, the banner
     /// shows, and no control or save acts.
     func testACorruptConfigIsRefusedKeepsItsBytesAndStillRestoresTheJournaledProxy() async throws {
