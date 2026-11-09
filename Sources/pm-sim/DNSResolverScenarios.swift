@@ -348,6 +348,106 @@ enum DNSResolverScenarios {
     private static let genuineIP = "10.20.30.40"
     private static let forgedIP = "203.0.113.66"
 
+    /// `pm-sim dns-internal-unreachable-falls-back`. Off the VPN the split-DNS
+    /// server cannot be reached, and the VPN gateway's hostname sits under the
+    /// split-DNS domain. Asking only that server left the gateway unresolvable,
+    /// so the VPN could never come up to make the server reachable.
+    ///
+    /// | # | condition                                        | expected                         |
+    /// |---|--------------------------------------------------|----------------------------------|
+    /// | A | split-DNS name, internal server silent, over UDP | the public DoH answer            |
+    /// | B | same, over TCP                                   | the public DoH answer            |
+    /// | C | after A and B                                    | nothing cached for the name      |
+    /// | D | `.local` name, internal server silent            | SERVFAIL, DoH never asked        |
+    ///
+    /// The internal server is a loopback socket that never answers and the DoH
+    /// provider a loopback fake, so nothing leaves the machine. That an
+    /// internal server's own reply (NXDOMAIN included) stays authoritative is
+    /// pinned in `DNSForwarderIntegrationTests`.
+    @RuntimeActor
+    static func internalUnreachableFallsBack(verbose: Bool) async throws -> ScenarioResult {
+        let name = "dnsInternalUnreachableFallsBack"
+        let start = Date()
+        var notes: [String] = []
+
+        let group = MultiThreadedEventLoopGroup.singleton
+        let logger = RecordingConsoleLogSink(minLevel: verbose ? .debug : .warning)
+
+        let silentServer = try await DatagramBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
+        ScenarioCleanup.register { _ = try? await silentServer.close().get() }
+        let provider = FakeAnsweringDoHProvider(group: group, ip: publicGatewayIP)
+        ScenarioCleanup.register { await provider.stop() }
+        try await provider.start()
+        notes.append("silent internal DNS on 127.0.0.1:\(silentServer.localAddress?.port ?? 0), DoH answering \(publicGatewayIP)")
+
+        var config = ProxyConfig.testFixture()
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["127.0.0.1"], enabled: true)]
+        config.dohProviders = ["http://127.0.0.1:\(provider.port)/dns-query"]
+        config.upstreams = []
+        let frozen = config
+        var tuning = DNSForwarderTuning()
+        tuning.internalServerPort = silentServer.localAddress?.port ?? 0
+
+        let forwarder = LocalDNSForwarder(group: group, logger: logger, configProvider: { frozen }, tuning: tuning)
+        ScenarioCleanup.register { await forwarder.stop() }
+        try await forwarder.start(host: "127.0.0.1", port: 0)
+        let udpPort = forwarder.listeningPort ?? 0
+        let tcpPort = forwarder.tcpListeningPort ?? 0
+
+        let gatewayQuery = DNSWireFormat.buildQuery(domain: "gateway.corp.example", txID: 0x4A01, qtype: 1)
+        func answeredIP(_ response: [UInt8]?) -> String? {
+            guard let response, DNSWireFormat.responseQuestionMatches(query: gatewayQuery, response: response) else { return nil }
+            return DNSWireFormat.firstIPv4Answer(in: response)?.ip
+        }
+
+        let udpIP = answeredIP(try await DNSProbe.overUDP(query: gatewayQuery, port: udpPort, timeout: 12))
+        notes.append("A udp: ip=\(udpIP ?? "none")")
+        let passA = udpIP == publicGatewayIP
+
+        let tcpIP = answeredIP(try await DNSProbe.overTCP(query: gatewayQuery, port: tcpPort, timeout: 12))
+        notes.append("B tcp: ip=\(tcpIP ?? "none")")
+        let passB = tcpIP == publicGatewayIP
+
+        let cached = forwarder.cachedResponseCount
+        notes.append("C cached responses=\(cached)")
+        let passC = cached == 0
+
+        let localQuery = DNSWireFormat.buildQuery(domain: "printer.local", txID: 0x4A02, qtype: 1)
+        let localResponse = try await DNSProbe.overUDP(query: localQuery, port: udpPort, timeout: 12)
+        let localRCode = localResponse.map { Int($0[3] & 0x0F) } ?? -1
+        let localDoHRequests = provider.requests(naming: "printer")
+        notes.append("D .local: rcode=\(localRCode) dohRequests=\(localDoHRequests)")
+        let passD = localRCode == 2 && localDoHRequests == 0
+
+        let checks = [passA, passB, passC, passD]
+        notes.append(checks.allSatisfy { $0 }
+            ? "PASS — a split-DNS name whose server is out of reach resolves through public DNS, uncached; .local never leaves"
+            : "FAIL — see per-case lines above")
+
+        return ScenarioResult(
+            name: name,
+            clientCount: 3,
+            clientsOpened: 3,
+            clientsWithFirstByte: [udpIP, tcpIP].compactMap { $0 }.count + (localResponse == nil ? 0 : 1),
+            clientsClosedEarly: [udpIP, tcpIP].filter { $0 == nil }.count + (localResponse == nil ? 1 : 0),
+            totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(start),
+            aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("a split-DNS name with a silent internal server gets the DoH answer over UDP", passA),
+                .init("the same name gets the DoH answer over TCP", passB),
+                .init("the public stand-in answer is not cached", passC),
+                .init("a .local name gets SERVFAIL without asking DoH", passD),
+            ],
+            notes: notes
+        )
+    }
+
+    /// RFC 5737 TEST-NET-2: the public address the fake DoH provider gives the gateway.
+    private static let publicGatewayIP = "198.51.100.7"
+
     private static func verdict(_ pass: Bool) -> String { pass ? "pass" : "FAIL" }
 }
 
@@ -453,6 +553,81 @@ private final class BlockPageHandler: ChannelInboundHandler, @unchecked Sendable
         buffer.writeString(response)
         // Capture the channel, not the context: `ChannelHandlerContext` is not
         // Sendable and must not cross into the completion closure.
+        context.writeAndFlush(wrapOutboundOut(buffer)).whenComplete { _ in
+            channel.close(promise: nil)
+        }
+    }
+}
+
+/// Answers every HTTP request with one `application/dns-json` A record, and
+/// keeps the first read of each request so a case can ask whether a name was
+/// asked about. The wire-format POST gets the same JSON and fails its question
+/// check, so the JSON fetch carries the answer.
+private final class FakeAnsweringDoHProvider: @unchecked Sendable {
+    private let group: EventLoopGroup
+    private let ip: String
+    private let requests = NIOLockedValueBox<[String]>([])
+    private var channel: Channel?
+
+    var port: Int { channel?.localAddress?.port ?? 0 }
+
+    /// Requests whose first read names `label`: the GET query string carries
+    /// the dotted name and the POST body its wire-format labels, so a single
+    /// label matches both. A count by label, not a total, because an earlier
+    /// query's cancelled fetches may still arrive later.
+    func requests(naming label: String) -> Int {
+        requests.withLockedValue { $0.filter { $0.contains(label) }.count }
+    }
+
+    init(group: EventLoopGroup, ip: String) {
+        self.group = group
+        self.ip = ip
+    }
+
+    func start() async throws {
+        let ip = ip
+        let requests = requests
+        channel = try await ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(DNSJSONAnswerHandler(ip: ip, requests: requests))
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+    }
+
+    func stop() async {
+        _ = try? await channel?.close().get()
+        channel = nil
+    }
+}
+
+private final class DNSJSONAnswerHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+
+    private let ip: String
+    private let requests: NIOLockedValueBox<[String]>
+    private var responded = false
+
+    init(ip: String, requests: NIOLockedValueBox<[String]>) {
+        self.ip = ip
+        self.requests = requests
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        guard !responded else { return }
+        responded = true
+        var request = unwrapInboundIn(data)
+        let head = String(decoding: request.readBytes(length: request.readableBytes) ?? [], as: UTF8.self)
+        requests.withLockedValue { if $0.count < 64 { $0.append(head) } }
+
+        let body = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"\#(ip)"}]}"#
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/dns-json\r\n" +
+            "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+        let channel = context.channel
+        var buffer = channel.allocator.buffer(capacity: response.utf8.count)
+        buffer.writeString(response)
         context.writeAndFlush(wrapOutboundOut(buffer)).whenComplete { _ in
             channel.close(promise: nil)
         }
