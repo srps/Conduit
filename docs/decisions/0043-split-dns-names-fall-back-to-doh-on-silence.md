@@ -33,7 +33,7 @@ The [2026-09-09 review](../review-2026-09-09.md) noted that recognized internal 
 
 - Off the VPN, A and AAAA lookups for names under split-DNS domains go to the configured DoH providers. They are corporate names, so this reveals them to those providers while the internal server is out of reach.
 - Off the VPN, other query types under split-DNS domains (SRV, PTR and similar) get REFUSED, as public names of those types already do.
-- A lookup for such a name off the VPN costs the 2 s internal wait plus the DoH round trip, on every lookup, because Conduit caches nothing for it. That stays inside the helper relay's 10 s pending window (`UDPRelay.staleTimeoutSeconds`).
+- A lookup for such a name off the VPN costs the 2 s internal wait plus the DoH round trip, on every lookup, because Conduit caches nothing for it. That typically stays well inside the helper relay's 10 s pending window (`UDPRelay.staleTimeoutSeconds`). The worst case, the 2 s wait plus the DoH resource timeout (8 s), reaches that window, so a provider answering after about 8 s has its reply dropped by the relay and the client retries.
 - After the VPN comes up, clients can keep using a public answer they cached for up to its TTL. Clamping the TTL of a fallback answer is in #290's scope.
 - On the VPN with an internal server that has stopped answering, an internal name may get a public address where one exists. A reply of any kind from the internal server prevents this.
 

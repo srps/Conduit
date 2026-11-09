@@ -14,7 +14,8 @@ release.
 
 This release makes recovery after a crash quiet and correct (with an updated
 helper), stops a slow origin from tripping a healthy upstream's circuit
-breaker, and makes the "choose a port" setting (port 0) advertise the port
+breaker, lets a VPN client resolve its gateway off the VPN when the gateway's
+hostname is under a split-DNS domain, and makes the "choose a port" setting (port 0) advertise the port
 actually bound. Helper protocol v5 is unchanged (one read-only command and two
 optional reply fields are added within it), the schema-two settings files and
 the platform-state journal keep their formats, and the v1 control protocol
