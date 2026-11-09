@@ -10,6 +10,19 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 The 0.6.2 notes below are prepared for packaging. 0.6.1 is the latest published
 release.
 
+### Fixed
+
+- After a wake with no network, or while the VPN is down and no interface is
+  up, DNS lookups no longer stall on servers that cannot answer and then
+  refuse the first lookups once the network is back (#292). While the network
+  path is unsatisfied the forwarder answers SERVFAIL at once, except from an
+  intercept rule or a fresh cache entry, and emits `dns.unsatisfied_path_servfail`.
+  Every network change and confirmed VPN transition that resets the DNS
+  transports now also cancels the lookups in flight, so their slots are free
+  for the retries on the new path. Before, a burst of lookups started with no
+  network held the forwarder's 64 slots for up to 10 s each, and a CLI request
+  through the proxy right after Wi-Fi returned failed with a 502.
+
 ## 0.6.2
 
 This release makes recovery after a crash quiet and correct (with an updated

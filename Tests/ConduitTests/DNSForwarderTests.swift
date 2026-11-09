@@ -1087,7 +1087,7 @@ final class DNSForwarderIntegrationTests: XCTestCase {
 
 /// Captures the datagrams a test client receives, so a test can assert on a
 /// reply *or* on the absence of one.
-private final class UDPReplyCollector: ChannelInboundHandler, @unchecked Sendable {
+final class UDPReplyCollector: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = AddressedEnvelope<ByteBuffer>
 
     private let lock = NSLock()
@@ -1126,7 +1126,7 @@ private final class NXDOMAINServer: ChannelInboundHandler, @unchecked Sendable {
 /// `application/dns-json` A record and counts the connections that asked.
 /// The wire-format POST gets the same JSON and fails its question check, so
 /// only the JSON fetch can produce an answer.
-private final class AnsweringDoHProvider: @unchecked Sendable {
+final class AnsweringDoHProvider: @unchecked Sendable {
     let channel: Channel
     private let requests: NIOLockedValueBox<Int>
 
