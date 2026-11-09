@@ -774,7 +774,9 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// answer is possible — see the type doc for why nil is so narrow.
     ///
     /// After an intercept rule and the cache, an unsatisfied network path
-    /// answers SERVFAIL at once (#292). A cancelled lookup
+    /// answers SERVFAIL at once (#292). With no enabled split-DNS entry there
+    /// is no internal server, so no internal attempt is made and a public
+    /// name goes straight to DoH (#296). A cancelled lookup
     /// (`resetUpstreamTransports`) answers SERVFAIL as soon as its attempt
     /// returns and starts no further one.
     ///
@@ -785,8 +787,9 @@ private final class DNSResolutionCore: @unchecked Sendable {
 
         let domain = DNSWireFormat.extractDomainName(from: queryBytes)
         let config = configProvider()
-        let internalServers = config.dnsEntries.filter(\.enabled).flatMap(\.servers)
-        let primaryDNS = internalServers.first ?? "192.0.2.53"
+        // Nil with no enabled entry: there is nothing to ask, and a made-up
+        // address only cost every public lookup the attempt timeout (#296).
+        let primaryDNS = config.dnsEntries.filter(\.enabled).flatMap(\.servers).first
         let isInternal = DNSWireFormat.isInternalDomain(domain, config: config)
         let queryType = DNSWireFormat.extractQueryType(from: queryBytes)
         let cacheKey = DNSCacheKey(domain: domain.lowercased(), queryType: queryType)
@@ -824,7 +827,9 @@ private final class DNSResolutionCore: @unchecked Sendable {
         var usedDoH = false
 
         if isInternal {
-            response = await forwardUDP(query: queryBytes, server: primaryDNS, timeout: tuning.internalDomainTimeout)
+            if let primaryDNS {
+                response = await forwardUDP(query: queryBytes, server: primaryDNS, timeout: tuning.internalDomainTimeout)
+            }
             // Off the VPN the internal server cannot be reached, and the VPN
             // gateway's own hostname is often under a split-DNS domain: asking
             // only that server would keep the VPN from ever coming up. So
@@ -838,10 +843,13 @@ private final class DNSResolutionCore: @unchecked Sendable {
                 let doh = await resolveViaDoH(query: queryBytes, config: config)
                 response = doh.response
                 usedDoH = doh.isProviderAnswer
-                reportSplitDNSFallback(entryDomain: entryDomain, name: domain, server: primaryDNS, outcome: doh)
+                reportSplitDNSFallback(entryDomain: entryDomain, name: domain, server: primaryDNS ?? "none", outcome: doh)
             }
         } else {
-            let internalResponse = await forwardUDP(query: queryBytes, server: primaryDNS, timeout: tuning.internalAttemptTimeout)
+            var internalResponse: [UInt8]?
+            if let primaryDNS {
+                internalResponse = await forwardUDP(query: queryBytes, server: primaryDNS, timeout: tuning.internalAttemptTimeout)
+            }
             if Task.isCancelled {
                 response = nil
             } else if DNSWireFormat.shouldFallbackToPublicDoH(internalResponse: internalResponse) {
@@ -1032,7 +1040,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// it back, then logs the line derived from it. A held-back fallback logs
     /// at debug only.
     private func reportSplitDNSFallback(entryDomain: String, name: String, server: String, outcome: DoHOutcome) {
-        let silence = "internal server \(server) did not answer"
+        let silence = server == "none" ? "the entry names no internal server" : "internal server \(server) did not answer"
         guard let suppressed = splitDNSFallbackGate.admit(host: entryDomain, reason: outcome.eventOutcome) else {
             logger.log(
                 .debug,

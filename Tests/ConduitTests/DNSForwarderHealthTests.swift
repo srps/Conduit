@@ -5,10 +5,10 @@ import NIOPosix
 import XCTest
 @testable import ProxyKernel
 
-/// The forwarder across network changes (#292): an unsatisfied path answers
-/// at once, a transports reset cancels the lookups in flight, and the
-/// returned path answers. Every server is a loopback fake; nothing leaves
-/// the machine.
+/// The forwarder across network changes (#292, #296): an unsatisfied path
+/// answers at once, a transports reset cancels the lookups in flight, the
+/// returned path answers, and no entry means no internal attempt. Every
+/// server is a loopback fake; nothing leaves the machine.
 final class DNSForwarderHealthTests: XCTestCase {
     private var ownedForwarder: LocalDNSForwarder?
     private var ownedChannels: [Channel] = []
@@ -125,6 +125,26 @@ final class DNSForwarderHealthTests: XCTestCase {
         XCTAssertEqual(fresh.map(DNSWireFormat.extractRCode), 0, "the first lookup on the returned path is answered")
         XCTAssertEqual(fresh.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "198.51.100.7")
         XCTAssertEqual(forwarder.inFlightQueryCount, 0)
+    }
+
+    // MARK: - #296: no enabled entry
+
+    @MainActor
+    func testNoEnabledSplitDNSEntrySkipsTheInternalAttempt() async throws {
+        let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
+        let doh = try await provider(ip: "198.51.100.7")
+        // The disabled entry's server is on the internal port, so an attempt
+        // on any address the forwarder made up would reach it too.
+        let port = try await startForwarder(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["127.0.0.1"], enabled: false)],
+            internalPort: internalServer.port, dohPort: doh.port, internalTimeout: .seconds(2)
+        )
+        let reply = try await ask(DNSWireFormat.buildQuery(domain: "public.example", txID: 0x7400), port: port)
+
+        XCTAssertEqual(reply.map(DNSWireFormat.extractRCode), 0)
+        XCTAssertEqual(reply.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "198.51.100.7")
+        XCTAssertEqual(internalServer.queryCount, 0, "no UDP attempt to any internal address")
+        XCTAssertEqual(ownedForwarder?.metricCounts?.dohFallbacks, 1)
     }
 
     // MARK: - Fixtures

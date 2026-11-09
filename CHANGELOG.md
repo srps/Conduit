@@ -22,6 +22,8 @@ release.
   for the retries on the new path. Before, a burst of lookups started with no
   network held the forwarder's 64 slots for up to 10 s each, and a CLI request
   through the proxy right after Wi-Fi returned failed with a 502.
+- With no enabled split-DNS entry, a public name no longer waits 1.5 s on a
+  placeholder internal server before DoH (#296). It goes to DoH at once.
 
 ## 0.6.2
 
