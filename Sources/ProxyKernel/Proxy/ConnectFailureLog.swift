@@ -164,17 +164,36 @@ package enum DirectConnectFailure {
     }
 }
 
+/// The repeats a `ConnectFailureLog` window counted instead of reporting,
+/// carried by the report that closes the window.
+package struct HeldBackConnectFailures: Sendable {
+    /// `suppressed=`.
+    package let count: Int
+    /// `windowSeconds=`: wall-clock seconds since the window opened (at its
+    /// first failure, or at the previous summary). At least 1, so a window
+    /// an eviction pushed out within its first second still stands for a span.
+    package let windowSeconds: Int
+    /// `lastAt=`: when the last counted repeat happened, in epoch seconds.
+    package let lastAt: Date
+    /// `lastSecondsAgo=`: seconds from that repeat to this report. A summary
+    /// comes out when its window closes, up to `windowSeconds` after the
+    /// failures stopped (#293).
+    package let lastSecondsAgo: Int
+    /// `summary=true`: a flush or an eviction reported the window, so the
+    /// report is not a new failure. A repeat that closes an overdue window is
+    /// a new failure carrying the old window's count, and is not marked.
+    package let isSummary: Bool
+}
+
 /// Coalesces connect-failure reports per target and failure kind (#100).
 ///
 /// The first failure is reported as it happens. Repeats inside `interval`
-/// are counted, not reported; when the interval closes, one summary carries
-/// the count as `suppressed=N` and the age of its window as `windowSeconds`:
-/// wall-clock seconds since the window opened (at its first failure, or at
-/// the previous summary), at least 1. That is about `interval` while awake,
-/// less when an eviction reports a window early, and longer after a sleep:
-/// the flush timer runs on uptime, which stops while the Mac sleeps. The
-/// event follows the same bound and still precedes its log line (both come
-/// from `HTTPProxyHandler.reportConnectFailure`).
+/// are counted, not reported; the report that closes the window carries
+/// them as `HeldBackConnectFailures`. `windowSeconds` is about `interval`
+/// while awake, less when an eviction reports a window early, and longer
+/// after a sleep: the flush timer runs on uptime, which stops while the Mac
+/// sleeps. The event follows the same bound and still precedes its log line
+/// (both come from `HTTPProxyHandler.reportConnectFailure`).
 ///
 /// Bounded: at most `capacity` keys. A new key on a full map first drops
 /// quiet expired entries, then evicts the oldest window, reporting any
@@ -200,9 +219,33 @@ package final class ConnectFailureLog: @unchecked Sendable {
     private struct Entry {
         var windowStart: Date
         var suppressed: Int
+        /// The last counted repeat. Before the first repeat it holds the
+        /// window's start, which is never read: `heldBack` needs a repeat.
+        var lastFailure: Date
         var level: LogLevel
         var error: Error
         var message: String
+
+        init(at: Date, level: LogLevel, error: Error, message: String) {
+            windowStart = at
+            suppressed = 0
+            lastFailure = at
+            self.level = level
+            self.error = error
+            self.message = message
+        }
+
+        func heldBack(at: Date, isSummary: Bool) -> HeldBackConnectFailures? {
+            guard suppressed > 0 else { return nil }
+            return HeldBackConnectFailures(
+                count: suppressed, windowSeconds: max(1, Self.seconds(from: windowStart, to: at)),
+                lastAt: lastFailure, lastSecondsAgo: max(0, Self.seconds(from: lastFailure, to: at)), isSummary: isSummary
+            )
+        }
+
+        private static func seconds(from start: Date, to end: Date) -> Int {
+            Int(end.timeIntervalSince(start).rounded())
+        }
     }
 
     private struct Report {
@@ -210,9 +253,7 @@ package final class ConnectFailureLog: @unchecked Sendable {
         let level: LogLevel
         let error: Error
         let message: String
-        let suppressed: Int
-        /// The window's age; reported only when `suppressed` is nonzero.
-        var windowSeconds = 0
+        let heldBack: HeldBackConnectFailures?
     }
 
     package let interval: TimeInterval
@@ -274,6 +315,7 @@ package final class ConnectFailureLog: @unchecked Sendable {
                 let age = at.timeIntervalSince(entry.windowStart)
                 if age < interval {
                     entry.suppressed += 1
+                    entry.lastFailure = at
                     entry.level = max(entry.level, level)
                     entry.error = error
                     entry.message = message
@@ -283,16 +325,16 @@ package final class ConnectFailureLog: @unchecked Sendable {
                 }
                 // The window closed without a flush: this failure carries
                 // the count the window held back.
-                entries[key] = Entry(windowStart: at, suppressed: 0, level: level, error: error, message: message)
+                entries[key] = Entry(at: at, level: level, error: error, message: message)
                 reports.append(Report(key: key, level: entry.suppressed > 0 ? max(entry.level, level) : level, error: error, message: message,
-                                      suppressed: entry.suppressed, windowSeconds: Self.seconds(from: entry.windowStart, to: at)))
+                                      heldBack: entry.heldBack(at: at, isSummary: false)))
                 return
             }
             if entries.count >= capacity {
                 reports += makeRoom(at: at)
             }
-            entries[key] = Entry(windowStart: at, suppressed: 0, level: level, error: error, message: message)
-            reports.append(Report(key: key, level: level, error: error, message: message, suppressed: 0))
+            entries[key] = Entry(at: at, level: level, error: error, message: message)
+            reports.append(Report(key: key, level: level, error: error, message: message, heldBack: nil))
         }
         emit(reports)
     }
@@ -304,12 +346,11 @@ package final class ConnectFailureLog: @unchecked Sendable {
         let reports: [Report] = lock.withLock {
             var due: [Report] = []
             for (key, entry) in entries where at.timeIntervalSince(entry.windowStart) >= interval {
-                if entry.suppressed > 0 {
-                    due.append(Report(key: key, level: entry.level, error: entry.error, message: entry.message,
-                                      suppressed: entry.suppressed, windowSeconds: Self.seconds(from: entry.windowStart, to: at)))
+                if let heldBack = entry.heldBack(at: at, isSummary: true) {
+                    due.append(Report(key: key, level: entry.level, error: entry.error, message: entry.message, heldBack: heldBack))
                     // A new window starts: the next repeat is counted
                     // against it rather than reported at once.
-                    entries[key] = Entry(windowStart: at, suppressed: 0, level: entry.level, error: entry.error, message: entry.message)
+                    entries[key] = Entry(at: at, level: entry.level, error: entry.error, message: entry.message)
                 } else {
                     entries.removeValue(forKey: key)
                 }
@@ -345,10 +386,9 @@ package final class ConnectFailureLog: @unchecked Sendable {
         guard entries.count >= capacity,
               let oldest = entries.min(by: { $0.value.windowStart < $1.value.windowStart }) else { return reports }
         entries.removeValue(forKey: oldest.key)
-        if oldest.value.suppressed > 0 {
-            let entry = oldest.value
-            reports.append(Report(key: oldest.key, level: entry.level, error: entry.error, message: entry.message,
-                                  suppressed: entry.suppressed, windowSeconds: Self.seconds(from: entry.windowStart, to: at)))
+        let entry = oldest.value
+        if let heldBack = entry.heldBack(at: at, isSummary: true) {
+            reports.append(Report(key: oldest.key, level: entry.level, error: entry.error, message: entry.message, heldBack: heldBack))
         }
         return reports
     }
@@ -360,14 +400,8 @@ package final class ConnectFailureLog: @unchecked Sendable {
                 error: report.error,
                 message: report.message, logger: logger, eventSink: eventSink,
                 eventAtAnyLevel: report.key.eventAtAnyLevel,
-                kind: report.key.kind, suppressed: report.suppressed, windowSeconds: report.windowSeconds
+                kind: report.key.kind, heldBack: report.heldBack
             )
         }
-    }
-
-    /// At least 1: a summary always stands for a span, even an evicted
-    /// window a burst of new keys pushed out within the same second.
-    private static func seconds(from start: Date, to end: Date) -> Int {
-        max(1, Int(end.timeIntervalSince(start).rounded()))
     }
 }
