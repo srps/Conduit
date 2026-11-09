@@ -1161,10 +1161,12 @@ final class AnsweringDoHProvider: @unchecked Sendable {
         self.requests = requests
     }
 
-    static func start(group: EventLoopGroup, ip: String) async throws -> AnsweringDoHProvider {
+    /// `silent`: count each request and never answer it, so a lookup hangs
+    /// on this provider until something ends it.
+    static func start(group: EventLoopGroup, ip: String, silent: Bool = false) async throws -> AnsweringDoHProvider {
         let requests = NIOLockedValueBox(0)
         let channel = try await ServerBootstrap(group: group)
-            .childChannelInitializer { $0.pipeline.addHandler(Responder(ip: ip, requests: requests)) }
+            .childChannelInitializer { $0.pipeline.addHandler(Responder(ip: ip, requests: requests, silent: silent)) }
             .bind(host: "127.0.0.1", port: 0)
             .get()
         return AnsweringDoHProvider(channel: channel, requests: requests)
@@ -1176,17 +1178,20 @@ final class AnsweringDoHProvider: @unchecked Sendable {
 
         private let ip: String
         private let requests: NIOLockedValueBox<Int>
+        private let silent: Bool
         private var responded = false
 
-        init(ip: String, requests: NIOLockedValueBox<Int>) {
+        init(ip: String, requests: NIOLockedValueBox<Int>, silent: Bool) {
             self.ip = ip
             self.requests = requests
+            self.silent = silent
         }
 
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             guard !responded else { return }
             responded = true
             requests.withLockedValue { $0 += 1 }
+            if silent { return }
             let body = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"\#(ip)"}]}"#
             let response = "HTTP/1.1 200 OK\r\nContent-Type: application/dns-json\r\n" +
                 "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"

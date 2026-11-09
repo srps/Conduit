@@ -15,6 +15,7 @@ final class DNSForwarderHealthTests: XCTestCase {
     private var ownedChannels: [Channel] = []
     private var ownedProviders: [AnsweringDoHProvider] = []
     private var ownedGroups: [MultiThreadedEventLoopGroup] = []
+    private let log = RecordingLogSink(minLevel: .debug)
     private let events = NIOLockedValueBox<[RuntimeEvent]>([])
     private let group = MultiThreadedEventLoopGroup.singleton
 
@@ -129,6 +130,36 @@ final class DNSForwarderHealthTests: XCTestCase {
         XCTAssertEqual(fresh.map(DNSWireFormat.extractRCode), 0, "the first lookup on the returned path is answered")
         XCTAssertEqual(fresh.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "198.51.100.7")
         XCTAssertEqual(forwarder.inFlightQueryCount, 0)
+    }
+
+    /// A reset while the providers are being asked cancels the fetches, which
+    /// then throw like a failed provider does. That is no provider failure:
+    /// no "all providers failed" warning, no `dns.split_dns_doh_fallback`.
+    @MainActor
+    func testResetDuringTheDoHStageReportsNoProviderFailure() async throws {
+        let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
+        let doh = try await provider(ip: "198.51.100.7", silent: true)
+        let port = try await startForwarder(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .milliseconds(50)
+        )
+        let forwarder = try XCTUnwrap(ownedForwarder)
+        let queries = [
+            DNSWireFormat.buildQuery(domain: "intranet.corp.example", txID: 0x7500),
+            DNSWireFormat.buildQuery(domain: "news.example", txID: 0x7501),
+        ]
+        let collector = try await client(sending: queries, to: port)
+        try await settle(until: { doh.requestCount() >= queries.count }, "both lookups are waiting on the provider")
+
+        forwarder.resetUpstreamTransports(reason: "network_change")
+
+        try await settle(until: { collector.replies().count == queries.count }, "every cancelled lookup answers")
+        XCTAssertEqual(Set(collector.replies().map(DNSWireFormat.extractRCode)), [2], "SERVFAIL for a cancelled lookup")
+        try await settle(until: { forwarder.inFlightQueryCount == 0 }, "every slot is released")
+        XCTAssertFalse(log.containsMessage("DoH provider(s) failed", at: .warning), "a cancellation is no provider failure")
+        XCTAssertTrue(log.containsMessage("DoH lookup for intranet.corp.example cancelled", at: .debug))
+        XCTAssertTrue(log.containsMessage("DoH lookup for news.example cancelled", at: .debug))
+        XCTAssertEqual(events(named: "dns.split_dns_doh_fallback").count, 0, "no fallback outcome to report")
     }
 
     /// A reset that lands after the lookup installed its response collector
@@ -366,7 +397,7 @@ final class DNSForwarderHealthTests: XCTestCase {
         let events = events
         let forwarder = LocalDNSForwarder(
             group: group ?? self.group,
-            logger: RecordingLogSink(minLevel: .debug),
+            logger: log,
             configProvider: { frozen },
             tuning: tuning,
             eventSink: { event in events.withLockedValue { $0.append(event) } }
@@ -377,8 +408,8 @@ final class DNSForwarderHealthTests: XCTestCase {
     }
 
     @MainActor
-    private func provider(ip: String) async throws -> AnsweringDoHProvider {
-        let provider = try await AnsweringDoHProvider.start(group: group, ip: ip)
+    private func provider(ip: String, silent: Bool = false) async throws -> AnsweringDoHProvider {
+        let provider = try await AnsweringDoHProvider.start(group: group, ip: ip, silent: silent)
         ownedProviders.append(provider)
         return provider
     }

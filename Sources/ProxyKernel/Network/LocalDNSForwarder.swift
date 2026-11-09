@@ -884,6 +884,8 @@ private final class DNSResolutionCore: @unchecked Sendable {
                     usedDoH = true
                 case .notAsked(let refusal):
                     response = refusal ?? internalResponse
+                case .cancelled:
+                    response = nil
                 case .unanswered:
                     // DoH failed (no providers reachable, all timed
                     // out, blocked by a filtering proxy, or the upstream
@@ -1111,12 +1113,15 @@ private final class DNSResolutionCore: @unchecked Sendable {
         case notAsked(refusal: [UInt8]?)
         /// Providers were asked and none answered.
         case unanswered
+        /// The lookup was cancelled (a transports reset) while the providers
+        /// were being asked. Not a provider failure: nothing is reported.
+        case cancelled
 
         var response: [UInt8]? {
             switch self {
             case .answered(let response): response
             case .notAsked(let refusal): refusal
-            case .unanswered: nil
+            case .unanswered, .cancelled: nil
             }
         }
 
@@ -1125,12 +1130,14 @@ private final class DNSResolutionCore: @unchecked Sendable {
             return false
         }
 
-        /// The `outcome=` value of `dns.split_dns_doh_fallback`.
-        var eventOutcome: String {
+        /// The `outcome=` value of `dns.split_dns_doh_fallback`; nil for a
+        /// cancelled lookup, which is no fallback outcome.
+        var eventOutcome: String? {
             switch self {
             case .answered: "answered"
             case .notAsked: "refused_qtype"
             case .unanswered: "unanswered"
+            case .cancelled: nil
             }
         }
     }
@@ -1139,14 +1146,15 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// it back, then logs the line derived from it. A held-back fallback logs
     /// at debug only.
     private func reportSplitDNSFallback(entryDomain: String, name: String, servers: [String], outcome: DoHOutcome) {
+        guard let outcome = outcome.eventOutcome else { return }
         let server = servers.isEmpty ? "none" : servers.joined(separator: ",")
         let silence = servers.isEmpty
             ? "no internal server was asked (every circuit open, or the entry names none)"
             : "internal server \(server) did not answer"
-        guard let suppressed = splitDNSFallbackGate.admit(host: entryDomain, reason: outcome.eventOutcome) else {
+        guard let suppressed = splitDNSFallbackGate.admit(host: entryDomain, reason: outcome) else {
             logger.log(
                 .debug,
-                "DNS: \(silence) for \(name); DoH fallback outcome=\(outcome.eventOutcome).",
+                "DNS: \(silence) for \(name); DoH fallback outcome=\(outcome).",
                 category: .network
             )
             return
@@ -1154,12 +1162,12 @@ private final class DNSResolutionCore: @unchecked Sendable {
         eventSink?(RuntimeEvent(
             kind: .routing,
             event: "dns.split_dns_doh_fallback",
-            detail: "domain=\(entryDomain) name=\(name) server=\(server) outcome=\(outcome.eventOutcome) suppressed=\(suppressed)"
+            detail: "domain=\(entryDomain) name=\(name) server=\(server) outcome=\(outcome) suppressed=\(suppressed)"
         ))
         let held = suppressed > 0 ? " \(suppressed) more for this domain and outcome were not logged since the last line." : ""
         logger.log(
             .info,
-            "DNS: \(silence) for \(name) (split-DNS domain \(entryDomain)); DoH fallback outcome=\(outcome.eventOutcome).\(held)",
+            "DNS: \(silence) for \(name) (split-DNS domain \(entryDomain)); DoH fallback outcome=\(outcome).\(held)",
             category: .network
         )
     }
@@ -1241,7 +1249,16 @@ private final class DNSResolutionCore: @unchecked Sendable {
             return nil
         }
 
-        if answer == nil {
+        if let answer { return .answered(answer) }
+
+        // A cancelled fetch throws too, and `try?` makes that nil: not a
+        // provider failure, so neither the warning nor its counter.
+        if Task.isCancelled {
+            logger.log(.debug, "DNS: DoH lookup for \(domain) cancelled by a transports reset.", category: .network)
+            return .cancelled
+        }
+
+        do {
             let statuses = observedStatuses.withLockedValue { $0 }.sorted()
             if let failures = doHFailureCountToReport(signature: statuses) {
                 let detail = statuses.isEmpty
@@ -1258,7 +1275,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
             }
         }
 
-        return answer.map(DoHOutcome.answered) ?? .unanswered
+        return .unanswered
     }
 
     private static func tryDoHJSONFetch(
