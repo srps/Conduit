@@ -219,7 +219,8 @@ package final class ConnectFailureLog: @unchecked Sendable {
     private struct Entry {
         var windowStart: Date
         var suppressed: Int
-        /// The last counted repeat; the window's first failure until one is.
+        /// The last counted repeat. Before the first repeat it holds the
+        /// window's start, which is never read: `heldBack` needs a repeat.
         var lastFailure: Date
         var level: LogLevel
         var error: Error
@@ -238,7 +239,7 @@ package final class ConnectFailureLog: @unchecked Sendable {
             guard suppressed > 0 else { return nil }
             return HeldBackConnectFailures(
                 count: suppressed, windowSeconds: max(1, Self.seconds(from: windowStart, to: at)),
-                lastAt: lastFailure, lastSecondsAgo: Self.seconds(from: lastFailure, to: at), isSummary: isSummary
+                lastAt: lastFailure, lastSecondsAgo: max(0, Self.seconds(from: lastFailure, to: at)), isSummary: isSummary
             )
         }
 
