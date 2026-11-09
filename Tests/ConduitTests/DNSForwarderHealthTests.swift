@@ -14,6 +14,7 @@ final class DNSForwarderHealthTests: XCTestCase {
     private var ownedForwarder: LocalDNSForwarder?
     private var ownedChannels: [Channel] = []
     private var ownedProviders: [AnsweringDoHProvider] = []
+    private var ownedGroups: [MultiThreadedEventLoopGroup] = []
     private let events = NIOLockedValueBox<[RuntimeEvent]>([])
     private let group = MultiThreadedEventLoopGroup.singleton
 
@@ -26,6 +27,8 @@ final class DNSForwarderHealthTests: XCTestCase {
         ownedChannels = []
         for provider in ownedProviders { _ = try? await provider.channel.close().get() }
         ownedProviders = []
+        for group in ownedGroups { try await group.shutdownGracefully() }
+        ownedGroups = []
         try await super.tearDown()
     }
 
@@ -126,6 +129,53 @@ final class DNSForwarderHealthTests: XCTestCase {
         XCTAssertEqual(fresh.map(DNSWireFormat.extractRCode), 0, "the first lookup on the returned path is answered")
         XCTAssertEqual(fresh.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "198.51.100.7")
         XCTAssertEqual(forwarder.inFlightQueryCount, 0)
+    }
+
+    /// A reset that lands after the lookup installed its response collector
+    /// and before its datagram connect completed. The cancel ends the wait;
+    /// the connect then fails, since the collector closed the channel. That
+    /// failure must not resume the lookup a second time (it killed the
+    /// process with SWIFT TASK CONTINUATION MISUSE). The forwarder runs on
+    /// one event loop that the test holds while the reset lands, so the
+    /// connect is pending by construction, every iteration.
+    @MainActor
+    func testResetWhileTheConnectIsPendingAnswersTheLookupOnce() async throws {
+        let loopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        ownedGroups.append(loopGroup)
+        let doh = try await provider(ip: "198.51.100.7")
+        let gate = NIOLockedValueBox<DispatchSemaphore?>(nil)
+        let reachedConnect = NIOLockedValueBox(false)
+        let port = try await startForwarder(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
+            endpoints: ["192.0.2.1": 5353], dohPort: doh.port, internalTimeout: .seconds(5),
+            group: loopGroup,
+            beforeInternalConnect: {
+                if let hold = gate.withLockedValue({ $0 }) {
+                    loopGroup.next().execute { hold.wait() }
+                }
+                reachedConnect.withLockedValue { $0 = true }
+            }
+        )
+        let forwarder = try XCTUnwrap(ownedForwarder)
+
+        for iteration in 0..<20 {
+            let hold = DispatchSemaphore(value: 0)
+            gate.withLockedValue { $0 = hold }
+            reachedConnect.withLockedValue { $0 = false }
+            let query = DNSWireFormat.buildQuery(domain: "host-\(iteration).corp.example", txID: 0x7400 + UInt16(iteration))
+            let collector = try await client(sending: [query], to: port)
+            try await settle(until: { reachedConnect.withLockedValue { $0 } }, "the lookup reached its connect")
+            // The lookup installs its collector and hands the connect to the
+            // held loop; neither waits on anything but the CPU.
+            try await Task.sleep(for: .milliseconds(50))
+
+            forwarder.resetUpstreamTransports(reason: "network_change")
+            hold.signal()
+
+            try await settle(until: { collector.replies().count == 1 }, "the cancelled lookup answers")
+            XCTAssertEqual(collector.replies().map(DNSWireFormat.extractRCode), [2], "SERVFAIL, iteration \(iteration)")
+            try await settle(until: { forwarder.inFlightQueryCount == 0 }, "its slot is released")
+        }
     }
 
     // MARK: - #296: no enabled entry
@@ -283,7 +333,9 @@ final class DNSForwarderHealthTests: XCTestCase {
     /// Starts the owned forwarder: `entries` as the split-DNS table, each
     /// configured server address reached on its loopback port in
     /// `endpoints`, one cleartext DoH provider on `dohPort`, and both internal
-    /// timeouts set to `internalTimeout`. Returns the UDP port.
+    /// timeouts set to `internalTimeout`. `beforeInternalConnect` runs on the
+    /// lookup's task right before each internal datagram connect. Returns the
+    /// UDP port.
     @MainActor
     private func startForwarder(
         entries: [DomainDNSEntry],
@@ -291,7 +343,9 @@ final class DNSForwarderHealthTests: XCTestCase {
         dohPort: Int,
         internalTimeout: TimeAmount,
         interceptRules: [DNSInterceptRule] = [],
-        defaultInternalPort: Int = 53
+        defaultInternalPort: Int = 53,
+        group: EventLoopGroup? = nil,
+        beforeInternalConnect: (@Sendable () -> Void)? = nil
     ) async throws -> Int {
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -303,12 +357,15 @@ final class DNSForwarderHealthTests: XCTestCase {
         let frozen = config
         var tuning = DNSForwarderTuning()
         tuning.internalServerPort = defaultInternalPort
-        tuning.internalServerEndpoint = { server in ("127.0.0.1", endpoints[server] ?? defaultInternalPort) }
+        tuning.internalServerEndpoint = { server in
+            beforeInternalConnect?()
+            return ("127.0.0.1", endpoints[server] ?? defaultInternalPort)
+        }
         tuning.internalDomainTimeout = internalTimeout
         tuning.internalAttemptTimeout = internalTimeout
         let events = events
         let forwarder = LocalDNSForwarder(
-            group: group,
+            group: group ?? self.group,
             logger: RecordingLogSink(minLevel: .debug),
             configProvider: { frozen },
             tuning: tuning,
