@@ -129,13 +129,15 @@ The callback carries the whole set, never a delta. The consumer converges to the
 /// reading. The one place that decides it, for the forwarder's table, the events and the Settings display.
 package struct LiveSplitDNSPolicy: Sendable {
     package private(set) var lastReading: [PushedResolver] = []
+    /// The last non-empty reading the policy put in use since the last `.disconnected`.
+    /// Only `.disconnected` clears it.
     private var heldThroughFlap: [PushedResolver] = []
 
     /// Records inputs. Returns true when `detectedInUse` changed.
     package mutating func update(gate: SplitDNSVPNGate, pushed: [PushedResolver]) -> Bool { notImplemented() }
 
-    /// `[]` when the gate withholds (`.disconnected`). The last reading otherwise, except during `.reasserting`,
-    /// when an empty reading keeps the set that was in use when the flap began.
+    /// `[]` when the gate withholds (`.disconnected`). `heldThroughFlap` otherwise, so an empty reading under
+    /// `.connected`, `.reasserting` or `.unknown` keeps the set in use.
     package private(set) var detectedInUse: [PushedResolver] = []
 
     /// Manual entries plus `detectedInUse`, validated, bounded, merged per domain.
@@ -204,7 +206,7 @@ Owner decision 5 rejected the alternative, the private `dnsinfo.h` API (`dns_con
 
 ### Triggers
 
-The three triggers the issue names collapse into one subscription. A VPN connect publishes the DNS key, a disconnect removes it, and a path change that makes the client rewrite its resolvers changes it. There is no `scutil` process, no poll and no re-detection call from the VPN or path handlers. The VPN observer's verdict and the pushed set are two inputs to one policy value, and the host does not need them in any order.
+The three triggers the issue names collapse into one subscription. A VPN connect publishes the DNS key, a disconnect removes it, and a path change that makes the client rewrite its resolvers changes it. There is no `scutil` process, no poll and no re-detection call from the VPN or path handlers. The VPN observer's verdict and the pushed set are two inputs to one policy value. A non-empty reading and the `.connected` verdict that follows it end in the same `detectedInUse` in either order: a reading that arrives first is recorded and takes effect on the verdict, and one that arrives second takes effect at once.
 
 `start()` reads the store once and reports it, so a host launched with the tunnel already up has the set before the first notification, the way `VPNStatusMonitor.primeInitialState` reports the initial utun sweep.
 
@@ -218,12 +220,14 @@ The monitor runs while the forwarder is enabled (`dns.forwarderEnabled`) and the
 
 ## Flap handling
 
-The fuser already decides what a flap is. The policy follows it and adds one rule.
+The fuser already decides what a flap is. The policy follows it and adds one rule. `heldThroughFlap` is the last non-empty reading in use since the last `.disconnected`, and `detectedInUse` is that held set whenever the gate does not withhold.
 
-- `.connected`: `detectedInUse` is the last reading. A reading that arrives before the verdict is kept and takes effect on the verdict.
-- `.reasserting`: an empty reading does not clear `detectedInUse`. Tunnel clients often remove and republish the DNS key during a reassert, and the flap design forbids a client-visible change inside the grace window. A non-empty reading during `.reasserting` replaces the held set; the client has republished.
-- `.disconnected`: `detectedInUse` is `[]` whatever the reading says. The held set is dropped.
-- `.unknown`: like `.connected`, for the same reason `SplitDNSVPNGate` keeps files on `.unknown`: wrongly keeping is self-correcting once the monitor primes, wrongly clearing churns.
+- `.connected`: a non-empty reading replaces the held set and is in use. An empty reading keeps the held set. A reading that arrives before the verdict is recorded and takes effect on the verdict.
+- `.reasserting`: the same rule. Tunnel clients often remove and republish the DNS key during a reassert, and the flap design forbids a client-visible change inside the grace window, so an empty reading keeps the held set. A non-empty reading replaces it, because the client has republished.
+- `.disconnected`: `detectedInUse` is `[]` whatever the reading says, and the held set is cleared. This is the only verdict that clears it.
+- `.unknown`: applies the reading, like `.connected`, for the same reason `SplitDNSVPNGate` keeps files on `.unknown`. Wrongly keeping corrects itself once the VPN observer primes, and wrongly clearing churns.
+
+The rule does not depend on the order in which observers report. An empty reading that lands just before `.disconnected` and one that lands just after it end in the same empty set. The cost is that a tunnel which withdraws its DNS key and stays connected keeps its last set until it disconnects. Both readings named servers the tunnel reaches, so that set stays reachable.
 
 The orchestrator's `applySplitDNSTable` drops cached answers for `table.domainsDiffering(from: previous)` and nothing else. A VPN connect already resets the DoH transports and the settled path report already clears the cache (`dns.transports_reset`, `dns.response_cache_cleared`); the targeted drop covers the case neither does, a name resolved and cached publicly off-VPN that is internal once the table gains its domain.
 
@@ -281,7 +285,7 @@ Kind `health`, listed beside `dns.transports_reset` in [`events.md`](events.md).
 | Event | When |
 | --- | --- |
 | `dns.split_table_changed` | The forwarder's table was swapped: `detected_domains=N manual_domains=N rules=N cache_dropped=N reason=pushed\|vpn_connected\|vpn_disconnected\|flap_held\|config\|detection_off`. Emitted by the orchestrator before the log line, once per swap, including the swap to empty. |
-| `dns.split_detected` | The in-use detected set changed: `interface=utunN domains=<comma list> servers=N outcome=applied\|held\|cleared`. Emitted by the host from `LiveSplitDNSPolicy` in the turn that decided it. `held` is the flap case. |
+| `dns.split_detected` | The in-use detected set changed: `interface=utunN domains=<comma list> servers=N outcome=applied\|held\|cleared`. Emitted by the host from `LiveSplitDNSPolicy` in the turn that decided it. `held` means an empty reading left the held set in use. |
 | `dns.split_resolver_ignored` | A pushed resolver was dropped before it reached the table: `interface= reason=invalid_domain\|invalid_server\|system_domain\|over_limit\|not_tunnel`. One per dropped resolver per reading, so a persistently odd push is visible but bounded by the cap. |
 | `dns.split_detection_failed` | The monitor could not create or read its store: `reason=store_create\|store_read`. Once per start; the host runs on manual entries alone. Warning log line. |
 
@@ -291,7 +295,7 @@ Kind `health`, listed beside `dns.transports_reset` in [`events.md`](events.md).
 
 Unit, against values and fakes only:
 
-- `LiveSplitDNSPolicyTests`. The gate state and reading matrix: connected × non-empty applies, connected × empty clears, reasserting × empty holds, reasserting × non-empty replaces, disconnected × anything clears, unknown keeps. `table(manual:limits:)`: shared domain merges detected first, manual rules before detected-only ones, caps enforced with ignored resolvers reported. A full-tunnel reading (`domains: [corp.example, eu.corp.example]`, `overridesPrimary: true`) yields a rule for each domain and none for public names, so a public name still takes the DoH path. A split-tunnel reading yields rules for its supplemental domains only.
+- `LiveSplitDNSPolicyTests`. The gate state and reading matrix: connected × non-empty applies, connected × empty keeps the held set, reasserting × empty keeps the held set, reasserting × non-empty replaces, disconnected × anything clears the held set, unknown applies the reading like connected. A non-empty reading that arrives before `.connected` and one that arrives after it end in the same `detectedInUse`. An empty reading on either side of `.disconnected` ends in `[]`. `table(manual:limits:)`: shared domain merges detected first, manual rules before detected-only ones, caps enforced with ignored resolvers reported. A full-tunnel reading (`domains: [corp.example, eu.corp.example]`, `overridesPrimary: true`) yields a rule for each domain and none for public names, so a public name still takes the DoH path. A split-tunnel reading yields rules for its supplemental domains only.
 - `PushedResolverMonitorTests`. The parser over the three fixture readings above, with their expected `domains` and `overridesPrimary`. `SupplementalMatchDomains` present wins over `DomainName` and `SearchDomains`; absent, the two are joined in that order and de-duplicated case-insensitively; an invalid domain among them is dropped with `dns.split_resolver_ignored reason=invalid_domain` and the rest kept. Also the `InterfaceName` filter, a non-UUID service ID, system domains dropped and an invalid server dropped.
 - `AppStateSplitDNSHintTests` (AppState harness). A manual entry duplicating an in-use detected domain shows the hint; an idle detected set shows none; "Remove manual copy" removes the entry from the draft and the editor's normal save persists it; no configuration write comes from the runtime.
 - `SplitDNSTableTests` (from PR #298) gains the origins: a shared domain lists detected servers first with their origins, a server both name counts as detected, and `domainsDiffering(from:)` returns the domains that entered or left. PR #298 already covers longest suffix, per-rule servers, open circuits and the empty table in `SplitDNSTableTests` and `DNSForwarderHealthTests`.
