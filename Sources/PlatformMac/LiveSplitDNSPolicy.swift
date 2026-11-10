@@ -16,6 +16,8 @@ package struct SplitDNSLimits: Hashable, Sendable {
     package var maxDetectedDomains: Int
     /// Caps each resolver's servers and each detected domain's list.
     package var maxServersPerDomain: Int
+    /// The `ignored` set's cap.
+    package var maxIgnored: Int { 4 * maxDetectedResolvers }
 
     package init(maxDetectedResolvers: Int, maxDetectedDomains: Int, maxServersPerDomain: Int) {
         self.maxDetectedResolvers = maxDetectedResolvers
@@ -39,11 +41,14 @@ package struct LiveSplitDNSPolicy: Hashable, Sendable {
 
     /// Each service's last resolvers in use since the last `.disconnected`,
     /// the only verdict that clears it whole. A reading replaces the held
-    /// resolvers of every service it names and keeps the rest, because tunnel
-    /// clients withdraw and republish their DNS key inside a flap, and a flap
-    /// must change nothing a client can see, whichever observer reports first
-    /// and whatever another tunnel publishes meanwhile. Under `.connected` only
-    /// a resolver whose tunnel is live is in use, fresh or kept, so a second
+    /// resolvers of every service and every interface it names and keeps the
+    /// rest, because tunnel clients withdraw and republish their DNS key
+    /// inside a flap, and a flap must change nothing a client can see,
+    /// whichever observer reports first and whatever another tunnel publishes
+    /// meanwhile. Replacing by interface too means service-ID churn on one
+    /// tunnel cannot pile up. At most `maxDetectedResolvers`, fresh resolvers
+    /// ahead of kept ones when the cap cuts. Under `.connected` only a
+    /// resolver whose tunnel is live is in use, fresh or kept, so a second
     /// tunnel staying up does not keep the first one's servers in use, and a
     /// replayed reading does not put them back. `.reasserting` and `.unknown`
     /// do not filter: the grace window bounds the first, and under the second
@@ -63,9 +68,9 @@ package struct LiveSplitDNSPolicy: Hashable, Sendable {
     /// nothing to `ignored`, because that set is unused.
     package private(set) var display = DetectedSplitDNSDisplay.none
 
-    /// The last reading's rejections plus every `over_limit` cut from
-    /// `detectedInUse`. The host reports the members that were not in the
-    /// set before an update.
+    /// The last reading's rejections, then every `over_limit` cut from
+    /// `detectedInUse`, the first `maxIgnored` of them. The host reports the
+    /// members that were not in the set before an update.
     package private(set) var ignored: Set<PushedResolverRejection> = []
 
     package init(limits: SplitDNSLimits) {
@@ -92,14 +97,21 @@ package struct LiveSplitDNSPolicy: Hashable, Sendable {
         }
         let fresh = ordered.filter(isLive)
         let republished = Set(ordered.map(\.serviceID))
-        let kept = heldThroughFlap.filter { isLive($0) && !republished.contains($0.serviceID) }
-        heldThroughFlap = Self.resolverOrder(fresh + kept)
+        let published = Set(ordered.map(\.interface))
+        let kept = heldThroughFlap.filter {
+            isLive($0) && !republished.contains($0.serviceID) && !published.contains($0.interface)
+        }
+        let candidates = fresh + kept
+        heldThroughFlap = Self.resolverOrder(Array(candidates.prefix(limits.maxDetectedResolvers)))
+        let cut = candidates.dropFirst(limits.maxDetectedResolvers).map {
+            PushedResolverRejection(serviceID: $0.serviceID, interface: $0.interface, reason: .overLimit)
+        }
 
         let withheld = !gate.entriesWanted
         detectedInUse = withheld ? [] : heldThroughFlap
         let bounded = Self.bound(detectedInUse, limits)
         detectedRules = bounded.rules
-        ignored = Set(reading.rejections).union(bounded.excess)
+        ignored = Set((reading.rejections + cut + bounded.excess).prefix(limits.maxIgnored))
         if withheld {
             display = DetectedSplitDNSDisplay(state: .idle, rows: Self.bound(ordered, limits).rows)
         } else {

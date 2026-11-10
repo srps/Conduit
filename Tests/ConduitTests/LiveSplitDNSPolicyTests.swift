@@ -438,6 +438,7 @@ final class LiveSplitDNSPolicyTests: XCTestCase {
             SplitDNSLimits.standard,
             SplitDNSLimits(maxDetectedResolvers: 16, maxDetectedDomains: 16, maxServersPerDomain: 8)
         )
+        XCTAssertEqual(SplitDNSLimits.standard.maxIgnored, 64)
     }
 }
 
