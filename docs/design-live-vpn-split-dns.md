@@ -62,7 +62,7 @@ let ignoredBefore = liveSplitDNS.ignored
 let changed = liveSplitDNS.update(gate: splitDNSGate, reading: pushedReading)    // pure
 for rejection in liveSplitDNS.ignored.subtracting(ignoredBefore) { emit(.splitResolverIgnored(rejection)) }
 if changed {
-    orchestrator.applyDetectedSplitDNSRules(liveSplitDNS.detectedRules, display: liveSplitDNS.display)   // merge, swap, drop affected cache, event, snapshot
+    orchestrator.applyDetectedSplitDNSRules(liveSplitDNS.detectedRules, display: liveSplitDNS.display, reason: reason)   // merge, swap, drop affected cache, event, snapshot
 }
 ```
 
@@ -324,9 +324,21 @@ The sequence stamp the host takes for VPN reports (`VPNObservationSequencer`, `v
 extension ProxyOrchestrator {
     /// The detected half of the forwarder's split-DNS table from now on. Stores `rules`, rebuilds the merged table as
     /// `SplitDNSTable(manual: config.dnsEntries, detected: rules)`, and, when the merged table changed, swaps it, drops
-    /// cached answers under the domains that entered or left and emits `dns.split_table_changed`. Sets
+    /// cached answers under the domains that entered or left and emits `dns.split_table_changed` with `reason`. Sets
     /// `snapshot.detectedSplitDNS` to `display`. Never restarts the forwarder. Safe before the forwarder has started.
-    package func applyDetectedSplitDNSRules(_ rules: [SplitDNSRule], display: DetectedSplitDNSDisplay) { notImplemented() }
+    package func applyDetectedSplitDNSRules(
+        _ rules: [SplitDNSRule], display: DetectedSplitDNSDisplay, reason: DetectedSplitDNSChangeReason
+    ) { notImplemented() }
+}
+
+/// The host input that changed the detected rules, the `reason` of `dns.split_table_changed`. A config change is not
+/// a case: the orchestrator detects it in `applyConfigChange` and emits `reason=config` itself.  [unit 3]
+package enum DetectedSplitDNSChangeReason: String, Hashable, Sendable {
+    case pushed                                  // a pushed-resolver reading
+    case vpnConnected = "vpn_connected"          // a VPN report of `.connected` or `.unknown`
+    case vpnDisconnected = "vpn_disconnected"    // a VPN report of `.disconnected`
+    case flapHeld = "flap_held"                  // a VPN report of `.reasserting`
+    case detectionOff = "detection_off"          // `dns.followVPNResolvers` turned off; the host pushes `[]`
 }
 ```
 
@@ -372,7 +384,7 @@ Kind `health`, listed beside `dns.transports_reset` in [`events.md`](events.md).
 
 | Event | When |
 | --- | --- |
-| `dns.split_table_changed` | The forwarder's table was swapped: `detected_domains=N manual_domains=N rules=N cache_dropped=N reason=pushed\|vpn_connected\|vpn_disconnected\|flap_held\|config\|detection_off`. Emitted by the orchestrator before the log line, once per swap, including the swap to empty. |
+| `dns.split_table_changed` | The forwarder's table was swapped: `detected_domains=N manual_domains=N rules=N cache_dropped=N reason=pushed\|vpn_connected\|vpn_disconnected\|flap_held\|config\|detection_off`. Emitted by the orchestrator before the log line, once per swap, including the swap to empty. `reason=config` comes from `applyConfigChange`; the other reasons are the `DetectedSplitDNSChangeReason` the host passed to `applyDetectedSplitDNSRules`. |
 | `dns.split_detected` | The in-use detected set changed: `interface=utunN domains=<comma list> servers=N outcome=applied\|held\|cleared`. Emitted by the host from `LiveSplitDNSPolicy` in the turn that decided it. `held` means an empty reading left the held set in use. |
 | `dns.split_resolver_ignored` | A rejection entered `LiveSplitDNSPolicy.ignored`: `service= interface= reason=invalid_domain\|invalid_server\|system_domain\|over_limit\|not_tunnel\|no_match_domains`. Emitted by the host, once per rejection when it enters the set. A reading that repeats the same rejections emits nothing, so a persistently odd push is reported once. |
 | `dns.split_detection_failed` | A reading arrived with `failure` set: `reason=store_create\|store_read`. Emitted by the host, once per start; the host runs on manual entries alone. Warning log line. |
@@ -425,6 +437,6 @@ Five verifiable units, each green on its own, in this order. Unit 1 is delivered
 
 1. **Kernel table. Delivered by PR #298 (ab2ffe32).** `SplitDNSTable` built from `config.dnsEntries` per query, per-rule servers in order, longest suffix, per-server circuits, the internal stage budget, and no internal attempt when no rule has a server, which removed the `192.0.2.53` wait (#296). The design's shape differs from what shipped in two ways that the later units close: rules carry no `origins`, and the forwarder builds the table from config instead of reading a box.
 2. **Platform inputs.** `PushedResolver`, `PushedResolverObserving`, `PushedResolverMonitor`, the fake, `LiveSplitDNSPolicy`. In the kernel, `SplitDNSOrigin`, `SplitDNSRule.origins` and `SplitDNSTable.init(manual:detected:)`, which owns the merge; `init(entries:)` callers move to it and `init(entries:)` is deleted. Pure tests and the parser fixture from the owner's VPN.
-3. **Host wiring.** `RuntimeHostEffects.pushedResolvers`, the policy in `RuntimeHost`, `applyDetectedSplitDNSRules(_:display:)`, the four events, the two pm-sim scenarios, `events.md`. The snapshot field: `DetectedSplitDNSDisplay` and `ProxyOrchestratorSnapshot.detectedSplitDNS` in the kernel, `ControlDetectedSplitDNS` and its rows in `ConduitShared` with their `ControlRuntimeSizing` measures and `ControlDisplayRecordCodec` caps, and the projection in `ProxyControlBridge`. In the kernel, `domainsDiffering(from:)`, `splitDNSBox` with the merged table rebuilt at init, in `applyConfigChange` and in `applyDetectedSplitDNSRules`, a `DNSResponseCache` method that removes the entries at or under a set of domains and returns how many it removed (the cache has only `clear()` today), and the forwarder's optional `splitDNSProvider`, which replaces `SplitDNSTable(entries: config.dnsEntries)`. `enabledDNSEntryDomain(containing:config:)` and `isInternalDomain(_:config:)` are deleted.
+3. **Host wiring.** `RuntimeHostEffects.pushedResolvers`, the policy in `RuntimeHost`, `applyDetectedSplitDNSRules(_:display:reason:)` and `DetectedSplitDNSChangeReason`, the four events, the two pm-sim scenarios, `events.md`. The snapshot field: `DetectedSplitDNSDisplay` and `ProxyOrchestratorSnapshot.detectedSplitDNS` in the kernel, `ControlDetectedSplitDNS` and its rows in `ConduitShared` with their `ControlRuntimeSizing` measures and `ControlDisplayRecordCodec` caps, and the projection in `ProxyControlBridge`. In the kernel, `domainsDiffering(from:)`, `splitDNSBox` with the merged table rebuilt at init, in `applyConfigChange` and in `applyDetectedSplitDNSRules`, a `DNSResponseCache` method that removes the entries at or under a set of domains and returns how many it removed (the cache has only `clear()` today), and the forwarder's optional `splitDNSProvider`, which replaces `SplitDNSTable(entries: config.dnsEntries)`. `enabledDNSEntryDomain(containing:config:)` and `isInternalDomain(_:config:)` are deleted.
 4. **App.** Settings groups, the duplicate-entry hint, wizard, `VPNDNSDetector` deleted, compositions supply the observer.
 5. **Validation.** The owner validation above, recorded in decision 0044, which moves its statuses as each unit lands. The record itself lands with this design, and 0043's open question on the first server already points to #290 part 1 and to 0044.
