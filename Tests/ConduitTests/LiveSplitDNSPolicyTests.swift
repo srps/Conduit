@@ -209,6 +209,57 @@ final class LiveSplitDNSPolicyTests: XCTestCase {
         XCTAssertEqual(policy.detectedInUse, [early])
     }
 
+    // MARK: - Retained state stays bounded
+
+    func testServiceChurnOnOneTunnelHoldsOnlyItsLatestResolver() {
+        for (state, live) in [(VPNObservedState.connected, Set(["utun7"])), (.reasserting, [])] {
+            var policy = policy()
+            for n in 1...100 {
+                _ = policy.update(gate: gate(state), liveInterfaces: live, reading: reading(PushedResolver(
+                    serviceID: "svc\(n)", interface: "utun7", domains: ["corp.example"], servers: ["192.0.2.1"]
+                )))
+            }
+            XCTAssertEqual(policy.detectedInUse.map(\.serviceID), ["svc100"], "\(state)")
+        }
+    }
+
+    func testTheHeldSetStaysWithinTheResolverCapAcrossManyTunnels() {
+        let live = Set((1...100).map { "utun\($0)" })
+        for (state, interfaces) in [(VPNObservedState.connected, live), (.reasserting, [])] {
+            var policy = policy()
+            var largest = 0
+            for n in 1...100 {
+                _ = policy.update(gate: gate(state), liveInterfaces: interfaces, reading: reading(PushedResolver(
+                    serviceID: String(format: "s%03d", n), interface: "utun\(n)",
+                    domains: ["d\(n).example"], servers: ["192.0.2.1"]
+                )))
+                largest = max(largest, policy.detectedInUse.count)
+            }
+            XCTAssertEqual(largest, 16, "\(state)")
+            XCTAssertEqual(policy.detectedInUse.last?.serviceID, "s100",
+                           "the fresh resolver survives the cut although it sorts last")
+            XCTAssertLessThanOrEqual(policy.ignored.count, 64)
+        }
+    }
+
+    func testTheIgnoredSetStaysBounded() {
+        let rejections = (1...200).map {
+            PushedResolverRejection(serviceID: "r\($0)", interface: "utun\($0)", reason: .noMatchDomains)
+        }
+        var policy = policy()
+        _ = policy.update(gate: gate(.connected), reading: PushedResolverReading(resolvers: [corp], rejections: rejections))
+        XCTAssertEqual(policy.ignored, Set(rejections.prefix(64)), "the reading's first rejections, up to the cap")
+
+        let resolvers = (1...100).map {
+            PushedResolver(serviceID: String(format: "s%03d", $0), interface: "utun\($0)",
+                           domains: ["d\($0).example"], servers: ["192.0.2.1"])
+        }
+        _ = policy.update(gate: gate(.connected), liveInterfaces: Set(resolvers.map(\.interface)),
+                          reading: PushedResolverReading(resolvers: resolvers))
+        XCTAssertEqual(policy.ignored.count, 64, "84 resolvers over the cap, reported up to the cap")
+        XCTAssertTrue(policy.ignored.allSatisfy { $0.reason == .overLimit })
+    }
+
     // MARK: - Detected rules
 
     func testShuffledResolversBuildTheSameRulesInResolverOrder() {
