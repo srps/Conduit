@@ -22,7 +22,7 @@ Split-DNS entries are a snapshot that the setup wizard and the Settings "Auto-de
 5. The monitor reads the public `SCDynamicStore` DNS keys. It does not use the private `dnsinfo.h` API or poll `scutil`.
 6. The table takes at most 16 detected domains and `DomainResourceLimits.dnsServers` servers per domain. `dns.split_resolver_ignored reason=over_limit` reports the excess.
 7. `dns.followVPNResolvers` in the DNS section turns the feature on and off, and decodes as on when absent. Off, the monitor does not start and the table holds manual entries only.
-8. The live set infers no parent domains. A DNS key with `SupplementalMatchDomains` contributes only those domains. A key without them, a full tunnel, contributes its `DomainName` followed by its `SearchDomains`, each once, checked with `DomainNameSyntax`.
+8. The live set infers no parent domains. A DNS key with `SupplementalMatchDomains` contributes only those domains. A key without them whose IPv4 `OverridePrimary` is 1, a full tunnel, contributes its `DomainName` followed by its `SearchDomains`, each once, checked with `DomainNameSyntax`. A key with neither contributes no domains and is rejected with reason `no_match_domains`.
 9. Public names stay on DoH while a full tunnel is up, as today. The reading records `OverridePrimary` as `PushedResolver.overridesPrimary` and nothing acts on it yet.
 
 ## Alternatives

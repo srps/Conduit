@@ -132,12 +132,13 @@ package struct PushedResolver: Hashable, Sendable {
     package let serviceID: String        // "com.cisco.anyconnect", the `<id>` in `State:/Network/Service/<id>/DNS`
     package let searchOrder: Int?        // the DNS dictionary's `SearchOrder`; nil when absent
     package let interface: String        // "utun4"
-    /// `SupplementalMatchDomains` when the DNS key has any. Otherwise `DomainName` then `SearchDomains`,
-    /// the full-tunnel case. Lowercased, no trailing dot, each once, valid under `DNSManager.validateDomain` (`DomainNameSyntax`).
+    /// `SupplementalMatchDomains` when the DNS key has any. Otherwise, only when `overridesPrimary` (a full tunnel),
+    /// `DomainName` then `SearchDomains`. Never empty: a key with neither is rejected as `no_match_domains`.
+    /// Lowercased, no trailing dot, each once, valid under `DNSManager.validateDomain` (`DomainNameSyntax`).
     package let domains: [String]
     package let servers: [String]
-    /// The sibling IPv4 key's `OverridePrimary` is 1: the tunnel is the machine's default resolver.
-    /// Recorded only; no decision reads it yet (owner decision 9).
+    /// The sibling IPv4 key's `OverridePrimary` is 1: the tunnel is the machine's default resolver, a full tunnel.
+    /// The parser's full-tunnel domain rule reads it; nothing else does yet (owner decision 9).
     package let overridesPrimary: Bool
 }
 
@@ -145,7 +146,8 @@ package struct PushedResolver: Hashable, Sendable {
 package struct PushedResolverRejection: Hashable, Sendable {
     package enum Reason: String, Hashable, Sendable {
         case invalidDomain = "invalid_domain", invalidServer = "invalid_server", systemDomain = "system_domain"
-        case notTunnel = "not_tunnel", overLimit = "over_limit"     // `over_limit` comes from the policy's caps
+        case notTunnel = "not_tunnel", noMatchDomains = "no_match_domains"
+        case overLimit = "over_limit"    // comes from the policy's caps, not the parser
     }
     package let serviceID: String
     package let interface: String?       // nil when the key named none
@@ -243,7 +245,13 @@ Notification patterns:
 
 On each notification the monitor lists `State:/Network/Service/*/DNS`, and for each key reads the DNS dictionary and the sibling `State:/Network/Service/<id>/IPv4` dictionary for `InterfaceName`. A service whose interface is not `utun*` is skipped. Admission mirrors `VPNStatusMonitor.handleStoreChanges`: a utun that never had IPv4 is an Apple service tunnel and does not count.
 
-What is read from the DNS dictionary (owner decision 8). When `SupplementalMatchDomains` is present and non-empty, those are the domains, and `DomainName` and `SearchDomains` are ignored: a split tunnel names exactly what it claims. When it is absent, the profile is a full tunnel, and the domains are `DomainName` followed by `SearchDomains`, lowercased, trailing dots stripped, each domain once. `ServerAddresses` gives the servers. `OverridePrimary` from the IPv4 dictionary is recorded on the reading as `overridesPrimary`. Domains that fail `DNSManager.validateDomain`, servers that fail `DNSManager.validateServer`, `local` and the `arpa` reverse zones are left out of the resolver and returned in the reading as typed `PushedResolverRejection` values, never dropped silently. The monitor has no event sink. It reports the reading whole, resolvers and rejections, through `onChange` on its queue. The host hops to the owner, hands it to `LiveSplitDNSPolicy`, and emits `dns.split_resolver_ignored` only for rejections that entered the policy's `ignored` set, so a push that stays odd is reported once, not on every notification.
+What is read from the DNS dictionary (owner decision 8). The domains come from the first of these rules that applies:
+
+1. `SupplementalMatchDomains` is present and non-empty. Those are the domains, and `DomainName` and `SearchDomains` are ignored, because a split tunnel names exactly what it claims.
+2. `OverridePrimary` is 1 in the IPv4 dictionary. The profile is a full tunnel, and the domains are `DomainName` followed by `SearchDomains`.
+3. Neither. The key names no domains it claims, and the whole key is rejected with reason `no_match_domains`. A service that sets a search domain without claiming the default route is not a full tunnel, and its `DomainName` is not a pushed split domain.
+
+Domains are lowercased, trailing dots stripped, each domain once. `ServerAddresses` gives the servers, and `SearchOrder` gives `searchOrder`. `OverridePrimary` is recorded on the reading as `overridesPrimary`. Domains that fail `DNSManager.validateDomain`, servers that fail `DNSManager.validateServer`, `local` and the `arpa` reverse zones are left out of the resolver and returned in the reading as typed `PushedResolverRejection` values, never dropped silently. The monitor has no event sink. It reports the reading whole, resolvers and rejections, through `onChange` on its queue. The host hops to the owner, hands it to `LiveSplitDNSPolicy`, and emits `dns.split_resolver_ignored` only for rejections that entered the policy's `ignored` set, so a push that stays odd is reported once, not on every notification.
 
 The parent-domain inference `DetectedDNSConfig.toDNSEntries()` performs today (an entry for `corp.example` when the tunnel pushed `eu.corp.example`) is not carried into the live set (owner decision 8). The tunnel's own scoping, or its own search domains on a full tunnel, is what macOS itself uses for those names.
 
@@ -256,9 +264,9 @@ The parent-domain inference `DetectedDNSConfig.toDNSEntries()` performs today (a
 
 What this changes:
 
-- **A full-tunnel VPN pushes a default resolver plus a search domain, not a list of split domains.** Owner decision 8 counts its `DomainName` and `SearchDomains` as pushed domains. For this VPN, the detected set is `corp.example` and its servers, which equals today's manual entry.
+- **A full-tunnel VPN pushes a default resolver plus a search domain, not a list of split domains.** Owner decision 8 counts its `DomainName` and `SearchDomains` as pushed domains when `OverridePrimary` is 1 and the key has no `SupplementalMatchDomains`. For this VPN, the detected set is `corp.example` and its servers, which equals today's manual entry.
 - **The pushed servers are the VPN's default resolver.** In a full-tunnel profile they are meant to answer every name. Today Conduit sends public names to DoH even while the VPN is up. Owner decision 9 keeps DoH for public names, which is the current behaviour, and records `OverridePrimary` on the reading as `overridesPrimary` so that a later change can act on it.
-- **The fixture covers both profiles.** The full tunnel above reads as `domains: [corp.example]`, `overridesPrimary: true`. A full tunnel whose `SearchDomains` add to `DomainName` (`DomainName` `corp.example`, `SearchDomains` `[eu.corp.example, corp.example]`) reads as `[corp.example, eu.corp.example]`. A split tunnel with `SupplementalMatchDomains` `[corp.example, lab.corp.example]`, a `DomainName` of `other.example` and no `OverridePrimary` reads as `[corp.example, lab.corp.example]`, `overridesPrimary: false`. The split-tunnel shape comes from the configd sources, not from an observation.
+- **The fixture covers both profiles.** The full tunnel above reads as `domains: [corp.example]`, `overridesPrimary: true`. A full tunnel whose `SearchDomains` add to `DomainName` (`DomainName` `corp.example`, `SearchDomains` `[eu.corp.example, corp.example]`) reads as `[corp.example, eu.corp.example]`. A split tunnel with `SupplementalMatchDomains` `[corp.example, lab.corp.example]`, a `DomainName` of `other.example` and no `OverridePrimary` reads as `[corp.example, lab.corp.example]`, `overridesPrimary: false`. A key with `DomainName` `corp.example`, no `SupplementalMatchDomains` and no `OverridePrimary` is rejected as `no_match_domains`. The split-tunnel shape comes from the configd sources, not from an observation.
 
 Owner decision 5 rejected the alternative, the private `dnsinfo.h` API (`dns_configuration_copy`), which returns exactly the parsed list `scutil --dns` prints but is not in the public SDK.
 
@@ -345,7 +353,7 @@ Kind `health`, listed beside `dns.transports_reset` in [`events.md`](events.md).
 | --- | --- |
 | `dns.split_table_changed` | The forwarder's table was swapped: `detected_domains=N manual_domains=N rules=N cache_dropped=N reason=pushed\|vpn_connected\|vpn_disconnected\|flap_held\|config\|detection_off`. Emitted by the orchestrator before the log line, once per swap, including the swap to empty. |
 | `dns.split_detected` | The in-use detected set changed: `interface=utunN domains=<comma list> servers=N outcome=applied\|held\|cleared`. Emitted by the host from `LiveSplitDNSPolicy` in the turn that decided it. `held` means an empty reading left the held set in use. |
-| `dns.split_resolver_ignored` | A rejection entered `LiveSplitDNSPolicy.ignored`: `service= interface= reason=invalid_domain\|invalid_server\|system_domain\|over_limit\|not_tunnel`. Emitted by the host, once per rejection when it enters the set. A reading that repeats the same rejections emits nothing, so a persistently odd push is reported once. |
+| `dns.split_resolver_ignored` | A rejection entered `LiveSplitDNSPolicy.ignored`: `service= interface= reason=invalid_domain\|invalid_server\|system_domain\|over_limit\|not_tunnel\|no_match_domains`. Emitted by the host, once per rejection when it enters the set. A reading that repeats the same rejections emits nothing, so a persistently odd push is reported once. |
 | `dns.split_detection_failed` | A reading arrived with `failure` set: `reason=store_create\|store_read`. Emitted by the host, once per start; the host runs on manual entries alone. Warning log line. |
 
 `scripts/check-event-catalogue.py` fails the build until all four are catalogued.
@@ -355,7 +363,7 @@ Kind `health`, listed beside `dns.transports_reset` in [`events.md`](events.md).
 Unit, against values and fakes only:
 
 - `LiveSplitDNSPolicyTests`. The gate state and reading matrix: connected × non-empty applies, connected × empty keeps the held set, reasserting × empty keeps the held set, reasserting × non-empty replaces, disconnected × anything clears the held set, unknown applies the reading like connected. A non-empty reading that arrives before `.connected` and one that arrives after it end in the same `detectedInUse`. An empty reading on either side of `.disconnected` ends in `[]`. `table(manual:)`: shared domain merges detected first, manual rules before detected-only ones, caps enforced with ignored resolvers reported. The same resolvers delivered in shuffled order build the same table: detected-only rules sorted by `searchOrder`, a missing `searchOrder` last, ties by `serviceID`. Two detected resolvers naming one domain give one rule with the first resolver's servers, then the second's, each once. The 17th distinct domain in resolver order is dropped as `over_limit`. A domain with nine detected servers and two manual ones keeps eight detected servers, then both manual ones. A full-tunnel reading (`domains: [corp.example, eu.corp.example]`, `overridesPrimary: true`) yields a rule for each domain and none for public names, so a public name still takes the DoH path. A split-tunnel reading yields rules for its supplemental domains only.
-- `PushedResolverMonitorTests`. The parser over the three fixture readings above, with their expected `domains` and `overridesPrimary`. `SupplementalMatchDomains` present wins over `DomainName` and `SearchDomains`; absent, the two are joined in that order and de-duplicated case-insensitively; an invalid domain among them is returned as a rejection with reason `.invalidDomain` and the rest kept. Also the `InterfaceName` filter, a non-UUID service ID, system domains dropped and an invalid server dropped.
+- `PushedResolverMonitorTests`. The parser over the three fixture readings above, with their expected `domains` and `overridesPrimary`. `SupplementalMatchDomains` present wins over `DomainName` and `SearchDomains`; absent with `OverridePrimary` 1, the two are joined in that order and de-duplicated case-insensitively; absent without `OverridePrimary`, the key is rejected as `no_match_domains` and contributes no resolver; an invalid domain among them is returned as a rejection with reason `.invalidDomain` and the rest kept. Also the `InterfaceName` filter, a non-UUID service ID, system domains dropped and an invalid server dropped.
 - `AppStateSplitDNSHintTests` (AppState harness). A manual entry duplicating an in-use detected domain shows the hint; an idle detected set shows none; "Remove manual copy" removes the entry from the draft and the editor's normal save persists it; no configuration write comes from the runtime.
 - `SplitDNSTableTests` (from PR #298) gains the origins: a shared domain lists detected servers first with their origins, a server both name counts as detected, and `domainsDiffering(from:)` returns the domains that entered or left. PR #298 already covers longest suffix, per-rule servers, open circuits and the empty table in `SplitDNSTableTests` and `DNSForwarderHealthTests`.
 - `DNSForwarderTests`. The forwarder reads the provider, not config: a table pushed with no change to `dnsEntries` routes the next query. A table swap drops exactly the differing domains from the response cache.
@@ -386,7 +394,7 @@ All nine are decided (owner, 2026-11-10, [#295 comment](https://github.com/srps/
 5. **Detection source.** The monitor reads `SCDynamicStore` DNS keys, the public API `VPNStatusMonitor` already uses. It does not use the private `dnsinfo.h` API or poll `scutil`.
 6. **Bounds.** The table takes at most 16 detected domains and `DomainResourceLimits.dnsServers` servers per domain, and `dns.split_resolver_ignored reason=over_limit` reports the excess.
 7. **The switch and its default.** `dns.followVPNResolvers` turns the feature on and off. It defaults to on and lives in the DNS section. Off means the monitor does not start and the table holds manual entries only.
-8. **Parent-domain inference and full-tunnel domains.** The live set infers no parent domains in the live set, and existing parent entries stay as manual entries. A DNS key with `SupplementalMatchDomains` contributes only those domains. A key without them, a full tunnel, contributes its `DomainName` and `SearchDomains`, de-duplicated and checked with `DomainNameSyntax`.
+8. **Parent-domain inference and full-tunnel domains.** The live set infers no parent domains in the live set, and existing parent entries stay as manual entries. A DNS key with `SupplementalMatchDomains` contributes only those domains. A key without them whose IPv4 `OverridePrimary` is 1, a full tunnel, contributes its `DomainName` followed by its `SearchDomains`, de-duplicated and checked with `DomainNameSyntax`. A key with neither contributes nothing and is rejected as `no_match_domains`.
 9. **Full-tunnel default resolver.** Public names stay on DoH, as today, and the reading records `OverridePrimary` as `overridesPrimary` for a later change to act on. Sending every public name to the pushed servers would make public resolution depend on the internal servers staying healthy.
 
 ## Sequencing
