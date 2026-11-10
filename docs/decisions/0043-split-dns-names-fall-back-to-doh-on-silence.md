@@ -51,5 +51,5 @@ Does not prove: that the VPN client connects from an off-VPN network with an ins
 
 ## Open questions
 
-- Resolved by #290 part 1: the servers of the entry the name matched (longest suffix) are asked in order, a server whose circuit is open is skipped, and the event's `server=` lists the servers asked or `none`. The VPN's own resolvers are #290 part 2.
+- Resolved by #290 part 1: the servers of the entry the name matched (longest suffix) are asked in order, a server whose circuit is open is skipped, and the event's `server=` lists the servers asked or `none`. The VPN's own resolvers are #290 part 2, decided in [0044](0044-split-dns-follows-vpn-pushed-resolvers.md).
 - Whether public DoH fallback for names outside the internal-domain list is permitted, the [2026-09-09 review](../review-2026-09-09.md)'s question, is not decided here.
