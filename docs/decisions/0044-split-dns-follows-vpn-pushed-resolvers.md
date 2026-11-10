@@ -2,7 +2,7 @@
 
 - Date: 2026-11-10
 - Decision: accepted (owner, 2026-11-10, [#295 comment](https://github.com/srps/Conduit/pull/295#issuecomment-6774052129): 1 to 7 as recommended, 8 with full-tunnel `DomainName` and `SearchDomains` counted as pushed domains, and a duplicate-entry hint added to 4; 9 revised the same day, [#295 comment](https://github.com/srps/Conduit/pull/295#issuecomment-6774517730), because its first premise was wrong)
-- Implementation: planned
+- Implementation: partial
 - Validation: pending
 - Supersedes: none
 - Superseded by: none
@@ -46,7 +46,7 @@ Split-DNS entries are a snapshot that the setup wizard and the Settings "Auto-de
 - A `.local` name under no rule goes to `firstServers` with no DoH fallback. With only detected rules in use it now reaches the tunnel's server, where today, with no manual entries, it gets an immediate SERVFAIL.
 - A user with no manual entries gains one attempt on the tunnel's first server for public names, only while the detected set is in use. Off the VPN the set is withheld, so no attempt is made, as today (#296).
 - A manual entry removed through the hint no longer applies on networks that push nothing, such as an office LAN. The hint only offers the removal, and nothing removes configuration without the user's click.
-- Two new ceilings (16 detected domains, servers per domain) join the bounded collections, approved here. The design also adds a 16-resolver cap. It decides which resolvers reach the table, the first 16 in resolver order, and it bounds the Settings display's row count so the codec can never refuse it. That cap is a design addition, pending owner approval.
+- Two new ceilings (16 detected domains, servers per domain) join the bounded collections, approved here. The design also adds a 16-resolver cap. It decides which resolvers reach the table, the first 16 in resolver order, and it bounds the Settings display's row count so the codec can never refuse it. That cap is a design addition, pending owner approval, and so is the 64-rejection cap on the set the policy reports as ignored.
 - `overridesPrimary` is recorded, and only decision 8's full-tunnel domain rule reads it, so a later change on full-tunnel public names needs no new reading.
 
 ## Invariants and verification
@@ -57,7 +57,11 @@ Split-DNS entries are a snapshot that the setup wizard and the Settings "Auto-de
 
 ## Implementation evidence
 
-None yet. PR #298 delivered the kernel `SplitDNSTable` this builds on, and the design's sequencing names what units 2 to 4 add.
+PR #298 delivered the kernel `SplitDNSTable` this builds on, and the design's sequencing names what units 2 to 4 add.
+
+Unit 2, the platform inputs, is [PR #299](https://github.com/srps/Conduit/pull/299). It changes no running-product behaviour: neither the app nor the daemon composes the monitor or the policy yet, and only the `pm-vpn-check` diagnostic prints a reading. [`PushedResolver.swift`](../../Sources/PlatformMac/PushedResolver.swift) parses the store's DNS keys under decisions 5 and 8, and [`PushedResolverMonitor.swift`](../../Sources/PlatformMac/PushedResolverMonitor.swift) observes them, with its fake in [`PlatformFakes.swift`](../../Sources/PlatformMac/PlatformFakes.swift). [`LiveSplitDNSPolicy.swift`](../../Sources/PlatformMac/LiveSplitDNSPolicy.swift) decides which pushed resolvers are in use from the gate, the live tunnels and the reading, holds them through a flap and applies decision 6's caps. [`VPNStateFuser.swift`](../../Sources/ProxyKernel/Network/VPNStateFuser.swift) reports the live tunnel set, and [`SplitDNSTable.swift`](../../Sources/ProxyKernel/Network/SplitDNSTable.swift) merges manual and detected rules under decision 2. [`LiveSplitDNSPolicyTests`](../../Tests/ConduitTests/LiveSplitDNSPolicyTests.swift), [`PushedResolverMonitorTests`](../../Tests/ConduitTests/PushedResolverMonitorTests.swift), [`SplitDNSTableTests`](../../Tests/ConduitTests/SplitDNSTableTests.swift) and [`VPNStateFuserTests`](../../Tests/ConduitTests/VPNStateFuserTests.swift) cover them.
+
+Does not prove: host wiring (unit 3: `RuntimeHost`, the forwarder's provider, the four events, the snapshot field and the pm-sim scenarios), the app (unit 4: Settings, the duplicate-entry hint and the wizard), or the owner validation, which stays pending.
 
 ## Open questions
 
