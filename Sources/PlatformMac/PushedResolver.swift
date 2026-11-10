@@ -16,7 +16,7 @@ package struct PushedResolver: Hashable, Sendable {
     package let domains: [String]
     /// IP literals in the order the store lists them, each once. Never empty.
     package let servers: [String]
-    /// `OverridePrimary` is 1: a full tunnel whose servers are the machine's
+    /// `OverridePrimary` is 1 on the IPv4 dictionary: a full tunnel whose servers are the machine's
     /// default resolver. Only the parser's full-tunnel domain rule reads it
     /// (owner decisions 8 and 9).
     package let overridesPrimary: Bool
@@ -29,6 +29,7 @@ package struct PushedResolver: Hashable, Sendable {
         servers: [String],
         overridesPrimary: Bool = false
     ) {
+        assert(!domains.isEmpty && !servers.isEmpty, "a pushed resolver names at least one domain and one server")
         self.serviceID = serviceID
         self.searchOrder = searchOrder
         self.interface = interface
@@ -122,7 +123,8 @@ extension PushedResolverReading {
                 continue
             }
             guard isTunnelInterface(interface) else { continue }
-            let overridesPrimary = addressing.contains { ($0["OverridePrimary"] as? NSNumber)?.boolValue == true }
+            let ipv4 = store[servicePrefix + serviceID + "/IPv4"] as? [String: Any]
+            let overridesPrimary = (ipv4?["OverridePrimary"] as? NSNumber)?.boolValue == true
             parseResolver(
                 serviceID: serviceID, interface: interface, dns: dns, overridesPrimary: overridesPrimary, into: &reading
             )

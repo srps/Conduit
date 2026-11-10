@@ -99,6 +99,33 @@ final class PushedResolverMonitorTests: XCTestCase {
         XCTAssertEqual(reading.rejections, [])
     }
 
+    func testSupplementalMatchDomainsWinOverTheFullTunnelRule() {
+        let store = service("both", "utun4", dns: [
+            "DomainName": "other.example",
+            "SearchDomains": ["search.example"],
+            "SupplementalMatchDomains": ["corp.example"],
+            "ServerAddresses": ["192.0.2.10"],
+        ], overridesPrimary: true)
+
+        let reading = PushedResolverReading.parse(store: store)
+
+        XCTAssertEqual(reading.resolvers.map(\.domains), [["corp.example"]],
+                       "a tunnel that claims the default route still contributes only the domains it names")
+        XCTAssertEqual(reading.resolvers.map(\.overridesPrimary), [true])
+    }
+
+    func testOverridePrimaryCountsOnlyOnTheIPv4Dictionary() {
+        let store = service("v6only", "utun5", dns: [
+            "DomainName": "corp.example",
+            "ServerAddresses": ["2001:db8::53"],
+        ], overridesPrimary: true, family: "IPv6")
+
+        let reading = PushedResolverReading.parse(store: store)
+
+        XCTAssertEqual(reading.resolvers, [])
+        XCTAssertEqual(reading.rejections.map(\.reason), [.noMatchDomains])
+    }
+
     func testNoMatchDomainsAndNoOverridePrimaryIsRejectedWithNoResolver() {
         let store = service("split", "utun3", dns: [
             "DomainName": "corp.example",
