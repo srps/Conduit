@@ -23,6 +23,17 @@ final class NetworkPathStateTests: XCTestCase {
         )
     }
 
+    // MARK: - DNS attempts
+
+    /// Only no path at all refuses lookups; a path that a connection would
+    /// bring up (an on-demand VPN) is attempted, since the lookup may be
+    /// what brings it up.
+    func testOnlyAnUnsatisfiedPathRefusesDNSAttempts() {
+        XCTAssertTrue(path(status: .satisfied).allowsDNSAttempts)
+        XCTAssertTrue(path(status: .requiresConnection, interfaces: []).allowsDNSAttempts)
+        XCTAssertFalse(path(status: .unsatisfied, interfaces: []).allowsDNSAttempts)
+    }
+
     // MARK: - Fingerprint
 
     func testIdenticalPathsHaveNoChangedFields() {

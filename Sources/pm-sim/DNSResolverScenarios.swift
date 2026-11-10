@@ -592,7 +592,7 @@ private final class BlockPageHandler: ChannelInboundHandler, @unchecked Sendable
 /// keeps the first read of each request so a case can ask whether a name was
 /// asked about. The wire-format POST gets the same JSON and fails its question
 /// check, so the JSON fetch carries the answer.
-private final class FakeAnsweringDoHProvider: @unchecked Sendable {
+final class FakeAnsweringDoHProvider: @unchecked Sendable {
     private let group: EventLoopGroup
     private let ip: String
     private let requests = NIOLockedValueBox<[String]>([])
@@ -668,7 +668,7 @@ private final class DNSJSONAnswerHandler: ChannelInboundHandler, @unchecked Send
 /// `ConsoleLogSink` for the operator running the sim, plus retention so the
 /// scenario can assert on what was logged. The log line *is* the behaviour
 /// under test in case B, so it has to be inspectable.
-private final class RecordingConsoleLogSink: LogSink, @unchecked Sendable {
+final class RecordingConsoleLogSink: LogSink, @unchecked Sendable {
     struct Entry {
         let level: LogLevel
         let message: String
@@ -703,7 +703,7 @@ private final class RecordingConsoleLogSink: LogSink, @unchecked Sendable {
 
 /// Plain BSD sockets on purpose: these assert bytes on the wire, so they must
 /// not share framing code with the implementation under test.
-private enum DNSProbe {
+enum DNSProbe {
 
     static func overUDP(query: [UInt8], port: Int, timeout: Int) async throws -> [UInt8]? {
         let fd = socket(AF_INET, SOCK_DGRAM, 0)

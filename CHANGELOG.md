@@ -7,8 +7,34 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
-The 0.6.2 notes below are prepared for packaging. 0.6.1 is the latest published
-release.
+The fixes below come after 0.6.2. The 0.6.2 notes further down are prepared for
+packaging; 0.6.1 is the latest published release.
+
+### Fixed
+
+- After a wake with no network, or while the VPN is down and no interface is
+  up, DNS lookups no longer stall on servers that cannot answer and then
+  refuse the first lookups once the network is back (#292). While the network
+  path is unsatisfied the forwarder answers SERVFAIL at once, except from an
+  intercept rule or a fresh cache entry, and emits `dns.unsatisfied_path_servfail`.
+  Every network change and confirmed VPN transition that resets the DNS
+  transports now also cancels the lookups in flight, so their slots are free
+  for the retries on the new path. Before, a burst of lookups started with no
+  network held the forwarder's 64 slots for up to 10 s each, and a CLI request
+  through the proxy right after Wi-Fi returned failed with a 502.
+- With no enabled split-DNS entry, a public name no longer waits 1.5 s on a
+  placeholder internal server before DoH (#296). It goes to DoH at once.
+- A split-DNS server that gives no reply three times in a row has its circuit
+  opened (#290): lookups skip it and go to the next server of the entry or to
+  public DoH at once, instead of each waiting out the 2 s timeout, while one
+  probe at a time asks the server; its reply closes the circuit, and so does
+  every network change or confirmed VPN transition. `dns.internal_server_circuit_opened`
+  and `_closed` report it. The servers of the entry a name matched are now
+  asked in order (the second server was never used before), and the entry
+  with the longest matching domain wins over one listed earlier. A public
+  stand-in answer for a split-DNS name now carries a 5 s TTL, so macOS and
+  browsers drop it soon after the VPN is up and the corporate answer takes
+  over.
 
 ## 0.6.2
 

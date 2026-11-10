@@ -282,6 +282,47 @@ final class DNSWireFormatTests: XCTestCase {
         XCTAssertEqual(DNSWireFormat.minimumTTL(in: response), 10)
     }
 
+    func testResponseByClampingTTLCutsOnlyLongerTTLs() throws {
+        let query = DNSWireFormat.buildQuery(domain: "host.corp.example", txID: 0x1234)
+        // Two records, each at the synthesizer's 60 s.
+        let json = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"192.0.2.1"},{"type":1,"TTL":60,"data":"192.0.2.2"}]}"#
+        let response = try XCTUnwrap(DNSWireFormat.synthesizeDNSResponse(originalQuery: query, jsonResponse: json))
+
+        let clamped = DNSWireFormat.responseByClampingTTL(response, to: 5)
+
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: clamped)?.ttl, 5)
+        XCTAssertEqual(DNSWireFormat.minimumTTL(in: clamped), 5, "every record is cut")
+        XCTAssertEqual(clamped.count, response.count)
+        XCTAssertTrue(DNSWireFormat.responseQuestionMatches(query: query, response: clamped))
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: clamped)?.ip, "192.0.2.1", "only the TTL bytes change")
+
+        // A 5 s record stays 5 s under a 60 s bound.
+        let short = try XCTUnwrap(DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: "192.0.2.3"))
+        XCTAssertEqual(DNSWireFormat.responseByClampingTTL(short, to: 60), short, "a TTL already under the bound is kept")
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: DNSWireFormat.responseByClampingTTL(short, to: 2))?.ttl, 2)
+
+        XCTAssertEqual(DNSWireFormat.responseByClampingTTL(Array(response.prefix(20)), to: 5), Array(response.prefix(20)), "a truncated response is returned as it is")
+    }
+
+    /// An OPT pseudo-record's TTL field is the extended RCODE, the EDNS
+    /// version and the DO flag (RFC 6891), not a lifetime: the clamp leaves
+    /// it alone and still cuts the records around it.
+    func testResponseByClampingTTLLeavesTheOPTRecordAlone() throws {
+        let query = DNSWireFormat.buildQuery(domain: "host.corp.example", txID: 0x1235)
+        let json = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"192.0.2.1"}]}"#
+        var response = try XCTUnwrap(DNSWireFormat.synthesizeDNSResponse(originalQuery: query, jsonResponse: json))
+        // Root name, TYPE 41, UDP payload size 4096, extended RCODE 0, version 0, DO set, no options.
+        let opt: [UInt8] = [0x00, 0x00, 0x29, 0x10, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00]
+        response[11] += 1 // ARCOUNT
+        response += opt
+
+        let clamped = DNSWireFormat.responseByClampingTTL(response, to: 5)
+
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: clamped)?.ttl, 5, "the A record is cut")
+        XCTAssertEqual(Array(clamped.suffix(opt.count)), opt, "the OPT record keeps its DO flag")
+        XCTAssertEqual(clamped.count, response.count)
+    }
+
     // MARK: - isInternalDomain
 
     func testInternalDomainMatchesConfiguredDNSEntry() {
@@ -1087,7 +1128,7 @@ final class DNSForwarderIntegrationTests: XCTestCase {
 
 /// Captures the datagrams a test client receives, so a test can assert on a
 /// reply *or* on the absence of one.
-private final class UDPReplyCollector: ChannelInboundHandler, @unchecked Sendable {
+final class UDPReplyCollector: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = AddressedEnvelope<ByteBuffer>
 
     private let lock = NSLock()
@@ -1126,7 +1167,7 @@ private final class NXDOMAINServer: ChannelInboundHandler, @unchecked Sendable {
 /// `application/dns-json` A record and counts the connections that asked.
 /// The wire-format POST gets the same JSON and fails its question check, so
 /// only the JSON fetch can produce an answer.
-private final class AnsweringDoHProvider: @unchecked Sendable {
+final class AnsweringDoHProvider: @unchecked Sendable {
     let channel: Channel
     private let requests: NIOLockedValueBox<Int>
 
@@ -1139,10 +1180,12 @@ private final class AnsweringDoHProvider: @unchecked Sendable {
         self.requests = requests
     }
 
-    static func start(group: EventLoopGroup, ip: String) async throws -> AnsweringDoHProvider {
+    /// `silent`: count each request and never answer it, so a lookup hangs
+    /// on this provider until something ends it.
+    static func start(group: EventLoopGroup, ip: String, silent: Bool = false) async throws -> AnsweringDoHProvider {
         let requests = NIOLockedValueBox(0)
         let channel = try await ServerBootstrap(group: group)
-            .childChannelInitializer { $0.pipeline.addHandler(Responder(ip: ip, requests: requests)) }
+            .childChannelInitializer { $0.pipeline.addHandler(Responder(ip: ip, requests: requests, silent: silent)) }
             .bind(host: "127.0.0.1", port: 0)
             .get()
         return AnsweringDoHProvider(channel: channel, requests: requests)
@@ -1154,17 +1197,20 @@ private final class AnsweringDoHProvider: @unchecked Sendable {
 
         private let ip: String
         private let requests: NIOLockedValueBox<Int>
+        private let silent: Bool
         private var responded = false
 
-        init(ip: String, requests: NIOLockedValueBox<Int>) {
+        init(ip: String, requests: NIOLockedValueBox<Int>, silent: Bool) {
             self.ip = ip
             self.requests = requests
+            self.silent = silent
         }
 
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             guard !responded else { return }
             responded = true
             requests.withLockedValue { $0 += 1 }
+            if silent { return }
             let body = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"\#(ip)"}]}"#
             let response = "HTTP/1.1 200 OK\r\nContent-Type: application/dns-json\r\n" +
                 "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
