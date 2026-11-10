@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 import XCTest
@@ -279,6 +280,47 @@ final class DNSWireFormatTests: XCTestCase {
         ]
 
         XCTAssertEqual(DNSWireFormat.minimumTTL(in: response), 10)
+    }
+
+    func testResponseByClampingTTLCutsOnlyLongerTTLs() throws {
+        let query = DNSWireFormat.buildQuery(domain: "host.corp.example", txID: 0x1234)
+        // Two records, each at the synthesizer's 60 s.
+        let json = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"192.0.2.1"},{"type":1,"TTL":60,"data":"192.0.2.2"}]}"#
+        let response = try XCTUnwrap(DNSWireFormat.synthesizeDNSResponse(originalQuery: query, jsonResponse: json))
+
+        let clamped = DNSWireFormat.responseByClampingTTL(response, to: 5)
+
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: clamped)?.ttl, 5)
+        XCTAssertEqual(DNSWireFormat.minimumTTL(in: clamped), 5, "every record is cut")
+        XCTAssertEqual(clamped.count, response.count)
+        XCTAssertTrue(DNSWireFormat.responseQuestionMatches(query: query, response: clamped))
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: clamped)?.ip, "192.0.2.1", "only the TTL bytes change")
+
+        // A 5 s record stays 5 s under a 60 s bound.
+        let short = try XCTUnwrap(DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: "192.0.2.3"))
+        XCTAssertEqual(DNSWireFormat.responseByClampingTTL(short, to: 60), short, "a TTL already under the bound is kept")
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: DNSWireFormat.responseByClampingTTL(short, to: 2))?.ttl, 2)
+
+        XCTAssertEqual(DNSWireFormat.responseByClampingTTL(Array(response.prefix(20)), to: 5), Array(response.prefix(20)), "a truncated response is returned as it is")
+    }
+
+    /// An OPT pseudo-record's TTL field is the extended RCODE, the EDNS
+    /// version and the DO flag (RFC 6891), not a lifetime: the clamp leaves
+    /// it alone and still cuts the records around it.
+    func testResponseByClampingTTLLeavesTheOPTRecordAlone() throws {
+        let query = DNSWireFormat.buildQuery(domain: "host.corp.example", txID: 0x1235)
+        let json = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"192.0.2.1"}]}"#
+        var response = try XCTUnwrap(DNSWireFormat.synthesizeDNSResponse(originalQuery: query, jsonResponse: json))
+        // Root name, TYPE 41, UDP payload size 4096, extended RCODE 0, version 0, DO set, no options.
+        let opt: [UInt8] = [0x00, 0x00, 0x29, 0x10, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00]
+        response[11] += 1 // ARCOUNT
+        response += opt
+
+        let clamped = DNSWireFormat.responseByClampingTTL(response, to: 5)
+
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: clamped)?.ttl, 5, "the A record is cut")
+        XCTAssertEqual(Array(clamped.suffix(opt.count)), opt, "the OPT record keeps its DO flag")
+        XCTAssertEqual(clamped.count, response.count)
     }
 
     // MARK: - isInternalDomain
@@ -876,11 +918,217 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         // died with an uncatchable CFNetwork NSException under this load.
         XCTAssertNil(forwarder.listeningPort, "Forwarder should be stopped")
     }
+
+    // MARK: - Split-DNS names when the internal server is out of reach
+
+    /// Off the VPN the corporate server cannot be reached, and that includes
+    /// the lookup for the VPN gateway's own hostname, which sits under the
+    /// split-DNS domain. Asking only that server left the gateway unresolvable
+    /// and the VPN unable to come up. Silence from the internal server now
+    /// falls through to public DNS.
+    @MainActor
+    func testConfiguredInternalNameFallsBackToDoHWhenInternalServerIsSilent() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let doh = try await AnsweringDoHProvider.start(group: group, ip: "203.0.113.7")
+        defer { doh.channel.close(promise: nil) }
+        let silentServer = try await Self.silentInternalServer(group: group)
+        defer { silentServer.close(promise: nil) }
+
+        let port = try await startForwarder(
+            internalDomain: "corp.internal.test", dohPort: doh.port,
+            tuning: try Self.quickInternalAttempt(against: silentServer)
+        )
+        let query = DNSWireFormat.buildQuery(domain: "vpn-gateway.corp.internal.test", txID: 0x6001)
+        let reply = try await Self.ask(query, port: port, group: group)
+        let response = try XCTUnwrap(reply, "The forwarder must answer")
+
+        XCTAssertEqual(DNSWireFormat.extractRCode(from: response), 0)
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: response)?.ip, "203.0.113.7")
+        XCTAssertEqual(ownedForwarder?.cachedResponseCount, 0, "A public stand-in answer for an internal name must not be cached")
+        XCTAssertEqual(ownedForwarder?.metricCounts?.dohFallbacks, 1)
+        XCTAssertEqual(
+            splitDNSFallbackEvents().map(\.detail),
+            ["domain=corp.internal.test name=vpn-gateway.corp.internal.test server=127.0.0.1 outcome=answered suppressed=0"]
+        )
+    }
+
+    /// Off the VPN every lookup under the domain falls back and none is
+    /// cached, so the event is held to one per domain and outcome per minute.
+    @MainActor
+    func testSplitDNSFallbackEventIsThrottledPerDomainAndOutcome() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let doh = try await AnsweringDoHProvider.start(group: group, ip: "203.0.113.7")
+        defer { doh.channel.close(promise: nil) }
+        let silentServer = try await Self.silentInternalServer(group: group)
+        defer { silentServer.close(promise: nil) }
+
+        let port = try await startForwarder(
+            internalDomain: "corp.internal.test", dohPort: doh.port,
+            tuning: try Self.quickInternalAttempt(against: silentServer)
+        )
+        for (index, host) in ["vpn-gateway", "mail", "intranet"].enumerated() {
+            let query = DNSWireFormat.buildQuery(domain: "\(host).corp.internal.test", txID: 0x6010 + UInt16(index))
+            let reply = try await Self.ask(query, port: port, group: group)
+            XCTAssertEqual(reply.map(DNSWireFormat.extractRCode), 0, "\(host) must get the DoH answer")
+        }
+
+        XCTAssertEqual(ownedForwarder?.metricCounts?.dohFallbacks, 3, "Every fallback still counts")
+        XCTAssertEqual(splitDNSFallbackEvents().count, 1, "Three fallbacks inside the minute report once")
+    }
+
+    /// Only A and AAAA have a DoH lookup. Any other type under a split-DNS
+    /// domain gets REFUSED off the VPN without asking a provider, and that is
+    /// not a DoH answer.
+    @MainActor
+    func testSplitDNSNameOfAnotherTypeIsRefusedWithoutAskingDoH() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let doh = try await AnsweringDoHProvider.start(group: group, ip: "203.0.113.7")
+        defer { doh.channel.close(promise: nil) }
+        let silentServer = try await Self.silentInternalServer(group: group)
+        defer { silentServer.close(promise: nil) }
+
+        let port = try await startForwarder(
+            internalDomain: "corp.internal.test", dohPort: doh.port,
+            tuning: try Self.quickInternalAttempt(against: silentServer)
+        )
+        let srv: UInt16 = 33
+        let query = DNSWireFormat.buildQuery(domain: "_ldap._tcp.corp.internal.test", txID: 0x6020, qtype: srv)
+        let reply = try await Self.ask(query, port: port, group: group)
+        let response = try XCTUnwrap(reply, "The forwarder must answer")
+
+        XCTAssertEqual(DNSWireFormat.extractRCode(from: response), 5, "REFUSED")
+        XCTAssertEqual(doh.requestCount(), 0)
+        XCTAssertEqual(ownedForwarder?.metricCounts?.dohFallbacks, 0, "A synthesized REFUSED is not a DoH fallback")
+        XCTAssertEqual(splitDNSFallbackEvents().compactMap(\.detail).map { $0.contains("outcome=refused_qtype") }, [true])
+    }
+
+    /// A reply from the internal server is its verdict, NXDOMAIN included: the
+    /// name stays off public DNS whenever the corporate server answers.
+    @MainActor
+    func testConfiguredInternalNameKeepsTheInternalServersNXDOMAIN() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let doh = try await AnsweringDoHProvider.start(group: group, ip: "203.0.113.7")
+        defer { doh.channel.close(promise: nil) }
+        let nxdomainServer = try await DatagramBootstrap(group: group)
+            .channelInitializer { $0.pipeline.addHandler(NXDOMAINServer()) }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        defer { nxdomainServer.close(promise: nil) }
+
+        let port = try await startForwarder(
+            internalDomain: "corp.internal.test", dohPort: doh.port,
+            tuning: try Self.quickInternalAttempt(against: nxdomainServer)
+        )
+        let query = DNSWireFormat.buildQuery(domain: "gone.corp.internal.test", txID: 0x6002)
+        let reply = try await Self.ask(query, port: port, group: group)
+        let response = try XCTUnwrap(reply, "The forwarder must answer")
+
+        XCTAssertEqual(DNSWireFormat.extractRCode(from: response), 3, "The internal NXDOMAIN must reach the client")
+        XCTAssertEqual(doh.requestCount(), 0, "DoH must not be asked about a name the internal server answered")
+        XCTAssertEqual(splitDNSFallbackEvents().count, 0, "An internal reply is not a fallback")
+    }
+
+    /// `.local` is multicast DNS and never public, so a silent server leaves
+    /// it at SERVFAIL rather than sending it to a public resolver.
+    @MainActor
+    func testLocalNameDoesNotFallBackToDoH() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let doh = try await AnsweringDoHProvider.start(group: group, ip: "203.0.113.7")
+        defer { doh.channel.close(promise: nil) }
+        let silentServer = try await Self.silentInternalServer(group: group)
+        defer { silentServer.close(promise: nil) }
+
+        let port = try await startForwarder(
+            internalDomain: "corp.internal.test", dohPort: doh.port,
+            tuning: try Self.quickInternalAttempt(against: silentServer)
+        )
+        let query = DNSWireFormat.buildQuery(domain: "printer.local", txID: 0x6003)
+        let reply = try await Self.ask(query, port: port, group: group)
+        let response = try XCTUnwrap(reply, "The forwarder must answer")
+
+        XCTAssertEqual(DNSWireFormat.extractRCode(from: response), 2)
+        XCTAssertEqual(doh.requestCount(), 0, "A .local name must never reach a public resolver")
+    }
+
+    /// An AD-style split-DNS domain under `.local` is still multicast DNS's
+    /// namespace: its names match the entry, and the silence fallback must
+    /// still leave them at SERVFAIL.
+    @MainActor
+    func testNameUnderLocalSplitDNSEntryDoesNotFallBackToDoH() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let doh = try await AnsweringDoHProvider.start(group: group, ip: "203.0.113.7")
+        defer { doh.channel.close(promise: nil) }
+        let silentServer = try await Self.silentInternalServer(group: group)
+        defer { silentServer.close(promise: nil) }
+
+        let port = try await startForwarder(
+            internalDomain: "corp.local", dohPort: doh.port,
+            tuning: try Self.quickInternalAttempt(against: silentServer)
+        )
+        let query = DNSWireFormat.buildQuery(domain: "fileserver.corp.local", txID: 0x6004)
+        let reply = try await Self.ask(query, port: port, group: group)
+        let response = try XCTUnwrap(reply, "The forwarder must answer")
+
+        XCTAssertEqual(DNSWireFormat.extractRCode(from: response), 2)
+        XCTAssertEqual(doh.requestCount(), 0, "A name under a .local split-DNS entry must never reach a public resolver")
+        XCTAssertEqual(splitDNSFallbackEvents().count, 0)
+    }
+
+    /// Starts the owned forwarder with one split-DNS domain on the loopback
+    /// internal server `tuning` names and one cleartext DoH provider on
+    /// `dohPort`, and returns its UDP port.
+    @MainActor
+    private func startForwarder(internalDomain: String, dohPort: Int, tuning: DNSForwarderTuning) async throws -> Int {
+        var config = ProxyConfig.testFixture()
+        config.upstreams = []
+        config.dnsEntries = [DomainDNSEntry(domain: internalDomain, servers: ["127.0.0.1"])]
+        config.dohProviders = ["http://127.0.0.1:\(dohPort)/dns-query"]
+        config.localHost = "127.0.0.1"
+        config.localPort = 9
+        let frozen = config
+        let events = forwarderEvents
+        let forwarder = LocalDNSForwarder(
+            group: MultiThreadedEventLoopGroup.singleton,
+            logger: RecordingLogSink(minLevel: .debug),
+            configProvider: { frozen },
+            tuning: tuning,
+            eventSink: { event in events.withLockedValue { $0.append(event) } }
+        )
+        ownedForwarder = forwarder
+        try await forwarder.start(host: "127.0.0.1", port: 0)
+        return try XCTUnwrap(forwarder.listeningPort)
+    }
+
+    /// The events the forwarder `startForwarder` started has emitted.
+    private let forwarderEvents = NIOLockedValueBox<[RuntimeEvent]>([])
+
+    private func splitDNSFallbackEvents() -> [RuntimeEvent] {
+        forwarderEvents.withLockedValue { $0 }.filter { $0.event == "dns.split_dns_doh_fallback" }
+    }
+
+    /// Sends one query to the forwarder on `port` and returns its first
+    /// reply, or nil if none arrives within ten seconds.
+    private static func ask(_ query: [UInt8], port: Int, group: EventLoopGroup) async throws -> [UInt8]? {
+        let collector = UDPReplyCollector()
+        let client = try await DatagramBootstrap(group: group)
+            .channelInitializer { $0.pipeline.addHandler(collector) }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        defer { client.close(promise: nil) }
+        var buf = client.allocator.buffer(capacity: query.count)
+        buf.writeBytes(query)
+        let target = try SocketAddress(ipAddress: "127.0.0.1", port: port)
+        try await client.writeAndFlush(AddressedEnvelope(remoteAddress: target, data: buf)).get()
+        for _ in 0..<1000 where collector.replies().isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return collector.replies().first
+    }
 }
 
 /// Captures the datagrams a test client receives, so a test can assert on a
 /// reply *or* on the absence of one.
-private final class UDPReplyCollector: ChannelInboundHandler, @unchecked Sendable {
+final class UDPReplyCollector: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = AddressedEnvelope<ByteBuffer>
 
     private let lock = NSLock()
@@ -895,5 +1143,81 @@ private final class UDPReplyCollector: ChannelInboundHandler, @unchecked Sendabl
         var buffer = unwrapInboundIn(data).data
         let bytes = buffer.readBytes(length: buffer.readableBytes) ?? []
         lock.withLock { if received.count < 16 { received.append(bytes) } }
+    }
+}
+
+/// Answers every UDP query with NXDOMAIN: an internal server that is reachable
+/// and does not know the name.
+private final class NXDOMAINServer: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = AddressedEnvelope<ByteBuffer>
+    typealias OutboundOut = AddressedEnvelope<ByteBuffer>
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let envelope = unwrapInboundIn(data)
+        var buffer = envelope.data
+        let query = buffer.readBytes(length: buffer.readableBytes) ?? []
+        guard let reply = DNSWireFormat.emptyDNSResponse(originalQuery: query, rcode: 3) else { return }
+        var out = context.channel.allocator.buffer(capacity: reply.count)
+        out.writeBytes(reply)
+        context.writeAndFlush(wrapOutboundOut(AddressedEnvelope(remoteAddress: envelope.remoteAddress, data: out)), promise: nil)
+    }
+}
+
+/// A cleartext loopback DoH provider that answers every request with one
+/// `application/dns-json` A record and counts the connections that asked.
+/// The wire-format POST gets the same JSON and fails its question check, so
+/// only the JSON fetch can produce an answer.
+final class AnsweringDoHProvider: @unchecked Sendable {
+    let channel: Channel
+    private let requests: NIOLockedValueBox<Int>
+
+    var port: Int { channel.localAddress?.port ?? 0 }
+
+    func requestCount() -> Int { requests.withLockedValue { $0 } }
+
+    private init(channel: Channel, requests: NIOLockedValueBox<Int>) {
+        self.channel = channel
+        self.requests = requests
+    }
+
+    /// `silent`: count each request and never answer it, so a lookup hangs
+    /// on this provider until something ends it.
+    static func start(group: EventLoopGroup, ip: String, silent: Bool = false) async throws -> AnsweringDoHProvider {
+        let requests = NIOLockedValueBox(0)
+        let channel = try await ServerBootstrap(group: group)
+            .childChannelInitializer { $0.pipeline.addHandler(Responder(ip: ip, requests: requests, silent: silent)) }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        return AnsweringDoHProvider(channel: channel, requests: requests)
+    }
+
+    private final class Responder: ChannelInboundHandler, @unchecked Sendable {
+        typealias InboundIn = ByteBuffer
+        typealias OutboundOut = ByteBuffer
+
+        private let ip: String
+        private let requests: NIOLockedValueBox<Int>
+        private let silent: Bool
+        private var responded = false
+
+        init(ip: String, requests: NIOLockedValueBox<Int>, silent: Bool) {
+            self.ip = ip
+            self.requests = requests
+            self.silent = silent
+        }
+
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+            guard !responded else { return }
+            responded = true
+            requests.withLockedValue { $0 += 1 }
+            if silent { return }
+            let body = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"\#(ip)"}]}"#
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/dns-json\r\n" +
+                "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+            let channel = context.channel
+            var buffer = channel.allocator.buffer(capacity: response.utf8.count)
+            buffer.writeString(response)
+            context.writeAndFlush(wrapOutboundOut(buffer)).whenComplete { _ in channel.close(promise: nil) }
+        }
     }
 }

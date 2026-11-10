@@ -136,6 +136,50 @@ package enum DNSWireFormat {
         return minimum
     }
 
+    /// TYPE of the EDNS OPT pseudo-record (RFC 6891).
+    private static let optRecordType: UInt16 = 41
+
+    /// `response` with every record's TTL cut to at most `maximum` seconds.
+    /// Records that cannot be walked (a truncated response) are left as they
+    /// are, together with everything after them.
+    package static func responseByClampingTTL(_ response: [UInt8], to maximum: UInt32) -> [UInt8] {
+        guard response.count >= 12 else { return response }
+        var clamped = response
+        var offset = 4
+        guard let questionCount = readUInt16(from: response, at: &offset),
+              let answerCount = readUInt16(from: response, at: &offset),
+              let authorityCount = readUInt16(from: response, at: &offset),
+              let additionalCount = readUInt16(from: response, at: &offset) else {
+            return response
+        }
+        offset = 12
+        for _ in 0..<questionCount {
+            guard skipName(in: response, offset: &offset), offset + 4 <= response.count else { return response }
+            offset += 4
+        }
+        for _ in 0..<(Int(answerCount) + Int(authorityCount) + Int(additionalCount)) {
+            guard skipName(in: response, offset: &offset), offset + 10 <= response.count else { return clamped }
+            guard let type = readUInt16(from: response, at: &offset) else { return clamped }
+            offset += 2 // CLASS
+            let ttlOffset = offset
+            guard let ttl = readUInt32(from: response, at: &offset),
+                  let rdLength = readUInt16(from: response, at: &offset) else {
+                return clamped
+            }
+            // An OPT pseudo-record (EDNS, RFC 6891) has no TTL: the field
+            // holds the extended RCODE, the version and the DO flag.
+            if type != optRecordType, ttl > maximum {
+                clamped[ttlOffset] = UInt8(maximum >> 24)
+                clamped[ttlOffset + 1] = UInt8((maximum >> 16) & 0xFF)
+                clamped[ttlOffset + 2] = UInt8((maximum >> 8) & 0xFF)
+                clamped[ttlOffset + 3] = UInt8(maximum & 0xFF)
+            }
+            guard offset + Int(rdLength) <= response.count else { return clamped }
+            offset += Int(rdLength)
+        }
+        return clamped
+    }
+
     /// First `A` record in the answer section, with its TTL.
     ///
     /// CNAMEs share the answer section with the addresses they resolve to and
@@ -177,20 +221,20 @@ package enum DNSWireFormat {
     }
 
     package static func isInternalDomain(_ domain: String, config: ProxyConfig) -> Bool {
+        enabledDNSEntryDomain(containing: domain, config: config) != nil || isMulticastDNSName(domain)
+    }
+
+    /// The domain of the enabled split-DNS entry that `domain` is at or under,
+    /// the longest when several match, lowercased, or nil when there is none.
+    package static func enabledDNSEntryDomain(containing domain: String, config: ProxyConfig) -> String? {
+        SplitDNSTable(entries: config.dnsEntries).rule(matching: domain)?.domain
+    }
+
+    /// Whether `domain` is a `.local` name, which belongs to multicast DNS and
+    /// never has a public answer.
+    package static func isMulticastDNSName(_ domain: String) -> Bool {
         let lower = domain.lowercased()
-        let internalPatterns = config.dnsEntries.filter(\.enabled).map { $0.domain.lowercased() }
-        for pattern in internalPatterns {
-            if lower == pattern || lower.hasSuffix(".\(pattern)") {
-                return true
-            }
-        }
-        let builtins = ["local"]
-        for suffix in builtins {
-            if lower == suffix || lower.hasSuffix(".\(suffix)") {
-                return true
-            }
-        }
-        return false
+        return lower == "local" || lower.hasSuffix(".local")
     }
 
     package static func synthesizeDNSResponse(originalQuery: [UInt8], jsonResponse: String, queryType: UInt16 = 1) -> [UInt8]? {

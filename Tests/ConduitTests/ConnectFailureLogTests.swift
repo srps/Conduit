@@ -168,7 +168,10 @@ final class ConnectFailureLogTests: XCTestCase {
         let lines = fixture.proxyLines()
         XCTAssertEqual(lines.count, 2)
         XCTAssertTrue(lines[1].message.contains("suppressed=2"), lines[1].message)
-        XCTAssertTrue(lines[1].message.hasSuffix("(suppressed=2 in the last 61s)"), lines[1].message)
+        XCTAssertTrue(lines[1].message.hasSuffix("(suppressed=2 in the last 61s, last 61s ago)"), lines[1].message)
+        let detail = fixture.emitted().last?.detail ?? ""
+        XCTAssertTrue(detail.hasSuffix("suppressed=2 windowSeconds=61 lastAt=1000000.000 lastSecondsAgo=61"), detail)
+        XCTAssertFalse(detail.contains("summary="), "the repeat that closes the window is a new failure: \(detail)")
     }
 
     /// The flush timer runs on uptime, which stops while the Mac sleeps. A
@@ -182,9 +185,76 @@ final class ConnectFailureLogTests: XCTestCase {
         fixture.runScheduled()
         let lines = fixture.proxyLines()
         XCTAssertEqual(lines.count, 2)
-        XCTAssertTrue(lines[1].message.hasSuffix("(suppressed=1 in the last 983s)"), lines[1].message)
-        XCTAssertTrue(fixture.emitted().last?.detail?.hasSuffix("suppressed=1 windowSeconds=983") ?? false,
+        XCTAssertTrue(lines[1].message.hasSuffix("(summary: suppressed=1 in the last 983s, last 983s ago)"), lines[1].message)
+        XCTAssertTrue(fixture.emitted().last?.detail?.contains("suppressed=1 windowSeconds=983 ") ?? false,
                       fixture.emitted().last?.detail ?? "")
+    }
+
+    /// #293: the VPN dropped, routing went direct 1.5 s later, and upstream
+    /// failure summaries kept arriving for a minute, each reading as a fresh
+    /// failure. A summary is marked as one and says when its last counted
+    /// failure happened, in wall-clock time and as an age.
+    func testASummaryCarriesTheLastFailureTimeAndAge() {
+        let fixture = Fixture()
+        reportNXDOMAIN(fixture)
+        fixture.advance(1)
+        reportNXDOMAIN(fixture)
+        fixture.advance(1.25)
+        reportNXDOMAIN(fixture)
+        fixture.advance(57.75)
+        fixture.runScheduled()
+
+        let summary = fixture.emitted().last?.detail ?? ""
+        XCTAssertEqual(Self.summaryFields(summary), [
+            "suppressed": "2", "windowSeconds": "60", "lastAt": "1000002.250", "lastSecondsAgo": "58", "summary": "true",
+        ], summary)
+        XCTAssertTrue(summary.contains(" suppressed=2 windowSeconds=60 "), "existing fields keep their shape: \(summary)")
+        XCTAssertEqual(fixture.proxyLines().last?.message,
+                       "Direct connect to pancake.apple.com:443 failed: \(nxdomain.displayDescription) (summary: suppressed=2 in the last 60s, last 58s ago)")
+    }
+
+    func testAFirstReportCarriesNoSummaryFields() {
+        let fixture = Fixture()
+        reportNXDOMAIN(fixture)
+        fixture.advance(61)
+        reportNXDOMAIN(fixture)
+        let details = fixture.emitted().map { $0.detail ?? "" }
+        XCTAssertEqual(details.count, 2)
+        for detail in details {
+            XCTAssertEqual(Self.summaryFields(detail), [:], detail)
+        }
+        XCTAssertEqual(fixture.proxyLines().map(\.message), Array(repeating: "Direct connect to pancake.apple.com:443 failed: \(nxdomain.displayDescription)", count: 2))
+    }
+
+    func testAnEvictionReportCarriesTheSameFieldsAsAFlush() {
+        let fixture = Fixture(capacity: 1)
+        reportNXDOMAIN(fixture, target: "a.example.test:443")
+        fixture.advance(2)
+        reportNXDOMAIN(fixture, target: "a.example.test:443")
+        fixture.advance(8)
+        reportNXDOMAIN(fixture, target: "b.example.test:443")
+        let evicted = fixture.emitted().first { $0.detail?.hasPrefix("target=a.example.test:443") == true && $0.detail?.contains("suppressed=") == true }?.detail ?? ""
+        XCTAssertEqual(Self.summaryFields(evicted), [
+            "suppressed": "1", "windowSeconds": "10", "lastAt": "1000002.000", "lastSecondsAgo": "8", "summary": "true",
+        ], evicted)
+
+        reportNXDOMAIN(fixture, target: "b.example.test:443")
+        fixture.advance(60)
+        fixture.runScheduled()
+        let flushed = fixture.emitted().last?.detail ?? ""
+        XCTAssertTrue(flushed.hasPrefix("target=b.example.test:443"), flushed)
+        XCTAssertEqual(Set(Self.summaryFields(flushed).keys), Set(Self.summaryFields(evicted).keys), flushed)
+    }
+
+    /// The tokens a summary adds to a connect-failure detail.
+    private static func summaryFields(_ detail: String) -> [String: String] {
+        let keys: Set = ["suppressed", "windowSeconds", "lastAt", "lastSecondsAgo", "summary"]
+        var fields: [String: String] = [:]
+        for token in detail.split(separator: " ") {
+            let parts = token.split(separator: "=", maxSplits: 1)
+            if parts.count == 2, keys.contains(String(parts[0])) { fields[String(parts[0])] = String(parts[1]) }
+        }
+        return fields
     }
 
     func testTheMapIsHardCappedAndAnEvictedCountIsNotLost() {
@@ -197,7 +267,7 @@ final class ConnectFailureLogTests: XCTestCase {
         XCTAssertLessThanOrEqual(fixture.log.count, 4)
         let summaries = fixture.proxyLines().filter { $0.message.contains("suppressed=1") }
         XCTAssertEqual(summaries.count, 6, "each evicted target reported the repeat it had held back")
-        XCTAssertTrue(summaries.allSatisfy { $0.message.hasSuffix("in the last 1s)") },
+        XCTAssertTrue(summaries.allSatisfy { $0.message.hasSuffix("in the last 1s, last 0s ago)") },
                       "an early eviction still reports a span: \(summaries.map(\.message))")
     }
 

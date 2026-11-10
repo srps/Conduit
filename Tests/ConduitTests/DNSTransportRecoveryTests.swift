@@ -57,6 +57,19 @@ final class DNSTransportRecoveryTests: XCTestCase {
         return orchestrator
     }
 
+    /// The forwarder refuses lookups while the path is unsatisfied (#292), so
+    /// every material path change tells it the status, whether or not it runs.
+    @RuntimeActor func testNetworkPathStatusReachesTheForwarder() async throws {
+        let orchestrator = makeOrchestrator()
+        XCTAssertTrue(orchestrator.dnsForwarder.networkPathSatisfied, "satisfied until a path says otherwise")
+
+        orchestrator.invalidateNetworkPath(Self.wifi(satisfied: false))
+        XCTAssertFalse(orchestrator.dnsForwarder.networkPathSatisfied)
+
+        await orchestrator.handleNetworkPath(Self.wifi())
+        XCTAssertTrue(orchestrator.dnsForwarder.networkPathSatisfied)
+    }
+
     @RuntimeActor func testNetworkChangeEmitsTransportResetWhenDNSRunning() async throws {
         let orchestrator = try await startOrchestratorWithDNS()
         defer { Task { @RuntimeActor in await orchestrator.stopDNS(); await orchestrator.stopProxy() } }
@@ -184,8 +197,9 @@ final class DNSTransportRecoveryTests: XCTestCase {
         XCTAssertTrue(transportResetEvents(in: orchestrator.eventLog, since: cutoff).isEmpty, "DNS was not running")
     }
 
-    /// #198 review: a query that started on the old path and is answered during the settle stores its answer after the leading edge
-    /// cleared the cache. The settle clears it again, so that answer does not outlive the settle (#200 fences the store itself).
+    /// #198 review, revised by #292: a query out on the old path when the leading edge arrives is cancelled, answers SERVFAIL and
+    /// stores nothing. A query that starts after the leading edge and is answered during the settle stores its answer after that
+    /// edge cleared the cache. The settle clears it again, so that answer does not outlive the settle (#200 fences the store itself).
     @RuntimeActor func testAnAnswerAQueryFromTheOldPathStoresDuringTheSettleDoesNotOutliveIt() async throws {
         let group = MultiThreadedEventLoopGroup.singleton
         let upstream = HeldDNSUpstream()
@@ -208,7 +222,10 @@ final class DNSTransportRecoveryTests: XCTestCase {
         )
         try await orchestrator.startProxy()
         await orchestrator.startDNS()
-        let client = try await DatagramBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
+        let replies = HeldDNSUpstream()
+        let client = try await DatagramBootstrap(group: group)
+            .channelInitializer { $0.pipeline.addHandler(replies) }
+            .bind(host: "127.0.0.1", port: 0).get()
         addTeardownBlock {
             try await client.close().get()
             try await server.close().get()
@@ -218,18 +235,27 @@ final class DNSTransportRecoveryTests: XCTestCase {
         XCTAssertEqual(orchestrator.snapshot.dnsRunState, .running, "DNS forwarder must bind for this test")
         let forwarderPort = try XCTUnwrap(orchestrator.dnsForwarder.listeningPort)
         await orchestrator.handleNetworkPath(Self.wifi(gateway: "192.168.1.1"))
+        func send(_ query: [UInt8]) async throws {
+            var buffer = client.allocator.buffer(capacity: query.count)
+            buffer.writeBytes(query)
+            try await client.writeAndFlush(AddressedEnvelope(
+                remoteAddress: try SocketAddress(ipAddress: "127.0.0.1", port: forwarderPort), data: buffer
+            )).get()
+        }
 
         // A query on the old path, held at the upstream.
-        let query = DNSWireFormat.buildQuery(domain: "held.example.com", txID: 0x1234)
-        var buffer = client.allocator.buffer(capacity: query.count)
-        buffer.writeBytes(query)
-        try await client.writeAndFlush(AddressedEnvelope(
-            remoteAddress: try SocketAddress(ipAddress: "127.0.0.1", port: forwarderPort), data: buffer
-        )).get()
-        let held = try await upstream.waitForQuery()
+        try await send(DNSWireFormat.buildQuery(domain: "old.example.com", txID: 0x1234))
+        _ = try await upstream.waitForQuery()
 
-        // The path changes while the query is out: its leading edge clears the cache. Then the old query is answered and stored.
+        // The path changes while the query is out: its leading edge cancels the query, which answers SERVFAIL and stores nothing.
         XCTAssertTrue(orchestrator.invalidateNetworkPath(Self.wifi(gateway: "10.0.0.1")))
+        let cancelled = try await replies.waitForQuery()
+        XCTAssertEqual(DNSWireFormat.extractRCode(from: cancelled.query), 2, "the old path's query is answered SERVFAIL")
+        XCTAssertEqual(orchestrator.dnsForwarder.cachedResponseCount, 0)
+
+        // A query during the settle is answered and stored.
+        try await send(DNSWireFormat.buildQuery(domain: "held.example.com", txID: 0x1235))
+        let held = try await upstream.waitForQuery()
         var answer = server.allocator.buffer(capacity: 64)
         answer.writeBytes(try XCTUnwrap(DNSWireFormat.synthesizeDirectResponse(originalQuery: held.query, ip: "192.0.2.80")))
         try await server.writeAndFlush(AddressedEnvelope(remoteAddress: held.from, data: answer)).get()
@@ -237,7 +263,7 @@ final class DNSTransportRecoveryTests: XCTestCase {
         while orchestrator.dnsForwarder.cachedResponseCount == 0, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
-        XCTAssertEqual(orchestrator.dnsForwarder.cachedResponseCount, 1, "the old path's answer was stored during the settle")
+        XCTAssertEqual(orchestrator.dnsForwarder.cachedResponseCount, 1, "the answer during the settle was stored")
 
         // The burst settles.
         let cutoff = Date()
@@ -405,11 +431,15 @@ private final class HeldDNSUpstream: ChannelInboundHandler, @unchecked Sendable 
         lock.withLock { if held == nil { held = Held(query: bytes, from: envelope.remoteAddress) } }
     }
 
-    /// Waits, bounded, for the first query.
+    /// Waits, bounded, for the next query, and takes it.
     func waitForQuery() async throws -> Held {
         let deadline = ContinuousClock.now + .seconds(5)
         while ContinuousClock.now < deadline {
-            if let held = lock.withLock({ held }) { return held }
+            let taken: Held? = lock.withLock {
+                defer { held = nil }
+                return held
+            }
+            if let taken { return taken }
             try await Task.sleep(for: .milliseconds(5))
         }
         throw NoQueryReached()
