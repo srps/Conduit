@@ -25,7 +25,7 @@ Split-DNS entries are a snapshot that the setup wizard and the Settings "Auto-de
 6. The table takes at most 16 detected domains and `DomainResourceLimits.dnsServers` servers per domain. `dns.split_resolver_ignored reason=over_limit` reports the excess.
 7. `dns.followVPNResolvers` in the DNS section turns the feature on and off, and decodes as on when absent. Off, the monitor does not start and the table holds manual entries only.
 8. The live set infers no parent domains. A DNS key with `SupplementalMatchDomains` contributes only those domains. A key without them whose IPv4 `OverridePrimary` is 1, a full tunnel, contributes its `DomainName` followed by its `SearchDomains`, each once, checked with `DomainNameSyntax`. A key with neither contributes no domains and is rejected with reason `no_match_domains`.
-9. Public names keep today's single path. An intercept rule and a cached answer come first. Then one attempt (`internalAttemptTimeout`, 1.5 s) on the table's `firstServers`, whether that server is manual or detected, and DoH unless the server answers with records (`DNSWireFormat.shouldFallbackToPublicDoH`). There is no DoH-only switch for now. The reading records `OverridePrimary` as `PushedResolver.overridesPrimary` for later use; only decision 8's full-tunnel domain rule branches on it.
+9. Public names keep today's single path. An intercept rule and a cached answer come first. Then one attempt (`internalAttemptTimeout`, 1.5 s) on the table's `firstServers`, whether that server is manual or detected, and DoH unless the server answers with records (`DNSWireFormat.shouldFallbackToPublicDoH`). There is no DoH-only switch for now. The reading records `OverridePrimary` as `PushedResolver.overridesPrimary` because decision 8's full-tunnel domain rule needs it; only that rule branches on it.
 
 ## Alternatives
 
@@ -43,6 +43,7 @@ Split-DNS entries are a snapshot that the setup wizard and the Settings "Auto-de
 - Manual entries never depend on the host pushing. With nothing detected, the table equals today's `SplitDNSTable(entries:)`, so an office LAN, detection switched off and pm-proxy resolve through the manual servers as today. `RuntimeHostSplitDNSTests` and `ProxyOrchestratorSplitDNSTests` cover the three cases.
 - On a full-tunnel VPN that pushes `corp.example` as its search domain, the detected set equals the manual entry users imported, so the hint offers to remove it.
 - Off the VPN, names under detected-only domains are public names: no wait on a detected server, cached, and visible to the DoH providers, as 0043 already allows for manual entries.
+- A `.local` name under no rule goes to `firstServers` with no DoH fallback. With only detected rules in use it now reaches the tunnel's server, where today, with no manual entries, it gets an immediate SERVFAIL.
 - A user with no manual entries gains one attempt on the tunnel's first server for public names, only while the detected set is in use. Off the VPN the set is withheld, so no attempt is made, as today (#296).
 - A manual entry removed through the hint no longer applies on networks that push nothing, such as an office LAN. The hint only offers the removal, and nothing removes configuration without the user's click.
 - Two new ceilings (16 detected domains, servers per domain) join the bounded collections, approved here. The design adds a 16-resolver cap so the Settings display's row count has a bound the codec can never refuse.
@@ -52,7 +53,7 @@ Split-DNS entries are a snapshot that the setup wizard and the Settings "Auto-de
 
 - Each decision has the tests and pm-sim scenarios the design lists under "Tests and pm-sim scenarios": `LiveSplitDNSPolicyTests`, `PushedResolverMonitorTests` with the full-tunnel, full-tunnel-with-extra-search-domain and split-tunnel fixtures, `SplitDNSTableTests`, `DNSForwarderTests`, `RuntimeHostSplitDNSTests`, `ProxyOrchestratorSplitDNSTests`, `AppStateSplitDNSHintTests`, and pm-sim `dns-split-follows-vpn` and `dns-split-flap-holds`.
 - Disproved by: a name under a manual entry that does not reach its manual servers while nothing is detected, a detected domain that writes an `/etc/resolver` file, a VPN transition that restarts the forwarder or writes `config.json`, a full-tunnel reading whose `SupplementalMatchDomains` are absent and that yields no domains, a split-tunnel reading that yields its `DomainName`, a public name with no intercept rule or cached answer that skips an in-use first server whose circuit is closed, or a public name that waits on a detected server while the set is withheld.
-- Owner validation: hotspot with the VPN off, VPN on with the hint shown on an imported entry, VPN off again within the grace window, and the office LAN, as the design lists.
+- Owner validation: hotspot with the VPN off, VPN on with the hint shown on an imported entry, VPN off again with the set held during the grace window and idle after it, and the office LAN, as the design lists.
 
 ## Implementation evidence
 
