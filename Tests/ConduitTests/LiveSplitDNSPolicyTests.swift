@@ -152,6 +152,41 @@ final class LiveSplitDNSPolicyTests: XCTestCase {
         XCTAssertEqual(policy.detectedInUse, [corporate])
     }
 
+    private let branch = PushedResolver(
+        serviceID: "branch", interface: "utun3", domains: ["branch.corp.example"], servers: ["198.51.100.7"]
+    )
+
+    func testTwoTunnelsOneWithdrawsItsKeyWhileItsInterfaceStaysLiveAndIsKept() {
+        var policy = policy()
+        _ = policy.update(gate: gate(.connected), liveInterfaces: ["utun3", "utun7"], reading: reading(corporate, branch))
+
+        _ = policy.update(gate: gate(.connected), liveInterfaces: ["utun3", "utun7"], reading: reading(branch))
+        XCTAssertEqual(policy.detectedInUse, [branch, corporate], "utun7 withdrew its key inside a flap")
+        XCTAssertEqual(policy.detectedRules.map(\.domain), ["branch.corp.example", "corp.example"])
+
+        _ = policy.update(gate: gate(.reasserting), liveInterfaces: [], reading: reading(branch))
+        XCTAssertEqual(policy.detectedInUse, [branch, corporate], "no interface filter under .reasserting")
+    }
+
+    func testTwoTunnelsOneWithdrawsItsKeyAndLeavesTheLiveSetAndIsDropped() {
+        var policy = policy()
+        _ = policy.update(gate: gate(.connected), liveInterfaces: ["utun3", "utun7"], reading: reading(corporate, branch))
+
+        XCTAssertTrue(policy.update(gate: gate(.connected), liveInterfaces: ["utun3"], reading: reading(branch)))
+        XCTAssertEqual(policy.detectedInUse, [branch])
+    }
+
+    func testARepublishedResolverReplacesItsHeldVersion() {
+        let moved = PushedResolver(
+            serviceID: "corp", interface: "utun7", domains: ["corp.example"], servers: ["203.0.113.53"]
+        )
+        var policy = policy()
+        _ = policy.update(gate: gate(.connected), liveInterfaces: ["utun3", "utun7"], reading: reading(corporate, branch))
+        _ = policy.update(gate: gate(.connected), liveInterfaces: ["utun3", "utun7"], reading: reading(moved))
+
+        XCTAssertEqual(policy.detectedInUse, [branch, moved], "branch held, corp's old servers replaced")
+    }
+
     // MARK: - Detected rules
 
     func testShuffledResolversBuildTheSameRulesInResolverOrder() {

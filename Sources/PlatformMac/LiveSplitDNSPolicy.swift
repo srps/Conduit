@@ -37,14 +37,16 @@ package struct LiveSplitDNSPolicy: Hashable, Sendable {
     /// that gets a verdict with no new reading passes this back in.
     package private(set) var lastReading = PushedResolverReading()
 
-    /// The last non-empty reading in use since the last `.disconnected`, the
-    /// only verdict that clears it whole. Tunnel clients withdraw and
-    /// republish their DNS key inside a flap, and a flap must change nothing a
-    /// client can see, whichever observer reports first. Under `.connected`
-    /// an empty reading drops the resolvers whose tunnel is no longer live,
-    /// so a second tunnel staying up does not keep the first one's servers
-    /// in use. `.reasserting` and `.unknown` do not filter: the grace window
-    /// bounds the first, and under the second no tunnel is admitted yet.
+    /// Each service's last resolvers in use since the last `.disconnected`,
+    /// the only verdict that clears it whole. A reading replaces the held
+    /// resolvers of every service it names and keeps the rest, because tunnel
+    /// clients withdraw and republish their DNS key inside a flap, and a flap
+    /// must change nothing a client can see, whichever observer reports first
+    /// and whatever another tunnel publishes meanwhile. Under `.connected` a
+    /// kept resolver whose tunnel is no longer live leaves, so a second tunnel
+    /// staying up does not keep the first one's servers in use. `.reasserting`
+    /// and `.unknown` do not filter: the grace window bounds the first, and
+    /// under the second no tunnel is admitted yet.
     private var heldThroughFlap: [PushedResolver] = []
 
     /// `[]` while the gate withholds (`.disconnected`); the held set otherwise,
@@ -81,13 +83,18 @@ package struct LiveSplitDNSPolicy: Hashable, Sendable {
         let before = (detectedRules, display)
         lastReading = reading
         let fresh = Self.resolverOrder(reading.resolvers)
+        let republished = Set(fresh.map(\.serviceID))
         switch gate.lastVPNState {
         case .disconnected:
             heldThroughFlap = []
-        case .connected where fresh.isEmpty:
-            heldThroughFlap.removeAll { !liveInterfaces.contains($0.interface) }
-        case .connected, .reasserting, .unknown:
-            if !fresh.isEmpty { heldThroughFlap = fresh }
+        case .connected:
+            let kept = heldThroughFlap.filter {
+                !republished.contains($0.serviceID) && liveInterfaces.contains($0.interface)
+            }
+            heldThroughFlap = Self.resolverOrder(fresh + kept)
+        case .reasserting, .unknown:
+            let kept = heldThroughFlap.filter { !republished.contains($0.serviceID) }
+            heldThroughFlap = Self.resolverOrder(fresh + kept)
         }
 
         let withheld = !gate.entriesWanted
