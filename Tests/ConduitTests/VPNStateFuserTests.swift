@@ -63,6 +63,35 @@ final class VPNStateFuserTests: XCTestCase {
         XCTAssertEqual(fuser.connectedInterfaceNames, [])
     }
 
+    func testLiveInterfaceNamesKeepFlappingTunnelsAndDropRemovedOnes() {
+        var fuser = VPNStateFuser()
+        _ = fuser.applyObservation(interfaceName: "utun7", observation: .connectedFixture())
+        _ = fuser.applyObservation(interfaceName: "utun3", observation: .connectedFixture())
+        XCTAssertEqual(fuser.liveInterfaceNames, ["utun3", "utun7"], "name order")
+
+        _ = fuser.applyObservation(
+            interfaceName: "utun7",
+            observation: UtunRawObservation(ipv4Present: false, hasIPv4Address: false, ipv6Present: true)
+        )
+        _ = fuser.markMinVisibleExpired(interfaceName: "utun7")
+        XCTAssertEqual(fuser.lastEmittedState, .connected, "utun3 still carries the verdict")
+        XCTAssertEqual(fuser.connectedInterfaceNames, ["utun3"])
+        XCTAssertEqual(fuser.liveInterfaceNames, ["utun3", "utun7"], "awaiting recovery is still live")
+    }
+
+    func testRemovingATunnelThatSortsLastChangesOnlyTheLiveSet() {
+        var fuser = VPNStateFuser()
+        _ = fuser.applyObservation(interfaceName: "utun3", observation: .connectedFixture())
+        _ = fuser.applyObservation(interfaceName: "utun7", observation: .connectedFixture())
+        XCTAssertEqual(fuser.liveInterfaceNames, ["utun3", "utun7"])
+
+        let decision = fuser.applyObservation(interfaceName: "utun7", observation: UtunRawObservation())
+
+        XCTAssertEqual(decision, .noChange)
+        XCTAssertEqual(fuser.connectedInterfaceNames.first, "utun3", "the first name never moves")
+        XCTAssertEqual(fuser.liveInterfaceNames, ["utun3"], "the monitor's live-set comparison catches this")
+    }
+
     // MARK: - Connected -> debouncing -> awaiting recovery (the flap path)
 
     func testIPv4DropAfterConnectedRequestsMinVisibleTimer() {

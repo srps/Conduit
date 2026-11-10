@@ -34,6 +34,10 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
     /// the name moves under an unchanged `.connected` (utun4 gone, utun5
     /// still up) the verdict is delivered again so the consumer re-reads it.
     private let connectedInterfaceBox = NIOLockedValueBox<String?>(nil)
+    /// `fuser.liveInterfaceNames`, copied out with the name above. A change
+    /// re-delivers an unchanged `.connected` too, so a consumer hears a
+    /// tunnel that went while the first name stayed (utun7 removed, utun3 up).
+    private let liveInterfacesBox = NIOLockedValueBox<[String]>([])
 
     /// Mutated only on `monitorQueue`. Not in the lifecycle box because the
     /// fuser holds non-Sendable state (timer book-keeping) that doesn't belong
@@ -86,6 +90,10 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
 
     package var connectedInterfaceName: String? {
         connectedInterfaceBox.withLockedValue { $0 }
+    }
+
+    package var liveInterfaceNames: [String] {
+        liveInterfacesBox.withLockedValue { $0 }
     }
 
     package func start() {
@@ -315,9 +323,9 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
         let interfaceChanged = refreshConnectedInterface()
         switch decision {
         case .noChange:
-            // The verdict did not move but the tunnel carrying it did.
-            // Deliver the same verdict again so the hosts pick up the new
-            // name; the orchestrator treats a repeated state as a name
+            // The verdict did not move but the tunnel carrying it, or the
+            // set of live tunnels, did. Deliver the same verdict again so the
+            // hosts pick up the new names; the orchestrator treats a repeated state as a name
             // update, not a transition, and emits no vpn.* event for it.
             if interfaceChanged, fuser.lastEmittedState.isConnected {
                 callback?(fuser.lastEmittedState)
@@ -390,15 +398,21 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
         }
     }
 
-    /// Called only on `monitorQueue`, before any callback, so the name a
-    /// consumer reads inside `onChange` belongs to the state being delivered.
-    /// Returns whether the name moved.
+    /// Called only on `monitorQueue`, before any callback, so the names a
+    /// consumer reads inside `onChange` belong to the state being delivered.
+    /// Returns whether the first name or the live set moved.
     private func refreshConnectedInterface() -> Bool {
         let name = fuser.connectedInterfaceNames.first
-        return connectedInterfaceBox.withLockedValue { box in
+        let live = fuser.liveInterfaceNames
+        let nameMoved = connectedInterfaceBox.withLockedValue { box in
             defer { box = name }
             return box != name
         }
+        let liveMoved = liveInterfacesBox.withLockedValue { box in
+            defer { box = live }
+            return box != live
+        }
+        return nameMoved || liveMoved
     }
 
     /// Extract the utun interface name (e.g. "utun0") from a dynamic store key.
