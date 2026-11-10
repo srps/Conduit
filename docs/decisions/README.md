@@ -67,3 +67,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0041](0041-dns-recovery-from-helper-relay-witness.md) | Decide DNS launch recovery from the helper's relay witness | accepted | implemented | passed |
 | [0042](0042-fall-back-to-the-probe-and-a-notice.md) | Fall back to the liveness probe and a notice when no evidence decides launch recovery | accepted | implemented | none |
 | [0043](0043-split-dns-names-fall-back-to-doh-on-silence.md) | Split-DNS names fall back to public DoH when the internal server is silent | accepted | implemented | pending |
+| [0044](0044-split-dns-follows-vpn-pushed-resolvers.md) | Split DNS follows the resolvers a connected VPN pushes | accepted | planned | pending |
