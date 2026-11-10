@@ -234,6 +234,63 @@ enum DNSHealthScenarios {
         )
     }
 
+    /// `pm-sim dns-internal-stage-budget` (#290 part 1). Six silent servers
+    /// under one entry at the production timeouts: the 5 s budget fits two
+    /// 2 s attempts, so the DoH answer reaches the client inside the helper
+    /// relay's pending window (`UDPRelay.staleTimeoutSeconds`) instead of
+    /// 12 s later, and the servers the budget left unasked saw nothing.
+    @RuntimeActor
+    static func internalStageBudget(verbose: Bool) async throws -> ScenarioResult {
+        let name = "dnsInternalStageBudget"
+        let start = Date()
+        var notes: [String] = []
+        let group = MultiThreadedEventLoopGroup.singleton
+        let logger = RecordingConsoleLogSink(minLevel: verbose ? .debug : .warning)
+
+        let addresses = (1...6).map { "192.0.2.\($0)" }
+        var servers: [ScriptedInternalServer] = []
+        for _ in addresses {
+            servers.append(try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: internalIP))
+        }
+        let provider = FakeAnsweringDoHProvider(group: group, ip: publicIP)
+        ScenarioCleanup.register { await provider.stop() }
+        try await provider.start()
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let defaults = DNSForwarderTuning()
+        let forwarder = try await startForwarder(
+            group: group, logger: logger, provider: provider, events: events,
+            entries: [DomainDNSEntry(domain: "corp.example", servers: addresses)],
+            endpoints: Dictionary(uniqueKeysWithValues: zip(addresses, servers.map(\.port))),
+            internalDomainTimeout: defaults.internalDomainTimeout, internalAttemptTimeout: defaults.internalAttemptTimeout
+        )
+        let port = forwarder.listeningPort ?? 0
+
+        let asked = Date()
+        let reply = try await DNSProbe.overUDP(query: DNSWireFormat.buildQuery(domain: "portal.corp.example", txID: 0x5E00), port: port, timeout: 12)
+        let seconds = Date().timeIntervalSince(asked)
+        let ip = reply.flatMap(DNSWireFormat.firstIPv4Answer)?.ip
+        let counts = servers.map(\.queryCount)
+        let fallbacks = events.withLockedValue { $0 }.filter { $0.event == "dns.split_dns_doh_fallback" }.map { $0.detail ?? "" }
+        let relayWindow = UDPRelay.staleTimeoutSeconds
+        notes.append("A ip=\(ip ?? "none") in \(String(format: "%.2f", seconds))s, relay window \(Int(relayWindow))s")
+        let passA = ip == publicIP && seconds < relayWindow
+        notes.append("B servers saw \(counts)")
+        let passB = counts == [1, 1, 0, 0, 0, 0]
+        notes.append("C events: \(fallbacks)")
+        let passC = fallbacks == ["domain=corp.example name=portal.corp.example server=192.0.2.1,192.0.2.2 outcome=answered suppressed=0"]
+
+        let checks = [passA, passB, passC]
+        notes.append(checks.allSatisfy { $0 } ? "PASS — two attempts fit the budget, the rest are not asked, the fallback answers inside the relay window" : "FAIL — see per-case lines above")
+        return result(
+            name: name, start: start, notes: notes, clients: 1, answered: reply == nil ? 0 : 1,
+            assertions: [
+                .init("the fallback answer arrives inside UDPRelay's pending window with six silent servers", passA),
+                .init("two 2 s attempts fit the 5 s budget; the other four servers are not asked", passB),
+                .init("the fallback event lists the two servers asked", passC),
+            ]
+        )
+    }
+
     // MARK: - Fixtures
 
     @RuntimeActor
@@ -258,6 +315,8 @@ enum DNSHealthScenarios {
         tuning.internalServerEndpoint = { server in ("127.0.0.1", endpoints[server] ?? defaultInternalPort) }
         tuning.internalDomainTimeout = internalDomainTimeout
         tuning.internalAttemptTimeout = internalAttemptTimeout
+        // The production budget, widened when one attempt would not fit it.
+        tuning.internalStageBudget = max(tuning.internalStageBudget, internalDomainTimeout, internalAttemptTimeout)
         let forwarder = LocalDNSForwarder(
             group: group, logger: logger, configProvider: { frozen }, tuning: tuning,
             eventSink: { event in events.withLockedValue { $0.append(event) } }

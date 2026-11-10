@@ -35,6 +35,13 @@ package struct DNSForwarderTuning: Sendable {
     /// How long the internal attempt for any other name may take before the
     /// DoH stage begins.
     package var internalAttemptTimeout: TimeAmount = .milliseconds(1500)
+    /// The most one lookup spends on its internal servers in all, however
+    /// many its entry names: half the helper relay's pending window
+    /// (`UDPRelay.staleTimeoutSeconds`), so the DoH race that follows
+    /// silence keeps the other half, more than its request timeout. A server
+    /// is asked only while a whole attempt fits what is left, and one left
+    /// unasked records no silence. Each attempt keeps its own timeout.
+    package var internalStageBudget: TimeAmount = .milliseconds(Int64(UDPRelay.staleTimeoutSeconds * 1000) / 2)
     /// How long a DNS-over-TCP connection with nothing outstanding may stay
     /// silent (see `DNSTCPHandler`).
     package var tcpIdleTimeout: TimeAmount = .seconds(10)
@@ -791,9 +798,11 @@ private final class DNSResolutionCore: @unchecked Sendable {
     ///
     /// The ladder, after an intercept rule and the cache: an unsatisfied
     /// network path answers SERVFAIL at once (#292); a split-DNS name asks its
-    /// entry's servers in order, skipping open circuits, and falls back to
-    /// DoH on silence (decision 0043); any other name asks the first internal
-    /// server whose circuit is closed, if there is one (#296), then DoH. A
+    /// entry's servers in order, skipping open circuits and stopping when
+    /// the next attempt would not fit `tuning.internalStageBudget`, and
+    /// falls back to DoH on silence (decision 0043); any other name asks the
+    /// first internal server whose circuit is closed, if there is one
+    /// (#296), then DoH. A
     /// cancelled lookup (`resetUpstreamTransports`) answers SERVFAIL as soon
     /// as its attempt returns and starts no further one.
     ///
@@ -943,14 +952,18 @@ private final class DNSResolutionCore: @unchecked Sendable {
     }
 
     /// Asks `servers` in order until one replies, or `askingAtMost` have
-    /// been asked. A server whose circuit is open is skipped, and the first
-    /// lookup to skip it sends the query as a detached probe; its reply
-    /// closes the circuit. Each silence counts towards the server's circuit,
-    /// each reply resets it. Stops at a cancellation.
+    /// been asked, or the next attempt would not fit what is left of
+    /// `tuning.internalStageBudget`. A server whose circuit is open is
+    /// skipped, and the first lookup to skip it sends the query as a
+    /// detached probe; its reply closes the circuit. Each silence counts
+    /// towards the server's circuit, each reply resets it; a server the
+    /// budget left unasked records nothing. Stops at a cancellation.
     private func askInternalServers(
         _ servers: [String], query: [UInt8], timeout: TimeAmount, askingAtMost: Int = .max
     ) async -> InternalAttempt {
         var attempt = InternalAttempt()
+        var remaining = tuning.internalStageBudget
+        var unasked: [String] = []
         for server in servers where !Task.isCancelled && attempt.asked.count < askingAtMost {
             if serverHealth.isOpen(server) {
                 if let generation = serverHealth.beginProbe(server) {
@@ -958,14 +971,29 @@ private final class DNSResolutionCore: @unchecked Sendable {
                 }
                 continue
             }
+            guard timeout <= remaining else {
+                unasked.append(server)
+                continue
+            }
             attempt.asked.append(server)
+            let began = NIODeadline.now()
             let response = await forwardUDP(query: query, server: server, timeout: timeout)
+            remaining = remaining - (NIODeadline.now() - began)
             guard !Task.isCancelled else { return attempt }
             report(serverHealth.record(replied: response != nil, from: server), server: server)
             if let response {
                 attempt.response = response
                 return attempt
             }
+        }
+        if !unasked.isEmpty {
+            logger.log(
+                .debug,
+                "DNS: the \(tuning.internalStageBudget.nanoseconds / 1_000_000) ms internal budget for " +
+                    "\(DNSWireFormat.extractDomainName(from: query)) left no room for \(unasked.joined(separator: ",")); " +
+                    "not asked, no silence counted.",
+                category: .network
+            )
         }
         return attempt
     }

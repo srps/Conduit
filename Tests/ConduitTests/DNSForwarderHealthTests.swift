@@ -367,15 +367,111 @@ final class DNSForwarderHealthTests: XCTestCase {
         XCTAssertEqual(publicAnswer.flatMap(DNSWireFormat.firstIPv4Answer)?.ttl, 60, "a public answer keeps its TTL")
     }
 
+    // MARK: - #290: the internal stage budget
+
+    /// Six silent servers under one entry, at the production timeouts. The
+    /// attempts stop once the next would not fit the 5 s budget, so the
+    /// fallback answer reaches the client inside the helper relay's pending
+    /// window instead of 12 s later, when the relay would have dropped it.
+    /// Measured, as a budget has to be; the margin is the window's other
+    /// half.
+    @MainActor
+    func testSixSilentServersStillAnswerInsideTheRelayWindow() async throws {
+        let defaults = DNSForwarderTuning()
+        let servers = try await sixSilentServers()
+        let doh = try await provider(ip: "198.51.100.7")
+        let port = try await startForwarder(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: sixAddresses)],
+            endpoints: endpoints(of: servers), dohPort: doh.port,
+            internalTimeout: defaults.internalDomainTimeout, internalStageBudget: defaults.internalStageBudget
+        )
+        let clock = ContinuousClock()
+        let started = clock.now
+        let reply = try await ask(DNSWireFormat.buildQuery(domain: "portal.corp.example", txID: 0x7B00), port: port)
+        let elapsed = clock.now - started
+
+        XCTAssertEqual(reply.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "198.51.100.7", "the fallback answers")
+        XCTAssertLessThan(elapsed, .seconds(UDPRelay.staleTimeoutSeconds), "inside the relay window")
+        XCTAssertEqual(servers.map(\.queryCount), [1, 1, 0, 0, 0, 0], "two 2 s attempts fit the 5 s budget; a third would not")
+        XCTAssertEqual(
+            events(named: "dns.split_dns_doh_fallback").map(\.detail),
+            ["domain=corp.example name=portal.corp.example server=192.0.2.1,192.0.2.2 outcome=answered suppressed=0"]
+        )
+    }
+
+    /// A server the budget left unasked recorded no silence. With a budget
+    /// that fits two 300 ms attempts, three lookups open the circuits of
+    /// the first two servers and no other; the fourth lookup skips those
+    /// two and asks the next two. The second attempt fits as long as the
+    /// first ends within 450 ms, a 150 ms allowance for a late timer.
+    @MainActor
+    func testServersTheBudgetLeftUnaskedRecordNoSilence() async throws {
+        let servers = try await sixSilentServers()
+        let doh = try await provider(ip: "198.51.100.7")
+        let port = try await startForwarder(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: sixAddresses)],
+            endpoints: endpoints(of: servers), dohPort: doh.port,
+            internalTimeout: .milliseconds(300), internalStageBudget: .milliseconds(750)
+        )
+        for index in 0..<3 {
+            let reply = try await ask(DNSWireFormat.buildQuery(domain: "wait-\(index).corp.example", txID: 0x7C00 + UInt16(index)), port: port)
+            XCTAssertEqual(reply.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "198.51.100.7", "silence falls back")
+        }
+        XCTAssertEqual(servers.map(\.queryCount), [3, 3, 0, 0, 0, 0], "each lookup asked the first two servers and no other")
+        XCTAssertEqual(
+            events(named: "dns.internal_server_circuit_opened").map(\.detail),
+            ["server=192.0.2.1 silences=3 suppressed=0", "server=192.0.2.2 silences=3 suppressed=0"],
+            "only the servers asked three times have open circuits"
+        )
+
+        let reply = try await ask(DNSWireFormat.buildQuery(domain: "next.corp.example", txID: 0x7C10), port: port)
+        XCTAssertEqual(reply.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "198.51.100.7")
+        try await settle(until: { servers[0].queryCount == 4 && servers[1].queryCount == 4 }, "each open circuit is probed once")
+        XCTAssertEqual(servers.map(\.queryCount), [4, 4, 1, 1, 0, 0], "the fourth lookup asks the next two servers; the last two wait their turn")
+        XCTAssertEqual(events(named: "dns.internal_server_circuit_opened").count, 2)
+    }
+
+    /// The production budget is a promise about the relay window: two
+    /// attempts fit it, and what it leaves the DoH race exceeds the race's
+    /// request timeout.
+    func testInternalStageBudgetLeavesTheDoHRaceRoomInTheRelayWindow() {
+        let tuning = DNSForwarderTuning()
+        let budget = Double(tuning.internalStageBudget.nanoseconds) / 1e9
+        let attempt = Double(tuning.internalDomainTimeout.nanoseconds) / 1e9
+        XCTAssertGreaterThanOrEqual(budget, 2 * attempt, "a silent first server still leaves room for a second")
+        XCTAssertLessThan(budget + DoHSessionFactory.requestTimeout, UDPRelay.staleTimeoutSeconds)
+    }
+
     // MARK: - Fixtures
+
+    /// The configured addresses of `sixSilentServers()`, in the order an
+    /// entry names them.
+    private let sixAddresses = (1...6).map { "192.0.2.\($0)" }
+
+    /// One silent internal server per address in `sixAddresses`, each on
+    /// its own loopback port.
+    @MainActor
+    private func sixSilentServers() async throws -> [ScriptedInternalServer] {
+        var servers: [ScriptedInternalServer] = []
+        for _ in sixAddresses {
+            servers.append(try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80"))
+        }
+        return servers
+    }
+
+    private func endpoints(of servers: [ScriptedInternalServer]) -> [String: Int] {
+        Dictionary(uniqueKeysWithValues: zip(sixAddresses, servers.map(\.port)))
+    }
 
     /// Starts the owned forwarder: `entries` as the split-DNS table, each
     /// configured server address reached on its loopback port in
     /// `endpoints`, one cleartext DoH provider on `dohPort`, and both internal
     /// timeouts set to `internalTimeout` unless `internalDomainTimeout` sets
-    /// the split-DNS one apart. `beforeInternalConnect` runs on the lookup's
-    /// task right before each internal datagram connect. Returns the UDP
-    /// port.
+    /// the split-DNS one apart. The internal stage budget is the production
+    /// default, widened when one attempt would not fit it, unless
+    /// `internalStageBudget` sets it. `beforeInternalConnect` runs on the
+    /// lookup's task right before each internal datagram connect. Returns
+    /// the UDP port.
     @MainActor
     private func startForwarder(
         entries: [DomainDNSEntry],
@@ -383,6 +479,7 @@ final class DNSForwarderHealthTests: XCTestCase {
         dohPort: Int,
         internalTimeout: TimeAmount,
         internalDomainTimeout: TimeAmount? = nil,
+        internalStageBudget: TimeAmount? = nil,
         interceptRules: [DNSInterceptRule] = [],
         defaultInternalPort: Int = 53,
         group: EventLoopGroup? = nil,
@@ -404,6 +501,8 @@ final class DNSForwarderHealthTests: XCTestCase {
         }
         tuning.internalDomainTimeout = internalDomainTimeout ?? internalTimeout
         tuning.internalAttemptTimeout = internalTimeout
+        tuning.internalStageBudget = internalStageBudget
+            ?? max(tuning.internalStageBudget, tuning.internalDomainTimeout, tuning.internalAttemptTimeout)
         let events = events
         let forwarder = LocalDNSForwarder(
             group: group ?? self.group,
