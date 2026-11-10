@@ -51,8 +51,11 @@ for server in rule.servers { /* as today: in order, open circuits skipped, insid
 The host, per input:
 
 ```swift
-if liveSplitDNS.update(gate: splitDNSGate, pushed: pushedResolvers) {   // pure
-    let table = liveSplitDNS.table(manual: config.dnsEntries, limits: .standard)
+let ignoredBefore = liveSplitDNS.ignored
+let changed = liveSplitDNS.update(gate: splitDNSGate, reading: pushedReading)    // pure
+for rejection in liveSplitDNS.ignored.subtracting(ignoredBefore) { emit(.splitResolverIgnored(rejection)) }
+if changed {
+    let table = liveSplitDNS.table(manual: config.dnsEntries)
     orchestrator.applySplitDNSTable(table, display: liveSplitDNS.display)   // swap the box, drop affected cache, event, snapshot
 }
 ```
@@ -119,7 +122,7 @@ Detected resolvers have one order, the resolver order, so the same store content
 
 The per-domain server cap applies to the detected servers, before the merge. `DomainResourceLimits.dnsServers` (8) caps the detected list of each domain, and a detected server past the cap is reported as `over_limit`. Manual servers for the same domain are then appended after the detected ones, never displaced and never counted against that cap. Manual entries are already bounded by the same limit at the configuration boundary.
 
-Rule order decides `firstServers`, the one internal attempt a public name makes. `LiveSplitDNSPolicy.table(manual:limits:)` lists the manual rules in configuration order, as `init(entries:)` does today, then the detected-only domains in resolver order. A user with manual entries keeps today's first server, or the detected server ahead of it when the first manual domain is also pushed. A user with no manual entries gets the tunnel's first server while it is in use and no internal attempt while it is not.
+Rule order decides `firstServers`, the one internal attempt a public name makes. `LiveSplitDNSPolicy.table(manual:)` lists the manual rules in configuration order, as `init(entries:)` does today, then the detected-only domains in resolver order. A user with manual entries keeps today's first server, or the detected server ahead of it when the first manual domain is also pushed. A user with no manual entries gets the tunnel's first server while it is in use and no internal attempt while it is not.
 
 ### Platform values (`PlatformMac`)
 
@@ -138,10 +141,30 @@ package struct PushedResolver: Hashable, Sendable {
     package let overridesPrimary: Bool
 }
 
+/// Why the parser left a value out of a reading. The monitor has no event sink; the host reports these.
+package struct PushedResolverRejection: Hashable, Sendable {
+    package enum Reason: String, Hashable, Sendable {
+        case invalidDomain = "invalid_domain", invalidServer = "invalid_server", systemDomain = "system_domain"
+        case notTunnel = "not_tunnel", overLimit = "over_limit"     // `over_limit` comes from the policy's caps
+    }
+    package let serviceID: String
+    package let interface: String?       // nil when the key named none
+    package let value: String?           // the dropped domain or server; nil when the whole key was rejected
+    package let reason: Reason
+}
+
+/// One whole reading of the store: the resolvers it admitted and what it rejected.
+package struct PushedResolverReading: Hashable, Sendable {
+    package enum Failure: String, Hashable, Sendable { case storeCreate = "store_create", storeRead = "store_read" }
+    package var resolvers: [PushedResolver] = []
+    package var rejections: [PushedResolverRejection] = []
+    package var failure: Failure? = nil  // set when the store could not be created or read; resolvers are then empty
+}
+
 /// Producer of the current pushed-resolver set. Mirrors `VPNStatusObserving` and `NetworkPathObserving`.
 package protocol PushedResolverObserving: AnyObject, Sendable {
-    /// Called with the whole current set on every change, on any queue. An empty array is a valid reading.
-    func setOnChange(_ onChange: @Sendable @escaping ([PushedResolver]) -> Void)
+    /// Called with the whole current reading on every change, on any queue. A reading with no resolvers is valid.
+    func setOnChange(_ onChange: @Sendable @escaping (PushedResolverReading) -> Void)
     func start()                         // reads the store once and reports it, then observes
     func stop()
 }
@@ -155,20 +178,25 @@ The callback carries the whole set, never a delta. The consumer converges to the
 /// Which pushed resolvers are in use right now, as a pure function of the gate's verdict and the last store
 /// reading. The one place that decides it, for the forwarder's table, the events and the Settings display.
 package struct LiveSplitDNSPolicy: Sendable {
+    package init(limits: SplitDNSLimits)
     package private(set) var lastReading: [PushedResolver] = []
     /// The last non-empty reading the policy put in use since the last `.disconnected`.
     /// Only `.disconnected` clears it.
     private var heldThroughFlap: [PushedResolver] = []
 
     /// Records inputs. Returns true when `detectedInUse` changed.
-    package mutating func update(gate: SplitDNSVPNGate, pushed: [PushedResolver]) -> Bool { notImplemented() }
+    package mutating func update(gate: SplitDNSVPNGate, reading: PushedResolverReading) -> Bool { notImplemented() }
+
+    /// The last reading's rejections plus what the caps dropped from `detectedInUse` (`.overLimit`). The host emits
+    /// `dns.split_resolver_ignored` for each member that was not in the set before the update, and nothing otherwise.
+    package private(set) var ignored: Set<PushedResolverRejection> = []
 
     /// `[]` when the gate withholds (`.disconnected`). `heldThroughFlap` otherwise, so an empty reading under
     /// `.connected`, `.reasserting` or `.unknown` keeps the set in use.
     package private(set) var detectedInUse: [PushedResolver] = []
 
     /// Manual entries plus `detectedInUse` in resolver order, bounded, merged per domain.
-    package func table(manual: [DomainDNSEntry], limits: SplitDNSLimits) -> SplitDNSTable { notImplemented() }
+    package func table(manual: [DomainDNSEntry]) -> SplitDNSTable { notImplemented() }
 
     /// `detectedInUse` with its state, or the last reading as `.idle` when the gate withholds.
     package var display: DetectedSplitDNSDisplay { get }
@@ -215,7 +243,7 @@ Notification patterns:
 
 On each notification the monitor lists `State:/Network/Service/*/DNS`, and for each key reads the DNS dictionary and the sibling `State:/Network/Service/<id>/IPv4` dictionary for `InterfaceName`. A service whose interface is not `utun*` is skipped. Admission mirrors `VPNStatusMonitor.handleStoreChanges`: a utun that never had IPv4 is an Apple service tunnel and does not count.
 
-What is read from the DNS dictionary (owner decision 8). When `SupplementalMatchDomains` is present and non-empty, those are the domains, and `DomainName` and `SearchDomains` are ignored: a split tunnel names exactly what it claims. When it is absent, the profile is a full tunnel, and the domains are `DomainName` followed by `SearchDomains`, lowercased, trailing dots stripped, each domain once. `ServerAddresses` gives the servers. `OverridePrimary` from the IPv4 dictionary is recorded on the reading as `overridesPrimary`. Domains that fail `DNSManager.validateDomain`, servers that fail `DNSManager.validateServer`, `local` and the `arpa` reverse zones are dropped with one `dns.split_resolver_ignored` event each, never silently. The reading is reported whole through `onChange`, on the monitor's queue; the host hops.
+What is read from the DNS dictionary (owner decision 8). When `SupplementalMatchDomains` is present and non-empty, those are the domains, and `DomainName` and `SearchDomains` are ignored: a split tunnel names exactly what it claims. When it is absent, the profile is a full tunnel, and the domains are `DomainName` followed by `SearchDomains`, lowercased, trailing dots stripped, each domain once. `ServerAddresses` gives the servers. `OverridePrimary` from the IPv4 dictionary is recorded on the reading as `overridesPrimary`. Domains that fail `DNSManager.validateDomain`, servers that fail `DNSManager.validateServer`, `local` and the `arpa` reverse zones are left out of the resolver and returned in the reading as typed `PushedResolverRejection` values, never dropped silently. The monitor has no event sink. It reports the reading whole, resolvers and rejections, through `onChange` on its queue. The host hops to the owner, hands it to `LiveSplitDNSPolicy`, and emits `dns.split_resolver_ignored` only for rejections that entered the policy's `ignored` set, so a push that stays odd is reported once, not on every notification.
 
 The parent-domain inference `DetectedDNSConfig.toDNSEntries()` performs today (an entry for `corp.example` when the tunnel pushed `eu.corp.example`) is not carried into the live set (owner decision 8). The tunnel's own scoping, or its own search domains on a full tunnel, is what macOS itself uses for those names.
 
@@ -242,11 +270,11 @@ The three triggers the issue names collapse into one subscription. A VPN connect
 
 ### Fake: `FakePushedResolverObserver` (`PlatformFakes.swift`)
 
-`emit(_ resolvers: [PushedResolver])`, delivered only between `start()` and `stop()`, plus `primedReading` delivered on start, mirroring `FakeVPNStatusObserver`. `RuntimeHostEffects` gains `pushedResolvers: any PushedResolverObserving`; `AppComposition`, `DevLaunch.makeAppState`, `AppStateHarness.launch()`, `ConduitDaemon` and the pm-sim host harness supply it.
+`emit(_ reading: PushedResolverReading)`, delivered only between `start()` and `stop()`, plus `primedReading` delivered on start, mirroring `FakeVPNStatusObserver`. `RuntimeHostEffects` gains `pushedResolvers: any PushedResolverObserving`; `AppComposition`, `DevLaunch.makeAppState`, `AppStateHarness.launch()`, `ConduitDaemon` and the pm-sim host harness supply it.
 
 ### Lifecycle
 
-The monitor runs while the forwarder is enabled (`dns.forwarderEnabled`) and the new `dns.followVPNResolvers` switch is on (owner decision 7), independent of `manageDNSResolvers`, because its consumer is the forwarder, not the entry files. It starts and stops with the VPN observer. A monitor that cannot create its store emits `dns.split_detection_failed` once and the host runs on manual entries alone.
+The monitor runs while the forwarder is enabled (`dns.forwarderEnabled`) and the new `dns.followVPNResolvers` switch is on (owner decision 7), independent of `manageDNSResolvers`, because its consumer is the forwarder, not the entry files. It starts and stops with the VPN observer. A monitor that cannot create or read its store reports a reading with `failure` set. The host emits `dns.split_detection_failed` when `failure` changes to a value, once per start, and runs on manual entries alone.
 
 ## Flap handling
 
@@ -317,8 +345,8 @@ Kind `health`, listed beside `dns.transports_reset` in [`events.md`](events.md).
 | --- | --- |
 | `dns.split_table_changed` | The forwarder's table was swapped: `detected_domains=N manual_domains=N rules=N cache_dropped=N reason=pushed\|vpn_connected\|vpn_disconnected\|flap_held\|config\|detection_off`. Emitted by the orchestrator before the log line, once per swap, including the swap to empty. |
 | `dns.split_detected` | The in-use detected set changed: `interface=utunN domains=<comma list> servers=N outcome=applied\|held\|cleared`. Emitted by the host from `LiveSplitDNSPolicy` in the turn that decided it. `held` means an empty reading left the held set in use. |
-| `dns.split_resolver_ignored` | A pushed resolver was dropped before it reached the table: `interface= reason=invalid_domain\|invalid_server\|system_domain\|over_limit\|not_tunnel`. One per dropped resolver per reading, so a persistently odd push is visible but bounded by the cap. |
-| `dns.split_detection_failed` | The monitor could not create or read its store: `reason=store_create\|store_read`. Once per start; the host runs on manual entries alone. Warning log line. |
+| `dns.split_resolver_ignored` | A rejection entered `LiveSplitDNSPolicy.ignored`: `service= interface= reason=invalid_domain\|invalid_server\|system_domain\|over_limit\|not_tunnel`. Emitted by the host, once per rejection when it enters the set. A reading that repeats the same rejections emits nothing, so a persistently odd push is reported once. |
+| `dns.split_detection_failed` | A reading arrived with `failure` set: `reason=store_create\|store_read`. Emitted by the host, once per start; the host runs on manual entries alone. Warning log line. |
 
 `scripts/check-event-catalogue.py` fails the build until all four are catalogued.
 
@@ -326,12 +354,12 @@ Kind `health`, listed beside `dns.transports_reset` in [`events.md`](events.md).
 
 Unit, against values and fakes only:
 
-- `LiveSplitDNSPolicyTests`. The gate state and reading matrix: connected × non-empty applies, connected × empty keeps the held set, reasserting × empty keeps the held set, reasserting × non-empty replaces, disconnected × anything clears the held set, unknown applies the reading like connected. A non-empty reading that arrives before `.connected` and one that arrives after it end in the same `detectedInUse`. An empty reading on either side of `.disconnected` ends in `[]`. `table(manual:limits:)`: shared domain merges detected first, manual rules before detected-only ones, caps enforced with ignored resolvers reported. The same resolvers delivered in shuffled order build the same table: detected-only rules sorted by `searchOrder`, a missing `searchOrder` last, ties by `serviceID`. Two detected resolvers naming one domain give one rule with the first resolver's servers, then the second's, each once. The 17th distinct domain in resolver order is dropped as `over_limit`. A domain with nine detected servers and two manual ones keeps eight detected servers, then both manual ones. A full-tunnel reading (`domains: [corp.example, eu.corp.example]`, `overridesPrimary: true`) yields a rule for each domain and none for public names, so a public name still takes the DoH path. A split-tunnel reading yields rules for its supplemental domains only.
-- `PushedResolverMonitorTests`. The parser over the three fixture readings above, with their expected `domains` and `overridesPrimary`. `SupplementalMatchDomains` present wins over `DomainName` and `SearchDomains`; absent, the two are joined in that order and de-duplicated case-insensitively; an invalid domain among them is dropped with `dns.split_resolver_ignored reason=invalid_domain` and the rest kept. Also the `InterfaceName` filter, a non-UUID service ID, system domains dropped and an invalid server dropped.
+- `LiveSplitDNSPolicyTests`. The gate state and reading matrix: connected × non-empty applies, connected × empty keeps the held set, reasserting × empty keeps the held set, reasserting × non-empty replaces, disconnected × anything clears the held set, unknown applies the reading like connected. A non-empty reading that arrives before `.connected` and one that arrives after it end in the same `detectedInUse`. An empty reading on either side of `.disconnected` ends in `[]`. `table(manual:)`: shared domain merges detected first, manual rules before detected-only ones, caps enforced with ignored resolvers reported. The same resolvers delivered in shuffled order build the same table: detected-only rules sorted by `searchOrder`, a missing `searchOrder` last, ties by `serviceID`. Two detected resolvers naming one domain give one rule with the first resolver's servers, then the second's, each once. The 17th distinct domain in resolver order is dropped as `over_limit`. A domain with nine detected servers and two manual ones keeps eight detected servers, then both manual ones. A full-tunnel reading (`domains: [corp.example, eu.corp.example]`, `overridesPrimary: true`) yields a rule for each domain and none for public names, so a public name still takes the DoH path. A split-tunnel reading yields rules for its supplemental domains only.
+- `PushedResolverMonitorTests`. The parser over the three fixture readings above, with their expected `domains` and `overridesPrimary`. `SupplementalMatchDomains` present wins over `DomainName` and `SearchDomains`; absent, the two are joined in that order and de-duplicated case-insensitively; an invalid domain among them is returned as a rejection with reason `.invalidDomain` and the rest kept. Also the `InterfaceName` filter, a non-UUID service ID, system domains dropped and an invalid server dropped.
 - `AppStateSplitDNSHintTests` (AppState harness). A manual entry duplicating an in-use detected domain shows the hint; an idle detected set shows none; "Remove manual copy" removes the entry from the draft and the editor's normal save persists it; no configuration write comes from the runtime.
 - `SplitDNSTableTests` (from PR #298) gains the origins: a shared domain lists detected servers first with their origins, a server both name counts as detected, and `domainsDiffering(from:)` returns the domains that entered or left. PR #298 already covers longest suffix, per-rule servers, open circuits and the empty table in `SplitDNSTableTests` and `DNSForwarderHealthTests`.
 - `DNSForwarderTests`. The forwarder reads the provider, not config: a table pushed with no change to `dnsEntries` routes the next query. A table swap drops exactly the differing domains from the response cache.
-- `RuntimeHostSplitDNSTests` (actual host over `FakeMachine`, `FakeVPNStatusObserver`, `FakePushedResolverObserver`). A primed reading plus `.connected` produces one `applySplitDNSTable` and one `dns.split_detected outcome=applied`; `.disconnected` produces the empty table; the snapshot field follows; `manageDNSResolvers` on writes files for manual entries only.
+- `RuntimeHostSplitDNSTests` (actual host over `FakeMachine`, `FakeVPNStatusObserver`, `FakePushedResolverObserver`). A primed reading plus `.connected` produces one `applySplitDNSTable` and one `dns.split_detected outcome=applied`; `.disconnected` produces the empty table; the snapshot field follows; `manageDNSResolvers` on writes files for manual entries only. Two readings with the same rejection emit one `dns.split_resolver_ignored`, and a third reading with a new rejection emits one more.
 - `SplitDNSVPNGateTests` and `DNSManagerVPNGatingTests` unchanged, which is the point.
 
 pm-sim, registered in `pm-sim all`:
