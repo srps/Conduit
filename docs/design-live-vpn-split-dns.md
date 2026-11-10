@@ -179,10 +179,10 @@ package struct PushedResolverRejection: Hashable, Sendable {
 
 /// One whole reading of the store: the resolvers it admitted and what it rejected.
 package struct PushedResolverReading: Hashable, Sendable {
-    package enum Failure: String, Hashable, Sendable { case storeCreate = "store_create", storeRead = "store_read" }
+    package enum Failure: String, Hashable, Sendable { case storeCreate = "store_create", storeSubscribe = "store_subscribe", storeRead = "store_read" }
     package var resolvers: [PushedResolver] = []
     package var rejections: [PushedResolverRejection] = []
-    package var failure: Failure? = nil  // set when the store could not be created or read; resolvers are then empty
+    package var failure: Failure? = nil  // set when the store could not be created, subscribed to or read; resolvers are then empty
 }
 
 /// Producer of the current pushed-resolver set. Mirrors `VPNStatusObserving` and `NetworkPathObserving`.
@@ -320,7 +320,7 @@ The set only helps if the monitor delivers when it changes. On main, `VPNStatusM
 
 ### Lifecycle
 
-The monitor runs while the forwarder is enabled (`dns.forwarderEnabled`) and the new `dns.followVPNResolvers` switch is on (owner decision 7), independent of `manageDNSResolvers`, because its consumer is the forwarder, not the entry files. The host starts it when both settings are on and stops it when either is off, at module start, at module stop, and on a config apply that flips either setting. A flip to off pushes an empty detected set with `reason=detection_off`. A monitor that cannot create or read its store reports a reading with `failure` set. The host emits `dns.split_detection_failed` when `failure` changes to a value, once per start, and runs on manual entries alone.
+The monitor runs while the forwarder is enabled (`dns.forwarderEnabled`) and the new `dns.followVPNResolvers` switch is on (owner decision 7), independent of `manageDNSResolvers`, because its consumer is the forwarder, not the entry files. The host starts it when both settings are on and stops it when either is off, at module start, at module stop, and on a config apply that flips either setting. A flip to off pushes an empty detected set with `reason=detection_off`. A monitor that cannot create, subscribe to or read its store reports a reading with `failure` set. A failed subscription (`SCDynamicStoreSetNotificationKeys` or `SCDynamicStoreSetDispatchQueue` returning false) detaches the store and records nothing, so the next stop and start retries. The host emits `dns.split_detection_failed` when `failure` changes to a value, once per start, and runs on manual entries alone.
 
 ## Flap handling
 
@@ -408,7 +408,7 @@ Kind `health`, listed beside `dns.transports_reset` in [`events.md`](events.md).
 | `dns.split_table_changed` | The forwarder's table was swapped: `detected_domains=N manual_domains=N rules=N reason=pushed\|vpn_connected\|vpn_disconnected\|flap_held\|config\|detection_off`. Emitted by the orchestrator before the log line, once per swap, including the swap to empty. `reason=config` comes from the setter of `ProxyOrchestrator.config`, which every config write passes through; the other reasons are the `DetectedSplitDNSChangeReason` the host passed to `applyDetectedSplitDNSRules`. |
 | `dns.split_detected` | The in-use detected set changed: `interface=utunN domains=<comma list> servers=N outcome=applied\|held\|cleared`. Emitted by the host from `LiveSplitDNSPolicy` in the turn that decided it. `held` means an empty reading left the held set in use. |
 | `dns.split_resolver_ignored` | A rejection entered `LiveSplitDNSPolicy.ignored`: `service= interface= reason=invalid_domain\|invalid_server\|system_domain\|over_limit\|not_tunnel\|no_match_domains`. Emitted by the host, once per rejection when it enters the set. A reading that repeats the same rejections emits nothing, so a persistently odd push is reported once. |
-| `dns.split_detection_failed` | A reading arrived with `failure` set: `reason=store_create\|store_read`. Emitted by the host, once per start; the host runs on manual entries alone. Warning log line. |
+| `dns.split_detection_failed` | A reading arrived with `failure` set: `reason=store_create\|store_subscribe\|store_read`. Emitted by the host, once per start; the host runs on manual entries alone. Warning log line. |
 
 `scripts/check-event-catalogue.py` fails the build until all four are catalogued.
 

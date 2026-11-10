@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import SystemConfiguration
 import XCTest
 @testable import PlatformMac
 
@@ -234,6 +235,50 @@ final class PushedResolverMonitorTests: XCTestCase {
         XCTAssertEqual(received.all, [primed, failed])
         XCTAssertFalse(fake.isObserving)
     }
+
+    func testAFailedNotificationKeySubscriptionReportsStoreSubscribeAndARestartInstalls() {
+        let failsOnce = FailsOnce()
+        let monitor = PushedResolverMonitor(setNotificationKeys: { store, keys in
+            failsOnce.attempt() && SCDynamicStoreSetNotificationKeys(store, nil, keys)
+        })
+        assertFailedSubscriptionThenCleanRestart(monitor)
+    }
+
+    func testAFailedDispatchQueueSubscriptionReportsStoreSubscribeAndARestartInstalls() {
+        let failsOnce = FailsOnce()
+        let monitor = PushedResolverMonitor(setDispatchQueue: { store, queue in
+            (queue == nil || failsOnce.attempt()) && SCDynamicStoreSetDispatchQueue(store, queue)
+        })
+        assertFailedSubscriptionThenCleanRestart(monitor)
+    }
+
+    private func assertFailedSubscriptionThenCleanRestart(
+        _ monitor: PushedResolverMonitor, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        defer { monitor.stop() }
+        let failed = readings(afterStarting: monitor)
+        XCTAssertEqual(failed, [PushedResolverReading(failure: .storeSubscribe)],
+                       "one reading, typed as a subscribe failure", file: file, line: line)
+
+        monitor.stop()
+        let restarted = readings(afterStarting: monitor)
+        XCTAssertEqual(restarted.first?.failure, nil, "a later stop and start installs cleanly", file: file, line: line)
+    }
+
+    /// Starts the monitor and returns what it has delivered once the first
+    /// reading arrives.
+    private func readings(afterStarting monitor: PushedResolverMonitor) -> [PushedResolverReading] {
+        let received = LockedReadings()
+        let arrived = expectation(description: "a reading")
+        arrived.assertForOverFulfill = false
+        monitor.setOnChange { reading in
+            received.append(reading)
+            arrived.fulfill()
+        }
+        monitor.start()
+        wait(for: [arrived], timeout: 5)
+        return received.all
+    }
 }
 
 private final class LockedReadings: @unchecked Sendable {
@@ -241,4 +286,16 @@ private final class LockedReadings: @unchecked Sendable {
     private var readings: [PushedResolverReading] = []
     var all: [PushedResolverReading] { lock.withLock { readings } }
     func append(_ reading: PushedResolverReading) { lock.withLock { readings.append(reading) } }
+}
+
+/// A subscription call that fails on its first attempt and succeeds after.
+private final class FailsOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var attempts = 0
+    func attempt() -> Bool {
+        lock.withLock {
+            attempts += 1
+            return attempts > 1
+        }
+    }
 }

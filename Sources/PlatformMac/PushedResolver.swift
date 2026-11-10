@@ -79,12 +79,13 @@ package struct PushedResolverRejection: Hashable, Sendable {
 package struct PushedResolverReading: Hashable, Sendable {
     package enum Failure: String, Hashable, Sendable {
         case storeCreate = "store_create"
+        case storeSubscribe = "store_subscribe"
         case storeRead = "store_read"
     }
 
     package var resolvers: [PushedResolver]
     package var rejections: [PushedResolverRejection]
-    /// Set when the store could not be created or read; `resolvers` is then empty.
+    /// Set when the store could not be created, subscribed to or read; `resolvers` is then empty.
     package var failure: Failure?
 
     package init(resolvers: [PushedResolver] = [], rejections: [PushedResolverRejection] = [], failure: Failure? = nil) {

@@ -12,7 +12,7 @@ package protocol PushedResolverObserving: AnyObject, Sendable {
     /// Called with the whole current reading on every change, never a delta,
     /// on any queue; the consumer hops to its own isolation. A reading with
     /// no resolvers is valid; one with a `failure` says the store could not
-    /// be created or read.
+    /// be created, subscribed to or read.
     func setOnChange(_ onChange: @Sendable @escaping (PushedResolverReading) -> Void)
 
     /// Reads the store once and reports it, then observes. Idempotent.
@@ -36,6 +36,8 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
     private let onChangeBox = NIOLockedValueBox<(@Sendable (PushedResolverReading) -> Void)?>(nil)
     private let lifecycleBox = NIOLockedValueBox<LifecycleState>(.init())
     private var lastDelivered: PushedResolverReading?
+    private let setNotificationKeys: @Sendable (SCDynamicStore, CFArray) -> Bool
+    private let setDispatchQueue: @Sendable (SCDynamicStore, DispatchQueue?) -> Bool
 
     private struct LifecycleState {
         var store: SCDynamicStore?
@@ -52,7 +54,19 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
         "State:/Network/Global/DNS",
     ]
 
-    package init() {}
+    /// The two subscription calls default to `SCDynamicStoreSetNotificationKeys`
+    /// and `SCDynamicStoreSetDispatchQueue`; a test injects failing ones.
+    package init(
+        setNotificationKeys: @Sendable @escaping (SCDynamicStore, CFArray) -> Bool = {
+            SCDynamicStoreSetNotificationKeys($0, nil, $1)
+        },
+        setDispatchQueue: @Sendable @escaping (SCDynamicStore, DispatchQueue?) -> Bool = {
+            SCDynamicStoreSetDispatchQueue($0, $1)
+        }
+    ) {
+        self.setNotificationKeys = setNotificationKeys
+        self.setDispatchQueue = setDispatchQueue
+    }
 
     package func setOnChange(_ onChange: @Sendable @escaping (PushedResolverReading) -> Void) {
         onChangeBox.withLockedValue { $0 = onChange }
@@ -74,7 +88,7 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
         }
         monitorQueue.async { [weak self] in self?.lastDelivered = nil }
         guard let store = teardown.0 else { return }
-        SCDynamicStoreSetDispatchQueue(store, nil)
+        _ = setDispatchQueue(store, nil)
         if let opaque = teardown.1 {
             Unmanaged<PushedResolverMonitor>.fromOpaque(opaque).release()
         }
@@ -120,8 +134,14 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
             deliver(PushedResolverReading(failure: .storeCreate))
             return
         }
-        SCDynamicStoreSetNotificationKeys(store, nil, Self.notificationPatterns as CFArray)
-        SCDynamicStoreSetDispatchQueue(store, monitorQueue)
+        guard setNotificationKeys(store, Self.notificationPatterns as CFArray),
+              setDispatchQueue(store, monitorQueue) else {
+            // Nothing is recorded, so a stop and start retries from scratch.
+            _ = setDispatchQueue(store, nil)
+            retained.release()
+            deliver(PushedResolverReading(failure: .storeSubscribe))
+            return
+        }
 
         let installed = lifecycleBox.withLockedValue { state -> Bool in
             guard state.started, state.store == nil else { return false }
@@ -130,7 +150,7 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
             return true
         }
         guard installed else {
-            SCDynamicStoreSetDispatchQueue(store, nil)
+            _ = setDispatchQueue(store, nil)
             retained.release()
             return
         }
