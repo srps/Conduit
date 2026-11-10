@@ -1,6 +1,6 @@
 # Design: split DNS follows the resolvers the VPN pushes
 
-Proposal for [#290](https://github.com/srps/Conduit/issues/290) part 2. Date 2026-11-09. Status: proposal. Part 1 of the issue shipped in PR #298 (ab2ffe32): the kernel's `SplitDNSTable`, per-entry servers and per-server circuits. This design builds on that table.
+Proposal for [#290](https://github.com/srps/Conduit/issues/290) part 2. Date 2026-11-09. Status: accepted. The owner decided its nine questions on 2026-11-10 ([#295 comment](https://github.com/srps/Conduit/pull/295#issuecomment-6774052129)), recorded in [decision 0044](decisions/0044-split-dns-follows-vpn-pushed-resolvers.md). Part 1 of the issue shipped in PR #298 (ab2ffe32): the kernel's `SplitDNSTable`, per-entry servers and per-server circuits. This design builds on that table.
 
 ## Problem
 
@@ -35,7 +35,7 @@ Read before designing. Each item is the thing the design has to fit.
 ## Non-goals
 
 - The per-server health circuit and the internal stage budget. Part 1 shipped them (PR #298) and this design does not change them.
-- A per-entry "never resolve publicly" switch (issue open question). Listed under owner decisions, recommended as later work.
+- A per-entry "never resolve publicly" switch (issue open question). Deferred by owner decision 3.
 - Replacing the forwarder's public-name path, DoH providers or the intercept rules.
 
 ## Data shape
@@ -102,8 +102,13 @@ Rule order decides `firstServers`, the one internal attempt a public name makes.
 /// A resolver a tunnel pushed, as the dynamic store holds it. One per (interface, domain set).
 package struct PushedResolver: Hashable, Sendable {
     package let interface: String        // "utun4"
-    package let domains: [String]        // the domains the store scopes it to; see "What is read"
+    /// `SupplementalMatchDomains` when the DNS key has any. Otherwise `DomainName` then `SearchDomains`,
+    /// the full-tunnel case. Lowercased, no trailing dot, each once, valid under `DNSManager.validateDomain` (`DomainNameSyntax`).
+    package let domains: [String]
     package let servers: [String]
+    /// The sibling IPv4 key's `OverridePrimary` is 1: the tunnel is the machine's default resolver.
+    /// Recorded only; no decision reads it yet (owner decision 9).
+    package let overridesPrimary: Bool
 }
 
 /// Producer of the current pushed-resolver set. Mirrors `VPNStatusObserving` and `NetworkPathObserving`.
@@ -138,7 +143,7 @@ package struct LiveSplitDNSPolicy: Sendable {
 }
 
 package struct SplitDNSLimits: Sendable {
-    package var maxDetectedDomains: Int      // owner decision; proposed 16
+    package var maxDetectedDomains: Int      // 16, owner decision 6
     package var maxServersPerDomain: Int     // `DomainResourceLimits.dnsServers`, the manual ceiling, reused
 }
 ```
@@ -178,24 +183,24 @@ Notification patterns:
 
 On each notification the monitor lists `State:/Network/Service/*/DNS`, and for each key reads the DNS dictionary and the sibling `State:/Network/Service/<id>/IPv4` dictionary for `InterfaceName`. A service whose interface is not `utun*` is skipped. Admission mirrors `VPNStatusMonitor.handleStoreChanges`: a utun that never had IPv4 is an Apple service tunnel and does not count.
 
-What is read from the DNS dictionary, in this order of preference, the first non-empty list winning: `SupplementalMatchDomains`, `SearchDomains`, `DomainName`. `ServerAddresses` gives the servers. Domains that fail `DNSManager.validateDomain`, servers that fail `DNSManager.validateServer`, `local` and the `arpa` reverse zones are dropped with one `dns.split_resolver_ignored` event each, never silently. The reading is reported whole through `onChange`, on the monitor's queue; the host hops.
+What is read from the DNS dictionary (owner decision 8). When `SupplementalMatchDomains` is present and non-empty, those are the domains, and `DomainName` and `SearchDomains` are ignored: a split tunnel names exactly what it claims. When it is absent, the profile is a full tunnel, and the domains are `DomainName` followed by `SearchDomains`, lowercased, trailing dots stripped, each domain once. `ServerAddresses` gives the servers. `OverridePrimary` from the IPv4 dictionary is recorded on the reading as `overridesPrimary`. Domains that fail `DNSManager.validateDomain`, servers that fail `DNSManager.validateServer`, `local` and the `arpa` reverse zones are dropped with one `dns.split_resolver_ignored` event each, never silently. The reading is reported whole through `onChange`, on the monitor's queue; the host hops.
 
-The parent-domain inference `DetectedDNSConfig.toDNSEntries()` performs today (an entry for `corp.example` when the tunnel pushed `eu.corp.example`) is not carried into the live set. The tunnel's own scoping is what macOS itself uses for those names.
+The parent-domain inference `DetectedDNSConfig.toDNSEntries()` performs today (an entry for `corp.example` when the tunnel pushed `eu.corp.example`) is not carried into the live set (owner decision 8). The tunnel's own scoping, or its own search domains on a full tunnel, is what macOS itself uses for those names.
 
 **Observed on the owner's machine (2026-11-09, Cisco Secure Client connected, full tunnel).** The values below are masked: `corp.example` for the pushed domain and RFC 5737 addresses for the servers. The parser fixture uses this shape.
 
 - The service ID is not a UUID. Cisco publishes `State:/Network/Service/com.cisco.anyconnect/DNS` and `State:/Network/Service/com.cisco.anyconnect/IPv4`. The physical service (`State:/Network/Service/<UUID>/DNS`, the hotspot resolver) is listed alongside them, and the `InterfaceName` filter skips it. So the monitor must not assume UUID-shaped service IDs.
-- The DNS dictionary has `DomainName` (`corp.example`), `SearchDomains` (`[corp.example]`), `SearchOrder` (`1`) and `ServerAddresses` (two servers, for example `[192.0.2.53, 198.51.100.53]`). There is **no `SupplementalMatchDomains`**, so the preference order above falls through to `SearchDomains`.
+- The DNS dictionary has `DomainName` (`corp.example`), `SearchDomains` (`[corp.example]`), `SearchOrder` (`1`) and `ServerAddresses` (two servers, for example `[192.0.2.53, 198.51.100.53]`). There is **no `SupplementalMatchDomains`**, so the domains are `DomainName` plus `SearchDomains`, which is `[corp.example]` once the duplicate is dropped.
 - The IPv4 dictionary carries `InterfaceName` (`utun6`), `Addresses`, `Router` and **`OverridePrimary : 1`**. As the monitor expects, `InterfaceName` sits in the IPv4 dictionary, not in the DNS dictionary.
 - `State:/Network/Global/DNS` mirrors the tunnel's servers and search domain, with `__CONFIGURATION_ID__ : Default: com.cisco.anyconnect 0`. The VPN is the machine's **primary** resolver, not a supplemental one. `scutil --dns` shows the tunnel resolver scoped to `utun6`, while Conduit's relay (`127.0.0.1`) stays resolver #1 on the physical interface.
 
 What this changes:
 
-- **A full-tunnel VPN pushes a default resolver plus a search domain, not a list of split domains.** For this VPN, the detected set is the one search domain and its servers, which equals today's manual entry.
-- **The pushed servers are the VPN's default resolver.** In a full-tunnel profile they are meant to answer every name. Today Conduit sends public names to DoH even while the VPN is up. Whether a full tunnel with `OverridePrimary` should instead route public names to the pushed servers is owner decision 9 below. The recommendation is to keep DoH for public names, which is the current behaviour, and record `OverridePrimary` on the reading so that a later change can act on it.
-- **The fixture needs a split-tunnel case too.** It should cover `SupplementalMatchDomains` present and no `OverridePrimary`. That reading comes from the configd sources, not from an observation.
+- **A full-tunnel VPN pushes a default resolver plus a search domain, not a list of split domains.** Owner decision 8 counts its `DomainName` and `SearchDomains` as pushed domains. For this VPN, the detected set is `corp.example` and its servers, which equals today's manual entry.
+- **The pushed servers are the VPN's default resolver.** In a full-tunnel profile they are meant to answer every name. Today Conduit sends public names to DoH even while the VPN is up. Owner decision 9 keeps DoH for public names, which is the current behaviour, and records `OverridePrimary` on the reading as `overridesPrimary` so that a later change can act on it.
+- **The fixture covers both profiles.** The full tunnel above reads as `domains: [corp.example]`, `overridesPrimary: true`. A full tunnel whose `SearchDomains` add to `DomainName` (`DomainName` `corp.example`, `SearchDomains` `[eu.corp.example, corp.example]`) reads as `[corp.example, eu.corp.example]`. A split tunnel with `SupplementalMatchDomains` `[corp.example, lab.corp.example]`, a `DomainName` of `other.example` and no `OverridePrimary` reads as `[corp.example, lab.corp.example]`, `overridesPrimary: false`. The split-tunnel shape comes from the configd sources, not from an observation.
 
-Owner decision 5 covers the alternative, the private `dnsinfo.h` API (`dns_configuration_copy`), which returns exactly the parsed list `scutil --dns` prints but is not in the public SDK.
+Owner decision 5 rejected the alternative, the private `dnsinfo.h` API (`dns_configuration_copy`), which returns exactly the parsed list `scutil --dns` prints but is not in the public SDK.
 
 ### Triggers
 
@@ -247,13 +252,13 @@ The fence: `SplitDNSTable`, `SplitDNSRule` and `SplitDNSOrigin` are Foundation-o
 
 ## Interaction with the `/etc/resolver` gate and the 0043 fallback
 
-**Entry files.** Recommended (owner decision 1): the detected set writes no `/etc/resolver` files. The files exist to send a domain's lookups to tunnel servers when the system resolver is Conduit's forwarder or the Wi-Fi resolver; for a tunnel that pushes its own resolvers, `configd` has already installed a scoped or supplemental resolver for exactly those domains, which is what the monitor is reading. A file would duplicate it, and a stranded duplicate is the deadlock the gate exists to prevent. Manual entries keep the gate, the repair and `DNSManager` untouched: `getEntries(from:vpnConnected:)` still reads `config.dnsEntries`, and the only new `DNSManager` call is `validateDomain` / `validateServer` reused by the monitor.
+**Entry files.** Owner decision 1: the detected set writes no `/etc/resolver` files. The files exist to send a domain's lookups to tunnel servers when the system resolver is Conduit's forwarder or the Wi-Fi resolver; for a tunnel that pushes its own resolvers, `configd` has already installed a scoped or supplemental resolver for exactly those domains, which is what the monitor is reading. A file would duplicate it, and a stranded duplicate is the deadlock the gate exists to prevent. Manual entries keep the gate, the repair and `DNSManager` untouched: `getEntries(from:vpnConnected:)` still reads `config.dnsEntries`, and the only new `DNSManager` call is `validateDomain` / `validateServer` reused by the monitor.
 
 If the owner chooses files for detected domains instead, `DNSManager`'s entry-file paths take a `[SplitDNSRule]` parameter in place of `config`, `clearEntryFiles` removes the journal-recorded set rather than the config's, and the host runs `reconcileEntryFiles` on a table change as it does on a gate flip. The repair's `Observation.after(config:)` reads would follow. This is the larger change and the reason for the recommendation.
 
 **Shared domains.** With files written for the manual `corp.example` entry (VPN up) and the forwarder preferring the detected servers for `corp.example`, mDNSResponder sends the domain to the manual servers and the forwarder's own clients get detected first. Both point at servers the tunnel reaches, so the two surfaces agree on reachability and differ only in order. The Settings display shows both so a user can delete the manual copy.
 
-**0043 silence fallback.** Unchanged in rule and narrowed in effect. On the VPN, detected rules answer, so the fallback rarely runs. Off the VPN, detected rules are absent, so names under those domains are public names and take the public path with no 2 s wait and with caching; the next table change drops those cached answers. Manual entries off the VPN keep the 0043 behaviour, with the wait paid per server until its circuit opens (PR #298). The privacy consequence recorded in 0043 (corporate names reaching DoH providers off-VPN) is unchanged for manual entries and applies off-VPN to detected domains as well; the owner decision on a never-public switch (decision 3) is the place to narrow it.
+**0043 silence fallback.** Unchanged in rule and narrowed in effect. On the VPN, detected rules answer, so the fallback rarely runs. Off the VPN, detected rules are absent, so names under those domains are public names and take the public path with no 2 s wait and with caching; the next table change drops those cached answers. Manual entries off the VPN keep the 0043 behaviour, with the wait paid per server until its circuit opens (PR #298). The privacy consequence recorded in 0043 (corporate names reaching DoH providers off-VPN) is unchanged for manual entries and applies off-VPN to detected domains as well; a never-public switch, deferred by owner decision 3, is where to narrow it later.
 
 **Office LAN.** No tunnel, nothing pushed, `detectedInUse` is `[]`. Manual entries apply, files withheld (VPN down), and the forwarder asks the manual servers, which answer on the LAN. The same as today; this design does not touch it, which is what the location-recovery design asks.
 
@@ -261,10 +266,11 @@ If the owner chooses files for detected domains instead, `DNSManager`'s entry-fi
 
 Settings → DNS, Split DNS section, becomes two groups.
 
-- **Manual entries.** The list as today, editing `appState.config.dnsEntries`. Rows whose domain is also in the detected set carry a secondary caption "also pushed by the VPN" and a "Remove manual copy" action, so a user who imported their entries can retire them when they see the live set working.
+- **Manual entries.** The list as today, editing `appState.config.dnsEntries`.
+- **Duplicate-entry hint (owner decision 4).** A manual entry whose domain, lowercased and without a trailing dot, is a domain in the in-use detected set (connected or held, not idle) shows the hint "Also pushed by the VPN on utunN" with the detected servers beside its own, and a "Remove manual copy" button. One click removes the entry from the draft, as the row's delete button does, and the settings save path persists it: the debounced save, or `commitPendingEdit`, with its validation and revision checks. The runtime never writes configuration; the hint is computed in the app from the draft and the snapshot's detected rows. The hint does not say the entry is useless: a manual entry still applies on networks that push nothing, such as the office LAN, and a user who needs it there keeps it.
 - **Detected from VPN.** Read-only rows from the runtime snapshot: domain, servers, interface, and a state of "in use" (connected), "held" (reasserting) or "idle, VPN down" (disconnected). An empty state reads "Nothing pushed on this network." A toggle "Follow VPN-pushed resolvers" (`dns.followVPNResolvers`) sits above it.
 - **Buttons.** "Add DNS Entry" stays. "Auto-detect from VPN" becomes "Copy detected to manual", enabled only when the detected set is non-empty, and appends the detected rules as `DomainDNSEntry` values. That is the one remaining way to pin a set for a network that pushes nothing, and it reads from the monitor's current set, not from `scutil`.
-- **Wizard.** The DNS step shows the detected set with "Conduit follows these while the VPN is connected" and an unchecked "Also keep them as manual entries". Recommended default is not to pin (owner decision 4). `VPNDNSDetector` and its `scutil` parser go when the wizard and the button read the monitor; its tests go with it.
+- **Wizard.** The DNS step shows the detected set with "Conduit follows these while the VPN is connected" and an unchecked "Also keep them as manual entries". By owner decision 4 it does not pin unless asked. `VPNDNSDetector` and its `scutil` parser go when the wizard and the button read the monitor; its tests go with it.
 
 The detected set reaches the app as a bounded field on the runtime snapshot, projected by `ProxyControlBridge` with a fixed cap on domains and servers and the usual text budgets (decisions 0029, 0038, sized before codec adoption per 0036). `VPNStatusFormatter` already renders the VPN state the rows' captions derive from.
 
@@ -285,8 +291,9 @@ Kind `health`, listed beside `dns.transports_reset` in [`events.md`](events.md).
 
 Unit, against values and fakes only:
 
-- `LiveSplitDNSPolicyTests`. The gate state and reading matrix: connected × non-empty applies, connected × empty clears, reasserting × empty holds, reasserting × non-empty replaces, disconnected × anything clears, unknown keeps. `table(manual:limits:)`: shared domain merges detected first, longest suffix order, caps enforced with ignored resolvers reported.
-- `PushedResolverMonitorTests`. The parser over fixture dictionaries recorded from the owner's VPN: three domain keys, `InterfaceName` filter, system domains dropped, invalid server dropped.
+- `LiveSplitDNSPolicyTests`. The gate state and reading matrix: connected × non-empty applies, connected × empty clears, reasserting × empty holds, reasserting × non-empty replaces, disconnected × anything clears, unknown keeps. `table(manual:limits:)`: shared domain merges detected first, manual rules before detected-only ones, caps enforced with ignored resolvers reported. A full-tunnel reading (`domains: [corp.example, eu.corp.example]`, `overridesPrimary: true`) yields a rule for each domain and none for public names, so a public name still takes the DoH path. A split-tunnel reading yields rules for its supplemental domains only.
+- `PushedResolverMonitorTests`. The parser over the three fixture readings above, with their expected `domains` and `overridesPrimary`. `SupplementalMatchDomains` present wins over `DomainName` and `SearchDomains`; absent, the two are joined in that order and de-duplicated case-insensitively; an invalid domain among them is dropped with `dns.split_resolver_ignored reason=invalid_domain` and the rest kept. Also the `InterfaceName` filter, a non-UUID service ID, system domains dropped and an invalid server dropped.
+- `AppStateSplitDNSHintTests` (AppState harness). A manual entry duplicating an in-use detected domain shows the hint; an idle detected set shows none; "Remove manual copy" removes the entry from the draft and the editor's normal save persists it; no configuration write comes from the runtime.
 - `SplitDNSTableTests` (from PR #298) gains the origins: a shared domain lists detected servers first with their origins, a server both name counts as detected, and `domainsDiffering(from:)` returns the domains that entered or left. PR #298 already covers longest suffix, per-rule servers, open circuits and the empty table in `SplitDNSTableTests` and `DNSForwarderHealthTests`.
 - `DNSForwarderTests`. The forwarder reads the provider, not config: a table pushed with no change to `dnsEntries` routes the next query. A table swap drops exactly the differing domains from the response cache.
 - `RuntimeHostSplitDNSTests` (actual host over `FakeMachine`, `FakeVPNStatusObserver`, `FakePushedResolverObserver`). A primed reading plus `.connected` produces one `applySplitDNSTable` and one `dns.split_detected outcome=applied`; `.disconnected` produces the empty table; the snapshot field follows; `manageDNSResolvers` on writes files for manual entries only.
@@ -297,25 +304,27 @@ pm-sim, registered in `pm-sim all`:
 - `dns-split-follows-vpn`. Fake corp server on loopback answers `host.corp.example`. Off-VPN the forwarder answers from the fake DoH provider and caches. The fake pushed-resolver observer emits `corp.example → loopback server`, the fake VPN observer emits `.connected`: the next answer comes from the corp server and the public answer is gone from the cache. `.disconnected`: the corp server is never asked again, and no internal answer was cached across either transition.
 - `dns-split-flap-holds`. `.reasserting` with an empty reading keeps answering from the corp server; the grace window expiring to `.disconnected` stops it; `.connected` with the reading back resumes it.
 
-Owner validation, recorded in the decision record: hotspot with the VPN off (gateway name resolves publicly, no 2 s wait for names under a detected-only domain), VPN on (corporate names from the pushed servers, Settings shows them in use), VPN off again (set idle within the grace window), office LAN (manual entries, files withheld).
+Owner validation, recorded in decision 0044: hotspot with the VPN off (gateway name resolves publicly, no 2 s wait for names under a detected-only domain), VPN on (corporate names from the pushed servers, Settings shows them in use and shows the duplicate-entry hint on an imported entry), VPN off again (set idle within the grace window), office LAN (manual entries, files withheld).
 
 ## Migration
 
-No file migration. `DomainDNSEntry` is unchanged, the detected set is never persisted, and `dns.followVPNResolvers` decodes as `true` when absent (owner decision 7). Users who imported their entries keep them as manual entries with today's behaviour. The Settings caption "also pushed by the VPN" and the "Remove manual copy" action are the migration path; nothing deletes configuration on the user's behalf.
+No file migration. `DomainDNSEntry` is unchanged, the detected set is never persisted, and `dns.followVPNResolvers` decodes as `true` when absent (owner decision 7). Users who imported their entries keep them as manual entries with today's behaviour. The duplicate-entry hint and its "Remove manual copy" button are the migration path; nothing deletes configuration on the user's behalf.
 
-The CHANGELOG entry says that imported entries are now redundant on networks that push the same resolvers and names the Settings action to remove them.
+The CHANGELOG entry says that imported entries are now redundant on networks that push the same resolvers and names the Settings hint and its "Remove manual copy" button.
 
 ## Owner decisions
 
-1. **Files for detected domains.** Recommend none. The tunnel's own scoped resolver covers them, and the entry-file surface is the deadlock-prone one. The alternative is described above and costs a `DNSManager` signature change.
-2. **Precedence on a shared domain.** Recommend detected servers first, then manual servers not already listed, with longest suffix deciding between domains. The alternative, manual first, defeats the purpose on the network the user is actually on.
-3. **A per-entry "never resolve publicly" switch.** Recommend deferring to part 1, where the circuit decides when a name goes public at all, and scoping it to manual entries when it comes. It does not change the shape here.
-4. **Wizard default.** Recommend that the wizard shows the detected set and does not pin it as manual entries unless asked. Pinning is what produced the hotspot failure.
-5. **Detection source.** Recommend `SCDynamicStore` DNS keys, public API already used by `VPNStatusMonitor`. The private `dnsinfo.h` API returns the parsed resolver list directly but is not in the SDK and would be the first private symbol in the app. `scutil` polling is rejected either way.
-6. **Bounds.** Recommend at most 16 detected domains and the existing `DomainResourceLimits.dnsServers` per domain, with excess reported by `dns.split_resolver_ignored reason=over_limit`. Two new ceilings require the owner's approval per the AGENTS.md rule on bounded collections.
-7. **The switch and its default.** Recommend `dns.followVPNResolvers`, default on, in the DNS section. Off means the monitor does not start and the table holds manual entries only.
-8. **Parent-domain inference.** Recommend dropping it for the live set and keeping whatever parent entries users already have as manual entries. Inferring `corp.example` from a pushed `eu.corp.example` sends names the tunnel never claimed to its servers.
-9. **Full-tunnel default resolver.** In a full-tunnel profile (`OverridePrimary : 1`) the pushed servers are the VPN's default resolver. Recommend keeping DoH for public names, as today, and recording `OverridePrimary` on the reading so that a later change can act on it. Sending every public name to the pushed servers would follow the VPN's intent, but it would make public resolution depend on the internal servers staying healthy.
+All nine are decided (owner, 2026-11-10, [#295 comment](https://github.com/srps/Conduit/pull/295#issuecomment-6774052129)) and recorded in [decision 0044](decisions/0044-split-dns-follows-vpn-pushed-resolvers.md).
+
+1. **Files for detected domains.** The detected set writes no `/etc/resolver` files. The tunnel's own scoped resolver covers them, and the entry-file path is the one prone to the deadlock.
+2. **Precedence on a shared domain.** Detected servers come first, then manual servers not already listed, with longest suffix deciding between domains. Manual first would defeat the purpose on the network the user is on.
+3. **A per-entry "never resolve publicly" switch.** Deferred, and scoped to manual entries when it comes. Part 1 (PR #298) shipped without it. It does not change the shape here.
+4. **Wizard default and duplicate entries.** The wizard shows the detected set and pins it as manual entries only when asked, since pinning produced the hotspot failure. Settings → DNS shows the duplicate-entry hint on a manual entry whose domain the in-use detected set provides, with a one-click "Remove manual copy" that goes through the draft and the normal save. The runtime never writes configuration.
+5. **Detection source.** The monitor reads `SCDynamicStore` DNS keys, the public API `VPNStatusMonitor` already uses. It does not use the private `dnsinfo.h` API or poll `scutil`.
+6. **Bounds.** The table takes at most 16 detected domains and `DomainResourceLimits.dnsServers` servers per domain, and `dns.split_resolver_ignored reason=over_limit` reports the excess.
+7. **The switch and its default.** `dns.followVPNResolvers` turns the feature on and off. It defaults to on and lives in the DNS section. Off means the monitor does not start and the table holds manual entries only.
+8. **Parent-domain inference and full-tunnel domains.** The live set infers no parent domains in the live set, and existing parent entries stay as manual entries. A DNS key with `SupplementalMatchDomains` contributes only those domains. A key without them, a full tunnel, contributes its `DomainName` and `SearchDomains`, de-duplicated and checked with `DomainNameSyntax`.
+9. **Full-tunnel default resolver.** Public names stay on DoH, as today, and the reading records `OverridePrimary` as `overridesPrimary` for a later change to act on. Sending every public name to the pushed servers would make public resolution depend on the internal servers staying healthy.
 
 ## Sequencing
 
@@ -324,5 +333,5 @@ Five verifiable units, each green on its own, in this order. Unit 1 is delivered
 1. **Kernel table. Delivered by PR #298 (ab2ffe32).** `SplitDNSTable` built from `config.dnsEntries` per query, per-rule servers in order, longest suffix, per-server circuits, the internal stage budget, and no internal attempt when no rule has a server, which removed the `192.0.2.53` wait (#296). The design's shape differs from what shipped in two ways that the later units close: rules carry no `origins`, and the forwarder builds the table from config instead of reading a box.
 2. **Platform inputs.** `PushedResolver`, `PushedResolverObserving`, `PushedResolverMonitor`, the fake, `LiveSplitDNSPolicy`. In the kernel, `SplitDNSOrigin` and `SplitDNSRule.origins`, with `init(entries:)` marking every server `.manual`. Pure tests and the parser fixture from the owner's VPN.
 3. **Host wiring.** `RuntimeHostEffects.pushedResolvers`, the policy in `RuntimeHost`, `applySplitDNSTable`, the four events, the snapshot field and its sizing, the two pm-sim scenarios, `events.md`. In the kernel, `domainsDiffering(from:)`, `splitDNSBox` and the forwarder's `splitDNSProvider`, which replaces `SplitDNSTable(entries: config.dnsEntries)`. `enabledDNSEntryDomain(containing:config:)` and `isInternalDomain(_:config:)` are deleted.
-4. **App.** Settings groups, wizard, `VPNDNSDetector` deleted, compositions supply the observer.
-5. **Record.** A decision record for owner decisions 1, 2, 4, 5, 6, 7, 8 and 9 with the owner's validation evidence, and 0043's open question on the first server closed by reference.
+4. **App.** Settings groups, the duplicate-entry hint, wizard, `VPNDNSDetector` deleted, compositions supply the observer.
+5. **Validation.** The owner validation above, recorded in decision 0044, which moves its statuses as each unit lands. The record itself lands with this design, and 0043's open question on the first server already points to PR #298 and to 0044.
