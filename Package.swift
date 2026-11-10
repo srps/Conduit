@@ -148,6 +148,7 @@ let package = Package(
         .executableTarget(
             name: "pm-vpn-check",
             dependencies: [
+                "ConduitShared",
                 "ProxyKernel",
                 "PlatformMac",
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),

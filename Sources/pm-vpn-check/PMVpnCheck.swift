@@ -23,8 +23,16 @@
 //     xcrun swift run pm-vpn-check
 //   DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" \
 //     xcrun swift run pm-vpn-check --duration 120 --grace 5 --min-visible 1
+//   DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" \
+//     xcrun swift run pm-vpn-check --pushed-dns
+//
+// `--pushed-dns` reads the tunnels' pushed resolvers once through
+// `PushedResolverMonitor.readOnce()` and prints them masked: domains as
+// `dN.example`, servers as documentation addresses, service IDs as `serviceN`.
+// The output can be pasted into a public issue.
 
 import Dispatch
+import ConduitShared
 import Foundation
 import NIOConcurrencyHelpers
 import PlatformMac
@@ -34,6 +42,10 @@ import ProxyKernel
 enum PMVpnCheck {
     static func main() {
         let args = parseArgs()
+        if args.pushedDNS {
+            printPushedResolvers()
+            return
+        }
 
         print("pm-vpn-check — VPNStatusMonitor live diagnostic")
         print("  duration       : \(args.durationSeconds)s")
@@ -77,12 +89,14 @@ enum PMVpnCheck {
         var durationSeconds: TimeInterval
         var graceSeconds: TimeInterval
         var minVisibleSeconds: TimeInterval
+        var pushedDNS = false
     }
 
     private static func parseArgs() -> Args {
         var duration: TimeInterval = 60
         var grace: TimeInterval = 2
         var minVisible: TimeInterval = 0.5
+        var pushedDNS = false
 
         var iter = CommandLine.arguments.dropFirst().makeIterator()
         while let arg = iter.next() {
@@ -93,17 +107,75 @@ enum PMVpnCheck {
                 if let next = iter.next(), let v = Double(next) { grace = v }
             case "--min-visible":
                 if let next = iter.next(), let v = Double(next) { minVisible = v }
+            case "--pushed-dns":
+                pushedDNS = true
             case "--help", "-h":
-                print("Usage: pm-vpn-check [--duration <s>] [--grace <s>] [--min-visible <s>]")
+                print("Usage: pm-vpn-check [--duration <s>] [--grace <s>] [--min-visible <s>] | --pushed-dns")
                 print("  --duration     run for this many seconds (default 60)")
                 print("  --grace        VPN grace window before declaring disconnect (default 2)")
                 print("  --min-visible  minimum-visible-flap debounce (default 0.5)")
+                print("  --pushed-dns   read the tunnels' pushed resolvers once, print them masked, exit")
                 exit(0)
             default:
                 FileHandle.standardError.write(Data("Unknown arg: \(arg)\n".utf8))
             }
         }
-        return Args(durationSeconds: duration, graceSeconds: grace, minVisibleSeconds: minVisible)
+        return Args(
+            durationSeconds: duration, graceSeconds: grace, minVisibleSeconds: minVisible, pushedDNS: pushedDNS
+        )
+    }
+
+    // MARK: - Pushed resolvers
+
+    private static func printPushedResolvers() {
+        print("pm-vpn-check — pushed resolvers, one read-only store reading, masked")
+        let reading = PushedResolverMonitor.readOnce()
+        if let failure = reading.failure {
+            print("unavailable: \(failure.rawValue)")
+            exit(1)
+        }
+        var mask = Mask()
+        print("resolvers: \(reading.resolvers.count)")
+        for resolver in reading.resolvers {
+            let order = resolver.searchOrder.map(String.init) ?? "-"
+            print("  \(mask.service(resolver.serviceID)) \(resolver.interface) searchOrder=\(order) overridesPrimary=\(resolver.overridesPrimary)")
+            print("    domains: \(resolver.domains.map { mask.domain($0) })")
+            print("    servers: \(resolver.servers.map { mask.server($0) })")
+        }
+        print("rejections: \(reading.rejections.count)")
+        for rejection in reading.rejections {
+            let value = rejection.value.map { raw in
+                rejection.reason == .invalidServer || IPAddressSyntax.isLiteral(raw) ? mask.server(raw) : mask.domain(raw)
+            } ?? "-"
+            print("  \(mask.service(rejection.serviceID)) \(rejection.interface ?? "-") \(rejection.reason.rawValue) \(value)")
+        }
+    }
+
+    /// Stable placeholders: the same input masks to the same output within a run.
+    private struct Mask {
+        private var domains: [String: String] = [:]
+        private var servers: [String: String] = [:]
+        private var services: [String: String] = [:]
+
+        mutating func domain(_ value: String) -> String {
+            remember(value, in: &domains) { "d\($0).example" }
+        }
+
+        mutating func server(_ value: String) -> String {
+            let v6 = value.contains(":")
+            return remember(value, in: &servers) { v6 ? "2001:db8::\($0)" : "192.0.2.\($0)" }
+        }
+
+        mutating func service(_ value: String) -> String {
+            remember(value, in: &services) { "service\($0)" }
+        }
+
+        private func remember(_ value: String, in table: inout [String: String], _ make: (Int) -> String) -> String {
+            if let known = table[value] { return known }
+            let masked = make(table.count + 1)
+            table[value] = masked
+            return masked
+        }
     }
 
     // MARK: - Helpers
