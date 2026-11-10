@@ -187,6 +187,28 @@ final class LiveSplitDNSPolicyTests: XCTestCase {
         XCTAssertEqual(policy.detectedInUse, [branch, moved], "branch held, corp's old servers replaced")
     }
 
+    func testReplayingTheLastReadingAfterATunnelLeavesTheLiveSetDropsIt() {
+        var policy = policy()
+        _ = policy.update(gate: gate(.connected), liveInterfaces: ["utun3", "utun7"], reading: reading(corporate, branch))
+
+        XCTAssertTrue(policy.update(gate: gate(.connected), liveInterfaces: ["utun3"], reading: policy.lastReading))
+        XCTAssertEqual(policy.detectedInUse, [branch], "the replayed reading still names utun7, which is no longer live")
+        XCTAssertEqual(policy.detectedRules.map(\.domain), ["branch.corp.example"])
+    }
+
+    func testAReadingThatNamesATunnelBeforeItIsLiveTakesEffectWhenItIsReplayed() {
+        let early = PushedResolver(
+            serviceID: "late", interface: "utun9", domains: ["late.corp.example"], servers: ["192.0.2.9"]
+        )
+        var policy = policy()
+        _ = policy.update(gate: gate(.connected), liveInterfaces: ["utun3"], reading: reading(early))
+        XCTAssertEqual(policy.detectedInUse, [], "utun9 is not live yet")
+        XCTAssertEqual(policy.detectedRules, [])
+
+        XCTAssertTrue(policy.update(gate: gate(.connected), liveInterfaces: ["utun3", "utun9"], reading: policy.lastReading))
+        XCTAssertEqual(policy.detectedInUse, [early])
+    }
+
     // MARK: - Detected rules
 
     func testShuffledResolversBuildTheSameRulesInResolverOrder() {
