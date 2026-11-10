@@ -53,14 +53,13 @@ The host, per input:
 ```swift
 if liveSplitDNS.update(gate: splitDNSGate, pushed: pushedResolvers) {   // pure
     let table = liveSplitDNS.table(manual: config.dnsEntries, limits: .standard)
-    orchestrator.applySplitDNSTable(table)       // kernel: swap the box, drop affected cache, event
-    mutateSnapshot { $0.detectedSplitDNS = liveSplitDNS.detectedInUse.display }   // bounded, for Settings
+    orchestrator.applySplitDNSTable(table, display: liveSplitDNS.display)   // swap the box, drop affected cache, event, snapshot
 }
 ```
 
 ### Kernel values (`ProxyKernel/Network/SplitDNSTable.swift`, Foundation only)
 
-`SplitDNSTable` and `SplitDNSRule` exist on main (PR #298). This design adds `SplitDNSOrigin`, `SplitDNSRule.origins` and `SplitDNSTable.domainsDiffering(from:)`. The comments mark which unit adds what.
+`SplitDNSTable` and `SplitDNSRule` exist on main (PR #298). This design adds `SplitDNSOrigin`, `SplitDNSRule.origins`, `SplitDNSTable.domainsDiffering(from:)` and `DetectedSplitDNSDisplay`. The comments mark which unit adds what.
 
 ```swift
 /// Where a rule's server came from. The forwarder does not branch on it; events and the UI do.  [unit 2]
@@ -89,6 +88,24 @@ package struct SplitDNSTable: Hashable, Sendable {
 
     /// Domains in `self` and not in `other`, or the reverse: what a swap has to drop from the response cache.  [unit 3]
     package func domainsDiffering(from other: SplitDNSTable) -> Set<String> { notImplemented() }
+}
+
+/// What Settings shows of the detected set. The host builds it from `LiveSplitDNSPolicy`; the orchestrator stores it on
+/// `ProxyOrchestratorSnapshot.detectedSplitDNS` and `ProxyControlBridge` projects it.  [unit 3]
+package struct DetectedSplitDNSDisplay: Hashable, Sendable, Codable {
+    package enum State: String, Hashable, Sendable, Codable {
+        case inUse                       // the gate allows and the last reading is the set in use
+        case held                        // the gate allows and an empty reading or `.reasserting` left the held set in use
+        case idle                        // `.disconnected`: rows are the last reading, unused
+    }
+    package struct Row: Hashable, Sendable, Codable {
+        package let interface: String    // "utun6"
+        package let domains: [String]
+        package let servers: [String]
+    }
+    package static let none = DetectedSplitDNSDisplay(state: .idle, rows: [])
+    package let state: State
+    package let rows: [Row]              // one per resolver, in table order, after the policy's caps
 }
 ```
 
@@ -142,6 +159,9 @@ package struct LiveSplitDNSPolicy: Sendable {
 
     /// Manual entries plus `detectedInUse`, validated, bounded, merged per domain.
     package func table(manual: [DomainDNSEntry], limits: SplitDNSLimits) -> SplitDNSTable { notImplemented() }
+
+    /// `detectedInUse` with its state, or the last reading as `.idle` when the gate withholds.
+    package var display: DetectedSplitDNSDisplay { get }
 }
 
 package struct SplitDNSLimits: Sendable {
@@ -238,12 +258,13 @@ The sequence stamp the host takes for VPN reports (`VPNObservationSequencer`, `v
 ```swift
 extension ProxyOrchestrator {
     /// The forwarder's split-DNS table from now on. Swaps the box, drops cached answers under the domains that entered or
-    /// left, emits `dns.split_table_changed`. Never restarts the forwarder. Safe before the forwarder has started.
-    package func applySplitDNSTable(_ table: SplitDNSTable) { notImplemented() }
+    /// left, emits `dns.split_table_changed`, and sets `snapshot.detectedSplitDNS` to `display`. Never restarts the
+    /// forwarder. Safe before the forwarder has started.
+    package func applySplitDNSTable(_ table: SplitDNSTable, display: DetectedSplitDNSDisplay) { notImplemented() }
 }
 ```
 
-Inside: `splitDNSBox: NIOLockedValueBox<SplitDNSTable>` beside `vpnConnectedForDNSBox`; the forwarder is constructed with `splitDNSProvider: { [splitDNSBox] in splitDNSBox.withLockedValue { $0 } }`.
+Inside: `splitDNSBox: NIOLockedValueBox<SplitDNSTable>` beside `vpnConnectedForDNSBox`; the forwarder is constructed with `splitDNSProvider: { [splitDNSBox] in splitDNSBox.withLockedValue { $0 } }`. The snapshot write goes through the orchestrator's private `mutateSnapshot`, as every other snapshot field does; the host has no other way to set it. `ProxyOrchestratorSnapshot` gains `detectedSplitDNS: DetectedSplitDNSDisplay`, decoding as `.none` when absent.
 
 Forwarder changes in `DNSResolutionCore.resolve(query:)`, unit 3:
 
@@ -272,11 +293,11 @@ Settings → DNS, Split DNS section, becomes two groups.
 
 - **Manual entries.** The list as today, editing `appState.config.dnsEntries`.
 - **Duplicate-entry hint (owner decision 4).** A manual entry whose domain, lowercased and without a trailing dot, is a domain in the in-use detected set (connected or held, not idle) shows the hint "Also pushed by the VPN on utunN" with the detected servers beside its own, and a "Remove manual copy" button. One click removes the entry from the draft, as the row's delete button does, and the settings save path persists it: the debounced save, or `commitPendingEdit`, with its validation and revision checks. The runtime never writes configuration; the hint is computed in the app from the draft and the snapshot's detected rows. The hint does not say the entry is useless: a manual entry still applies on networks that push nothing, such as the office LAN, and a user who needs it there keeps it.
-- **Detected from VPN.** Read-only rows from the runtime snapshot: domain, servers, interface, and a state of "in use" (connected), "held" (reasserting) or "idle, VPN down" (disconnected). An empty state reads "Nothing pushed on this network." A toggle "Follow VPN-pushed resolvers" (`dns.followVPNResolvers`) sits above it.
+- **Detected from VPN.** Read-only rows from the runtime snapshot's `detectedSplitDNS`: domains, servers, interface, and its state as "in use" (`.inUse`), "held" (`.held`) or "idle, VPN down" (`.idle`). An empty state reads "Nothing pushed on this network." A toggle "Follow VPN-pushed resolvers" (`dns.followVPNResolvers`) sits above it.
 - **Buttons.** "Add DNS Entry" stays. "Auto-detect from VPN" becomes "Copy detected to manual", enabled only when the detected set is non-empty, and appends the detected rules as `DomainDNSEntry` values. That is the one remaining way to pin a set for a network that pushes nothing, and it reads from the monitor's current set, not from `scutil`.
 - **Wizard.** The DNS step shows the detected set with "Conduit follows these while the VPN is connected" and an unchecked "Also keep them as manual entries". By owner decision 4 it does not pin unless asked. `VPNDNSDetector` and its `scutil` parser go when the wizard and the button read the monitor; its tests go with it.
 
-The detected set reaches the app as a bounded field on the runtime snapshot, projected by `ProxyControlBridge` with a fixed cap on domains and servers and the usual text budgets (decisions 0029, 0038, sized before codec adoption per 0036). `VPNStatusFormatter` already renders the VPN state the rows' captions derive from.
+The detected set reaches the app as a bounded field on the control snapshot. `RuntimeSnapshotControlProjection` maps `DetectedSplitDNSDisplay` to a `ControlDetectedSplitDNS` value with `ControlDetectedSplitDNSRow` rows. Its caps are at most 16 rows, at most 16 domains across all rows (`SplitDNSLimits.maxDetectedDomains`), and at most `DomainResourceLimits.dnsServers` servers per row. `ControlRuntimeSizing.swift` gains `measure(into:)` for the value and its rows, counting each interface, domain and server as text and each list as elements, and `ControlRuntimeSnapshot.measure(into:)` calls it. `ControlDisplayRecordCodec.swift` gains their encode and decode, refusing a list over its cap. These follow decisions 0029 and 0038, sized before codec adoption per 0036. `VPNStatusFormatter` already renders the VPN state the rows' captions derive from.
 
 ## Events
 
@@ -336,6 +357,6 @@ Five verifiable units, each green on its own, in this order. Unit 1 is delivered
 
 1. **Kernel table. Delivered by PR #298 (ab2ffe32).** `SplitDNSTable` built from `config.dnsEntries` per query, per-rule servers in order, longest suffix, per-server circuits, the internal stage budget, and no internal attempt when no rule has a server, which removed the `192.0.2.53` wait (#296). The design's shape differs from what shipped in two ways that the later units close: rules carry no `origins`, and the forwarder builds the table from config instead of reading a box.
 2. **Platform inputs.** `PushedResolver`, `PushedResolverObserving`, `PushedResolverMonitor`, the fake, `LiveSplitDNSPolicy`. In the kernel, `SplitDNSOrigin` and `SplitDNSRule.origins`, with `init(entries:)` marking every server `.manual`. Pure tests and the parser fixture from the owner's VPN.
-3. **Host wiring.** `RuntimeHostEffects.pushedResolvers`, the policy in `RuntimeHost`, `applySplitDNSTable`, the four events, the snapshot field and its sizing, the two pm-sim scenarios, `events.md`. In the kernel, `domainsDiffering(from:)`, `splitDNSBox` and the forwarder's `splitDNSProvider`, which replaces `SplitDNSTable(entries: config.dnsEntries)`. `enabledDNSEntryDomain(containing:config:)` and `isInternalDomain(_:config:)` are deleted.
+3. **Host wiring.** `RuntimeHostEffects.pushedResolvers`, the policy in `RuntimeHost`, `applySplitDNSTable(_:display:)`, the four events, the two pm-sim scenarios, `events.md`. The snapshot field: `DetectedSplitDNSDisplay` and `ProxyOrchestratorSnapshot.detectedSplitDNS` in the kernel, `ControlDetectedSplitDNS` and its rows in `ConduitShared` with their `ControlRuntimeSizing` measures and `ControlDisplayRecordCodec` caps, and the projection in `ProxyControlBridge`. In the kernel, `domainsDiffering(from:)`, `splitDNSBox` and the forwarder's `splitDNSProvider`, which replaces `SplitDNSTable(entries: config.dnsEntries)`. `enabledDNSEntryDomain(containing:config:)` and `isInternalDomain(_:config:)` are deleted.
 4. **App.** Settings groups, the duplicate-entry hint, wizard, `VPNDNSDetector` deleted, compositions supply the observer.
 5. **Validation.** The owner validation above, recorded in decision 0044, which moves its statuses as each unit lands. The record itself lands with this design, and 0043's open question on the first server already points to PR #298 and to 0044.
