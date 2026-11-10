@@ -48,21 +48,29 @@ guard let rule = table.rule(matching: name) else { /* public path: one attempt o
 for server in rule.servers { /* as today: in order, open circuits skipped, inside the stage budget */ }
 ```
 
-The host, per input:
+The orchestrator owns the table. It merges the manual entries from its own config with the detected rules the host last pushed, and caches the result:
+
+```swift
+// at init, in applyConfigChange after `config = newConfig`, and in applyDetectedSplitDNSRules
+splitDNSBox.withLockedValue { $0.table = SplitDNSTable(manual: config.dnsEntries, detected: $0.detected) }
+```
+
+The host, per input, pushes only the detected rules:
 
 ```swift
 let ignoredBefore = liveSplitDNS.ignored
 let changed = liveSplitDNS.update(gate: splitDNSGate, reading: pushedReading)    // pure
 for rejection in liveSplitDNS.ignored.subtracting(ignoredBefore) { emit(.splitResolverIgnored(rejection)) }
 if changed {
-    let table = liveSplitDNS.table(manual: config.dnsEntries)
-    orchestrator.applySplitDNSTable(table, display: liveSplitDNS.display)   // swap the box, drop affected cache, event, snapshot
+    orchestrator.applyDetectedSplitDNSRules(liveSplitDNS.detectedRules, display: liveSplitDNS.display)   // merge, swap, drop affected cache, event, snapshot
 }
 ```
 
+A runtime that never pushes, such as pm-proxy, keeps manual split DNS: with no detected rules the orchestrator's table is `SplitDNSTable(manual: config.dnsEntries, detected: [])`, which equals today's `SplitDNSTable(entries:)`.
+
 ### Kernel values (`ProxyKernel/Network/SplitDNSTable.swift`, Foundation only)
 
-`SplitDNSTable` and `SplitDNSRule` exist on main (PR #298). This design adds `SplitDNSOrigin`, `SplitDNSRule.origins`, `SplitDNSTable.domainsDiffering(from:)` and `DetectedSplitDNSDisplay`. The comments mark which unit adds what.
+`SplitDNSTable` and `SplitDNSRule` exist on main (PR #298). This design adds `SplitDNSOrigin`, `SplitDNSRule.origins`, `SplitDNSTable.init(manual:detected:)`, `SplitDNSTable.domainsDiffering(from:)` and `DetectedSplitDNSDisplay`. The comments mark which unit adds what.
 
 ```swift
 /// Where a rule's server came from. The forwarder does not branch on it; events and the UI do.  [unit 2]
@@ -84,7 +92,16 @@ package struct SplitDNSTable: Hashable, Sendable {
     package let rules: [SplitDNSRule]    // one rule per domain
 
     package init(rules: [SplitDNSRule])
-    package init(entries: [DomainDNSEntry])            // exists; unit 2 sets every origin to `.manual`
+
+    /// The one merge of manual and detected split DNS.  [unit 2]
+    /// - Order: the enabled `manual` entries merged per domain in configuration order, as `init(entries:)` does today,
+    ///   then the domains only `detected` names, in `detected` order.
+    /// - Precedence on a shared domain: the detected servers first, then manual servers not already listed.
+    /// - The per-domain server cap applies to `detected` before the merge: `LiveSplitDNSPolicy` caps each rule at
+    ///   `DomainResourceLimits.dnsServers` and the initializer asserts it. Manual servers are appended uncapped.
+    /// With `detected` empty, the result equals today's `init(entries: manual)` with every origin `.manual`.
+    package init(manual: [DomainDNSEntry], detected: [SplitDNSRule])
+    package init(entries: [DomainDNSEntry])            // exists; unit 2 migrates its callers to `init(manual:detected: [])` and deletes it
 
     package func rule(matching name: String) -> SplitDNSRule?    // exists: longest suffix on a label boundary
     package var firstServers: [String] { get }                    // exists: servers of the first rule that has any
@@ -112,17 +129,17 @@ package struct DetectedSplitDNSDisplay: Hashable, Sendable, Codable {
 }
 ```
 
-One rule per domain. When a detected resolver and a manual entry name the same domain, the rule's servers are the detected servers first, then manual servers not already listed, and `origins` records which is which. A server both name counts as detected. Longest suffix wins between rules, so a detected `eu.corp.example` beats a manual `corp.example` for names under it. These are the two precedence rules; there are no others.
+One rule per domain. `SplitDNSTable(manual:detected:)` owns the merge, and `LiveSplitDNSPolicy` produces only the detected rules it takes. When a detected rule and a manual entry name the same domain, the rule's servers are the detected servers first, then manual servers not already listed, and `origins` records which is which. A server both name counts as detected. Longest suffix wins between rules, so a detected `eu.corp.example` beats a manual `corp.example` for names under it. These are the two precedence rules; there are no others.
 
 Detected resolvers have one order, the resolver order, so the same store contents always build the same table. `LiveSplitDNSPolicy` sorts `detectedInUse` by `searchOrder` ascending, with a missing `searchOrder` last, then by `serviceID`. The order in which the store lists its keys never matters. The resolver order decides three things:
 
-- The order of the detected-only rules in the table.
+- The order of `detectedRules`, and so the order of the detected-only rules in the table.
 - Which domains the 16-domain cap keeps: the first 16 distinct domains in resolver order. The rest are reported as `over_limit`.
 - The servers of a domain that two detected resolvers both name: the first resolver's servers, then the second's not already listed.
 
-The per-domain server cap applies to the detected servers, before the merge. `DomainResourceLimits.dnsServers` (8) caps the detected list of each domain, and a detected server past the cap is reported as `over_limit`. Manual servers for the same domain are then appended after the detected ones, never displaced and never counted against that cap. Manual entries are already bounded by the same limit at the configuration boundary.
+The per-domain server cap applies to the detected servers, before the merge. `LiveSplitDNSPolicy` caps the detected list of each domain at `DomainResourceLimits.dnsServers` (8) and reports a detected server past the cap as `over_limit`. `SplitDNSTable(manual:detected:)` then appends the manual servers for the same domain after the detected ones, never displaced and never counted against that cap. Manual entries are already bounded by the same limit at the configuration boundary.
 
-Rule order decides `firstServers`, the one internal attempt a public name makes. `LiveSplitDNSPolicy.table(manual:)` lists the manual rules in configuration order, as `init(entries:)` does today, then the detected-only domains in resolver order. A user with manual entries keeps today's first server, or the detected server ahead of it when the first manual domain is also pushed. A user with no manual entries gains this one attempt on the tunnel's first server only while the detected set is in use. Off the VPN the gate withholds the set, so no attempt is made, as today (#296).
+Rule order decides `firstServers`, the one internal attempt a public name makes. `SplitDNSTable(manual:detected:)` lists the manual rules in configuration order, as `init(entries:)` does today, then the detected-only domains in resolver order. A user with manual entries keeps today's first server, or the detected server ahead of it when the first manual domain is also pushed. A user with no manual entries gains this one attempt on the tunnel's first server only while the detected set is in use. Off the VPN the gate withholds the set, so no attempt is made, as today (#296).
 
 ### Platform values (`PlatformMac`)
 
@@ -197,8 +214,10 @@ package struct LiveSplitDNSPolicy: Sendable {
     /// `.connected`, `.reasserting` or `.unknown` keeps the set in use.
     package private(set) var detectedInUse: [PushedResolver] = []
 
-    /// Manual entries plus `detectedInUse` in resolver order, bounded, merged per domain.
-    package func table(manual: [DomainDNSEntry]) -> SplitDNSTable { notImplemented() }
+    /// `detectedInUse` as rules: one per domain in resolver order, capped, every origin `.detected(interface:)`.
+    /// `[]` while the gate withholds. What the host passes to `applyDetectedSplitDNSRules`; the kernel merges the
+    /// manual entries in.
+    package var detectedRules: [SplitDNSRule] { get }
 
     /// `detectedInUse` with its state, or the last reading as `.idle` when the gate withholds.
     package var display: DetectedSplitDNSDisplay { get }
@@ -222,7 +241,7 @@ Rejected. `ConfigDiff.dnsChanged` restarts the forwarder, so every VPN transitio
 
 ### B. A live table the host builds and pushes into the kernel (chosen)
 
-The kernel defines `SplitDNSTable`. The orchestrator keeps one in a locked box beside `vpnConnectedForDNSBox` and hands the forwarder a `splitDNSProvider` closure, the way it hands `configProvider` and `preferProxyPathForDoH` today. The host owns the two inputs (the gate and the pushed-resolver observer), decides with `LiveSplitDNSPolicy`, and pushes the result with `applySplitDNSTable`. Manual entries enter the same table from the applied config, so the forwarder has one read path for split DNS instead of two.
+The kernel defines `SplitDNSTable`. The orchestrator keeps the detected rules and the merged table in a locked box beside `vpnConnectedForDNSBox` and hands the forwarder a `splitDNSProvider` closure, the way it hands `configProvider` and `preferProxyPathForDoH` today. The host owns the two inputs (the gate and the pushed-resolver observer), decides with `LiveSplitDNSPolicy`, and pushes the detected rules with `applyDetectedSplitDNSRules`. The orchestrator merges them with the manual entries of its own config, so manual split DNS never depends on the host pushing, and the forwarder has one read path for split DNS instead of two.
 
 Chosen. It is the existing shape (observer in PlatformMac, pure decision value, host owns the turn, kernel mirror box, forwarder closure) applied to one more input. No restart. The kernel import fence holds because the kernel only defines values and the box. Events, the entry-file decision and the Settings display all read `LiveSplitDNSPolicy` in the same host turn, so they cannot disagree. Interface depth: the forwarder already consults one `rule(matching:)` (PR #298), and B changes only where its table comes from. The complexity of merging, bounding and flap-holding sits behind one pure value with one test file.
 
@@ -295,7 +314,7 @@ The fuser already decides what a flap is. The policy follows it and adds one rul
 
 The rule does not depend on the order in which observers report. An empty reading that lands just before `.disconnected` and one that lands just after it end in the same empty set. The cost is that a tunnel which withdraws its DNS key and stays connected keeps its last set until it disconnects. Both readings named servers the tunnel reaches, so that set stays reachable.
 
-The orchestrator's `applySplitDNSTable` drops cached answers for `table.domainsDiffering(from: previous)` and nothing else. A VPN connect already resets the DoH transports and the settled path report already clears the cache (`dns.transports_reset`, `dns.response_cache_cleared`); the targeted drop covers the case neither does, a name resolved and cached publicly off-VPN that is internal once the table gains its domain.
+The orchestrator's table swap drops cached answers for `table.domainsDiffering(from: previous)` and nothing else. A VPN connect already resets the DoH transports and the settled path report already clears the cache (`dns.transports_reset`, `dns.response_cache_cleared`); the targeted drop covers the case neither does, a name resolved and cached publicly off-VPN that is internal once the table gains its domain.
 
 The sequence stamp the host takes for VPN reports (`VPNObservationSequencer`, `vpn.observation_stale`) covers the gate input. The pushed-resolver observer delivers whole readings, so an older reading landing after a newer one is the one hazard; the host delivers them through `deliveries` in arrival order on the owner, as it does network-path batches, and the last one delivered is the current one.
 
@@ -303,21 +322,23 @@ The sequence stamp the host takes for VPN reports (`VPNObservationSequencer`, `v
 
 ```swift
 extension ProxyOrchestrator {
-    /// The forwarder's split-DNS table from now on. Swaps the box, drops cached answers under the domains that entered or
-    /// left, emits `dns.split_table_changed`, and sets `snapshot.detectedSplitDNS` to `display`. Never restarts the
-    /// forwarder. Safe before the forwarder has started.
-    package func applySplitDNSTable(_ table: SplitDNSTable, display: DetectedSplitDNSDisplay) { notImplemented() }
+    /// The detected half of the forwarder's split-DNS table from now on. Stores `rules`, rebuilds the merged table as
+    /// `SplitDNSTable(manual: config.dnsEntries, detected: rules)`, and, when the merged table changed, swaps it, drops
+    /// cached answers under the domains that entered or left and emits `dns.split_table_changed`. Sets
+    /// `snapshot.detectedSplitDNS` to `display`. Never restarts the forwarder. Safe before the forwarder has started.
+    package func applyDetectedSplitDNSRules(_ rules: [SplitDNSRule], display: DetectedSplitDNSDisplay) { notImplemented() }
 }
 ```
 
-Inside: `splitDNSBox: NIOLockedValueBox<SplitDNSTable>` beside `vpnConnectedForDNSBox`; the forwarder is constructed with `splitDNSProvider: { [splitDNSBox] in splitDNSBox.withLockedValue { $0 } }`. The snapshot write goes through the orchestrator's private `mutateSnapshot`, as every other snapshot field does; the host has no other way to set it. `ProxyOrchestratorSnapshot` gains `detectedSplitDNS: DetectedSplitDNSDisplay`, decoding as `.none` when absent.
+Inside: `splitDNSBox`, a `NIOLockedValueBox` beside `vpnConnectedForDNSBox`, holds the detected rules and the merged table built from them. The orchestrator builds the merged table at init from the initial config, in `applyConfigChange` right after `config = newConfig`, and in `applyDetectedSplitDNSRules`. A query reads the cached table and never merges. The forwarder is constructed with `splitDNSProvider: { [splitDNSBox] in splitDNSBox.withLockedValue { $0.table } }`. When `applyConfigChange` changes the merged table, the orchestrator drops the differing domains from the response cache and emits `dns.split_table_changed reason=config` itself, so the host never pushes for a config change. The snapshot write goes through the orchestrator's private `mutateSnapshot`, as every other snapshot field does; the host has no other way to set it. `ProxyOrchestratorSnapshot` gains `detectedSplitDNS: DetectedSplitDNSDisplay`, decoding as `.none` when absent.
 
-Forwarder changes in `DNSResolutionCore.resolve(query:)`, unit 3:
+Forwarder changes, unit 3:
 
-- `let table = splitDNSProvider()` replaces `SplitDNSTable(entries: config.dnsEntries)`. Everything after that line is PR #298's and stays: the matched rule's servers in order, open circuits skipped, the stage budget, the 0043 fallback on silence, the one attempt on `firstServers` for a public name, and no internal answer cached.
-- `DNSWireFormat.enabledDNSEntryDomain(containing:config:)` and `isInternalDomain(_:config:)` have no production caller once the forwarder reads the box. Their tests in `DNSForwarderTests` move to `table.rule(matching:)` and both functions are deleted in the same unit, so nothing reads split DNS from config again. `.local` keeps `isMulticastDNSName`.
+- `LocalDNSForwarder.init` gains `splitDNSProvider: (@Sendable () -> SplitDNSTable)? = nil`. The orchestrator passes its box. When it is nil, `DNSResolutionCore` builds `SplitDNSTable(manual: configProvider().dnsEntries, detected: [])` per query, which is today's table. pm-dns, the pm-sim scenarios and the forwarder tests construct the forwarder with `configProvider` only, so they keep manual split DNS with no change.
+- In `DNSResolutionCore.resolve(query:)`, `let table = splitDNSProvider()` replaces `SplitDNSTable(entries: config.dnsEntries)`. Everything after that line is PR #298's and stays: the matched rule's servers in order, open circuits skipped, the stage budget, the 0043 fallback on silence, the one attempt on `firstServers` for a public name, and no internal answer cached.
+- `DNSWireFormat.enabledDNSEntryDomain(containing:config:)` and `isInternalDomain(_:config:)` have no production caller once the forwarder reads the provider. Their tests in `DNSForwarderTests` move to `table.rule(matching:)` and both functions are deleted in the same unit, so nothing outside `SplitDNSTable(manual:detected:)` reads split DNS from config again. `.local` keeps `isMulticastDNSName`.
 
-Manual entries reach the table from the host, not from `configProvider()`. `applyConfigChange` already restarts the forwarder on `dnsChanged`; the host also rebuilds the table from the new config in the same turn. A later subtraction can narrow `dnsChanged` so that an entries-only edit no longer restarts the listener, since the forwarder no longer reads entries from config. That is out of scope here.
+Manual entries reach the table from the orchestrator's own config, never from the host. The table therefore holds the manual entries whenever the host has pushed nothing: at launch before the first VPN report, with the VPN `.disconnected`, with `dns.followVPNResolvers` off, and in pm-proxy, which runs an orchestrator with no host. `applyConfigChange` still restarts the forwarder on `dnsChanged`. A later subtraction can narrow `dnsChanged` so that an entries-only edit no longer restarts the listener, since the forwarder reads entries through the table. That is out of scope here.
 
 The fence: `SplitDNSTable`, `SplitDNSRule` and `SplitDNSOrigin` are Foundation-only kernel values. `PushedResolver`, the observer protocol, the monitor, the fake and the policy are PlatformMac. The host imports both. Nothing new crosses toward the kernel but values.
 
@@ -331,7 +352,7 @@ If the owner chooses files for detected domains instead, `DNSManager`'s entry-fi
 
 **0043 silence fallback.** Unchanged in rule and narrowed in effect. On the VPN, detected rules answer, so the fallback rarely runs. Off the VPN, detected rules are absent, so names under those domains are public names. They take the public path, with no wait on a detected server and with caching, and with the one attempt on a manual first server only when a manual entry names one; the next table change drops those cached answers. Manual entries off the VPN keep the 0043 behaviour, with the wait paid per server until its circuit opens (PR #298). The privacy consequence recorded in 0043 (corporate names reaching DoH providers off-VPN) is unchanged for manual entries and applies off-VPN to detected domains as well; a never-public switch, deferred by owner decision 3, is where to narrow it later.
 
-**Office LAN.** No tunnel, nothing pushed, `detectedInUse` is `[]`. Manual entries apply, files withheld (VPN down), and the forwarder asks the manual servers, which answer on the LAN. The same as today; this design does not touch it, which is what the location-recovery design asks.
+**Office LAN.** No tunnel, nothing pushed, `detectedInUse` is `[]`. The orchestrator's table is `SplitDNSTable(manual: config.dnsEntries, detected: [])`, which equals today's table, so manual entries apply from launch whether or not the host has pushed anything. Files are withheld (VPN down), and the forwarder asks the manual servers, which answer on the LAN. That is the same as today, and this design does not touch it, which is what the location-recovery design asks. `RuntimeHostSplitDNSTests` proves it for a LAN launch with the VPN `.disconnected` and for detection off, and `ProxyOrchestratorSplitDNSTests` proves it for pm-proxy's headless path.
 
 ## Settings UI
 
@@ -362,12 +383,13 @@ Kind `health`, listed beside `dns.transports_reset` in [`events.md`](events.md).
 
 Unit, against values and fakes only:
 
-- `LiveSplitDNSPolicyTests`. The gate state and reading matrix: connected × non-empty applies, connected × empty keeps the held set, reasserting × empty keeps the held set, reasserting × non-empty replaces, disconnected × anything clears the held set, unknown applies the reading like connected. A non-empty reading that arrives before `.connected` and one that arrives after it end in the same `detectedInUse`. An empty reading on either side of `.disconnected` ends in `[]`. `table(manual:)`: shared domain merges detected first, manual rules before detected-only ones, caps enforced with ignored resolvers reported. The same resolvers delivered in shuffled order build the same table: detected-only rules sorted by `searchOrder`, a missing `searchOrder` last, ties by `serviceID`. Two detected resolvers naming one domain give one rule with the first resolver's servers, then the second's, each once. The 17th distinct domain in resolver order is dropped as `over_limit`. A domain with nine detected servers and two manual ones keeps eight detected servers, then both manual ones. A full-tunnel reading (`domains: [corp.example, eu.corp.example]`, `overridesPrimary: true`) yields a rule for each domain and none for public names. With no manual entries, the table's `firstServers` are the tunnel's servers while the set is in use and empty while the gate withholds it. A split-tunnel reading yields rules for its supplemental domains only.
+- `LiveSplitDNSPolicyTests`. The gate state and reading matrix: connected × non-empty applies, connected × empty keeps the held set, reasserting × empty keeps the held set, reasserting × non-empty replaces, disconnected × anything clears the held set, unknown applies the reading like connected. A non-empty reading that arrives before `.connected` and one that arrives after it end in the same `detectedInUse`. An empty reading on either side of `.disconnected` ends in `[]`. `detectedRules`: the same resolvers delivered in shuffled order build the same rules, sorted by `searchOrder`, a missing `searchOrder` last, ties by `serviceID`. Two detected resolvers naming one domain give one rule with the first resolver's servers, then the second's, each once. The 17th distinct domain in resolver order is dropped as `over_limit`. A domain with nine detected servers keeps eight and reports the ninth as `over_limit`. A full-tunnel reading (`domains: [corp.example, eu.corp.example]`, `overridesPrimary: true`) yields a rule for each domain and none for public names. With no manual entries, `SplitDNSTable(manual: [], detected: detectedRules).firstServers` are the tunnel's servers while the set is in use and empty while the gate withholds it. A split-tunnel reading yields rules for its supplemental domains only.
 - `PushedResolverMonitorTests`. The parser over the three fixture readings above, with their expected `domains` and `overridesPrimary`. `SupplementalMatchDomains` present wins over `DomainName` and `SearchDomains`; absent with `OverridePrimary` 1, the two are joined in that order and de-duplicated case-insensitively; absent without `OverridePrimary`, the key is rejected as `no_match_domains` and contributes no resolver; an invalid domain among them is returned as a rejection with reason `.invalidDomain` and the rest kept. Also the `InterfaceName` filter, `InterfaceName` read from IPv6 when IPv4 has none, a key with neither rejected as `not_tunnel`, a non-UUID service ID, system domains dropped and an invalid server dropped.
 - `AppStateSplitDNSHintTests` (AppState harness). A manual entry duplicating an in-use detected domain shows the hint; an idle detected set shows none; "Remove manual copy" removes the entry from the draft and the editor's normal save persists it; no configuration write comes from the runtime.
-- `SplitDNSTableTests` (from PR #298) gains the origins: a shared domain lists detected servers first with their origins, a server both name counts as detected, and `domainsDiffering(from:)` returns the domains that entered or left. PR #298 already covers longest suffix, per-rule servers, open circuits and the empty table in `SplitDNSTableTests` and `DNSForwarderHealthTests`.
-- `DNSForwarderTests`. The forwarder reads the provider, not config: a table pushed with no change to `dnsEntries` routes the next query. A table swap drops exactly the differing domains from the response cache. Decision 9's public-name path on a provider table: with only a detected rule in use, a public name gets one attempt on its first server and DoH answers when that server returns NXDOMAIN or no records; the server's answer with records is used and DoH is not asked; with the table empty, the server is never asked and DoH answers at once; an intercept rule and a cached answer still win before the attempt.
-- `RuntimeHostSplitDNSTests` (actual host over `FakeMachine`, `FakeVPNStatusObserver`, `FakePushedResolverObserver`). A primed reading plus `.connected` produces one `applySplitDNSTable` and one `dns.split_detected outcome=applied`; `.disconnected` produces the empty table; the snapshot field follows; `manageDNSResolvers` on writes files for manual entries only. Two readings with the same rejection emit one `dns.split_resolver_ignored`, and a third reading with a new rejection emits one more.
+- `SplitDNSTableTests` (from PR #298) gains the merge in `init(manual:detected:)`. With `detected` empty, the table equals `init(entries:)` for the same entries, rule for rule, with every origin `.manual`. A shared domain lists the detected servers first with their origins, then the manual servers not already listed, and a server both name counts as detected. Manual rules come before detected-only ones, in configuration order, then in `detected` order. A domain with eight detected servers and two manual ones keeps all ten, the manual ones last. `domainsDiffering(from:)` returns the domains that entered or left. PR #298 already covers longest suffix, per-rule servers, open circuits and the empty table in `SplitDNSTableTests` and `DNSForwarderHealthTests`.
+- `DNSForwarderTests`. The forwarder reads the provider, not config: a table pushed with no change to `dnsEntries` routes the next query. A forwarder built without `splitDNSProvider` routes a name under a manual entry to its servers, as today. A table swap drops exactly the differing domains from the response cache. Decision 9's public-name path on a provider table: with only a detected rule in use, a public name gets one attempt on its first server and DoH answers when that server returns NXDOMAIN or no records; the server's answer with records is used and DoH is not asked; with the table empty, the server is never asked and DoH answers at once; an intercept rule and a cached answer still win before the attempt.
+- `RuntimeHostSplitDNSTests` (actual host over `FakeMachine`, `FakeVPNStatusObserver`, `FakePushedResolverObserver`). A primed reading plus `.connected` produces one `applyDetectedSplitDNSRules` and one `dns.split_detected outcome=applied`; `.disconnected` pushes no detected rules and leaves the manual ones; the snapshot field follows; a launch on a LAN with manual entries only, the VPN `.disconnected` and nothing pushed resolves a name under a manual entry through its manual servers; with `dns.followVPNResolvers` off the monitor never starts and the same name resolves through the manual servers; `manageDNSResolvers` on writes files for manual entries only. Two readings with the same rejection emit one `dns.split_resolver_ignored`, and a third reading with a new rejection emits one more.
+- `ProxyOrchestratorSplitDNSTests`. pm-proxy's headless path: an orchestrator built from a config with manual entries, started with its forwarder and never sent `applyDetectedSplitDNSRules`, as `PMProxy.swift` runs it, resolves a name under a manual entry through its manual servers. A config change that edits `dnsEntries` rebuilds the merged table and emits `dns.split_table_changed reason=config`, and the detected rules last pushed stay in it.
 - `SplitDNSVPNGateTests` and `DNSManagerVPNGatingTests` unchanged, which is the point.
 
 pm-sim, registered in `pm-sim all`:
@@ -402,7 +424,7 @@ All nine are decided (owner, 2026-11-10, [#295 comment](https://github.com/srps/
 Five verifiable units, each green on its own, in this order. Unit 1 is delivered.
 
 1. **Kernel table. Delivered by PR #298 (ab2ffe32).** `SplitDNSTable` built from `config.dnsEntries` per query, per-rule servers in order, longest suffix, per-server circuits, the internal stage budget, and no internal attempt when no rule has a server, which removed the `192.0.2.53` wait (#296). The design's shape differs from what shipped in two ways that the later units close: rules carry no `origins`, and the forwarder builds the table from config instead of reading a box.
-2. **Platform inputs.** `PushedResolver`, `PushedResolverObserving`, `PushedResolverMonitor`, the fake, `LiveSplitDNSPolicy`. In the kernel, `SplitDNSOrigin` and `SplitDNSRule.origins`, with `init(entries:)` marking every server `.manual`. Pure tests and the parser fixture from the owner's VPN.
-3. **Host wiring.** `RuntimeHostEffects.pushedResolvers`, the policy in `RuntimeHost`, `applySplitDNSTable(_:display:)`, the four events, the two pm-sim scenarios, `events.md`. The snapshot field: `DetectedSplitDNSDisplay` and `ProxyOrchestratorSnapshot.detectedSplitDNS` in the kernel, `ControlDetectedSplitDNS` and its rows in `ConduitShared` with their `ControlRuntimeSizing` measures and `ControlDisplayRecordCodec` caps, and the projection in `ProxyControlBridge`. In the kernel, `domainsDiffering(from:)`, `splitDNSBox`, a `DNSResponseCache` method that removes the entries at or under a set of domains and returns how many it removed (the cache has only `clear()` today), and the forwarder's `splitDNSProvider`, which replaces `SplitDNSTable(entries: config.dnsEntries)`. `enabledDNSEntryDomain(containing:config:)` and `isInternalDomain(_:config:)` are deleted.
+2. **Platform inputs.** `PushedResolver`, `PushedResolverObserving`, `PushedResolverMonitor`, the fake, `LiveSplitDNSPolicy`. In the kernel, `SplitDNSOrigin`, `SplitDNSRule.origins` and `SplitDNSTable.init(manual:detected:)`, which owns the merge; `init(entries:)` callers move to it and `init(entries:)` is deleted. Pure tests and the parser fixture from the owner's VPN.
+3. **Host wiring.** `RuntimeHostEffects.pushedResolvers`, the policy in `RuntimeHost`, `applyDetectedSplitDNSRules(_:display:)`, the four events, the two pm-sim scenarios, `events.md`. The snapshot field: `DetectedSplitDNSDisplay` and `ProxyOrchestratorSnapshot.detectedSplitDNS` in the kernel, `ControlDetectedSplitDNS` and its rows in `ConduitShared` with their `ControlRuntimeSizing` measures and `ControlDisplayRecordCodec` caps, and the projection in `ProxyControlBridge`. In the kernel, `domainsDiffering(from:)`, `splitDNSBox` with the merged table rebuilt at init, in `applyConfigChange` and in `applyDetectedSplitDNSRules`, a `DNSResponseCache` method that removes the entries at or under a set of domains and returns how many it removed (the cache has only `clear()` today), and the forwarder's optional `splitDNSProvider`, which replaces `SplitDNSTable(entries: config.dnsEntries)`. `enabledDNSEntryDomain(containing:config:)` and `isInternalDomain(_:config:)` are deleted.
 4. **App.** Settings groups, the duplicate-entry hint, wizard, `VPNDNSDetector` deleted, compositions supply the observer.
 5. **Validation.** The owner validation above, recorded in decision 0044, which moves its statuses as each unit lands. The record itself lands with this design, and 0043's open question on the first server already points to #290 part 1 and to 0044.
