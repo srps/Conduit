@@ -233,16 +233,24 @@ final class DNSForwarderHealthTests: XCTestCase {
 
     // MARK: - #290: per-server circuits
 
+    /// The circuit opens on the third silence, here counted by the one
+    /// internal attempt a public name makes. The probe a skipping lookup
+    /// sends runs for the split-DNS timeout, 20 s here, so it is still out
+    /// while the three skipping lookups run and are settled (10 s at most):
+    /// no second probe can start while the first is in flight. With one
+    /// 50 ms timeout for both, the probe timed out between the skipping
+    /// lookups under CI load and each of them sent a new one.
     @MainActor
     func testSilentServerOpensItsCircuitAfterThreeSilencesAndIsSkipped() async throws {
         let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
         let doh = try await provider(ip: "198.51.100.7")
         let port = try await startForwarder(
             entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
-            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .milliseconds(50)
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port,
+            internalTimeout: .milliseconds(50), internalDomainTimeout: .seconds(20)
         )
         for index in 0..<3 {
-            let reply = try await ask(DNSWireFormat.buildQuery(domain: "wait-\(index).corp.example", txID: 0x7500 + UInt16(index)), port: port)
+            let reply = try await ask(DNSWireFormat.buildQuery(domain: "wait-\(index).example", txID: 0x7500 + UInt16(index)), port: port)
             XCTAssertEqual(reply.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "198.51.100.7", "silence falls back")
         }
         XCTAssertEqual(internalServer.queryCount, 3, "each of the first three lookups waited on the server")
@@ -250,11 +258,11 @@ final class DNSForwarderHealthTests: XCTestCase {
         XCTAssertEqual(opened.map(\.detail), ["server=192.0.2.1 silences=3 suppressed=0"])
         XCTAssertEqual(opened.first?.kind, .health)
 
-        for index in 0..<3 {
-            let reply = try await ask(DNSWireFormat.buildQuery(domain: "skip-\(index).corp.example", txID: 0x7510 + UInt16(index)), port: port)
-            XCTAssertEqual(reply.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "198.51.100.7")
-        }
-        XCTAssertEqual(internalServer.queryCount, 4, "three skipped lookups sent one probe between them")
+        let skipping = (0..<3).map { DNSWireFormat.buildQuery(domain: "skip-\($0).corp.example", txID: 0x7510 + UInt16($0)) }
+        let collector = try await client(sending: skipping, to: port)
+        try await settle(until: { collector.replies().count == skipping.count }, "every skipping lookup takes the fallback")
+        XCTAssertEqual(Set(collector.replies().compactMap { DNSWireFormat.firstIPv4Answer(in: $0)?.ip }), ["198.51.100.7"])
+        XCTAssertEqual(internalServer.queryCount, 4, "three skipping lookups shared one probe")
         XCTAssertEqual(events(named: "dns.internal_server_circuit_closed").count, 0)
         XCTAssertEqual(ownedForwarder?.metricCounts?.dohFallbacks, 6)
     }
@@ -364,15 +372,17 @@ final class DNSForwarderHealthTests: XCTestCase {
     /// Starts the owned forwarder: `entries` as the split-DNS table, each
     /// configured server address reached on its loopback port in
     /// `endpoints`, one cleartext DoH provider on `dohPort`, and both internal
-    /// timeouts set to `internalTimeout`. `beforeInternalConnect` runs on the
-    /// lookup's task right before each internal datagram connect. Returns the
-    /// UDP port.
+    /// timeouts set to `internalTimeout` unless `internalDomainTimeout` sets
+    /// the split-DNS one apart. `beforeInternalConnect` runs on the lookup's
+    /// task right before each internal datagram connect. Returns the UDP
+    /// port.
     @MainActor
     private func startForwarder(
         entries: [DomainDNSEntry],
         endpoints: [String: Int],
         dohPort: Int,
         internalTimeout: TimeAmount,
+        internalDomainTimeout: TimeAmount? = nil,
         interceptRules: [DNSInterceptRule] = [],
         defaultInternalPort: Int = 53,
         group: EventLoopGroup? = nil,
@@ -392,7 +402,7 @@ final class DNSForwarderHealthTests: XCTestCase {
             beforeInternalConnect?()
             return ("127.0.0.1", endpoints[server] ?? defaultInternalPort)
         }
-        tuning.internalDomainTimeout = internalTimeout
+        tuning.internalDomainTimeout = internalDomainTimeout ?? internalTimeout
         tuning.internalAttemptTimeout = internalTimeout
         let events = events
         let forwarder = LocalDNSForwarder(
