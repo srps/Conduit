@@ -1,5 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
+import ConduitShared
 import Foundation
+
+/// Where a rule's server came from. The forwarder does not branch on it;
+/// events and the UI do.
+package enum SplitDNSOrigin: Hashable, Sendable {
+    /// An enabled `DomainDNSEntry`.
+    case manual
+    /// Pushed by the tunnel on this interface.
+    case detected(interface: String)
+}
 
 /// One split-DNS domain and the servers asked for names at or under it, in
 /// the order they are tried.
@@ -9,16 +19,21 @@ package struct SplitDNSRule: Hashable, Sendable {
     /// IP literals in the order they are asked. Empty when the entry names
     /// none: its names are still split-DNS names, with no server to ask.
     package let servers: [String]
+    /// One per server, parallel to `servers`; `[.manual]` for a manual entry
+    /// that names no server.
+    package let origins: [SplitDNSOrigin]
 
-    package init(domain: String, servers: [String]) {
+    package init(domain: String, servers: [String], origins: [SplitDNSOrigin]) {
+        assert(servers.isEmpty ? origins == [.manual] : origins.count == servers.count)
         self.domain = domain
         self.servers = servers
+        self.origins = origins
     }
 }
 
 /// What the forwarder consults for a name: built whole from the enabled
-/// `dnsEntries`, one rule per domain, never mutated in place. The live table
-/// of `docs/design-live-vpn-split-dns.md` builds on this value.
+/// `dnsEntries` and the rules a tunnel pushed, one rule per domain, never
+/// mutated in place. See `docs/design-live-vpn-split-dns.md`.
 package struct SplitDNSTable: Hashable, Sendable {
     package static let empty = SplitDNSTable(rules: [])
 
@@ -28,13 +43,21 @@ package struct SplitDNSTable: Hashable, Sendable {
         self.rules = rules
     }
 
-    /// The enabled entries, merged per lowercased domain in configuration
-    /// order. Two entries for one domain contribute their servers in that
-    /// order, each server once.
-    package init(entries: [DomainDNSEntry]) {
+    /// The one merge of manual and detected split DNS.
+    ///
+    /// The enabled `manual` entries come first, merged per lowercased domain
+    /// in configuration order, each server once; then the domains only
+    /// `detected` names, in `detected` order. Rule order decides
+    /// `firstServers`, so configuration keeps the first server it gives. A
+    /// domain in both asks its detected servers first, then the manual ones
+    /// not already listed, and a server both name counts as detected. Detected
+    /// rules arrive capped at `DomainResourceLimits.dnsServers` servers
+    /// (`LiveSplitDNSPolicy` cuts them); manual servers are appended uncounted.
+    /// With `detected` empty, every origin is `.manual`.
+    package init(manual: [DomainDNSEntry], detected: [SplitDNSRule]) {
         var order: [String] = []
         var servers: [String: [String]] = [:]
-        for entry in entries where entry.enabled {
+        for entry in manual where entry.enabled {
             let domain = Self.normalize(entry.domain)
             guard !domain.isEmpty else { continue }
             if servers[domain] == nil { order.append(domain) }
@@ -44,7 +67,26 @@ package struct SplitDNSTable: Hashable, Sendable {
             }
             servers[domain] = list
         }
-        rules = order.map { SplitDNSRule(domain: $0, servers: servers[$0] ?? []) }
+        var detectedOrder: [String] = []
+        var detectedByDomain: [String: SplitDNSRule] = [:]
+        for rule in detected where detectedByDomain[rule.domain] == nil {
+            assert(rule.servers.count <= DomainResourceLimits.dnsServers, "detected rules arrive capped")
+            detectedOrder.append(rule.domain)
+            detectedByDomain[rule.domain] = rule
+        }
+        let manualRules = order.map { domain -> SplitDNSRule in
+            let list = servers[domain] ?? []
+            guard let pushed = detectedByDomain[domain] else {
+                return SplitDNSRule(domain: domain, servers: list, origins: Array(repeating: .manual, count: max(list.count, 1)))
+            }
+            let manualOnly = list.filter { !pushed.servers.contains($0) }
+            return SplitDNSRule(
+                domain: domain,
+                servers: pushed.servers + manualOnly,
+                origins: pushed.origins + manualOnly.map { _ in .manual }
+            )
+        }
+        rules = manualRules + detectedOrder.filter { servers[$0] == nil }.compactMap { detectedByDomain[$0] }
     }
 
     /// The rule whose domain is `name` or the longest suffix of `name` on a
@@ -72,5 +114,43 @@ package struct SplitDNSTable: Hashable, Sendable {
         var lower = domain.lowercased()
         while lower.hasSuffix(".") { lower.removeLast() }
         return lower
+    }
+}
+
+/// What Settings shows of the detected set, built by `LiveSplitDNSPolicy`.
+package struct DetectedSplitDNSDisplay: Hashable, Sendable, Codable {
+    package enum State: String, Hashable, Sendable, Codable {
+        /// The gate allows and the last reading, non-empty, is the set in use.
+        case inUse
+        /// The gate allows and an empty reading kept the previous set in use.
+        case held
+        /// The gate withholds; the rows are the last reading, unused.
+        case idle
+    }
+
+    package struct Row: Hashable, Sendable, Codable {
+        package let interface: String
+        package let domains: [String]
+        package let servers: [String]
+
+        package init(interface: String, domains: [String], servers: [String]) {
+            self.interface = interface
+            self.domains = domains
+            self.servers = servers
+        }
+    }
+
+    package static let none = DetectedSplitDNSDisplay(state: .idle, rows: [])
+
+    package let state: State
+    /// One per resolver the policy kept, in resolver order. Each kept domain
+    /// appears once, under the first resolver that kept it, and a row left
+    /// with no domain is omitted. A row's servers are the resolver's kept
+    /// servers.
+    package let rows: [Row]
+
+    package init(state: State, rows: [Row]) {
+        self.state = state
+        self.rows = rows
     }
 }
