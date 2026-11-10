@@ -96,8 +96,10 @@ final class DNSForwarderHealthTests: XCTestCase {
         let queries = (0..<8).map { DNSWireFormat.buildQuery(domain: "host-\($0).corp.example", txID: 0x7200 + UInt16($0)) }
         let collector = try await client(sending: queries, to: port)
 
-        try await settle(until: { forwarder.inFlightQueryCount == queries.count }, "every lookup is waiting on the silent server")
-        XCTAssertEqual(internalServer.queryCount, queries.count)
+        // A lookup holds its slot before its datagram reaches the server, so
+        // the server's count is the one to settle on; the slot follows.
+        try await settle(until: { internalServer.queryCount == queries.count }, "every lookup is waiting on the silent server")
+        XCTAssertEqual(forwarder.inFlightQueryCount, queries.count, "every waiting lookup holds its slot")
 
         forwarder.resetUpstreamTransports(reason: "network_change")
 
