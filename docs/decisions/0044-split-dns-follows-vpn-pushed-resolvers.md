@@ -45,7 +45,7 @@ Split-DNS entries are a snapshot that the setup wizard and the Settings "Auto-de
 - Off the VPN, names under detected-only domains are public names: no wait on a detected server, cached, and visible to the DoH providers, as 0043 already allows for manual entries.
 - A user with no manual entries gains one attempt on the tunnel's first server for public names, only while the detected set is in use. Off the VPN the set is withheld, so no attempt is made, as today (#296).
 - A manual entry removed through the hint no longer applies on networks that push nothing, such as an office LAN. The hint only offers the removal, and nothing removes configuration without the user's click.
-- Two new ceilings (16 detected domains, servers per domain) join the bounded collections, approved here.
+- Two new ceilings (16 detected domains, servers per domain) join the bounded collections, approved here. The design adds a 16-resolver cap so the Settings display's row count has a bound the codec can never refuse.
 - `overridesPrimary` is recorded, and only decision 8's full-tunnel domain rule reads it, so a later change on full-tunnel public names needs no new reading.
 
 ## Invariants and verification
