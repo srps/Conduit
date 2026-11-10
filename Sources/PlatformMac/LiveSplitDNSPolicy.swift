@@ -42,11 +42,12 @@ package struct LiveSplitDNSPolicy: Hashable, Sendable {
     /// resolvers of every service it names and keeps the rest, because tunnel
     /// clients withdraw and republish their DNS key inside a flap, and a flap
     /// must change nothing a client can see, whichever observer reports first
-    /// and whatever another tunnel publishes meanwhile. Under `.connected` a
-    /// kept resolver whose tunnel is no longer live leaves, so a second tunnel
-    /// staying up does not keep the first one's servers in use. `.reasserting`
-    /// and `.unknown` do not filter: the grace window bounds the first, and
-    /// under the second no tunnel is admitted yet.
+    /// and whatever another tunnel publishes meanwhile. Under `.connected` only
+    /// a resolver whose tunnel is live is in use, fresh or kept, so a second
+    /// tunnel staying up does not keep the first one's servers in use, and a
+    /// replayed reading does not put them back. `.reasserting` and `.unknown`
+    /// do not filter: the grace window bounds the first, and under the second
+    /// no tunnel is admitted yet.
     private var heldThroughFlap: [PushedResolver] = []
 
     /// `[]` while the gate withholds (`.disconnected`); the held set otherwise,
@@ -82,20 +83,17 @@ package struct LiveSplitDNSPolicy: Hashable, Sendable {
     ) -> Bool {
         let before = (detectedRules, display)
         lastReading = reading
-        let fresh = Self.resolverOrder(reading.resolvers)
-        let republished = Set(fresh.map(\.serviceID))
+        let ordered = Self.resolverOrder(reading.resolvers)
+        let isLive: (PushedResolver) -> Bool
         switch gate.lastVPNState {
-        case .disconnected:
-            heldThroughFlap = []
-        case .connected:
-            let kept = heldThroughFlap.filter {
-                !republished.contains($0.serviceID) && liveInterfaces.contains($0.interface)
-            }
-            heldThroughFlap = Self.resolverOrder(fresh + kept)
-        case .reasserting, .unknown:
-            let kept = heldThroughFlap.filter { !republished.contains($0.serviceID) }
-            heldThroughFlap = Self.resolverOrder(fresh + kept)
+        case .connected: isLive = { liveInterfaces.contains($0.interface) }
+        case .reasserting, .unknown: isLive = { _ in true }
+        case .disconnected: isLive = { _ in false }
         }
+        let fresh = ordered.filter(isLive)
+        let republished = Set(ordered.map(\.serviceID))
+        let kept = heldThroughFlap.filter { isLive($0) && !republished.contains($0.serviceID) }
+        heldThroughFlap = Self.resolverOrder(fresh + kept)
 
         let withheld = !gate.entriesWanted
         detectedInUse = withheld ? [] : heldThroughFlap
@@ -103,7 +101,7 @@ package struct LiveSplitDNSPolicy: Hashable, Sendable {
         detectedRules = bounded.rules
         ignored = Set(reading.rejections).union(bounded.excess)
         if withheld {
-            display = DetectedSplitDNSDisplay(state: .idle, rows: Self.bound(fresh, limits).rows)
+            display = DetectedSplitDNSDisplay(state: .idle, rows: Self.bound(ordered, limits).rows)
         } else {
             let held = fresh.isEmpty && !detectedInUse.isEmpty
             display = DetectedSplitDNSDisplay(state: held ? .held : .inUse, rows: bounded.rows)
