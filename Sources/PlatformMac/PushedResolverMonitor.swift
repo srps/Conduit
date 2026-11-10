@@ -136,8 +136,8 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
         }
         guard setNotificationKeys(store, Self.notificationPatterns as CFArray),
               setDispatchQueue(store, monitorQueue) else {
+            // No queue was attached, and releasing the store drops its keys.
             // Nothing is recorded, so a stop and start retries from scratch.
-            _ = setDispatchQueue(store, nil)
             retained.release()
             deliver(PushedResolverReading(failure: .storeSubscribe))
             return

@@ -113,7 +113,7 @@ package struct SplitDNSTable: Hashable, Sendable {
 /// `LiveSplitDNSPolicy.display` returns it; the snapshot field and the projection are unit 3.  [unit 2]
 package struct DetectedSplitDNSDisplay: Hashable, Sendable, Codable {
     package enum State: String, Hashable, Sendable, Codable {
-        case inUse                       // the gate allows and the last reading, non-empty, is the set in use, `.reasserting` included
+        case inUse                       // the gate allows and the reading is non-empty: its resolvers plus any held ones it does not name, `.reasserting` included
         case held                        // the gate allows and an empty reading kept the previous set in use
         case idle                        // `.disconnected`: rows are the last reading, capped the same way, unused
     }

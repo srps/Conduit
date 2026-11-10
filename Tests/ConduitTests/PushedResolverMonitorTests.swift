@@ -252,6 +252,23 @@ final class PushedResolverMonitorTests: XCTestCase {
         assertFailedSubscriptionThenCleanRestart(monitor)
     }
 
+    func testAFailedSubscriptionDoesNotKeepTheMonitorAlive() {
+        weak var released: PushedResolverMonitor?
+        do {
+            let failsOnce = FailsOnce()
+            let monitor = PushedResolverMonitor(setNotificationKeys: { store, keys in
+                failsOnce.attempt() && SCDynamicStoreSetNotificationKeys(store, nil, keys)
+            })
+            released = monitor
+            XCTAssertEqual(readings(afterStarting: monitor), [PushedResolverReading(failure: .storeSubscribe)])
+            monitor.stop()
+        }
+        // installStore may still be returning on the monitor's queue after it
+        // delivered; give that frame a bounded moment to unwind.
+        for _ in 0..<200 where released != nil { Thread.sleep(forTimeInterval: 0.01) }
+        XCTAssertNil(released, "a failed subscribe releases the retain it took for the store context")
+    }
+
     private func assertFailedSubscriptionThenCleanRestart(
         _ monitor: PushedResolverMonitor, file: StaticString = #filePath, line: UInt = #line
     ) {
