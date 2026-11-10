@@ -111,13 +111,23 @@ package struct DetectedSplitDNSDisplay: Hashable, Sendable, Codable {
 
 One rule per domain. When a detected resolver and a manual entry name the same domain, the rule's servers are the detected servers first, then manual servers not already listed, and `origins` records which is which. A server both name counts as detected. Longest suffix wins between rules, so a detected `eu.corp.example` beats a manual `corp.example` for names under it. These are the two precedence rules; there are no others.
 
-Rule order decides `firstServers`, the one internal attempt a public name makes. `LiveSplitDNSPolicy.table(manual:limits:)` lists the manual rules in configuration order, as `init(entries:)` does today, then the detected-only domains in reading order. A user with manual entries keeps today's first server, or the detected server ahead of it when the first manual domain is also pushed. A user with no manual entries gets the tunnel's first server while it is in use and no internal attempt while it is not.
+Detected resolvers have one order, the resolver order, so the same store contents always build the same table. `LiveSplitDNSPolicy` sorts `detectedInUse` by `searchOrder` ascending, with a missing `searchOrder` last, then by `serviceID`. The order in which the store lists its keys never matters. The resolver order decides three things:
+
+- The order of the detected-only rules in the table.
+- Which domains the 16-domain cap keeps: the first 16 distinct domains in resolver order. The rest are reported as `over_limit`.
+- The servers of a domain that two detected resolvers both name: the first resolver's servers, then the second's not already listed.
+
+The per-domain server cap applies to the detected servers, before the merge. `DomainResourceLimits.dnsServers` (8) caps the detected list of each domain, and a detected server past the cap is reported as `over_limit`. Manual servers for the same domain are then appended after the detected ones, never displaced and never counted against that cap. Manual entries are already bounded by the same limit at the configuration boundary.
+
+Rule order decides `firstServers`, the one internal attempt a public name makes. `LiveSplitDNSPolicy.table(manual:limits:)` lists the manual rules in configuration order, as `init(entries:)` does today, then the detected-only domains in resolver order. A user with manual entries keeps today's first server, or the detected server ahead of it when the first manual domain is also pushed. A user with no manual entries gets the tunnel's first server while it is in use and no internal attempt while it is not.
 
 ### Platform values (`PlatformMac`)
 
 ```swift
-/// A resolver a tunnel pushed, as the dynamic store holds it. One per (interface, domain set).
+/// A resolver a tunnel pushed, as the dynamic store holds it. One per service DNS key.
 package struct PushedResolver: Hashable, Sendable {
+    package let serviceID: String        // "com.cisco.anyconnect", the `<id>` in `State:/Network/Service/<id>/DNS`
+    package let searchOrder: Int?        // the DNS dictionary's `SearchOrder`; nil when absent
     package let interface: String        // "utun4"
     /// `SupplementalMatchDomains` when the DNS key has any. Otherwise `DomainName` then `SearchDomains`,
     /// the full-tunnel case. Lowercased, no trailing dot, each once, valid under `DNSManager.validateDomain` (`DomainNameSyntax`).
@@ -157,7 +167,7 @@ package struct LiveSplitDNSPolicy: Sendable {
     /// `.connected`, `.reasserting` or `.unknown` keeps the set in use.
     package private(set) var detectedInUse: [PushedResolver] = []
 
-    /// Manual entries plus `detectedInUse`, validated, bounded, merged per domain.
+    /// Manual entries plus `detectedInUse` in resolver order, bounded, merged per domain.
     package func table(manual: [DomainDNSEntry], limits: SplitDNSLimits) -> SplitDNSTable { notImplemented() }
 
     /// `detectedInUse` with its state, or the last reading as `.idle` when the gate withholds.
@@ -166,7 +176,7 @@ package struct LiveSplitDNSPolicy: Sendable {
 
 package struct SplitDNSLimits: Sendable {
     package var maxDetectedDomains: Int      // 16, owner decision 6
-    package var maxServersPerDomain: Int     // `DomainResourceLimits.dnsServers`, the manual ceiling, reused
+    package var maxServersPerDomain: Int     // `DomainResourceLimits.dnsServers`, applied to detected servers before manual ones are appended
 }
 ```
 
@@ -316,7 +326,7 @@ Kind `health`, listed beside `dns.transports_reset` in [`events.md`](events.md).
 
 Unit, against values and fakes only:
 
-- `LiveSplitDNSPolicyTests`. The gate state and reading matrix: connected × non-empty applies, connected × empty keeps the held set, reasserting × empty keeps the held set, reasserting × non-empty replaces, disconnected × anything clears the held set, unknown applies the reading like connected. A non-empty reading that arrives before `.connected` and one that arrives after it end in the same `detectedInUse`. An empty reading on either side of `.disconnected` ends in `[]`. `table(manual:limits:)`: shared domain merges detected first, manual rules before detected-only ones, caps enforced with ignored resolvers reported. A full-tunnel reading (`domains: [corp.example, eu.corp.example]`, `overridesPrimary: true`) yields a rule for each domain and none for public names, so a public name still takes the DoH path. A split-tunnel reading yields rules for its supplemental domains only.
+- `LiveSplitDNSPolicyTests`. The gate state and reading matrix: connected × non-empty applies, connected × empty keeps the held set, reasserting × empty keeps the held set, reasserting × non-empty replaces, disconnected × anything clears the held set, unknown applies the reading like connected. A non-empty reading that arrives before `.connected` and one that arrives after it end in the same `detectedInUse`. An empty reading on either side of `.disconnected` ends in `[]`. `table(manual:limits:)`: shared domain merges detected first, manual rules before detected-only ones, caps enforced with ignored resolvers reported. The same resolvers delivered in shuffled order build the same table: detected-only rules sorted by `searchOrder`, a missing `searchOrder` last, ties by `serviceID`. Two detected resolvers naming one domain give one rule with the first resolver's servers, then the second's, each once. The 17th distinct domain in resolver order is dropped as `over_limit`. A domain with nine detected servers and two manual ones keeps eight detected servers, then both manual ones. A full-tunnel reading (`domains: [corp.example, eu.corp.example]`, `overridesPrimary: true`) yields a rule for each domain and none for public names, so a public name still takes the DoH path. A split-tunnel reading yields rules for its supplemental domains only.
 - `PushedResolverMonitorTests`. The parser over the three fixture readings above, with their expected `domains` and `overridesPrimary`. `SupplementalMatchDomains` present wins over `DomainName` and `SearchDomains`; absent, the two are joined in that order and de-duplicated case-insensitively; an invalid domain among them is dropped with `dns.split_resolver_ignored reason=invalid_domain` and the rest kept. Also the `InterfaceName` filter, a non-UUID service ID, system domains dropped and an invalid server dropped.
 - `AppStateSplitDNSHintTests` (AppState harness). A manual entry duplicating an in-use detected domain shows the hint; an idle detected set shows none; "Remove manual copy" removes the entry from the draft and the editor's normal save persists it; no configuration write comes from the runtime.
 - `SplitDNSTableTests` (from PR #298) gains the origins: a shared domain lists detected servers first with their origins, a server both name counts as detected, and `domainsDiffering(from:)` returns the domains that entered or left. PR #298 already covers longest suffix, per-rule servers, open circuits and the empty table in `SplitDNSTableTests` and `DNSForwarderHealthTests`.
