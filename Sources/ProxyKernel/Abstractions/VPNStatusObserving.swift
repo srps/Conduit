@@ -27,10 +27,15 @@ package protocol VPNStatusObserving: AnyObject, Sendable {
     /// the state just delivered. Observers with no interface to name (the
     /// fake, a path-monitor fallback) take the default.
     var connectedInterfaceName: String? { get }
+
+    /// Every utun the observer has not declared gone, flapping ones included,
+    /// in name order. Read inside `onChange`, like `connectedInterfaceName`.
+    var liveInterfaceNames: [String] { get }
 }
 
 extension VPNStatusObserving {
     package var connectedInterfaceName: String? { nil }
+    package var liveInterfaceNames: [String] { [] }
 }
 
 /// Test/sim injection point. Drives the orchestrator's VPN-state plumbing
@@ -41,6 +46,7 @@ package final class FakeVPNStatusObserver: VPNStatusObserving, @unchecked Sendab
     private let onChangeBox = NIOLockedValueBox<(@Sendable (VPNObservedState) -> Void)?>(nil)
     private let startedBox = NIOLockedValueBox<Bool>(false)
     private let interfaceBox = NIOLockedValueBox<String?>(nil)
+    private let liveInterfacesBox = NIOLockedValueBox<[String]>([])
     private let primedBox = NIOLockedValueBox<VPNObservedState?>(nil)
 
     package init() {}
@@ -51,6 +57,13 @@ package final class FakeVPNStatusObserver: VPNStatusObserving, @unchecked Sendab
     package var connectedInterfaceName: String? {
         get { interfaceBox.withLockedValue { $0 } }
         set { interfaceBox.withLockedValue { $0 = newValue } }
+    }
+
+    /// Settable so a test can name the live tunnels behind the state it is
+    /// about to emit.
+    package var liveInterfaceNames: [String] {
+        get { liveInterfacesBox.withLockedValue { $0 } }
+        set { liveInterfacesBox.withLockedValue { $0 = newValue } }
     }
 
     package func setOnChange(_ onChange: @Sendable @escaping (VPNObservedState) -> Void) {

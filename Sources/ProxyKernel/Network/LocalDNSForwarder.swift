@@ -813,7 +813,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
 
         let domain = DNSWireFormat.extractDomainName(from: queryBytes)
         let config = configProvider()
-        let table = SplitDNSTable(entries: config.dnsEntries)
+        let table = SplitDNSTable(manual: config.dnsEntries, detected: [])
         let rule = table.rule(matching: domain)
         let isInternal = rule != nil || DNSWireFormat.isMulticastDNSName(domain)
         let queryType = DNSWireFormat.extractQueryType(from: queryBytes)

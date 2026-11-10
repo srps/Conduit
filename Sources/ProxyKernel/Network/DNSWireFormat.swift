@@ -227,7 +227,7 @@ package enum DNSWireFormat {
     /// The domain of the enabled split-DNS entry that `domain` is at or under,
     /// the longest when several match, lowercased, or nil when there is none.
     package static func enabledDNSEntryDomain(containing domain: String, config: ProxyConfig) -> String? {
-        SplitDNSTable(entries: config.dnsEntries).rule(matching: domain)?.domain
+        SplitDNSTable(manual: config.dnsEntries, detected: []).rule(matching: domain)?.domain
     }
 
     /// Whether `domain` is a `.local` name, which belongs to multicast DNS and

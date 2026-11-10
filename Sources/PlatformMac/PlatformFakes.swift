@@ -1004,6 +1004,47 @@ package final class FakeNetworkPathObserver: NetworkPathObserving, @unchecked Se
     }
 }
 
+/// Stands in for `PushedResolverMonitor`. `primedReading`, when set, is
+/// delivered on each stopped-to-started transition, as the monitor reports
+/// its first read; `emit` delivers only between `start()` and `stop()`. Both
+/// run the callback on the calling thread. Mirrors `FakeVPNStatusObserver`.
+package final class FakePushedResolverObserver: PushedResolverObserving, @unchecked Sendable {
+    private let lock = NSLock()
+    private var callback: (@Sendable (PushedResolverReading) -> Void)?
+    private var started = false
+    private var primed: PushedResolverReading?
+
+    package init() {}
+
+    package var primedReading: PushedResolverReading? {
+        get { lock.withLock { primed } }
+        set { lock.withLock { primed = newValue } }
+    }
+
+    /// Whether `start()` has been called since the last `stop()`.
+    package var isObserving: Bool { lock.withLock { started } }
+
+    package func setOnChange(_ onChange: @Sendable @escaping (PushedResolverReading) -> Void) {
+        lock.withLock { callback = onChange }
+    }
+
+    package func start() {
+        let delivery = lock.withLock { () -> (() -> Void)? in
+            defer { started = true }
+            guard !started, let primed, let callback else { return nil }
+            return { callback(primed) }
+        }
+        delivery?()
+    }
+
+    package func stop() { lock.withLock { started = false } }
+
+    package func emit(_ reading: PushedResolverReading) {
+        let delivery = lock.withLock { started ? callback : nil }
+        delivery?(reading)
+    }
+}
+
 // MARK: - Updates
 
 /// Stands in for the nested updater: records each start, can refuse them,

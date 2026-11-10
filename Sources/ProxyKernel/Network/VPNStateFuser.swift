@@ -238,6 +238,17 @@ package struct VPNStateFuser {
             .sorted()
     }
 
+    /// Every interface the fuser has not declared gone, in name order:
+    /// connected, debouncing or awaiting recovery. Unlike
+    /// `connectedInterfaceNames` it keeps a flapping utun while another
+    /// carries the verdict, so a consumer can tell a flap from a removal.
+    package var liveInterfaceNames: [String] {
+        interfaces
+            .filter { [.connected, .linkDownDebouncing, .linkDownAwaitingRecovery].contains($0.value.phase) }
+            .map(\.key)
+            .sorted()
+    }
+
     /// Records the verdict of a *complete* sweep of the utun key space that
     /// found no tunnel carrying IPv4.
     ///
