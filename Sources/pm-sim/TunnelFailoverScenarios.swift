@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: Apache-2.0
+import Foundation
+import NIOConcurrencyHelpers
+import NIOCore
+import NIOPosix
+import ProxyKernel
+
+enum TunnelFailoverScenarios {
+    /// `pm-sim tunnel-failover-backoff` (decision 0045).
+    ///
+    /// A pool that does not count an answered 4xx, as the DoH upstream route's
+    /// does, over two upstreams: the primary answers 403 to every CONNECT, as
+    /// a proxy blocking the target by policy, and nothing listens on the
+    /// secondary's port. Each tunnel fails over from the primary's 403 to the
+    /// secondary, whose refused dial counts until its breaker opens. From then
+    /// on a failover asks no upstream in its backoff, so the 403 stands.
+    ///
+    /// | # | condition                          | expected                                                      |
+    /// |---|------------------------------------|---------------------------------------------------------------|
+    /// | A | `threshold` tunnels                | the refused dials open the secondary's breaker                |
+    /// | B | three more tunnels                 | each fails with the primary's 403                             |
+    /// | C | the secondary in its backoff        | never forced half-open (`upstream.circuit_half_opened` absent) |
+    /// | D | the primary                        | asked once per tunnel, and its breaker still closed           |
+    @RuntimeActor
+    static func aFailoverSkipsAnUpstreamInItsBackoff(verbose: Bool) async throws -> ScenarioResult {
+        let name = "tunnelFailoverBackoff"
+        let start = Date()
+        var notes: [String] = []
+        let group = MultiThreadedEventLoopGroup.singleton
+
+        let primary = FakeUpstreamProxy(group: group, originHost: "127.0.0.1", originPort: 9, requireAuth: false)
+        ScenarioCleanup.register { await primary.stop() }
+        try await primary.start()
+        primary.connectRefusalStatus = 403
+        let unused = try await ServerBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
+        let secondaryPort = unused.localAddress?.port ?? 0
+        try await unused.close().get()
+
+        var config = ProxyConfig()
+        config.circuitBreakerWindowSeconds = 0
+        config.circuitFailureThreshold = 2
+        config.circuitBaseOpenIntervalSeconds = 300
+        config.circuitMaxOpenIntervalSeconds = 300
+        config.upstreams = [
+            UpstreamProxy(name: "primary", host: "127.0.0.1", port: primary.port, priority: 0),
+            UpstreamProxy(name: "secondary", host: "127.0.0.1", port: secondaryPort, priority: 1),
+        ]
+        let frozen = config
+        notes.append("primary 127.0.0.1:\(primary.port) answers 403; nothing listens on secondary 127.0.0.1:\(secondaryPort)")
+
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let sink: @Sendable (RuntimeEvent) -> Void = { event in events.withLockedValue { $0.append(event) } }
+        let logger = RecordingLogSink(minLevel: verbose ? .debug : .info)
+        let pool = ConnectionPool(
+            group: group, logger: logger, configProvider: { frozen }, authenticatorProvider: { _ in MockAuthenticator() },
+            eventSink: sink, answeredStatusAccounting: .serverErrorsOnly
+        )
+        ScenarioCleanup.register { pool.closeAll(scope: .all) }
+        let coordinator = CONNECTCoordinator(
+            pool: pool, authenticatorProvider: { _ in MockAuthenticator() }, logger: logger, eventSink: sink
+        )
+
+        func tunnel(_ index: Int) async -> String {
+            do {
+                let opened = try await coordinator.connectUpstreamTunnel(target: "blocked-\(index).example:443").get()
+                opened.channel.close(promise: nil)
+                return "opened via \(opened.endpoint)"
+            } catch {
+                return error.displayDescription
+            }
+        }
+
+        for index in 0..<frozen.circuitFailureThreshold { notes.append("A tunnel \(index): \(await tunnel(index))") }
+        let opened = events.withLockedValue { $0 }.filter { $0.event == "upstream.circuit_opened" }.map { $0.detail ?? "" }
+        let passA = opened.count == 1 && opened[0].hasPrefix("upstream=secondary ")
+        notes.append("A opened=\(opened)")
+
+        let attemptsBefore = primary.connectAttemptCount
+        let phaseStart = Date()
+        var outcomes: [String] = []
+        for index in 0..<3 { outcomes.append(await tunnel(frozen.circuitFailureThreshold + index)) }
+        let phaseSeconds = Date().timeIntervalSince(phaseStart)
+        let passB = outcomes.allSatisfy { $0.contains("HTTP 403") } && phaseSeconds < 5
+        notes.append("B outcomes=\(outcomes) seconds=\(String(format: "%.2f", phaseSeconds))")
+
+        let halfOpened = events.withLockedValue { $0 }.filter { $0.event == "upstream.circuit_half_opened" }.map { $0.detail ?? "" }
+        let passC = halfOpened.isEmpty
+        notes.append("C halfOpened=\(halfOpened)")
+
+        let asked = primary.connectAttemptCount - attemptsBefore
+        let circuits = pool.upstreamStatuses().map { "\($0.name)=\($0.circuitState)" }
+        let passD = asked == 3 && circuits == ["primary=closed", "secondary=open"]
+        notes.append("D primaryAsked=\(asked) circuits=\(circuits)")
+
+        let checks = [passA, passB, passC, passD]
+        notes.append(checks.allSatisfy { $0 }
+            ? "PASS — a failover leaves an upstream in its backoff alone and the 403 stands"
+            : "FAIL — see per-case lines above")
+        return ScenarioResult(
+            name: name,
+            clientCount: frozen.circuitFailureThreshold + 3,
+            clientsOpened: frozen.circuitFailureThreshold + 3,
+            clientsWithFirstByte: 0,
+            clientsClosedEarly: 0,
+            totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(start),
+            aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("refused dials to the secondary open its breaker", passA),
+                .init("with the secondary in its backoff, each tunnel fails at once with the primary's 403", passB),
+                .init("no failover forced the secondary into a half-open probe", passC),
+                .init("the primary is asked once per tunnel and stays closed", passD),
+            ],
+            notes: notes
+        )
+    }
+}

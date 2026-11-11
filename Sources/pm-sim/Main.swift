@@ -94,6 +94,7 @@ enum PMSim {
               dns-doh-blocked         DNS: internal server dead + DoH answering 404 still answers the client
               dns-doh-upstream-407    DNS: with the rules saying DIRECT and direct a black hole, DoH resolves through an upstream whose 407 Conduit answers (0045)
               dns-doh-upstream-refused DNS: upstreams that answer 403 for the DoH provider fail the lookups and open no circuit breaker (0045)
+              tunnel-failover-backoff Tunnels: refused dials open a breaker, and a failover asks no upstream in its backoff (0045)
               dns-upstream-spoof      DNS: wrong-ID and QR-clear replies are dropped, never answered or cached
               dns-internal-unreachable-falls-back  DNS: a split-DNS name whose server is silent resolves through DoH
               dns-ephemeral-pair-rebind  DNS: a taken TCP twin moves the port-0 UDP+TCP pair to a fresh port
@@ -298,6 +299,7 @@ enum PMSim {
         "dns-doh-blocked",
         "dns-doh-upstream-407",
         "dns-doh-upstream-refused",
+        "tunnel-failover-backoff",
         "dns-upstream-spoof",
         "dns-internal-unreachable-falls-back",
         "dns-ephemeral-pair-rebind",
@@ -499,6 +501,8 @@ enum PMSim {
             return [try await DoHProxyAuthScenarios.resolvesThroughAnAuthenticatingUpstream(verbose: verbose)]
         case "dns-doh-upstream-refused":
             return [try await DoHProxyAuthScenarios.aRefusingUpstreamOpensNoBreaker(verbose: verbose)]
+        case "tunnel-failover-backoff":
+            return [try await TunnelFailoverScenarios.aFailoverSkipsAnUpstreamInItsBackoff(verbose: verbose)]
         case "dns-upstream-spoof":
             return [try await DNSResolverScenarios.upstreamSpoofRejected(verbose: verbose)]
         case "dns-internal-unreachable-falls-back":
