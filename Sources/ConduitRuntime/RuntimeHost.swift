@@ -292,6 +292,19 @@ package final class RuntimeHost {
     /// Fed by `handleVPNStateChange`; every resolver-file apply path consults
     /// `entriesWanted`.
     var splitDNSGate = SplitDNSVPNGate()
+    /// Which resolvers the connected VPN pushed are in use (decision 0044). Fed in the turn that takes a VPN report
+    /// or a store reading; `RuntimeHostSplitDNSDetection.swift` holds the rules.
+    var liveSplitDNS = LiveSplitDNSPolicy(limits: .standard)
+    /// The tunnels the VPN observer named live with the report the gate last took.
+    var vpnLiveInterfaces: Set<String> = []
+    let pushedResolverObserver: any PushedResolverObserving
+    /// The newest reading the observer reported and the owner has not taken. One slot: readings are whole, so
+    /// only the newest matters, and an older one can never land after it.
+    let pendingPushedReading = NIOLockedValueBox<PushedResolverReading?>(nil)
+    /// Whether the observer is started. Written only by `reconcileSplitDNSDetection`.
+    var splitDNSDetectionRunning = false
+    /// The failure of the last reading taken since the observer started, so one failure is reported once.
+    var splitDNSDetectionFailure: PushedResolverReading.Failure?
     /// A failed entry-file write or removal, retried once the helper is
     /// seen available (#165).
     var splitDNSRepair = SplitDNSEntryFileRepair()
@@ -356,7 +369,8 @@ package final class RuntimeHost {
         environmentDriftInterval: Duration = .seconds(300),
         reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
         splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval,
-        networkPathSettle: NetworkPathSettle = .standard
+        networkPathSettle: NetworkPathSettle = .standard,
+        dnsForwarderTuning: DNSForwarderTuning = DNSForwarderTuning()
     ) async throws -> RuntimeHost {
         let store = ConfigurationStore(
             session: stateSession,
@@ -387,7 +401,8 @@ package final class RuntimeHost {
             environmentDriftInterval: environmentDriftInterval,
             reapplyRetrySchedule: reapplyRetrySchedule,
             splitDNSHelperCheckInterval: splitDNSHelperCheckInterval,
-            networkPathSettle: networkPathSettle
+            networkPathSettle: networkPathSettle,
+            dnsForwarderTuning: dnsForwarderTuning
         )
         host.emitConfigurationEvents(opened.events)
         return host
@@ -419,7 +434,8 @@ package final class RuntimeHost {
         environmentDriftInterval: Duration = .seconds(300),
         reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
         splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval,
-        networkPathSettle: NetworkPathSettle = .standard
+        networkPathSettle: NetworkPathSettle = .standard,
+        dnsForwarderTuning: DNSForwarderTuning = DNSForwarderTuning()
     ) {
         self.incarnation = incarnation
         self.startedAt = startedAt
@@ -429,6 +445,7 @@ package final class RuntimeHost {
         self.environmentDriftInterval = environmentDriftInterval
         self.reapplyRetrySchedule = reapplyRetrySchedule
         self.networkPathObserver = effects.networkPath
+        self.pushedResolverObserver = effects.pushedResolvers
         self.networkPathSettle = networkPathSettle
         self.networkLocationObserver = effects.networkLocation
         self.systemWakeObserver = effects.wake
@@ -525,7 +542,8 @@ package final class RuntimeHost {
             auditSink: auditSink,
             eventLog: diagnosticsEventLog,
             resolverManager: tunnelResolverManager,
-            portHolderProbe: effects.portHolderProbe
+            portHolderProbe: effects.portHolderProbe,
+            dnsForwarderTuning: dnsForwarderTuning
         )
         self.orchestrator = orchestrator
 
@@ -563,6 +581,8 @@ package final class RuntimeHost {
                 guard let self else { return }
                 self.writeSnapshotFile(snapshot: self.orchestrator.snapshot)
                 self.onControlStateChange?()
+                // The DNS module's run state reaches the host here, whichever start, stop or restart moved it.
+                self.reconcileSplitDNSDetection()
             }
         }
         // `onConfigChange` is not wired. The orchestrator fires it only from `applyConfigChange`, which here runs only the reconciler's
@@ -591,10 +611,17 @@ package final class RuntimeHost {
         // of the monitor would keep a stopped host's observer alive forever.
         self.vpnStatusMonitor.setOnChange { [weak self, deliveries, vpnSequencer, weak monitor = self.vpnStatusMonitor] state in
             let interfaceName = monitor?.connectedInterfaceName
+            let liveInterfaces = Set(monitor?.liveInterfaceNames ?? [])
             let sequence = vpnSequencer.next()
             deliveries.deliver {
-                await self?.handleVPNStateChange(state, interfaceName: interfaceName, sequence: sequence)
+                await self?.handleVPNStateChange(
+                    state, interfaceName: interfaceName, liveInterfaces: liveInterfaces, sequence: sequence
+                )
             }
+        }
+        self.pushedResolverObserver.setOnChange { [weak self, deliveries, pendingPushedReading] reading in
+            pendingPushedReading.withLockedValue { $0 = reading }
+            deliveries.deliver { self?.takePushedResolverReading() }
         }
         reconciler.host = self
 
@@ -1279,7 +1306,9 @@ package final class RuntimeHost {
         )
     }
 
-    private func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String?, sequence: UInt64) async {
+    private func handleVPNStateChange(
+        _ state: VPNObservedState, interfaceName: String?, liveInterfaces: Set<String>, sequence: UInt64
+    ) async {
         // Gate update and decision must stay in one turn, and the entry-file
         // work is queued in it: the decision reads the gate's current state,
         // and a second VPN transition interleaving at a suspension point
@@ -1293,7 +1322,11 @@ package final class RuntimeHost {
         // against unreachable servers.
         // A report older than one the gate already took is not the tunnel's
         // state; the orchestrator still sees it and drops it itself.
-        let entriesWantedChanged = splitDNSGateOrder.admit(sequence) ? splitDNSGate.update(state) : false
+        let admitted = splitDNSGateOrder.admit(sequence)
+        let entriesWantedChanged = admitted ? splitDNSGate.update(state) : false
+        // The same turn as the gate, so the detected set and the entry files never read different verdicts. A
+        // repeated `.connected` still counts: the monitor re-delivers it when the live tunnels change.
+        if admitted { applyVPNReportToLiveSplitDNS(state, liveInterfaces: liveInterfaces) }
         // Its own delivery, which queues its work in a later turn whatever this one awaits, so it is asked for here.
         deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
         if platformConfig.manageDNSResolvers, entriesWantedChanged {
@@ -1830,6 +1863,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
     /// The host has no presentation mirror, so the orchestrator's config after the push is the input it holds.
     package func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async -> RuntimeConfigApplication {
         await orchestrator.applyConfigChange(new, from: old)
+        reconcileSplitDNSDetection()
         return .held(orchestrator.config)
     }
 
