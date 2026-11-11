@@ -16,8 +16,10 @@ packaging; 0.6.1 is the latest published release.
   decision 0044). While a tunnel is up, the DNS forwarder asks the servers the
   tunnel pushed for the domains it pushed them for, ahead of any manual entry
   for the same domain, and stops when the tunnel goes down. A VPN flap keeps
-  the last set in use, and a dynamic store that cannot be read drops it until
-  a reading succeeds. No forwarder restart and no configuration write is
+  the last set in use. A dynamic store that cannot be read drops it: after a
+  failed read, until the next read that succeeds; after a store that could not
+  be created or subscribed to, until the DNS forwarder is next stopped and
+  started or `dnsFollowVPNResolvers` is turned off and on. No forwarder restart and no configuration write is
   involved, and manual entries work as before. `dnsFollowVPNResolvers: false`
   in `config.json` turns it off; a Settings control follows. New events:
   `dns.split_table_changed`, `dns.split_detected`,
