@@ -90,6 +90,15 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
         }
     }
 
+    /// The punycode spelling of a Unicode host name, when it has one that is plain host text.
+    private static func asciiSpelling(ofHost value: String) -> String? {
+        guard !value.unicodeScalars.allSatisfy(\.isASCII) else { return nil }
+        var components = URLComponents()
+        components.host = value
+        guard let encoded = components.encodedHost, TunnelAuthority.isHostText(encoded) else { return nil }
+        return encoded
+    }
+
     package var errorDescription: String? {
         switch self {
         case .invalidPort(let field, let value):
@@ -106,6 +115,9 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
             // only the `check` code. The Settings field already shows what was typed.
             if field == "routing.pacURL" {
                 return "routing.pacURL must not include a username or password."
+            }
+            if let ascii = Self.asciiSpelling(ofHost: value) {
+                return "\(field): '\(value)' is not a valid host. Write a Unicode name in its ASCII (punycode) form: '\(ascii)'"
             }
             return "\(field): '\(value)' is not a valid host"
         case .invalidInterceptPattern(let index, let pattern, let reason):
@@ -371,6 +383,11 @@ extension ProxyConfig {
             let label = tunnel.effectiveLabel
             validatePort("tunnels.definitions[\(i)](\(label)).localPort", tunnel.localPort, into: &errors)
             validatePort("tunnels.definitions[\(i)](\(label)).remotePort", tunnel.remotePort, into: &errors)
+            // Written into the CONNECT a proxied tunnel sends, so held to the characters a host is spelled with. An empty
+            // host is a row not yet typed into.
+            if !tunnel.remoteHost.isEmpty, !TunnelAuthority.isHostText(tunnel.remoteHost) {
+                errors.append(.invalidHost(field: "tunnels.definitions[\(i)](\(label)).remoteHost", value: tunnel.remoteHost))
+            }
         }
 
         if proxy.socksEnabled && proxy.socksPort == proxy.port && proxy.port != 0 {

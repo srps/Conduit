@@ -250,6 +250,26 @@ final class ConfigArchitectureTests: XCTestCase {
         XCTAssertTrue(errors.contains { if case .invalidHost = $0 { return true } else { return false } })
     }
 
+    /// A proxied tunnel writes its remote host into a CONNECT, which carries only host text. A Unicode name is refused
+    /// where it is typed, with its punycode spelling, not at connect time.
+    func testATunnelRemoteHostIsHostText() {
+        var config = ProxyConfig()
+        config.tunnels.definitions = [
+            TunnelDefinition(localPort: 15432, remoteHost: "bücher.corp.example", remotePort: 5432),
+            TunnelDefinition(localPort: 15433, remoteHost: "db.corp.example\r\nX-Injected: 1", remotePort: 5432),
+            TunnelDefinition(localPort: 15434, remoteHost: "xn--bcher-kva.corp.example", remotePort: 5432),
+            TunnelDefinition(localPort: 15435, remoteHost: "2001:db8::1", remotePort: 5432),
+            TunnelDefinition(localPort: 15436, remoteHost: "", remotePort: 5432),
+        ]
+        let refused = config.validate().compactMap { error -> (field: String, message: String)? in
+            guard case .invalidHost(let field, _) = error else { return nil }
+            return (ConfigValidationError.fieldPath(field), error.localizedDescription)
+        }
+        XCTAssertEqual(refused.map(\.field), ["tunnels.definitions[0].remoteHost", "tunnels.definitions[1].remoteHost"])
+        XCTAssertTrue(refused[0].message.hasSuffix("Write a Unicode name in its ASCII (punycode) form: 'xn--bcher-kva.corp.example'"), refused[0].message)
+        XCTAssertTrue(refused[1].message.hasSuffix("is not a valid host"), refused[1].message)
+    }
+
     func testLoopbackNoProxyFormsAreValid() {
         var config = ProxyConfig()
         config.noProxyHosts = ["localhost", "127.0.0.1", "127.0.0.*", "::1", "[::1]"]
