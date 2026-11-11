@@ -152,6 +152,29 @@ final class TunnelStoreTests: XCTestCase {
         subscription.cancel()
     }
 
+    func testASubscriptionThatEndsReleasesItsHandler() throws {
+        final class Captured: Sendable {}
+        weak var cancelled: Captured?
+        weak var dropped: Captured?
+        try autoreleasepool {
+            let first = Captured(), second = Captured()
+            cancelled = first
+            dropped = second
+            let store = SystemTunnelStore()
+            try store.subscribe(queue: queue) { _ = first }.get().cancel()
+            _ = try store.subscribe(queue: queue) { _ = second }.get()
+        }
+        // The session lets go of its context a moment after it is detached.
+        var waits = 0
+        while cancelled != nil || dropped != nil, waits < 200 {
+            Thread.sleep(forTimeInterval: 0.01)
+            waits += 1
+        }
+
+        XCTAssertNil(cancelled, "the store session was the handler's only owner")
+        XCTAssertNil(dropped, "a subscription let go without a cancel ends the same way")
+    }
+
     func testAFailedNotificationKeySubscriptionIsReportedAndTheNextSucceeds() throws {
         let failsOnce = FailsOnce()
         let store = SystemTunnelStore(setNotificationKeys: { session, keys in
