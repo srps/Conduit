@@ -52,18 +52,25 @@ package struct VPNDetection: Equatable, Sendable {
     }
 }
 
-/// The only memory VPN detection keeps between readings: when each tunnel
-/// lost its address, and when the state was last connected. One value lives
-/// for one observation session; a new session starts from `init()`.
+/// The only memory VPN detection keeps between readings: when each lost
+/// tunnel's debounce ends, when the state was last connected, and when the
+/// grace window ends. One value lives for one observation session; a new
+/// session starts from `init()`.
 ///
 /// `reconcile` takes a whole reading and the current time and returns the
 /// verdict. Repeating a call changes nothing, and a missed reading is made
 /// good by the next one, whatever prompted it.
+///
+/// Each window is fixed when its phase starts: the debounce by the reading
+/// that first sees the loss, the grace by the first reading after the
+/// debounce ended. A later `window` reaches only phases that have not
+/// started, so while the store stays as it is the phase only moves forward:
+/// debouncing, reasserting, down.
 package struct VPNFlapTimer: Equatable, Sendable {
     /// Tunnels that stopped counting while observed and are still in the
-    /// store, with the time of the reading that first saw the loss. No larger
-    /// than the snapshot: an interface the store drops leaves here too.
-    private var lostAt: [String: TimeInterval] = [:]
+    /// store, with the end of each one's debounce. No larger than the
+    /// snapshot: an interface the store drops leaves here too.
+    private var debounceEnds: [String: TimeInterval] = [:]
     /// The interfaces that counted in the last reading.
     private var counted: Set<String> = []
     /// The latest instant the state is known to have been `.connected`: a
@@ -71,10 +78,16 @@ package struct VPNFlapTimer: Equatable, Sendable {
     /// the session has seen the VPN up. Grace is measured from here, so it
     /// outlasts the tunnels that set it.
     private var connectedUntil: TimeInterval?
+    /// When `.reasserting` ends. Set by the first reading that finds the
+    /// connected state over with a tunnel left to recover, and kept until a
+    /// tunnel counts again or none is left.
+    private var graceEnd: TimeInterval?
 
     package init() {}
 
     /// `now` is a monotonic clock in seconds; only differences matter.
+    /// `window` is read for a phase that starts in this call and for no
+    /// other. `up` is the same predicate for the whole session.
     package mutating func reconcile(
         _ reading: TunnelReading,
         now: TimeInterval,
@@ -90,39 +103,38 @@ package struct VPNFlapTimer: Equatable, Sendable {
         case .snapshot(let read):
             snapshot = read
         }
-        let minVisible = max(0, window.minVisible)
 
         // Up to this reading the state was what the last one left: connected
         // until now if a tunnel counted, else until the last debounce ended.
         if !counted.isEmpty {
             connectedUntil = now
-        } else if let lastLoss = lostAt.values.max() {
-            connectedUntil = max(connectedUntil ?? -.infinity, min(now, lastLoss + minVisible))
+        } else if let lastDebounceEnd = debounceEnds.values.max() {
+            connectedUntil = max(connectedUntil ?? -.infinity, min(now, lastDebounceEnd))
         }
 
         let countedNow = Set(snapshot.tunnels.filter(up.counts).map(\.interface))
         var lost: [String: TimeInterval] = [:]
         for tunnel in snapshot.tunnels where tunnel.hasInterfaceKey && !countedNow.contains(tunnel.interface) {
-            if let since = lostAt[tunnel.interface] {
-                lost[tunnel.interface] = since
+            if let debounceEnd = debounceEnds[tunnel.interface] {
+                lost[tunnel.interface] = debounceEnd
             } else if counted.contains(tunnel.interface) {
-                lost[tunnel.interface] = now
+                lost[tunnel.interface] = now + max(0, window.minVisible)
             }
         }
         if !countedNow.isEmpty { connectedUntil = now }
-        lostAt = lost
+        debounceEnds = lost
         counted = countedNow
 
-        let debouncing = lost.filter { now < $0.value + minVisible }
-        let nextDebounceEnd = debouncing.values.min().map { $0 + minVisible }
+        let debouncing = lost.filter { now < $0.value }
         let live = countedNow.union(lost.keys).sorted()
 
         if !countedNow.isEmpty || !debouncing.isEmpty {
+            graceEnd = nil
             return VPNDetection(
                 phase: countedNow.isEmpty ? .debouncing : .up,
                 carrying: countedNow.union(debouncing.keys).sorted(),
                 live: live,
-                deadline: nextDebounceEnd
+                deadline: debouncing.values.min()
             )
         }
         guard let connectedUntil else {
@@ -131,9 +143,11 @@ package struct VPNFlapTimer: Equatable, Sendable {
         if lost.isEmpty {
             // The VPN was up in this session and no tunnel is waiting to
             // recover: its interfaces were removed outright.
+            graceEnd = nil
             return VPNDetection(phase: .down(.userInitiated), carrying: [], live: [], deadline: nil)
         }
-        let graceEnd = connectedUntil + window.grace
+        let graceEnd = graceEnd ?? connectedUntil + window.grace
+        self.graceEnd = graceEnd
         if now < graceEnd {
             return VPNDetection(phase: .reasserting, carrying: [], live: live, deadline: graceEnd)
         }

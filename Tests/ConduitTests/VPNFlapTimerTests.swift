@@ -106,6 +106,76 @@ final class VPNFlapTimerTests: XCTestCase {
         XCTAssertEqual(lost.deadline, 15)
     }
 
+    // MARK: - A window that changes during a flap
+
+    func testAVerdictThatSettledIsNotReopenedByALongerWindow() {
+        _ = at(0, ["utun6": .addressed])
+        _ = at(0, ["utun6": .addressless])
+        XCTAssertEqual(at(7, ["utun6": .addressless]).state, .disconnected(reason: .networkLost))
+
+        let longerDebounce = timer.reconcile(
+            reading(["utun6": .addressless]), now: 8, window: VPNFlapWindow(minVisible: 30, grace: 5)
+        )
+        XCTAssertEqual(longerDebounce.state, .disconnected(reason: .networkLost),
+                       "a debounce that ended at 1 does not start again")
+        XCTAssertNil(longerDebounce.deadline)
+
+        let longerGrace = timer.reconcile(
+            reading(["utun6": .addressless]), now: 8, window: VPNFlapWindow(minVisible: 1, grace: 3600)
+        )
+        XCTAssertEqual(longerGrace.state, .disconnected(reason: .networkLost),
+                       "a grace that ended at 6 does not start again")
+        XCTAssertNil(longerGrace.deadline)
+    }
+
+    func testADebounceKeepsTheLengthItStartedWith() {
+        _ = at(0, ["utun6": .addressed])
+        XCTAssertEqual(at(10, ["utun6": .addressless]).deadline, 11)
+
+        let longer = timer.reconcile(
+            reading(["utun6": .addressless]), now: 10.5, window: VPNFlapWindow(minVisible: 30, grace: 5)
+        )
+        XCTAssertEqual(longer.deadline, 11)
+        let shorter = timer.reconcile(
+            reading(["utun6": .addressless]), now: 10.6, window: VPNFlapWindow(minVisible: 0, grace: 5)
+        )
+        XCTAssertEqual(shorter.phase, .debouncing)
+        XCTAssertEqual(shorter.deadline, 11)
+    }
+
+    func testAGraceKeepsTheLengthItStartedWith() {
+        _ = at(0, ["utun6": .addressed])
+        _ = at(10, ["utun6": .addressless])
+        XCTAssertEqual(at(11, ["utun6": .addressless]).deadline, 16)
+
+        let longer = timer.reconcile(
+            reading(["utun6": .addressless]), now: 12, window: VPNFlapWindow(minVisible: 1, grace: 3600)
+        )
+        XCTAssertEqual(longer.state, .reasserting)
+        XCTAssertEqual(longer.deadline, 16)
+        let shorter = timer.reconcile(
+            reading(["utun6": .addressless]), now: 13, window: VPNFlapWindow(minVisible: 1, grace: 0)
+        )
+        XCTAssertEqual(shorter.state, .reasserting, "nor does a shorter one end it early")
+        XCTAssertEqual(shorter.deadline, 16)
+    }
+
+    func testANewWindowAppliesToThePhaseThatHasNotStarted() {
+        _ = at(0, ["utun6": .addressed])
+        _ = at(10, ["utun6": .addressless])
+
+        let grace = timer.reconcile(
+            reading(["utun6": .addressless]), now: 11, window: VPNFlapWindow(minVisible: 1, grace: 60)
+        )
+        XCTAssertEqual(grace.deadline, 71, "the grace started at 11, under the new window")
+
+        _ = at(20, ["utun6": .addressed])
+        let nextFlap = timer.reconcile(
+            reading(["utun6": .addressless]), now: 30, window: VPNFlapWindow(minVisible: 4, grace: 60)
+        )
+        XCTAssertEqual(nextFlap.deadline, 34, "and so does the next flap's debounce")
+    }
+
     // MARK: - Late and missing wake-ups
 
     func testALateWakeUpIsJudgedByTheClockNotByHowManyReadingsThereWere() {
@@ -210,9 +280,10 @@ final class VPNFlapTimerTests: XCTestCase {
         _ = at(10, ["utun6": .addressless])
         let memory = timer
 
-        let blind = timer.reconcile(.failed(.storeRead), now: 10.5, window: window)
+        let failure = TunnelReading.Failure(.storeRead, code: 1001)
+        let blind = timer.reconcile(.failed(failure), now: 10.5, window: window)
 
-        XCTAssertEqual(blind.phase, .blind(.storeRead))
+        XCTAssertEqual(blind.phase, .blind(failure))
         XCTAssertEqual(blind.state, .unknown)
         XCTAssertNil(blind.deadline)
         XCTAssertEqual(timer, memory)
