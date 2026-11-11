@@ -51,15 +51,15 @@ package final class LiveSplitDNSDetection: @unchecked Sendable {
         lock.withLock { state.running = true }
     }
 
-    /// Drops the last reading and the held set, and leaves the empty set for the owner to apply. A reading that
-    /// arrives after this is dropped: the next start reads the store again. The VPN verdict stays, because the
-    /// VPN observer reports only a change and so never repeats it.
+    /// Drops the last reading and the held set, and leaves the empty set for the owner to apply. A failure the
+    /// owner has not taken stays for that take, so one that arrived just before the stop is still reported. A
+    /// reading that arrives after this is dropped: the next start reads the store again. The VPN verdict stays,
+    /// because the VPN observer reports only a change and so never repeats it.
     package func stop() {
         lock.withLock {
             state.running = false
             state.policy = LiveSplitDNSPolicy(limits: state.policy.limits)
             state.lastFailure = nil
-            state.unreportedFailure = nil
             state.reportedIgnored = []
             state.unappliedSet = DetectedSet(rules: [], display: state.policy.display, reason: .detectionOff)
         }

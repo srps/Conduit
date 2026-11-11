@@ -381,6 +381,25 @@ final class RuntimeHostSplitDNSTests: XCTestCase {
         XCTAssertEqual(answer, corpIP)
     }
 
+    /// A failed start stops detection on the delivery of its snapshot. The failed reading lands after that delivery
+    /// was queued and before the owner runs it, so the stop is the first to take it.
+    @RuntimeActor func testAStoreFailureThatArrivesJustBeforeDetectionStopsIsStillReported() async throws {
+        let running = try await start(primed: PushedResolverReading(resolvers: [corp()]))
+        await running.report(.connected, live: ["utun6"])
+
+        running.host.orchestrator.mutateSnapshotForTesting { $0.dnsRunState = .failed }
+        running.harness.pushedResolvers.emit(PushedResolverReading(failure: .storeRead))
+        await running.host.deliveries.drain()
+
+        XCTAssertFalse(running.harness.pushedResolvers.isObserving)
+        let reported = running.host.orchestrator.eventLog.events.suffix(3).map { "\($0.event) \($0.detail ?? "")" }
+        XCTAssertEqual(reported, [
+            "dns.split_detection_failed reason=store_read",
+            "dns.split_detected interface=utun6 domains=corp.example servers=1 outcome=cleared",
+            "dns.split_table_changed detected_domains=0 manual_domains=0 rules=0 reason=detection_off",
+        ])
+    }
+
     /// The VPN observer reports a verdict only when it changes, across its own stop and start too, so the verdict
     /// the gate holds at a stop is the one the next start has to judge by. Forgetting it would leave the gate at
     /// `.unknown`, which admits every reading, with no report coming to correct it.

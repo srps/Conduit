@@ -126,6 +126,24 @@ final class LiveSplitDNSDetectionTests: XCTestCase {
         XCTAssertNil(detection.take())
     }
 
+    func testAFailureNotYetTakenAtAStopIsStillPendingBesideTheEmptySet() {
+        let detection = connected()
+        detection.receive(PushedResolverReading(resolvers: [corp]))
+        _ = detection.take()
+
+        detection.receive(PushedResolverReading(failure: .storeRead))
+        detection.stop()
+
+        let pending = detection.take()
+        XCTAssertEqual(pending?.failure, .storeRead)
+        XCTAssertEqual(pending?.set, .init(rules: [], display: .none, reason: .detectionOff))
+        XCTAssertNil(detection.take(), "it is reported once")
+
+        detection.start()
+        detection.receive(PushedResolverReading(failure: .storeRead))
+        XCTAssertEqual(detection.take()?.failure, .storeRead, "the next start reports its own failure")
+    }
+
     func testAVerdictTakenWhileStoppedJudgesTheNextStartsFirstReading() {
         let detection = LiveSplitDNSDetection(limits: .standard)
         detection.report(gate: gate(.disconnected(reason: .userInitiated)), liveInterfaces: [])
