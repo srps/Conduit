@@ -47,6 +47,7 @@ final class DoHUpstreamRoute: Sendable {
     static let maximumConnections = 64
 
     private let source: DoHUpstreamRouteSource
+    private let logger: any LogSink
     private let server: SOCKS5Server
     private let boundPort = NIOLockedValueBox<Int?>(nil)
 
@@ -58,6 +59,7 @@ final class DoHUpstreamRoute: Sendable {
         eventSink: (@Sendable (RuntimeEvent) -> Void)?
     ) {
         self.source = source
+        self.logger = logger
         nonisolated(unsafe) let configProvider = configProvider
         let gate = RuntimeEventRepeatGate()
         // At most one of each event per target a minute: a failing upstream
@@ -98,9 +100,18 @@ final class DoHUpstreamRoute: Sendable {
         boundPort.withLockedValue { $0 = server.listeningPort }
     }
 
+    /// Closes the listener, every connection it accepted, and what is left
+    /// in the route's pool: a tunnel still in its CONNECT handshake has no
+    /// client to go back to.
     func stop() async {
         boundPort.withLockedValue { $0 = nil }
-        await server.stop()
+        let accepted = await server.stop()
+        let pooled = source.pool.closeAll()
+        logger.log(
+            .info,
+            "DoH upstream route stopped: closed \(accepted) accepted connection(s) and \(pooled) upstream connection(s) its pool still held.",
+            category: .network
+        )
     }
 
     var listeningPort: Int? { boundPort.withLockedValue { $0 } }

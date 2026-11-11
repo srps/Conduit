@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import NIOConcurrencyHelpers
 import NIOCore
+import NIOEmbedded
 import NIOPosix
 import XCTest
 @testable import ProxyKernel
@@ -156,7 +157,117 @@ final class DoHUpstreamRouteTests: XCTestCase {
         }
     }
 
+    // MARK: - Stop
+
+    /// A tunnel in use closes with the forwarder, on both of its sides.
+    func testStoppingTheForwarderClosesAnEstablishedTunnel() async throws {
+        let running = try await start(provider: "http://\(Self.providerHost)/dns-query")
+        let routePort = try XCTUnwrap(running.forwarder.doHUpstreamRoutePort)
+        let client = try await SOCKS5TestClient.connect(to: routePort, group: group)
+        try await client.greet()
+        let reply = try await client.request(host: Self.providerHost, port: 80)
+        XCTAssertEqual(reply, 0x00)
+        XCTAssertEqual(running.upstream.tunnelsOpened, 1)
+        XCTAssertEqual(running.upstream.openConnections, 1)
+
+        await running.forwarder.stop()
+
+        try await client.waitUntilClosed()
+        XCTAssertFalse(client.channel.isActive, "the accepted connection outlived the forwarder")
+        try await waitUntil { running.upstream.openConnections == 0 }
+        XCTAssertEqual(running.upstream.openConnections, 0, "its tunnel to the upstream outlived the forwarder")
+    }
+
+    /// A connection that has greeted and not yet asked for a target closes
+    /// too, so a request it sends afterwards reaches nothing.
+    func testStoppingTheForwarderClosesAConnectionStillInItsHandshake() async throws {
+        let running = try await start(provider: "http://\(Self.providerHost)/dns-query")
+        let routePort = try XCTUnwrap(running.forwarder.doHUpstreamRoutePort)
+        let client = try await SOCKS5TestClient.connect(to: routePort, group: group)
+        try await client.greet()
+
+        await running.forwarder.stop()
+
+        try await client.waitUntilClosed()
+        XCTAssertFalse(client.channel.isActive, "the accepted connection outlived the forwarder")
+        XCTAssertEqual(running.upstream.connectHeads(), [], "nothing was dialled for it")
+    }
+
+    /// A request whose upstream CONNECT is still unanswered: the stop closes
+    /// the accepted connection and the upstream connection opened for it.
+    func testStoppingTheForwarderClosesAConnectionWaitingOnItsUpstream() async throws {
+        let silent = try await SilentUpstream.start(group: group)
+        addTeardownBlock { await silent.stop() }
+        let running = try await start(provider: "http://\(Self.providerHost)/dns-query", upstreamPort: silent.port)
+        let routePort = try XCTUnwrap(running.forwarder.doHUpstreamRoutePort)
+        let client = try await SOCKS5TestClient.connect(to: routePort, group: group)
+        try await client.greet()
+        try await client.sendRequest(host: Self.providerHost, port: 80)
+        try await waitUntil { silent.requestsReceived == 1 }
+        XCTAssertEqual(silent.requestsReceived, 1, "the CONNECT is in flight")
+
+        await running.forwarder.stop()
+
+        try await client.waitUntilClosed()
+        XCTAssertFalse(client.channel.isActive, "the accepted connection outlived the forwarder")
+        try await waitUntil { silent.openConnections == 0 }
+        XCTAssertEqual(silent.openConnections, 0, "the pending upstream connection outlived the forwarder")
+        XCTAssertEqual(client.receivedBytes.count, 2, "no reply was written for a tunnel that never opened")
+    }
+
+    /// The stop marks the listener stopped before it closes each connection.
+    /// A request read in between closes its connection and dials nothing.
+    func testARequestReadAfterTheStopBeganDialsNothing() throws {
+        let loop = EmbeddedEventLoop()
+        var config = ProxyConfig.testFixture()
+        config.upstreams = []
+        let frozen = config
+        let logger = DiscardingLogSink()
+        let pool = ConnectionPool(
+            group: loop, logger: logger, configProvider: { frozen }, authenticatorProvider: { _ in StubNegotiateAuthenticator() }
+        )
+        let outcomes = NIOLockedValueBox<[String]>([])
+        let accepted = SOCKS5AcceptedConnections()
+        let channel = EmbeddedChannel(handler: SOCKS5Handler(
+            connectCoordinator: CONNECTCoordinator(pool: pool, authenticatorProvider: { _ in StubNegotiateAuthenticator() }, logger: logger),
+            logger: logger, group: loop, directModeProvider: { (false, .none) }, pacRoutingEngine: nil,
+            configProvider: { frozen }, gatewayMode: false,
+            routing: .upstreamOnly(SOCKS5UpstreamOnlyRoute(
+                admits: { _, _ in true },
+                refused: { _ in outcomes.withLockedValue { $0.append("refused") } },
+                opened: { _, _ in outcomes.withLockedValue { $0.append("opened") } },
+                failed: { _, _ in outcomes.withLockedValue { $0.append("failed") } }
+            )),
+            accepted: accepted,
+            onConnectionOpened: { _ in }, onConnectionClosed: { _ in }, onConnectionActivity: { _ in }
+        ), loop: loop)
+        try channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 1)).wait()
+        XCTAssertTrue(accepted.track(channel))
+        XCTAssertEqual(accepted.stop().count, 1)
+
+        var bytes = channel.allocator.buffer(capacity: 16)
+        bytes.writeBytes([0x05, 0x01, 0x00])
+        try channel.writeInbound(bytes)
+        bytes.clear()
+        bytes.writeBytes([0x05, 0x01, 0x00, 0x01, 192, 0, 2, 10, 0, 80])
+        try channel.writeInbound(bytes)
+        loop.run()
+
+        XCTAssertFalse(channel.isActive, "the connection is closed, not routed")
+        XCTAssertEqual(outcomes.withLockedValue { $0 }, [], "the coordinator was never asked: with no upstream it would have reported a failure")
+        XCTAssertEqual(try channel.readOutbound(as: ByteBuffer.self).map { Array($0.readableBytesView) }, [5, 0], "the method selection")
+        XCTAssertNil(try channel.readOutbound(as: ByteBuffer.self), "and no reply")
+        XCTAssertFalse(accepted.track(EmbeddedChannel()), "a stopped listener tracks nothing new")
+        _ = try channel.finish(acceptAlreadyClosed: true)
+    }
+
     // MARK: - Harness
+
+    private func waitUntil(_ condition: @Sendable () -> Bool) async throws {
+        for _ in 0..<400 where !condition() {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
 
     private struct Running {
         let forwarder: LocalDNSForwarder
@@ -169,13 +280,14 @@ final class DoHUpstreamRouteTests: XCTestCase {
         provider: String,
         offerRoute: Bool = true,
         upstreamEnabled: Bool = true,
+        upstreamPort: Int? = nil,
         offered: @escaping @Sendable () -> Bool = { true }
     ) async throws -> Running {
         let upstream = try await AuthenticatingUpstream.start(group: group, answerIP: Self.answerIP)
         self.upstream = upstream
 
         var config = ProxyConfig.testFixture()
-        var proxy = UpstreamProxy(name: "corp", host: "127.0.0.1", port: upstream.port, priority: 0)
+        var proxy = UpstreamProxy(name: "corp", host: "127.0.0.1", port: upstreamPort ?? upstream.port, priority: 0)
         proxy.enabled = upstreamEnabled
         config.upstreams = [proxy]
         config.dohProviders = [provider]
@@ -277,6 +389,7 @@ final class AuthenticatingUpstream: @unchecked Sendable {
     var challengesSent: Int { state.withLockedValue { $0.challengesSent } }
     var tunnelsOpened: Int { state.withLockedValue { $0.tunnelsOpened } }
     func firstTunnelBytes() -> [[UInt8]] { state.withLockedValue { $0.firstTunnelBytes } }
+    var openConnections: Int { children.withLockedValue { $0.count } }
 
     private init(channel: Channel, state: NIOLockedValueBox<State>, children: NIOLockedValueBox<[ObjectIdentifier: Channel]>) {
         self.channel = channel
@@ -368,6 +481,64 @@ final class AuthenticatingUpstream: @unchecked Sendable {
             var out = context.channel.allocator.buffer(capacity: text.utf8.count)
             out.writeString(text)
             context.writeAndFlush(wrapOutboundOut(out), promise: nil)
+        }
+    }
+}
+
+/// An upstream that accepts a connection, reads what it is sent and never answers.
+final class SilentUpstream: Sendable {
+    private let channel: Channel
+    /// Accepted connections, at most 64, so `stop` can close them.
+    private let children: NIOLockedValueBox<[ObjectIdentifier: Channel]>
+    private let requests: NIOLockedValueBox<Int>
+
+    var port: Int { channel.localAddress?.port ?? 0 }
+    var openConnections: Int { children.withLockedValue { $0.count } }
+    var requestsReceived: Int { requests.withLockedValue { $0 } }
+
+    private init(channel: Channel, children: NIOLockedValueBox<[ObjectIdentifier: Channel]>, requests: NIOLockedValueBox<Int>) {
+        self.channel = channel
+        self.children = children
+        self.requests = requests
+    }
+
+    static func start(group: EventLoopGroup) async throws -> SilentUpstream {
+        let children = NIOLockedValueBox<[ObjectIdentifier: Channel]>([:])
+        let requests = NIOLockedValueBox(0)
+        let channel = try await ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { child in
+                let id = ObjectIdentifier(child)
+                children.withLockedValue { if $0.count < 64 { $0[id] = child } }
+                child.closeFuture.whenComplete { _ in children.withLockedValue { $0[id] = nil } }
+                return child.pipeline.addHandler(Counter(requests: requests))
+            }
+            .bind(host: "127.0.0.1", port: 0).get()
+        return SilentUpstream(channel: channel, children: children, requests: requests)
+    }
+
+    func stop() async {
+        do {
+            try await channel.close().get()
+        } catch ChannelError.alreadyClosed {
+        } catch {
+            XCTFail("silent upstream close failed: \(error)")
+        }
+        for child in children.withLockedValue({ Array($0.values) }) {
+            child.close(promise: nil)
+        }
+    }
+
+    private final class Counter: ChannelInboundHandler, @unchecked Sendable {
+        typealias InboundIn = ByteBuffer
+        private let requests: NIOLockedValueBox<Int>
+        private var counted = false
+        init(requests: NIOLockedValueBox<Int>) { self.requests = requests }
+
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+            guard !counted else { return }
+            counted = true
+            requests.withLockedValue { $0 += 1 }
         }
     }
 }

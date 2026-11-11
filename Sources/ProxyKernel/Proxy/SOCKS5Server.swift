@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 
@@ -18,6 +19,43 @@ struct SOCKS5UpstreamOnlyRoute: Sendable {
     let refused: @Sendable (_ target: String) -> Void
     let opened: @Sendable (_ target: String, _ upstream: String) -> Void
     let failed: @Sendable (_ target: String, _ error: Error) -> Void
+}
+
+/// The connections an upstream-only listener has accepted and not yet closed,
+/// so its stop can close them. The client listener keeps none: its tunnels
+/// outlive a listener restart by design. Holds at most the listener's inbound
+/// budget, since a connection is tracked only after the budget admits it.
+final class SOCKS5AcceptedConnections: Sendable {
+    private struct State {
+        var open: [ObjectIdentifier: Channel] = [:]
+        var stopped = false
+    }
+    private let state = NIOLockedValueBox(State())
+
+    /// False once the listener has stopped: the caller closes `channel`.
+    func track(_ channel: Channel) -> Bool {
+        let id = ObjectIdentifier(channel)
+        let tracked = state.withLockedValue { state -> Bool in
+            guard !state.stopped else { return false }
+            state.open[id] = channel
+            return true
+        }
+        if tracked {
+            channel.closeFuture.whenComplete { [state] _ in state.withLockedValue { $0.open[id] = nil } }
+        }
+        return tracked
+    }
+
+    /// True from the moment the stop began. A request read after that dials nothing.
+    var isStopped: Bool { state.withLockedValue { $0.stopped } }
+
+    /// Refuses every later `track` and returns the connections open now.
+    func stop() -> [Channel] {
+        state.withLockedValue { state in
+            state.stopped = true
+            return Array(state.open.values)
+        }
+    }
 }
 
 final class SOCKS5Server: @unchecked Sendable {
@@ -39,6 +77,7 @@ final class SOCKS5Server: @unchecked Sendable {
     private let inboundBudget: InboundConnectionBudget
     private let handshakeTimeout: TimeAmount
     private let routing: SOCKS5Routing
+    private let accepted: SOCKS5AcceptedConnections?
     private var serverChannel: Channel?
 
     var listeningHost: String? {
@@ -67,6 +106,10 @@ final class SOCKS5Server: @unchecked Sendable {
     ) {
         precondition(handshakeTimeout.nanoseconds > 0)
         self.routing = routing
+        switch routing {
+        case .clientPolicy: self.accepted = nil
+        case .upstreamOnly: self.accepted = SOCKS5AcceptedConnections()
+        }
         self.inboundBudget = inboundBudget
         self.handshakeTimeout = handshakeTimeout
         self.group = group
@@ -93,6 +136,9 @@ final class SOCKS5Server: @unchecked Sendable {
                 ) else {
                     return channel.close().flatMap { channel.eventLoop.makeFailedFuture(ChannelError.ioOnClosedChannel) }
                 }
+                if let accepted = self.accepted, !accepted.track(channel) {
+                    return channel.close().flatMap { channel.eventLoop.makeFailedFuture(ChannelError.ioOnClosedChannel) }
+                }
                 var future = channel.eventLoop.makeSucceededVoidFuture()
                 if self.gatewayMode {
                     nonisolated(unsafe) let configProvider = self.configProvider
@@ -114,6 +160,7 @@ final class SOCKS5Server: @unchecked Sendable {
                             gatewayMode: self.gatewayMode,
                             handshakeTimeout: self.handshakeTimeout,
                             routing: self.routing,
+                            accepted: self.accepted,
                             eventSink: self.eventSink,
                             onConnectionOpened: self.onConnectionOpened,
                             onConnectionClosed: self.onConnectionClosed,
@@ -140,11 +187,44 @@ final class SOCKS5Server: @unchecked Sendable {
         }
     }
 
-    func stop() async {
+    /// Closes the listener and, for an upstream-only listener, every
+    /// connection it accepted: a tunnel in use, one still in its handshake,
+    /// one waiting on its upstream. Returns how many connections it closed.
+    /// A close that fails is reported in `connection.socks5_close_failed`.
+    @discardableResult
+    func stop() async -> Int {
+        // First, so a request read from here on dials nothing.
+        let children = accepted?.stop() ?? []
+        var failures: [String] = []
         if let serverChannel {
-            _ = try? await serverChannel.close().get()
+            if let error = await Self.closeError(serverChannel) { failures.append("listener: \(error.displayDescription)") }
         }
         serverChannel = nil
+        for child in children {
+            if let error = await Self.closeError(child) { failures.append("connection: \(error.displayDescription)") }
+        }
+        if let first = failures.first {
+            let event = RuntimeEvent(
+                kind: .connection,
+                event: "connection.socks5_close_failed",
+                detail: "protocol=\(protocolName) failed=\(failures.count) first=\(first)"
+            )
+            eventSink?(event)
+            logger.log(.warning, "\(event.event): \(event.detail ?? "")", category: .proxy)
+        }
+        return children.count
+    }
+
+    /// Nil when `channel` is closed now, whoever closed it.
+    private static func closeError(_ channel: Channel) async -> Error? {
+        do {
+            try await channel.close().get()
+            return nil
+        } catch ChannelError.alreadyClosed {
+            return nil
+        } catch {
+            return error
+        }
     }
 }
 
@@ -166,6 +246,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     private var state: State = .greeting
     private let handshakeTimeout: TimeAmount
     private let routing: SOCKS5Routing
+    private let accepted: SOCKS5AcceptedConnections?
     private var handshakeDeadline: Scheduled<Void>?
     private var connectionID: UUID?
     private var accumulated = ByteBufferAllocator().buffer(capacity: 512)
@@ -180,6 +261,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         gatewayMode: Bool,
         handshakeTimeout: TimeAmount = .seconds(10),
         routing: SOCKS5Routing = .clientPolicy,
+        accepted: SOCKS5AcceptedConnections? = nil,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void,
         onConnectionClosed: @Sendable @escaping (UUID) -> Void,
@@ -187,6 +269,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     ) {
         precondition(handshakeTimeout.nanoseconds > 0)
         self.routing = routing
+        self.accepted = accepted
         self.handshakeTimeout = handshakeTimeout
         self.connectCoordinator = connectCoordinator
         self.logger = logger
@@ -391,6 +474,11 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
                 sendReply(context: context, rep: 0x02)
                 return false
             }
+            // The listener's stop closes this connection; until that lands, a request it read must not dial.
+            guard accepted?.isStopped != true else {
+                context.close(promise: nil)
+                return false
+            }
             connectViaUpstream(host: host, port: port, context: context, proxyChain: [], failureLogLevel: .debug)
             return false
         }
@@ -585,6 +673,11 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             .whenComplete { result in
                 switch result {
                 case .success(let (upstream, endpoint, authMethod)):
+                    guard ctx.channel.isActive else {
+                        // The client left, or the listener stopped, while the upstream was dialled: nothing would relay this tunnel.
+                        upstream.close(mode: .all, promise: nil)
+                        return
+                    }
                     if case .upstreamOnly(let route) = self.routing {
                         route.opened(target, endpoint)
                     } else {
