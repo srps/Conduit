@@ -61,6 +61,10 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     private let splitDNSProvider: (@Sendable () -> SplitDNSTable)?
     private let preferProxyPathForDoH: @Sendable () -> Bool
     private let localProxyPort: @Sendable () -> Int?
+    /// Nil where the host has no upstream pool to lend; DoH then has no upstream route.
+    private let upstreamRouteSource: DoHUpstreamRouteSource?
+    /// Bound by `start`, closed by `stop`. Read by lookups on other threads.
+    private let upstreamRoute = NIOLockedValueBox<DoHUpstreamRoute?>(nil)
     private let onMetrics: (@Sendable () -> Void)?
     private let tuning: DNSForwarderTuning
     private let tcpMaximumConnections: Int
@@ -102,6 +106,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         splitDNSProvider: (@Sendable () -> SplitDNSTable)? = nil,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool = { false },
         localProxyPort: @escaping @Sendable () -> Int? = { nil },
+        upstreamRoute: DoHUpstreamRouteSource? = nil,
         onMetrics: (@Sendable () -> Void)? = nil,
         // Exposed only so tests can drive the slow-lookup and idle rules
         // without waiting out the production timeouts.
@@ -119,6 +124,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         self.splitDNSProvider = splitDNSProvider
         self.preferProxyPathForDoH = preferProxyPathForDoH
         self.localProxyPort = localProxyPort
+        self.upstreamRouteSource = upstreamRoute
         self.onMetrics = onMetrics
         self.tuning = tuning
         self.tcpMaximumConnections = tcpMaximumConnections
@@ -151,6 +157,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             configProvider: configProvider,
             preferProxyPathForDoH: { false },
             localProxyPort: { nil },
+            upstreamRoute: { nil },
             pathSatisfied: { true },
             onMetrics: nil,
             tuning: DNSForwarderTuning()
@@ -183,6 +190,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         guard let host = ProxyConfig.loopbackBindHost(host) else {
             throw ConfigValidationError.conflict(description: "DNS requires a loopback bind address because it has no client allowlist.")
         }
+        await startUpstreamRoute()
         let core = DNSResolutionCore(
             group: group,
             logger: logger,
@@ -190,6 +198,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             splitDNSProvider: splitDNSProvider,
             preferProxyPathForDoH: preferProxyPathForDoH,
             localProxyPort: localProxyPort,
+            upstreamRoute: { [upstreamRoute] in upstreamRoute.withLockedValue { $0 } },
             pathSatisfied: { [pathSatisfied] in pathSatisfied.withLockedValue { $0 } },
             onMetrics: onMetrics,
             tuning: tuning,
@@ -224,7 +233,13 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             }
         let attempts = port == 0 ? Self.ephemeralPairAttempts : 1
         for attempt in 1...attempts {
-            let udp = try await bootstrap.bind(host: host, port: port).get()
+            let udp: Channel
+            do {
+                udp = try await bootstrap.bind(host: host, port: port).get()
+            } catch {
+                await stopUpstreamRoute()
+                throw error
+            }
             let actualHost = udp.localAddress?.ipAddress ?? host
             let actualPort = udp.localAddress?.port ?? port
             await willBindTCP(actualPort)
@@ -271,6 +286,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
                         "DNS forwarder could not release UDP port \(actualPort) after its TCP port turned out to be held: \(closeError.displayDescription). Not binding another pair beside it.",
                         category: .network
                     )
+                    await stopUpstreamRoute()
                     throw closeError
                 }
                 let last = attempt == attempts
@@ -291,7 +307,49 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         tcpConnections = nil
         self.core = nil
         core.invalidateSessions()
+        await stopUpstreamRoute()
         throw DNSForwarderStartError.noEphemeralPortPair(host: host, attempts: attempts)
+    }
+
+    /// Binds the DoH upstream route before the core is built, so the first
+    /// lookup already has it. A bind failure leaves the forwarder running on
+    /// its other routes.
+    private func startUpstreamRoute() async {
+        guard let upstreamRouteSource, upstreamRoute.withLockedValue({ $0 }) == nil else { return }
+        let route = DoHUpstreamRoute(
+            source: upstreamRouteSource, group: group, logger: logger,
+            configProvider: configProvider, eventSink: eventSink
+        )
+        do {
+            try await route.start()
+            upstreamRoute.withLockedValue { $0 = route }
+        } catch {
+            eventSink?(RuntimeEvent(
+                kind: .health,
+                event: "dns.doh_upstream_route_unavailable",
+                detail: "error=\(error.displayDescription)"
+            ))
+            logger.log(
+                .warning,
+                "DNS: the DoH upstream route could not bind a loopback port (\(error.displayDescription)). Lookups use the direct and client-listener routes only.",
+                category: .network
+            )
+        }
+    }
+
+    private func stopUpstreamRoute() async {
+        let route = upstreamRoute.withLockedValue { current -> DoHUpstreamRoute? in
+            defer { current = nil }
+            return current
+        }
+        await route?.stop()
+    }
+
+    /// The port the DoH upstream route is offered on now. Nil while stopped,
+    /// with no upstream enabled, and while the host is not offering it.
+    package var doHUpstreamRoutePort: Int? {
+        let port = upstreamRoute.withLockedValue { $0 }?.offeredPort
+        return DoHSessionFactory.upstreamRoute(config: configProvider(), boundPort: port) == nil ? nil : port
     }
 
     package func stop() async {
@@ -315,6 +373,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         tcpConnections = nil
         core?.invalidateSessions()
         core = nil
+        await stopUpstreamRoute()
         logger.log(.notice, "DNS forwarder stopped.", category: .network)
     }
 
@@ -413,24 +472,30 @@ private struct DoHTransports: @unchecked Sendable {
     let direct: URLSession
     let localProxy: URLSession?
     let localProxyPort: Int?
+    /// Built whenever the upstream route's listener is bound. Whether a
+    /// lookup may use it is decided per lookup, in `sessions`.
+    let upstream: URLSession?
 
-    init(config: ProxyConfig, boundPort: Int?, delegate: ProxyChallengeRefusingDelegate) {
-        self.direct = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil), delegate: delegate)
+    init(config: ProxyConfig, boundPort: Int?, upstreamRoutePort: Int?, delegate: ProxyChallengeRefusingDelegate) {
+        self.direct = DoHSessionFactory.session(for: .direct, delegate: delegate)
         let localRoute = DoHSessionFactory.localProxyRoute(config: config, boundPort: boundPort)
-        self.localProxyPort = localRoute?.proxy?.port
+        if case .clientListener(_, let port) = localRoute { self.localProxyPort = port } else { self.localProxyPort = nil }
         self.localProxy = localRoute.map { DoHSessionFactory.session(for: $0, delegate: delegate) }
+        self.upstream = upstreamRoutePort.map { DoHSessionFactory.session(for: .upstream(port: $0), delegate: delegate) }
     }
+
+    var all: [URLSession] { [direct, localProxy, upstream].compactMap { $0 } }
 
     func invalidate() {
-        direct.invalidateAndCancel()
-        localProxy?.invalidateAndCancel()
+        for session in all { session.invalidateAndCancel() }
     }
 
-    /// On VPN, direct HTTPS to public DoH resolvers is often black-holed; try
-    /// the local proxy listener first.
-    func sessions(preferProxyPath: Bool) -> [URLSession] {
-        guard let localProxy else { return [direct] }
-        return preferProxyPath ? [localProxy, direct] : [direct, localProxy]
+    /// On VPN, direct HTTPS to public DoH resolvers is often black-holed, so
+    /// the proxied routes come first. The order only breaks ties: every
+    /// session returned is raced.
+    func sessions(preferProxyPath: Bool, upstreamOffered: Bool) -> [URLSession] {
+        let proxied = [upstreamOffered ? upstream : nil, localProxy].compactMap { $0 }
+        return preferProxyPath ? proxied + [direct] : [direct] + proxied.reversed()
     }
 }
 
@@ -533,6 +598,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private let splitDNSProvider: (@Sendable () -> SplitDNSTable)?
     private let preferProxyPathForDoH: @Sendable () -> Bool
     private let localProxyPort: @Sendable () -> Int?
+    private let upstreamRoute: @Sendable () -> DoHUpstreamRoute?
     private let pathSatisfied: @Sendable () -> Bool
     private let onMetrics: (@Sendable () -> Void)?
     private let tuning: DNSForwarderTuning
@@ -616,6 +682,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         splitDNSProvider: (@Sendable () -> SplitDNSTable)? = nil,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool,
         localProxyPort: @escaping @Sendable () -> Int?,
+        upstreamRoute: @escaping @Sendable () -> DoHUpstreamRoute?,
         pathSatisfied: @escaping @Sendable () -> Bool,
         onMetrics: (@Sendable () -> Void)? = nil,
         tuning: DNSForwarderTuning,
@@ -629,6 +696,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         self.splitDNSProvider = splitDNSProvider
         self.preferProxyPathForDoH = preferProxyPathForDoH
         self.localProxyPort = localProxyPort
+        self.upstreamRoute = upstreamRoute
         self.pathSatisfied = pathSatisfied
         self.onMetrics = onMetrics
         let delegate = ProxyChallengeRefusingDelegate(client: .doh) { event in
@@ -641,7 +709,10 @@ private final class DNSResolutionCore: @unchecked Sendable {
         }
         self.proxyChallengeDelegate = delegate
         self.transportsBox = NIOLockedValueBox(
-            DoHTransportsHandle(transports: DoHTransports(config: configProvider(), boundPort: localProxyPort(), delegate: delegate))
+            DoHTransportsHandle(transports: DoHTransports(
+                config: configProvider(), boundPort: localProxyPort(),
+                upstreamRoutePort: upstreamRoute()?.listeningPort, delegate: delegate
+            ))
         )
     }
 
@@ -678,7 +749,8 @@ private final class DNSResolutionCore: @unchecked Sendable {
     @discardableResult
     func resetUpstreamTransports() -> Int {
         let fresh = DoHTransportsHandle(transports: DoHTransports(
-            config: configProvider(), boundPort: localProxyPort(), delegate: proxyChallengeDelegate
+            config: configProvider(), boundPort: localProxyPort(),
+            upstreamRoutePort: upstreamRoute()?.listeningPort, delegate: proxyChallengeDelegate
         ))
         let old = transportsBox.withLockedValue { current -> DoHTransportsHandle in
             let captured = current
@@ -1268,7 +1340,9 @@ private final class DNSResolutionCore: @unchecked Sendable {
             guard handle.beginUse() else { return .unanswered }
         }
         defer { handle.endUse() }
-        let sessions = handle.transports.sessions(preferProxyPath: preferProxyPathForDoH())
+        let upstreamOffered = DoHSessionFactory.upstreamRoute(config: config, boundPort: upstreamRoute()?.offeredPort) != nil
+        let transports = handle.transports
+        let preferProxyPath = preferProxyPathForDoH()
 
         let refusalsBefore = proxyChallengeDelegate.refusalCount
 
@@ -1278,6 +1352,10 @@ private final class DNSResolutionCore: @unchecked Sendable {
         let answer: [UInt8]? = await withTaskGroup(of: [UInt8]?.self) { group -> [UInt8]? in
             for provider in providers {
                 let dohURL = "\(provider)?name=\(encodedDomain)&type=\(typeName)"
+                let sessions = transports.sessions(
+                    preferProxyPath: preferProxyPath,
+                    upstreamOffered: upstreamOffered && DoHSessionFactory.upstreamRouteCarries(provider: provider)
+                )
                 for session in sessions {
                     group.addTask {
                         await Self.tryDoHJSONFetch(

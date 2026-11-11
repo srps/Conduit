@@ -1256,6 +1256,12 @@ package final class ProxyOrchestrator {
             vpnConnectedForDNSBox.withLockedValue { $0 }
         },
         localProxyPort: { [server = localProxyServer] in server.listeningPort },
+        // The tunnels' pool: it dials an upstream whatever the client routing rules say, and outlives a listener restart. Not offered
+        // while client traffic goes direct (VPN off, no upstream): the runtime dials no upstream then, and direct DoH works.
+        upstreamRoute: DoHUpstreamRouteSource(
+            coordinator: tunnelCoordinator,
+            offered: { [directModeBox] in !directModeBox.withLockedValue { $0.cause }.routesClientTrafficDirectly }
+        ),
         // A signal only: the hop reads the running core's counters when it runs. A stop clears them, and a later start's core counts
         // from zero, so a hop that lands after either publishes that operation's counts, never the ones it was queued with.
         onMetrics: { [weak self] in
@@ -1379,6 +1385,7 @@ package final class ProxyOrchestrator {
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
         localProxyPort: { [server = localProxyServer] in server.listeningPort },
+        upstreamRoutePort: { [forwarder = dnsForwarder] in forwarder.doHUpstreamRoutePort },
         eventSink: { [eventLog] event in eventLog.append(event) }
     )
 

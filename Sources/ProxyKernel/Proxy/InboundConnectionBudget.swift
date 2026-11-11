@@ -11,6 +11,12 @@ final class InboundConnectionBudget: Sendable {
         var lastWarning = NIODeadline.uptimeNanoseconds(0)
     }
     private let state = NIOLockedValueBox(State())
+    /// A listener with its own fixed cap, where the config's limit is for the client listeners.
+    private let fixedLimit: Int?
+
+    init(fixedLimit: Int? = nil) {
+        self.fixedLimit = fixedLimit
+    }
 
     var count: Int { state.withLockedValue { $0.count } }
 
@@ -18,14 +24,14 @@ final class InboundConnectionBudget: Sendable {
         _ channel: Channel, protocolName: String, config: ProxyConfig,
         logger: any LogSink, eventSink: (@Sendable (RuntimeEvent) -> Void)?
     ) -> Bool {
-        let limit = config.inboundConnectionMaxLimit
+        let limit = fixedLimit ?? config.inboundConnectionMaxLimit
         // Live UI edits can expose an invalid draft before config validation.
         // A nonpositive limit rejects new peers without disturbing reservations.
         let decision = state.withLockedValue { state -> (accepted: Bool, count: Int, warn: Bool) in
             guard state.count < limit else { return (false, state.count, false) }
             state.count += 1
             let now = NIODeadline.now()
-            let warn = state.count > config.inboundConnectionWarnThreshold && now - state.lastWarning >= .seconds(10)
+            let warn = fixedLimit == nil && state.count > config.inboundConnectionWarnThreshold && now - state.lastWarning >= .seconds(10)
             if warn { state.lastWarning = now }
             return (true, state.count, warn)
         }

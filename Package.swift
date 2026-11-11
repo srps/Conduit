@@ -107,7 +107,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "pm-dns",
-            dependencies: ["ProxyKernel"],
+            dependencies: ["ProxyKernel", "ProxyAuth"],
             path: "Sources/pm-dns"
         ),
         // Nested in Conduit.app by bundle-app.sh with Sparkle.framework in its

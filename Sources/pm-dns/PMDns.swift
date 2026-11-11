@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import ProxyAuth
 import ProxyKernel
 import NIOPosix
 
@@ -35,7 +36,9 @@ enum PMDns {
 
             The forwarder tries corporate DNS first for internal domains,
             then falls back to Cloudflare DoH for external names.
-            DoH fetches race direct and the local proxy listener.
+            DoH fetches race a direct route and, when the config enables an
+            upstream proxy, a route through it (Kerberos from the ticket cache;
+            an NTLMv2 upstream has no saved password here and fails).
             """)
             return
         }
@@ -78,7 +81,9 @@ enum PMDns {
             let forwarder = LocalDNSForwarder(
                 group: group,
                 logger: logger,
-                configProvider: { config }
+                configProvider: { config },
+                upstreamRoute: upstreamRoute(config: config, group: group, logger: logger),
+                eventSink: { event in logger.log(.info, "\(event.event) \(event.detail ?? "")", category: .network) }
             )
 
             do {
@@ -96,6 +101,23 @@ enum PMDns {
         }
 
         dispatchMain()
+    }
+
+    /// A pool and coordinator of this process's own, as pm-tunnel builds
+    /// them: pm-dns runs no proxy listener to borrow one from. Credentials
+    /// come from the in-memory provider, so nothing on the host is read
+    /// beyond the Kerberos ticket cache.
+    private static func upstreamRoute(config: ProxyConfig, group: MultiThreadedEventLoopGroup, logger: ConsoleLogSink) -> DoHUpstreamRouteSource? {
+        guard !config.enabledUpstreams.isEmpty else { return nil }
+        let authProvider = credentialBasedAuthenticatorProvider(
+            configProvider: { config },
+            credentialProvider: InMemoryCredentialProvider(),
+            eventSink: { event in logger.log(.error, "\(event.event): \(event.detail ?? "")", category: .auth) }
+        )
+        let pool = ConnectionPool(group: group, logger: logger, configProvider: { config }, authenticatorProvider: authProvider)
+        return DoHUpstreamRouteSource(
+            coordinator: CONNECTCoordinator(pool: pool, authenticatorProvider: authProvider, logger: logger)
+        )
     }
 
     @MainActor

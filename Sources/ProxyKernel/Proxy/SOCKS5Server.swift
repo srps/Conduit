@@ -3,6 +3,23 @@ import Foundation
 import NIOCore
 import NIOPosix
 
+/// How a SOCKS listener routes the requests it accepts.
+enum SOCKS5Routing: Sendable {
+    /// The client listener's rules: PAC, bypass and force lists, direct mode.
+    case clientPolicy
+    /// Every admitted request goes through an upstream proxy and no rule can
+    /// send one direct. The DoH upstream route (decision 0045).
+    case upstreamOnly(SOCKS5UpstreamOnlyRoute)
+}
+
+/// What an upstream-only SOCKS listener admits, and where it reports.
+struct SOCKS5UpstreamOnlyRoute: Sendable {
+    let admits: @Sendable (_ host: String, _ port: Int) -> Bool
+    let refused: @Sendable (_ target: String) -> Void
+    let opened: @Sendable (_ target: String, _ upstream: String) -> Void
+    let failed: @Sendable (_ target: String, _ error: Error) -> Void
+}
+
 final class SOCKS5Server: @unchecked Sendable {
     private let group: EventLoopGroup
     private let connectCoordinator: CONNECTCoordinator
@@ -21,6 +38,7 @@ final class SOCKS5Server: @unchecked Sendable {
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
     private let inboundBudget: InboundConnectionBudget
     private let handshakeTimeout: TimeAmount
+    private let routing: SOCKS5Routing
     private var serverChannel: Channel?
 
     var listeningHost: String? {
@@ -41,12 +59,14 @@ final class SOCKS5Server: @unchecked Sendable {
         gatewayMode: Bool,
         inboundBudget: InboundConnectionBudget = InboundConnectionBudget(),
         handshakeTimeout: TimeAmount = .seconds(10),
+        routing: SOCKS5Routing = .clientPolicy,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void = { _ in },
         onConnectionClosed: @Sendable @escaping (UUID) -> Void = { _ in },
         onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void = { _ in }
     ) {
         precondition(handshakeTimeout.nanoseconds > 0)
+        self.routing = routing
         self.inboundBudget = inboundBudget
         self.handshakeTimeout = handshakeTimeout
         self.group = group
@@ -68,7 +88,7 @@ final class SOCKS5Server: @unchecked Sendable {
             .childChannelOption(ChannelOptions.tcpNoDelay, value: 1)
             .childChannelInitializer { channel in
                 guard self.inboundBudget.admit(
-                    channel, protocolName: "socks5", config: self.configProvider(),
+                    channel, protocolName: self.protocolName, config: self.configProvider(),
                     logger: self.logger, eventSink: self.eventSink
                 ) else {
                     return channel.close().flatMap { channel.eventLoop.makeFailedFuture(ChannelError.ioOnClosedChannel) }
@@ -93,6 +113,7 @@ final class SOCKS5Server: @unchecked Sendable {
                             configProvider: self.configProvider,
                             gatewayMode: self.gatewayMode,
                             handshakeTimeout: self.handshakeTimeout,
+                            routing: self.routing,
                             eventSink: self.eventSink,
                             onConnectionOpened: self.onConnectionOpened,
                             onConnectionClosed: self.onConnectionClosed,
@@ -104,7 +125,19 @@ final class SOCKS5Server: @unchecked Sendable {
         serverChannel = try await bootstrap.bind(host: host, port: port).get()
         let actualHost = serverChannel?.localAddress?.ipAddress ?? host
         let actualPort = serverChannel?.localAddress?.port ?? port
-        logger.log(.notice, "SOCKS5 proxy listening on \(actualHost):\(actualPort).", category: .proxy)
+        switch routing {
+        case .clientPolicy:
+            logger.log(.notice, "SOCKS5 proxy listening on \(actualHost):\(actualPort).", category: .proxy)
+        case .upstreamOnly:
+            logger.log(.info, "DoH upstream route listening on \(actualHost):\(actualPort).", category: .network)
+        }
+    }
+
+    private var protocolName: String {
+        switch routing {
+        case .clientPolicy: "socks5"
+        case .upstreamOnly: "doh_upstream_route"
+        }
     }
 
     func stop() async {
@@ -132,6 +165,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     private enum State { case greeting, request, routing, relaying }
     private var state: State = .greeting
     private let handshakeTimeout: TimeAmount
+    private let routing: SOCKS5Routing
     private var handshakeDeadline: Scheduled<Void>?
     private var connectionID: UUID?
     private var accumulated = ByteBufferAllocator().buffer(capacity: 512)
@@ -145,12 +179,14 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         configProvider: @escaping () -> ProxyConfig,
         gatewayMode: Bool,
         handshakeTimeout: TimeAmount = .seconds(10),
+        routing: SOCKS5Routing = .clientPolicy,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void,
         onConnectionClosed: @Sendable @escaping (UUID) -> Void,
         onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void
     ) {
         precondition(handshakeTimeout.nanoseconds > 0)
+        self.routing = routing
         self.handshakeTimeout = handshakeTimeout
         self.connectCoordinator = connectCoordinator
         self.logger = logger
@@ -348,6 +384,17 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             return false
         }
 
+        if case .upstreamOnly(let route) = routing {
+            let target = host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
+            guard route.admits(host, Int(port)) else {
+                route.refused(target)
+                sendReply(context: context, rep: 0x02)
+                return false
+            }
+            connectViaUpstream(host: host, port: port, context: context, proxyChain: [], failureLogLevel: .debug)
+            return false
+        }
+
         let (isDirectMode, directCause) = directModeProvider()
         let directModeBypass = isDirectMode && directCause.routesClientTrafficDirectly
         let currentConfig = configProvider()
@@ -538,12 +585,19 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             .whenComplete { result in
                 switch result {
                 case .success(let (upstream, endpoint, authMethod)):
-                    self.logger.log(.notice, "SOCKS5 tunnel via \(endpoint) for \(host):\(port)", category: .proxy)
+                    if case .upstreamOnly(let route) = self.routing {
+                        route.opened(target, endpoint)
+                    } else {
+                        self.logger.log(.notice, "SOCKS5 tunnel via \(endpoint) for \(host):\(port)", category: .proxy)
+                    }
                     if let id = self.connectionID, let authMethod {
                         self.onConnectionActivity(ConnectionActivity(connectionID: id, authMethod: authMethod))
                     }
                     self.attachRelay(context: ctx, upstream: upstream, isUpstreamTunnel: true)
                 case .failure(let error):
+                    if case .upstreamOnly(let route) = self.routing {
+                        route.failed(target, error)
+                    }
                     self.logger.log(failureLogLevel, "SOCKS5 upstream tunnel failed: \(error.displayDescription)", category: .proxy)
                     self.sendReply(context: ctx, rep: 0x05)
                 }

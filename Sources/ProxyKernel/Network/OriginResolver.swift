@@ -63,6 +63,7 @@ package final class DoHOriginResolver: OriginResolving {
     private let logger: any LogSink
     private let configProvider: @Sendable () -> ProxyConfig
     private let localProxyPort: @Sendable () -> Int?
+    private let upstreamRoutePort: @Sendable () -> Int?
     private let cache = NIOLockedValueBox<[String: CacheEntry]>([:])
     private let negativeCache = NIOLockedValueBox(NegativeAnswerCache(ttl: 5))
     private let proxyChallengeDelegate: ProxyChallengeRefusingDelegate
@@ -71,10 +72,12 @@ package final class DoHOriginResolver: OriginResolving {
     /// provider needs the proxy routes too (see `DoHSessionFactory.routes`).
     package init(logger: any LogSink, configProvider: @escaping @Sendable () -> ProxyConfig,
                  localProxyPort: @escaping @Sendable () -> Int? = { nil },
+                 upstreamRoutePort: @escaping @Sendable () -> Int? = { nil },
                  eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil) {
         self.logger = logger
         self.configProvider = configProvider
         self.localProxyPort = localProxyPort
+        self.upstreamRoutePort = upstreamRoutePort
         self.proxyChallengeDelegate = ProxyChallengeRefusingDelegate(client: .originResolver) { event in
             eventSink?(event)
             logger.log(
@@ -183,7 +186,9 @@ package final class DoHOriginResolver: OriginResolving {
         let providers = config.dohProviders.isEmpty
             ? DNSSection.defaultDoHProviders
             : config.dohProviders
-        let routes = DoHSessionFactory.routes(for: config, localProxyPort: localProxyPort())
+        let routes = DoHSessionFactory.routes(
+            for: config, localProxyPort: localProxyPort(), upstreamRoutePort: upstreamRoutePort()
+        )
         let encoded = host.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? host
         let query = DNSWireFormat.buildQuery(domain: host, qtype: 1)
         let delegate = proxyChallengeDelegate
@@ -191,6 +196,7 @@ package final class DoHOriginResolver: OriginResolving {
         return await withTaskGroup(of: (ip: String, ttl: TimeInterval)?.self) { group in
             for provider in providers {
                 for route in routes {
+                    if case .upstream = route, !DoHSessionFactory.upstreamRouteCarries(provider: provider) { continue }
                     group.addTask { await Self.fetchJSON(url: "\(provider)?name=\(encoded)&type=A", route: route, delegate: delegate) }
                     group.addTask { await Self.fetchWire(provider: provider, query: query, route: route, delegate: delegate) }
                 }
