@@ -1050,6 +1050,247 @@ package final class FakePushedResolverObserver: PushedResolverObserving, @unchec
     }
 }
 
+/// Stands in for `SystemTunnelStore`. It holds store keys, and `read()`
+/// parses all of them every time, as the real store is read.
+///
+/// A change to a key matching `TunnelSnapshot.keyPatterns` marks every
+/// subscription made before it. A marked subscription has one signal on its
+/// way and no more, however many changes follow before that signal runs, as
+/// configd coalesces them: at most one callback per subscription is ever
+/// queued. A change to any other key, or one that leaves a key as it was,
+/// marks nothing. The signal says nothing about which key moved.
+///
+/// `notifications` decides what a mark does: `.delivered` queues the signal,
+/// `.held` keeps the mark on those subscriptions until `deliverHeld()`, and
+/// `.dropped` loses it. A subscription made after a change never hears of
+/// it, held or not.
+///
+/// Cancelling takes the mark away, so a signal queued and not yet run does
+/// nothing. `signalsQueuedBeforeCancelStillRun` turns that off.
+///
+/// A subscription released uncancelled ends as a cancel would end it, hands
+/// that result to its `onUncancelledRelease`, and then traps in a debug
+/// build, as `SystemTunnelStore`'s does. `trapsOnUncancelledRelease` turns
+/// the trap off.
+package final class FakeTunnelStore: TunnelStoreReading, @unchecked Sendable {
+    package enum Notifications: Sendable {
+        case delivered
+        case held
+        case dropped
+    }
+
+    private struct Subscriber {
+        let queue: DispatchQueue
+        let onChange: @Sendable () -> Void
+        /// A signal is queued and has not run.
+        var queued = false
+        /// A change happened while `.held` and waits for `deliverHeld()`.
+        var held = false
+    }
+
+    private static let subscribedKeys = TunnelSnapshot.keyPatterns.map { pattern in
+        // The patterns are constants of this module.
+        try! NSRegularExpression(pattern: "^(?:\(pattern))$")
+    }
+
+    private let lock = NSLock()
+    private var keys: [String: [String: Any]] = [:]
+    private var subscribers: [Int: Subscriber] = [:]
+    private var nextSubscriber = 0
+    private var mode = Notifications.delivered
+    private var lateSignals = false
+    private var failsRead: TunnelReading.Failure?
+    private var failsSubscribe: TunnelReading.Failure?
+    private var failsCancel: TunnelReading.Failure?
+    private var trapsOnRelease = true
+
+    package init() {}
+
+    package var notifications: Notifications {
+        get { lock.withLock { mode } }
+        set { lock.withLock { mode = newValue } }
+    }
+
+    /// Off by default. While on, a signal already queued when its
+    /// subscription is cancelled still calls `onChange`, once, after the
+    /// cancel returned. `SCDynamicStore` does not say that a detached queue
+    /// has no callback left on it, so a subscriber has to survive this; a
+    /// test turns it on to prove that a restarted subscriber ignores the
+    /// earlier session's call.
+    package var signalsQueuedBeforeCancelStillRun: Bool {
+        get { lock.withLock { lateSignals } }
+        set { lock.withLock { lateSignals = newValue } }
+    }
+
+    /// While set, `read()` returns this failure.
+    package var readFailure: TunnelReading.Failure? {
+        get { lock.withLock { failsRead } }
+        set { lock.withLock { failsRead = newValue } }
+    }
+
+    /// While set, `subscribe` returns this failure and adds no subscriber.
+    package var subscribeFailure: TunnelReading.Failure? {
+        get { lock.withLock { failsSubscribe } }
+        set { lock.withLock { failsSubscribe = newValue } }
+    }
+
+    /// On by default. A test of what a subscriber does when its subscription
+    /// is released uncancelled turns the debug trap off.
+    package var trapsOnUncancelledRelease: Bool {
+        get { lock.withLock { trapsOnRelease } }
+        set { lock.withLock { trapsOnRelease = newValue } }
+    }
+
+    /// While set, a first `cancel()` ends the subscription and returns this
+    /// failure, and so does the release of one never cancelled.
+    package var cancelFailure: TunnelReading.Failure? {
+        get { lock.withLock { failsCancel } }
+        set { lock.withLock { failsCancel = newValue } }
+    }
+
+    /// Subscriptions made and not yet cancelled.
+    package var subscriptionCount: Int { lock.withLock { subscribers.count } }
+
+    /// Setting a key to the value it has changes nothing and signals nothing.
+    package func set(_ key: String, _ value: [String: Any]) {
+        change { put(value, at: key) }
+    }
+
+    /// Removing a key the store does not hold changes nothing and signals
+    /// nothing.
+    package func remove(_ key: String) {
+        change { put(nil, at: key) }
+    }
+
+    /// Sets or removes a tunnel's two interface keys in one change. `nil`
+    /// removes the key; an empty list keeps it with no addresses.
+    package func setInterface(_ interface: String, ipv4: [String]?, ipv6: [String]?) {
+        setAll([
+            "State:/Network/Interface/\(interface)/IPv4": ipv4.map { ["Addresses": $0] },
+            "State:/Network/Interface/\(interface)/IPv6": ipv6.map { ["Addresses": $0] },
+        ])
+    }
+
+    /// Sets or removes several keys in one change, as one store transaction
+    /// does: a subscriber is signalled once and reads them all moved.
+    package func setAll(_ values: [String: [String: Any]?]) {
+        change {
+            // Every key is written, so `contains` must not stop at the first.
+            values.map { put($0.value, at: $0.key) }.contains(true)
+        }
+    }
+
+    /// Queues the signal for every subscription holding a change made while
+    /// `.held`. Does nothing for the others.
+    package func deliverHeld() {
+        let signals = lock.withLock {
+            subscribers.keys.sorted().compactMap { id -> (() -> Void)? in
+                guard subscribers[id]!.held else { return nil }
+                subscribers[id]!.held = false
+                return queueSignal(id)
+            }
+        }
+        signals.forEach { $0() }
+    }
+
+    package func read() -> TunnelReading {
+        lock.withLock {
+            if let failsRead { return .failed(failsRead) }
+            return .snapshot(TunnelSnapshot.parse(store: keys))
+        }
+    }
+
+    package func subscribe(
+        queue: DispatchQueue,
+        onChange: @escaping @Sendable () -> Void,
+        onUncancelledRelease: @escaping @Sendable (Result<Void, TunnelReading.Failure>) -> Void
+    ) -> Result<any TunnelStoreSubscription, TunnelReading.Failure> {
+        lock.withLock {
+            if let failsSubscribe { return .failure(failsSubscribe) }
+            nextSubscriber += 1
+            subscribers[nextSubscriber] = Subscriber(queue: queue, onChange: onChange)
+            return .success(Subscription(store: self, id: nextSubscriber, onUncancelledRelease: onUncancelledRelease))
+        }
+    }
+
+    /// Writes one key under the lock. Returns whether a subscribed key
+    /// changed.
+    private func put(_ value: [String: Any]?, at key: String) -> Bool {
+        let old = keys[key]
+        guard (old as NSDictionary?) != (value as NSDictionary?) else { return false }
+        keys[key] = value
+        let whole = NSRange(key.startIndex..., in: key)
+        return Self.subscribedKeys.contains { $0.firstMatch(in: key, range: whole) != nil }
+    }
+
+    /// `mutate` runs under the lock and returns whether a subscribed key
+    /// changed.
+    private func change(_ mutate: () -> Bool) {
+        let signals = lock.withLock { () -> [() -> Void] in
+            guard mutate() else { return [] }
+            switch mode {
+            case .delivered:
+                return subscribers.keys.sorted().compactMap(queueSignal)
+            case .held:
+                for id in subscribers.keys { subscribers[id]!.held = true }
+            case .dropped:
+                break
+            }
+            return []
+        }
+        signals.forEach { $0() }
+    }
+
+    /// Marks the subscription under the lock and returns the dispatch to run
+    /// outside it, or nil when a signal is already queued.
+    private func queueSignal(_ id: Int) -> (() -> Void)? {
+        guard let subscriber = subscribers[id], !subscriber.queued else { return nil }
+        subscribers[id]!.queued = true
+        return { [self] in
+            subscriber.queue.async {
+                let deliver = self.lock.withLock { () -> Bool in
+                    guard self.subscribers[id] != nil else { return self.lateSignals }
+                    self.subscribers[id]!.queued = false
+                    return true
+                }
+                if deliver { subscriber.onChange() }
+            }
+        }
+    }
+
+    /// Ends the subscription and returns how the detach went and whether a
+    /// release that had to make it traps, or nil when it had already ended.
+    private func end(_ id: Int) -> (detach: Result<Void, TunnelReading.Failure>, traps: Bool)? {
+        lock.withLock {
+            guard subscribers.removeValue(forKey: id) != nil else { return nil }
+            return (failsCancel.map { .failure($0) } ?? .success(()), trapsOnRelease)
+        }
+    }
+
+    private final class Subscription: TunnelStoreSubscription, @unchecked Sendable {
+        private let store: FakeTunnelStore
+        private let id: Int
+        private let onUncancelledRelease: @Sendable (Result<Void, TunnelReading.Failure>) -> Void
+
+        init(
+            store: FakeTunnelStore, id: Int,
+            onUncancelledRelease: @escaping @Sendable (Result<Void, TunnelReading.Failure>) -> Void
+        ) {
+            self.store = store
+            self.id = id
+            self.onUncancelledRelease = onUncancelledRelease
+        }
+
+        deinit {
+            guard let ended = store.end(id) else { return }
+            onUncancelledRelease(ended.detach)
+            if ended.traps { assertionFailure("cancel a store subscription before releasing it") }
+        }
+
+        func cancel() -> Result<Void, TunnelReading.Failure> { store.end(id)?.detach ?? .success(()) }
+    }
+}
+
 // MARK: - Updates
 
 /// Stands in for the nested updater: records each start, can refuse them,
