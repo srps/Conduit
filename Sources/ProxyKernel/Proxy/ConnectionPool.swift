@@ -1454,12 +1454,6 @@ package final class ConnectionPool: @unchecked Sendable {
         // bypassed the breaker entirely — a real-world bug, not just a
         // scenario quirk.
         return attempt.flatMapError { [weak self] (error: Error) -> EventLoopFuture<UpstreamExchangeResponse> in
-            // `self?.group...makeFailedFuture(error)`
-            // is unreachable here — `guard let self else` fires precisely
-            // when `self` is nil, so the `??` left side always evaluates to
-            // nil. The propagation that actually happens is `return attempt`
-            // (which is already in a failed state because we got here via
-            // `flatMapError`). Simplifying makes the intent obvious.
             let acquisitionFailed = error is AcquisitionFailure
             let cause = (error as? AcquisitionFailure)?.cause ?? error
             guard let self else { return attempt.eventLoop.makeFailedFuture(cause) }
