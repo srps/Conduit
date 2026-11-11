@@ -53,12 +53,15 @@ final class TunnelSelectionTests: XCTestCase {
     /// A tunnel given up after its selection claimed P's probe and before
     /// the dial gives that slot back, so the next request probes P.
     func testATunnelGivenUpBeforeItsDialFreesTheProbeItClaimed() async throws {
-        let harness = try await probeHarness()
-        let reads = NIOLockedValueBox(0)
-        // The stop lands between the selection and the dial.
-        let isWanted: @Sendable () -> Bool = { reads.withLockedValue { $0 += 1; return $0 <= 1 } }
+        let stopped = NIOLockedValueBox(false)
+        // The stop lands as the selection claims P's probe, which moves P half-open.
+        let harness = try await probeHarness(eventSink: { event in
+            if event.event == "upstream.circuit_half_opened" { stopped.withLockedValue { $0 = true } }
+        })
 
-        await assertAbandoned(harness.coordinator.connectUpstreamTunnel(target: "a.corp.example:443", isWanted: isWanted))
+        await assertAbandoned(harness.coordinator.connectUpstreamTunnel(
+            target: "a.corp.example:443", isWanted: { !stopped.withLockedValue { $0 } }
+        ))
 
         try await harness.assertTheNextRequestProbesP()
     }
@@ -66,12 +69,19 @@ final class TunnelSelectionTests: XCTestCase {
     /// A dial refused after its caller gave the tunnel up is not charged,
     /// and gives back the probe slot its selection claimed.
     func testADialRefusedAfterTheStopFreesTheProbeItClaimed() async throws {
-        let harness = try await probeHarness()
-        let reads = NIOLockedValueBox(0)
-        // Wanted through the selection and the dial; given up before the refusal is seen.
-        let isWanted: @Sendable () -> Bool = { reads.withLockedValue { $0 += 1; return $0 <= 2 } }
+        // The pool dials on a loop held busy until the stop, so the dial is in flight, not yet refused, when it lands.
+        let dialLoop = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        addTeardownBlock { try await dialLoop.shutdownGracefully() }
+        let harness = try await probeHarness(group: dialLoop)
+        let held = DispatchSemaphore(value: 0)
+        dialLoop.next().execute { _ = held.wait(timeout: .now() + 5) }
+        let stopped = NIOLockedValueBox(false)
 
-        await assertAbandoned(harness.coordinator.connectUpstreamTunnel(target: "a.corp.example:443", isWanted: isWanted))
+        let tunnel = harness.coordinator.connectUpstreamTunnel(target: "a.corp.example:443", isWanted: { !stopped.withLockedValue { $0 } })
+        XCTAssertEqual(harness.pool.upstreamStatuses().first?.circuitState, .halfOpen, "precondition: the dial in flight holds P's probe")
+        stopped.withLockedValue { $0 = true }
+        held.signal()
+        await assertAbandoned(tunnel)
 
         XCTAssertEqual(harness.pool.upstreamStatuses().first?.circuitState, .halfOpen, "the abandoned dial charged nothing")
         try await harness.assertTheNextRequestProbesP()
@@ -124,12 +134,13 @@ final class TunnelSelectionTests: XCTestCase {
         let upstream = try await authenticatingUpstream()
         let setup = makeCoordinator(upstreams: [("P", upstream.port)])
         let (pool, coordinator) = (setup.pool, setup.coordinator)
-        let reads = NIOLockedValueBox(0)
         let stopped = NIOLockedValueBox(false)
         let isWanted: @Sendable () -> Bool = {
-            let read = reads.withLockedValue { $0 += 1; return $0 }
-            // The third read admits the connected dial.
-            guard read == 3 else { return !stopped.withLockedValue { $0 } }
+            // The fence is read on the pool's loop first when the connected dial is admitted; the reads before it
+            // happen on the caller's thread as the tunnel is selected and dialled.
+            guard MultiThreadedEventLoopGroup.currentEventLoop != nil, !stopped.withLockedValue({ $0 }) else {
+                return !stopped.withLockedValue { $0 }
+            }
             stopped.withLockedValue { $0 = true }
             let closed = DispatchSemaphore(value: 0)
             DispatchQueue.global().async {
@@ -203,10 +214,12 @@ final class TunnelSelectionTests: XCTestCase {
         }
     }
 
-    private func probeHarness() async throws -> ProbeHarness {
+    private func probeHarness(
+        group: EventLoopGroup? = nil, eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
+    ) async throws -> ProbeHarness {
         let refusedPort = try await unusedPort()
         let s = try await authenticatingUpstream()
-        let setup = makeCoordinator(upstreams: [("P", refusedPort), ("S", s.port)], openInterval: 0.05)
+        let setup = makeCoordinator(upstreams: [("P", refusedPort), ("S", s.port)], openInterval: 0.05, group: group, eventSink: eventSink)
         let p = setup.upstreams[0]
         setup.pool.recordDedicatedTunnelSuccess(for: p, latencyMS: 1)
         for _ in 0..<setup.threshold { setup.pool.recordConnectFailure(for: p) }
@@ -222,7 +235,10 @@ final class TunnelSelectionTests: XCTestCase {
         let threshold: Int
     }
 
-    private func makeCoordinator(upstreams: [(name: String, port: Int)], openInterval: TimeInterval = 300) -> Setup {
+    private func makeCoordinator(
+        upstreams: [(name: String, port: Int)], openInterval: TimeInterval = 300,
+        group: EventLoopGroup? = nil, eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
+    ) -> Setup {
         var config = ProxyConfig.testFixture()
         config.upstreams = upstreams.enumerated().map { index, upstream in
             UpstreamProxy(name: upstream.name, host: "127.0.0.1", port: upstream.port, priority: index)
@@ -233,8 +249,8 @@ final class TunnelSelectionTests: XCTestCase {
         config.upstreamResponseTimeoutSeconds = 10
         let frozen = config
         let pool = ConnectionPool(
-            group: group, logger: DiscardingLogSink(), configProvider: { frozen },
-            authenticatorProvider: { _ in StubNegotiateAuthenticator() }
+            group: group ?? self.group, logger: DiscardingLogSink(), configProvider: { frozen },
+            authenticatorProvider: { _ in StubNegotiateAuthenticator() }, eventSink: eventSink
         )
         addTeardownBlock { pool.closeAll(scope: .all) }
         let coordinator = CONNECTCoordinator(pool: pool, authenticatorProvider: { _ in StubNegotiateAuthenticator() }, logger: DiscardingLogSink())
