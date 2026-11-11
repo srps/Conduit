@@ -585,6 +585,19 @@ package final class ConnectionPool: @unchecked Sendable {
     ) -> EventLoopFuture<StreamingExchangeResult> {
         let proxy = selection.proxy
         let start = Date()
+        // A probe's verdict is its response head: a long download would
+        // otherwise hold the half-open slot until its last byte, and every
+        // other request would pass the upstream over until then.
+        let settledAtHead = NIOLockedValueBox(false)
+        let settleAtHead: @Sendable () -> Void = { [weak self] in
+            settledAtHead.withLockedValue { $0 = true }
+            self?.recordSuccess(for: proxy, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
+        }
+        let onStreamedHead = selection.probe == nil ? nil : settleAtHead
+        let recordSuccessUnlessSettled: @Sendable () -> Void = { [weak self] in
+            guard !settledAtHead.withLockedValue({ $0 }) else { return }
+            self?.recordSuccess(for: proxy, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
+        }
         let attempt: EventLoopFuture<StreamingExchangeResult> = acquireConnection(
             for: proxy,
             target: head.uri,
@@ -600,9 +613,10 @@ package final class ConnectionPool: @unchecked Sendable {
                 clientChannel: clientChannel,
                 connection: connection,
                 proxy: proxy,
-                authSource: authSource
+                authSource: authSource,
+                onStreamedHead: onStreamedHead
             ), connection: connection).flatMap { result in
-                self.recordSuccess(for: result.upstream, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
+                recordSuccessUnlessSettled()
                 return connection.channel.eventLoop.makeSucceededFuture(result)
             }
         }
@@ -617,7 +631,7 @@ package final class ConnectionPool: @unchecked Sendable {
             let cause = (error as? AcquisitionFailure)?.cause ?? error
             guard let self else { return attempt.eventLoop.makeFailedFuture(cause) }
             if ConnectionPoolError.isClientClosedDuringResponse(cause) {
-                self.recordSuccess(for: proxy, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
+                recordSuccessUnlessSettled()
             } else {
                 self.recordExchangeError(cause, for: selection, origin: ExchangeOrigin(head))
             }
@@ -1535,7 +1549,8 @@ package final class ConnectionPool: @unchecked Sendable {
         clientChannel: Channel,
         connection: PooledUpstreamConnection,
         proxy: UpstreamProxy,
-        authSource: String?
+        authSource: String?,
+        onStreamedHead: (@Sendable () -> Void)?
     ) -> EventLoopFuture<StreamingExchangeResult> {
         let auth = connection.authenticationState()
         let promise = connection.channel.eventLoop.makePromise(of: StreamingExchangeResult.self)
@@ -1551,7 +1566,8 @@ package final class ConnectionPool: @unchecked Sendable {
             eventSink: eventSink,
             clientChannel: clientChannel,
             responseTimeout: upstreamResponseTimeout,
-            streamingPromise: promise
+            streamingPromise: promise,
+            onStreamedHead: onStreamedHead
         )
 
         return connection.channel.pipeline.addHandler(handler).flatMap {
@@ -2130,6 +2146,8 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
     private let clientChannel: Channel?
     private let bufferedPromise: EventLoopPromise<UpstreamExchangeResponse>?
     private let streamingPromise: EventLoopPromise<StreamingExchangeResult>?
+    /// Called once, when a streamed response's head goes to the client.
+    private var onStreamedHead: (@Sendable () -> Void)?
 
     private var phase: Phase
     private var responseHead: HTTPResponseHead?
@@ -2174,6 +2192,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
         self.clientChannel = nil
         self.bufferedPromise = responsePromise
         self.streamingPromise = nil
+        self.onStreamedHead = nil
         self.phase = isAuthenticated ? .awaitingFinal : .awaitingChallenge
     }
 
@@ -2189,7 +2208,8 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
         eventSink: (@Sendable (RuntimeEvent) -> Void)?,
         clientChannel: Channel,
         responseTimeout: TimeAmount,
-        streamingPromise: EventLoopPromise<StreamingExchangeResult>
+        streamingPromise: EventLoopPromise<StreamingExchangeResult>,
+        onStreamedHead: (@Sendable () -> Void)?
     ) {
         self.connection = connection
         self.authenticatorProvider = authenticatorProvider
@@ -2204,6 +2224,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
         self.clientChannel = clientChannel
         self.bufferedPromise = nil
         self.streamingPromise = streamingPromise
+        self.onStreamedHead = onStreamedHead
         self.phase = isAuthenticated ? .awaitingFinal : .awaitingChallenge
     }
 
@@ -2269,7 +2290,10 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
         case .head(let head):
             responseHead = head
             if head.status == .proxyAuthenticationRequired {
-                cancelResponseTimeout()
+                // The challenge's body must still arrive before it can be
+                // answered; a fresh deadline keeps a stalled one from holding
+                // the exchange, and a probe slot, for good.
+                resetResponseTimeout(context: context)
                 challengeHeaders = head.headers["Proxy-Authenticate"]
             } else {
                 finishAuthHandshake()
@@ -2278,6 +2302,8 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
             if head.status != .proxyAuthenticationRequired, let clientChannel {
                 isStreaming = true
                 cancelResponseTimeout()
+                onStreamedHead?()
+                onStreamedHead = nil
                 var clientHead = head
                 HTTPHopByHopHeaders.sanitizeForwardedResponseHeaders(&clientHead.headers)
                 if let backpressure {
@@ -2416,6 +2442,10 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
             )
             return
         }
+        // The challenge arrived in full. Computing the answer may take a
+        // while (a Kerberos ticket); the answer's own send arms the next
+        // deadline.
+        cancelResponseTimeout()
 
         switch phase {
         case .awaitingChallenge:

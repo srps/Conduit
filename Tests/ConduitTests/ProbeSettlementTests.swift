@@ -7,10 +7,12 @@ import NIOPosix
 import XCTest
 @testable import ProxyKernel
 
-/// A half-open breaker passes its upstream over until its probe settles (decision 0045), and a failure without the
-/// probe cannot reopen it.
+/// A half-open breaker passes its upstream over until its probe settles (decision 0045), and since a failure without
+/// the probe cannot reopen it, a probe that never settles keeps the upstream out of selection for good. A streamed
+/// probe settles at its response head, and a challenge whose body stalls times out.
 final class ProbeSettlementTests: XCTestCase {
     private var group: MultiThreadedEventLoopGroup!
+    private var upstreams: [RawResponseUpstream] = []
     private let events = NIOLockedValueBox<[RuntimeEvent]>([])
 
     override func setUp() {
@@ -19,8 +21,57 @@ final class ProbeSettlementTests: XCTestCase {
     }
 
     override func tearDown() async throws {
+        for upstream in upstreams { try await upstream.stop() }
         try await group.shutdownGracefully()
         try await super.tearDown()
+    }
+
+    /// The probe is a long download: its head arrives and its body does not end. The head is the probe's verdict, so
+    /// the breaker closes while the body still streams and the next request may use the upstream.
+    func testAStreamedProbeClosesTheBreakerAtItsResponseHead() async throws {
+        let upstream = try await startUpstream { _ in "HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\nfirst bytes" }
+        let (pool, proxy) = makeHalfOpenPool(port: upstream.port)
+        try await waitUntilProbeMay(pool, proxy)
+
+        let client = try await StreamingClientSink.make(group: group)
+        let download = pool.startStreamingExchange(head: Self.head("http://files.corp.example/large"), requestBody: nil, clientChannel: client.channel)
+        try await waitFor("the breaker closes once the probe's head arrives") { self.state(pool, proxy) == .closed }
+
+        let next = try XCTUnwrap(pool.selectTunnelUpstream(excluding: []))
+        XCTAssertEqual(next.proxy.id, proxy.id)
+        XCTAssertNil(next.probe, "a closed breaker has no probe to claim")
+        XCTAssertEqual(named("upstream.circuit_closed"), ["upstream=U endpoint=127.0.0.1:\(upstream.port) reason=probe_success"])
+
+        pool.closeAll(scope: .all)
+        do {
+            _ = try await download.result.get()
+            XCTFail("the download was cut off by closeAll")
+        } catch {
+            XCTAssertTrue(ConnectionPoolError.isStreamingResponseInterrupted(error), "\(error)")
+        }
+        await client.close()
+    }
+
+    /// The probe meets a 407 whose body never arrives. It times out as a silence, which on one origin does not
+    /// count, so the probe slot is given back and the next request probes again.
+    func testAChallengeWhoseBodyStallsTimesOutAndSettlesTheProbe() async throws {
+        let upstream = try await startUpstream { _ in
+            "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate\r\nContent-Length: 64\r\n\r\n"
+        }
+        let (pool, proxy) = makeHalfOpenPool(port: upstream.port)
+        try await waitUntilProbeMay(pool, proxy)
+
+        let exchange = pool.exchange(head: Self.head("http://a.corp.example/"), body: nil)
+        do {
+            _ = try await within(seconds: 3, exchange)
+            XCTFail("a 407 with no body cannot be answered")
+        } catch {
+            XCTAssertTrue(ConnectionPoolError.isUpstreamResponseTimedOut(error), "\(error)")
+        }
+
+        XCTAssertEqual(named("upstream.probe_released").count, 1, "the probe settled: \(events.withLockedValue { $0.map(\.event) })")
+        XCTAssertEqual(state(pool, proxy), .halfOpen)
+        XCTAssertNotNil(pool.selectTunnelUpstream(excluding: [])?.probe, "the next request probes again")
     }
 
     /// While a probe holds the half-open slot, silences from attempts without it leave the silence ledger alone. Had
@@ -49,6 +100,19 @@ final class ProbeSettlementTests: XCTestCase {
 
     // MARK: - Harness
 
+    private static func head(_ uri: String) -> HTTPRequestHead {
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: uri)
+        head.headers.add(name: "Host", value: URL(string: uri)?.host ?? uri)
+        return head
+    }
+
+    private func startUpstream(_ script: @escaping @Sendable (String) -> String?) async throws -> RawResponseUpstream {
+        let upstream = RawResponseUpstream(script)
+        try await upstream.start(group: group)
+        upstreams.append(upstream)
+        return upstream
+    }
+
     /// One upstream, U, whose breaker two refused connects have opened for 0.1 s.
     private func makeHalfOpenPool(port: Int) -> (ConnectionPool, UpstreamProxy) {
         var config = ProxyConfig.testFixture()
@@ -76,6 +140,21 @@ final class ProbeSettlementTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(150))
     }
 
+    private func waitFor(_ what: String, _ condition: @escaping () -> Bool) async throws {
+        for _ in 0..<200 where !condition() {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(condition(), what)
+    }
+
+    private func within<T: Sendable>(seconds: Int64, _ future: EventLoopFuture<T>) async throws -> T {
+        let promise = group.next().makePromise(of: T.self)
+        future.cascade(to: promise)
+        let deadline = group.next().scheduleTask(in: .seconds(seconds)) { promise.fail(DeadlineElapsed()) }
+        defer { deadline.cancel() }
+        return try await promise.futureResult.get()
+    }
+
     private func named(_ name: String) -> [String] {
         events.withLockedValue { $0 }.filter { $0.event == name }.map { $0.detail ?? "" }
     }
@@ -84,3 +163,5 @@ final class ProbeSettlementTests: XCTestCase {
         pool.upstreamStatuses().first { $0.id == proxy.id }?.circuitState
     }
 }
+
+private struct DeadlineElapsed: Error {}
