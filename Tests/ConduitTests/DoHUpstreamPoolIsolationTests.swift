@@ -59,9 +59,26 @@ final class DoHUpstreamPoolIsolationTests: XCTestCase {
             )
         }
 
-        let health = Health(of: running.orchestrator.dohUpstreamPool)
+        let pool = running.orchestrator.dohUpstreamPool
+        let health = Health(of: pool)
         XCTAssertEqual(health.circuits, [.closed, .closed])
         XCTAssertEqual(health.consecutiveFailures, [0, 0])
+
+        // Closed and unmoved would also be the state of a pool the route never dialled through. With both breakers open, a
+        // lookup forces each into a half-open probe; the 403 that answers it is seen by this pool, frees the probe and counts nothing.
+        for proxy in running.orchestrator.config.enabledUpstreams {
+            for _ in 0..<running.orchestrator.config.circuitFailureThreshold { pool.recordDedicatedTunnelFailure(for: proxy) }
+        }
+        XCTAssertEqual(Health(of: pool).circuits, [.open, .open], "precondition")
+        let reply = try await SOCKS5TestClient.reply(
+            connecting: Self.provider.host, port: Self.provider.port, through: running.routePort, group: group
+        )
+        XCTAssertEqual(reply, 0x05)
+        let released = running.orchestrator.eventLog.events.filter { $0.event == "upstream.probe_released" }
+        XCTAssertEqual(released.map { $0.detail ?? "" }.sorted(), running.orchestrator.config.enabledUpstreams.map {
+            "upstream=\($0.name) endpoint=\($0.endpoint) origin=\(Self.provider.host):\(Self.provider.port) answered=403 pool=doh"
+        }.sorted(), "each upstream's probe met the route's 403 in the route's own pool")
+        XCTAssertEqual(Health(of: pool).circuits, [.halfOpen, .halfOpen])
         await stop(running)
     }
 
