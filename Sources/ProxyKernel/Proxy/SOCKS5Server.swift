@@ -468,9 +468,8 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         if case .upstreamOnly(let route) = routing {
-            let target = host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
             guard route.admits(host, Int(port)) else {
-                route.refused(target)
+                route.refused(Self.observableWireTarget(host: host, port: port))
                 sendReply(context: context, rep: 0x02)
                 return false
             }
@@ -536,6 +535,24 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             pacPlan: .noOpinion
         )
         return false
+    }
+
+    /// A requested target for an event or a log line. The name is bytes a
+    /// client sent, up to 255 of anything. Every scalar a host name or an
+    /// address cannot hold (a space, a newline, `=`, `?`) becomes `_`, so it
+    /// stays one token on one line. A name over 48 scalars is cut: with its
+    /// `target=` key it then stays under the 65 characters at which
+    /// `SensitiveValueSanitizer`, which every event and log line passes,
+    /// replaces a run with `<redacted-token>` and takes the key with it.
+    static func observableWireTarget(host: String, port: UInt16) -> String {
+        let limit = 48
+        var name = String.UnicodeScalarView()
+        for scalar in host.unicodeScalars.prefix(limit) {
+            let kept = scalar.isASCII && (scalar.properties.isAlphabetic || scalar.properties.numericType != nil || ".-_:".unicodeScalars.contains(scalar))
+            name.append(kept ? scalar : "_")
+        }
+        let shown = String(name) + (host.unicodeScalars.count > limit ? "..." : "")
+        return shown.contains(":") ? "[\(shown)]:\(port)" : "\(shown):\(port)"
     }
 
     private func finishRequestRouting(

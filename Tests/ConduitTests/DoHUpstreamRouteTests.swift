@@ -127,11 +127,63 @@ final class DoHUpstreamRouteTests: XCTestCase {
 
         XCTAssertEqual(running.upstream.connectHeads(), [], "a refused target never reaches the upstream")
         let refusals = running.events.withLockedValue { $0 }.filter { $0.event == "dns.doh_upstream_route_refused" }
+        XCTAssertEqual(
+            refusals.map(\.detail), ["target=intranet.corp.example:443 reason=not_a_doh_provider suppressed=0"],
+            "refusals share one limit, whatever they asked for"
+        )
+    }
+
+    /// The refused name is bytes a local process chose. The event shows it as
+    /// one printable token, and a process that sends a new name every time
+    /// gets one event a minute, not one per name.
+    func testRefusalsAreReportedOnceAMinuteWithThePrintableTarget() async throws {
+        let upstream = try await AuthenticatingUpstream.start(group: group, answerIP: Self.answerIP)
+        self.upstream = upstream
+        var config = ProxyConfig.testFixture()
+        config.upstreams = [UpstreamProxy(name: "corp", host: "127.0.0.1", port: upstream.port, priority: 0)]
+        config.dohProviders = ["http://\(Self.providerHost)/dns-query"]
+        let frozen = config
+        let logger = RecordingLogSink(minLevel: .debug)
+        let pool = ConnectionPool(
+            group: group, logger: logger, configProvider: { frozen }, authenticatorProvider: { _ in StubNegotiateAuthenticator() }
+        )
+        self.pool = pool
+        let clock = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000))
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let route = DoHUpstreamRoute(
+            source: DoHUpstreamRouteSource(
+                pool: pool,
+                coordinator: CONNECTCoordinator(pool: pool, authenticatorProvider: { _ in StubNegotiateAuthenticator() }, logger: logger)
+            ),
+            group: group, logger: logger, configProvider: { frozen },
+            eventSink: { event in events.withLockedValue { $0.append(event) } },
+            eventGate: RuntimeEventRepeatGate(now: { clock.withLockedValue { $0 } })
+        )
+        try await route.start()
+        let routePort = try XCTUnwrap(route.listeningPort)
+        let forged = "a.corp.example\r\nWARN forged line reason=ok"
+
+        for index in 0..<70 {
+            let reply = try await socksConnect(host: "host-\(index).corp.example", port: 443, to: routePort)
+            XCTAssertEqual(reply, 0x02)
+        }
+        clock.withLockedValue { $0 += 61 }
+        _ = try await socksConnect(host: forged, port: 443, to: routePort)
+        _ = try await socksConnect(host: String(repeating: "x", count: 255), port: 443, to: routePort)
+        clock.withLockedValue { $0 += 61 }
+        _ = try await socksConnect(host: String(repeating: "x", count: 255), port: 443, to: routePort)
+        await route.stop()
+
+        let refusals = events.withLockedValue { $0 }.filter { $0.event == "dns.doh_upstream_route_refused" }
         XCTAssertEqual(refusals.map(\.detail), [
-            "target=intranet.corp.example:443 reason=not_a_doh_provider suppressed=0",
-            "target=\(Self.providerHost):443 reason=not_a_doh_provider suppressed=0",
-            "target=198.51.100.7:80 reason=not_a_doh_provider suppressed=0",
+            "target=host-0.corp.example:443 reason=not_a_doh_provider suppressed=0",
+            "target=a.corp.example__WARN_forged_line_reason_ok:443 reason=not_a_doh_provider suppressed=69",
+            "target=\(String(repeating: "x", count: 48))...:443 reason=not_a_doh_provider suppressed=1",
         ])
+        let lines = logger.entries().map(\.message).filter { $0.contains("dns.doh_upstream_route_refused") }
+        XCTAssertEqual(lines.count, 3)
+        XCTAssertFalse(lines.contains { $0.contains("\n") || $0.contains("\r") }, "\(lines)")
+        XCTAssertEqual(upstream.connectHeads(), [])
     }
 
     func testAFailingUpstreamIsReportedAndTheListenerStopsWithTheForwarder() async throws {

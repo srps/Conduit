@@ -56,21 +56,17 @@ final class DoHUpstreamRoute: Sendable {
         group: EventLoopGroup,
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
-        eventSink: (@Sendable (RuntimeEvent) -> Void)?
+        eventSink: (@Sendable (RuntimeEvent) -> Void)?,
+        // Exposed only so a test can move the clock its events are limited by.
+        eventGate: RuntimeEventRepeatGate = RuntimeEventRepeatGate()
     ) {
         self.source = source
         self.logger = logger
         nonisolated(unsafe) let configProvider = configProvider
-        let gate = RuntimeEventRepeatGate()
-        // At most one of each event per target a minute: a failing upstream
-        // would otherwise report on every lookup.
-        let report: @Sendable (String, String, String, LogLevel) -> Void = { name, target, detail, level in
-            guard let suppressed = gate.admit(host: target, reason: name) else { return }
-            let event = RuntimeEvent(
-                kind: .routing,
-                event: name,
-                detail: "target=\(target)\(detail) suppressed=\(suppressed)"
-            )
+        // At most one of each event a minute for each key: a failing upstream would otherwise report on every lookup.
+        let report: @Sendable (String, String, String, LogLevel) -> Void = { name, key, detail, level in
+            guard let suppressed = eventGate.admit(host: key, reason: name) else { return }
+            let event = RuntimeEvent(kind: .routing, event: name, detail: "\(detail) suppressed=\(suppressed)")
             eventSink?(event)
             logger.log(level, "DNS: \(event.event) \(event.detail ?? "")", category: .network)
         }
@@ -87,9 +83,18 @@ final class DoHUpstreamRoute: Sendable {
                 admits: { host, port in
                     DoHSessionFactory.isProviderEndpoint(host: host, port: port, config: configProvider())
                 },
-                refused: { target in report("dns.doh_upstream_route_refused", target, " reason=not_a_doh_provider", .warning) },
-                opened: { target, upstream in report("dns.doh_upstream_route_used", target, " upstream=\(upstream)", .info) },
-                failed: { target, error in report("dns.doh_upstream_route_failed", target, " error=\(error.displayDescription)", .info) }
+                // Every refusal shares one key. Keyed by target, a process that asks for a new name each time would get an
+                // event for each and push the gate's other entries out. The target is whatever a local process sent.
+                refused: { target in
+                    report("dns.doh_upstream_route_refused", "", "target=\(target) reason=not_a_doh_provider", .warning)
+                },
+                // Only a configured provider gets this far, so these targets are few and come from the config.
+                opened: { target, upstream in
+                    report("dns.doh_upstream_route_used", target, "target=\(target) upstream=\(upstream)", .info)
+                },
+                failed: { target, error in
+                    report("dns.doh_upstream_route_failed", target, "target=\(target) error=\(error.displayDescription)", .info)
+                }
             )),
             eventSink: eventSink
         )
