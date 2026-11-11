@@ -203,6 +203,12 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                     for: established.proxy,
                     latencyMS: Int(Date().timeIntervalSince(start) * 1_000)
                 )
+                // The upstream opened it, but its caller no longer wants it.
+                guard isWanted() else {
+                    established.channel.close(mode: .all, promise: nil)
+                    pool.removeDedicatedTunnel(established)
+                    throw ConnectionPoolError.tunnelAbandoned
+                }
                 // The handshake handler stays, holding reads paused and any
                 // server-first bytes, until `attachRelay` hands them over.
                 return (channel: established.channel, endpoint: established.proxy.endpoint, authMethod: established.authMethod)

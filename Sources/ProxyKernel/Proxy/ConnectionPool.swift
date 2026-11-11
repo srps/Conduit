@@ -562,9 +562,11 @@ package final class ConnectionPool: @unchecked Sendable {
     /// From the handshake on, the caller settles it.
     ///
     /// - Parameter isWanted: false once the caller has given the tunnel up.
-    ///   Read before the dial and again when it connects, before the
-    ///   connection joins the pool: a connection that is no longer wanted is
-    ///   closed there and the attempt fails with `tunnelAbandoned`.
+    ///   Read before the dial and again, under the pool's lock, when the
+    ///   connection would join the pool: one that is no longer wanted is
+    ///   closed there and the attempt fails with `tunnelAbandoned`. A caller
+    ///   whose stop makes it false and then calls `closeAll` therefore closes
+    ///   every connection dialled for it.
     package func makeDedicatedTunnelConnection(
         _ selection: UpstreamSelection? = nil, target: String? = nil, isWanted: @escaping @Sendable () -> Bool = { true }
     ) -> EventLoopFuture<(PooledUpstreamConnection, ProxyConfig)> {
@@ -1022,14 +1024,10 @@ package final class ConnectionPool: @unchecked Sendable {
     ) -> EventLoopFuture<PooledUpstreamConnection> {
         return connectToUpstreamProxy(proxy)
             .flatMapThrowing { [weak self] channel in
-                guard isWanted() else {
-                    channel.close(mode: .all, promise: nil)
-                    throw ConnectionPoolError.tunnelAbandoned
-                }
                 // Only dedicated CONNECT tunnels dial raw; classified before
                 // the pool publishes it, so no `closeAll(scope:
                 // .allButDedicated)` can take it for a pooled connection.
-                let connection = try Self.insert(channel, proxy: proxy, target: target, into: self, dedicatedTunnel: true)
+                let connection = try Self.insert(channel, proxy: proxy, target: target, into: self, dedicatedTunnel: true, isWanted: isWanted)
                 self?.logger.log(.info, "Connected to upstream proxy \(proxy.endpoint) (raw).", category: .proxy)
                 return connection
             }
@@ -1040,7 +1038,7 @@ package final class ConnectionPool: @unchecked Sendable {
     /// and fails the dial: nothing else would ever track or close it (#159).
     static func insert(
         _ channel: Channel, proxy: UpstreamProxy, target: String, into pool: ConnectionPool?, selects: Bool = true,
-        dedicatedTunnel: Bool = false
+        dedicatedTunnel: Bool = false, isWanted: () -> Bool = { true }
     ) throws -> PooledUpstreamConnection {
         guard let pool else {
             channel.close(mode: .all, promise: nil)
@@ -1050,7 +1048,7 @@ package final class ConnectionPool: @unchecked Sendable {
         if dedicatedTunnel {
             connection.isDedicatedTunnel = true
         }
-        try pool.insertDialedConnection(connection, target: target, selects: selects)
+        try pool.insertDialedConnection(connection, target: target, selects: selects, isWanted: isWanted)
         return connection
     }
 
@@ -1078,15 +1076,28 @@ package final class ConnectionPool: @unchecked Sendable {
     /// acquisition locally (#156). `target` is what the request asked for,
     /// sanitized here. A dedicated tunnel arrives already marked: once the
     /// lock below is released, any caller can see it.
-    func insertDialedConnection(_ connection: PooledUpstreamConnection, target: String, selects: Bool = true) throws {
+    ///
+    /// `isWanted` is read under that lock, the one `closeAll` takes: a
+    /// connection is either in the pool before a `closeAll` that follows its
+    /// caller's stop, which closes it, or refused here with
+    /// `tunnelAbandoned`.
+    func insertDialedConnection(
+        _ connection: PooledUpstreamConnection, target: String, selects: Bool = true, isWanted: () -> Bool = { true }
+    ) throws {
         connection.transitionTicket = try sockets.register(
             connection.channel, route: .upstream,
             target: SensitiveValueSanitizer.observableTarget(target), upstream: connection.proxy.endpoint
         )
-        lock.withLockVoid {
+        let admitted = lock.withLock {
+            guard isWanted() else { return false }
             connection.inUse = true
             insertConnectionLocked(connection)
             if selects { lastSelectedUpstreamID = connection.proxy.id }
+            return true
+        }
+        guard admitted else {
+            connection.channel.close(mode: .all, promise: nil)
+            throw ConnectionPoolError.tunnelAbandoned
         }
         // A connection that closes (a sweep, the upstream, a timeout) leaves
         // the pool at once instead of holding a slot until it is next picked.

@@ -116,6 +116,37 @@ final class TunnelSelectionTests: XCTestCase {
         XCTAssertEqual(probed.endpoint, "127.0.0.1:\(s.port)")
     }
 
+    /// A stop that lands while a dial is being admitted to the pool: the
+    /// dial read `isWanted` as true just before it, and the stop's `closeAll`
+    /// follows. The connection is in the pool for that `closeAll` to close,
+    /// so no tunnel opens for a caller that has stopped.
+    func testAStopLandingAsTheDialIsAdmittedClosesIt() async throws {
+        let upstream = try await authenticatingUpstream()
+        let setup = makeCoordinator(upstreams: [("P", upstream.port)])
+        let (pool, coordinator) = (setup.pool, setup.coordinator)
+        let reads = NIOLockedValueBox(0)
+        let stopped = NIOLockedValueBox(false)
+        let isWanted: @Sendable () -> Bool = {
+            let read = reads.withLockedValue { $0 += 1; return $0 }
+            // The third read admits the connected dial.
+            guard read == 3 else { return !stopped.withLockedValue { $0 } }
+            stopped.withLockedValue { $0 = true }
+            let closed = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async {
+                pool.closeAll(scope: .all)
+                closed.signal()
+            }
+            // Long enough for the stop's `closeAll` to finish, unless the admission holds the lock it needs.
+            _ = closed.wait(timeout: .now() + 0.3)
+            return true
+        }
+
+        await assertAbandoned(coordinator.connectUpstreamTunnel(target: "a.corp.example:443", isWanted: isWanted))
+
+        XCTAssertEqual(upstream.tunnelsOpened, 0, "the stop closed the connection before its handshake finished")
+        XCTAssertEqual(pool.allConnectionSnapshot.count, 0)
+    }
+
     // MARK: - Harness
 
     /// P refuses every dial, has the better score, and its breaker is open
