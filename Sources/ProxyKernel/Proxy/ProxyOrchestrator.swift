@@ -2295,6 +2295,13 @@ package final class ProxyOrchestrator {
         emitEvent(.health, "dns.transports_reset", detail: "source=\(source)")
     }
 
+    /// Closes the breakers and drops the silences of every pool that dials an upstream. What they recorded was on the path the VPN just
+    /// replaced, and a pool left out keeps passing over an upstream that has recovered.
+    private func resetUpstreamCircuitsAfterFlap() {
+        localProxyServer.resetCircuitsAfterFlap()
+        tunnelConnectionPool.resetCircuitsAfterFlap()
+    }
+
     /// Ends the current flap and returns its monotonic duration in seconds, or 0 when no flap start was recorded.
     private func takeFlapDuration() -> TimeInterval {
         defer { flapStartedAt = nil }
@@ -2312,7 +2319,7 @@ package final class ProxyOrchestrator {
         // or the address-only pass, run from here, since the monitor's own
         // `.connected` will now find nothing changed.
         resumeStrandedSweeps()
-        localProxyServer.resetCircuitsAfterFlap()
+        resetUpstreamCircuitsAfterFlap()
         setDirectMode(deriveDirectModeCause(probeSummary: summary))
         resumeConnectivityMonitoring(summary: summary)
         mutateSnapshot {
@@ -2466,10 +2473,10 @@ package final class ProxyOrchestrator {
             // clients must not see old breaker holds or utun-pinned DoH pools.
             switch previous {
             case .reasserting:
-                localProxyServer.resetCircuitsAfterFlap()
+                resetUpstreamCircuitsAfterFlap()
                 resetDNSTransportsForRecovery(source: "vpn_flap_recovered")
             case .disconnected:
-                localProxyServer.resetCircuitsAfterFlap()
+                resetUpstreamCircuitsAfterFlap()
                 resetDNSTransportsForRecovery(source: "vpn_reconnected")
             case .unknown, .connected:
                 if snapshot.dnsRunState == .running {
