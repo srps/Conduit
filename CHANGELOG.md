@@ -103,7 +103,24 @@ packaging; 0.6.1 is the latest published release.
   no local address (`EADDRNOTAVAIL`), or out of descriptors, buffers or memory
   (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`). Before, a VPN flap's routing gap
   could open the breaker of every healthy upstream. A refused connect, a
-  connect timeout and a host-unreachable still count.
+  connect timeout, a host-unreachable and a failed lookup of the upstream's
+  name still count, so a full-tunnel VPN going down while Wi-Fi keeps its
+  default route can still open breakers; the reset when the VPN comes back
+  closes them. Such a failure is reported as `upstream.failure_uncharged`.
+- An upstream whose dial fails on this Mac on every attempt, such as an
+  IPv6-only one on an IPv4-only network, is no longer picked for its latency
+  score on every request. It is passed over while another upstream can be
+  asked, until it next succeeds, the VPN comes back, or the breaker's base
+  open interval (30 s by default) has passed (`upstream.locally_unreachable`,
+  `upstream.locally_reachable`). A plain-HTTP request whose dial failed this
+  way now goes to another upstream it has not tried, since none of its bytes
+  left the Mac; before, it failed with a 502 on every request.
+- A half-open upstream whose probe is a long download is selectable again
+  once the download's response head arrives, instead of after its last byte.
+  A 407 whose body never arrives now times out after `upstreamResponseTimeout`
+  instead of holding its connection, and a probe slot, for good.
+- A proxied port tunnel refused for its remote host is reported as refused in
+  the tunnels' status, not as a listener that failed to bind.
 - While an upstream is half-open, only its probe decides whether the breaker
   reopens. When every upstream's probe is taken, a request still goes to the
   preferred upstream without one, as before, but its failure no longer
