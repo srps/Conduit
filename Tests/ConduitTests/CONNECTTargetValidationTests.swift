@@ -51,7 +51,8 @@ final class CONNECTTargetValidationTests: XCTestCase {
 
     /// Every path that writes a CONNECT line goes through the coordinator.
     func testTheCoordinatorRefusesATargetThatCouldSplitItsCONNECT() async throws {
-        let (coordinator, events) = try await startCoordinator()
+        let clock = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000_000))
+        let (coordinator, events) = try await startCoordinator(now: { clock.withLockedValue { $0 } })
 
         for host in Self.forgedHosts {
             do {
@@ -63,10 +64,17 @@ final class CONNECTTargetValidationTests: XCTestCase {
         }
 
         XCTAssertEqual(upstream?.connectHeads(), [], "nothing was dialled for a malformed target")
-        let rejected = events.withLockedValue { $0 }.filter { $0.event == "connection.tunnel_target_rejected" }
-        XCTAssertEqual(rejected.count, Self.forgedHosts.count)
-        XCTAssertEqual(rejected.first?.detail, "target=a.corp.example__X-Injected:_1:443")
-        XCTAssertFalse(rejected.contains { ($0.detail ?? "").contains { $0.isNewline || $0 == " " || $0 == "\0" } }, "\(rejected)")
+        // A local client chooses how often to send one, so the event is limited to one a minute for every target together.
+        let rejected = { events.withLockedValue { $0 }.filter { $0.event == "connection.tunnel_target_rejected" }.map { $0.detail ?? "" } }
+        XCTAssertEqual(rejected(), ["target=a.corp.example__X-Injected:_1:443 suppressed=0"])
+        clock.withLockedValue { $0 += 60 }
+        do {
+            _ = try await coordinator.connectUpstreamTunnel(target: "a.corp.example\r\nX-Injected: 2:443").get()
+            XCTFail("a forged target was tunnelled")
+        } catch {
+            XCTAssertEqual(error as? ConnectionPoolError, .malformedTunnelTarget)
+        }
+        XCTAssertEqual(rejected().last, "target=a.corp.example__X-Injected:_2:443 suppressed=\(Self.forgedHosts.count - 1)")
 
         let tunnel = try await coordinator.connectUpstreamTunnel(target: "under_score.corp.example:443").get()
         tunnel.channel.close(promise: nil)
@@ -143,7 +151,9 @@ final class CONNECTTargetValidationTests: XCTestCase {
         return config
     }
 
-    private func startCoordinator() async throws -> (CONNECTCoordinator, NIOLockedValueBox<[RuntimeEvent]>) {
+    private func startCoordinator(
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) async throws -> (CONNECTCoordinator, NIOLockedValueBox<[RuntimeEvent]>) {
         let upstream = try await AuthenticatingUpstream.start(group: group, answerIP: "198.51.100.30")
         self.upstream = upstream
         let config = Self.config(upstreamPort: upstream.port)
@@ -153,7 +163,8 @@ final class CONNECTTargetValidationTests: XCTestCase {
         let events = NIOLockedValueBox<[RuntimeEvent]>([])
         let coordinator = CONNECTCoordinator(
             pool: pool, authenticatorProvider: { _ in StubNegotiateAuthenticator() }, logger: DiscardingLogSink(),
-            eventSink: { event in events.withLockedValue { $0.append(event) } }
+            eventSink: { event in events.withLockedValue { $0.append(event) } },
+            targetRejectionGate: RuntimeEventRepeatGate(now: now)
         )
         return (coordinator, events)
     }
