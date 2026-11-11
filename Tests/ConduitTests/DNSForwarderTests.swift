@@ -323,37 +323,43 @@ final class DNSWireFormatTests: XCTestCase {
         XCTAssertEqual(clamped.count, response.count)
     }
 
-    // MARK: - isInternalDomain
+    // MARK: - Split-DNS names
 
-    func testInternalDomainMatchesConfiguredDNSEntry() {
+    private func splitDNSRule(_ name: String, config: ProxyConfig) -> SplitDNSRule? {
+        SplitDNSTable(manual: config.dnsEntries, detected: []).rule(matching: name)
+    }
+
+    func testSplitDNSNameMatchesConfiguredDNSEntry() {
         var config = ProxyConfig.testFixture()
         config.dnsEntries = [DomainDNSEntry(domain: "corp.example.com", servers: ["10.0.0.1"])]
-        XCTAssertTrue(DNSWireFormat.isInternalDomain("host.corp.example.com", config: config))
-        XCTAssertTrue(DNSWireFormat.isInternalDomain("corp.example.com", config: config))
+        XCTAssertEqual(splitDNSRule("host.corp.example.com", config: config)?.domain, "corp.example.com")
+        XCTAssertEqual(splitDNSRule("corp.example.com", config: config)?.domain, "corp.example.com")
     }
 
-    func testInternalDomainMatchesBuiltinLocalDomains() {
+    func testLocalNameIsMulticastWithNoRule() {
         let config = ProxyConfig.testFixture()
-        XCTAssertTrue(DNSWireFormat.isInternalDomain("printer.local", config: config))
+        XCTAssertNil(splitDNSRule("printer.local", config: config))
+        XCTAssertTrue(DNSWireFormat.isMulticastDNSName("printer.local"))
     }
 
-    func testExternalDomainIsNotInternal() {
+    func testExternalDomainHasNoRule() {
         let config = ProxyConfig.testFixture()
-        XCTAssertFalse(DNSWireFormat.isInternalDomain("www.google.com", config: config))
-        XCTAssertFalse(DNSWireFormat.isInternalDomain("login.microsoftonline.com", config: config))
-        XCTAssertFalse(DNSWireFormat.isInternalDomain("github.com", config: config))
+        for name in ["www.google.com", "login.microsoftonline.com", "github.com"] {
+            XCTAssertNil(splitDNSRule(name, config: config), name)
+            XCTAssertFalse(DNSWireFormat.isMulticastDNSName(name), name)
+        }
     }
 
-    func testInternalDomainIsCaseInsensitive() {
+    func testSplitDNSNameIsCaseInsensitive() {
         var config = ProxyConfig.testFixture()
         config.dnsEntries = [DomainDNSEntry(domain: "corp.example.com", servers: ["10.0.0.1"])]
-        XCTAssertTrue(DNSWireFormat.isInternalDomain("Host.CORP.EXAMPLE.COM", config: config))
+        XCTAssertNotNil(splitDNSRule("Host.CORP.EXAMPLE.COM", config: config))
     }
 
-    func testInternalDomainIgnoresDisabledEntries() {
+    func testSplitDNSNameIgnoresDisabledEntries() {
         var config = ProxyConfig.testFixture()
         config.dnsEntries = [DomainDNSEntry(domain: "private.corp", servers: ["10.0.0.1"], enabled: false)]
-        XCTAssertFalse(DNSWireFormat.isInternalDomain("host.private.corp", config: config))
+        XCTAssertNil(splitDNSRule("host.private.corp", config: config))
     }
 
     // MARK: - synthesizeDNSResponse

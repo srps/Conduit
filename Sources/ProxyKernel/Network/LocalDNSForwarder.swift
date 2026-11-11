@@ -58,6 +58,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     private let group: EventLoopGroup
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
+    private let splitDNSProvider: (@Sendable () -> SplitDNSTable)?
     private let preferProxyPathForDoH: @Sendable () -> Bool
     private let localProxyPort: @Sendable () -> Int?
     private let onMetrics: (@Sendable () -> Void)?
@@ -97,6 +98,8 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         group: EventLoopGroup,
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
+        // The split-DNS table each query consults. Nil reads the manual entries from `configProvider`.
+        splitDNSProvider: (@Sendable () -> SplitDNSTable)? = nil,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool = { false },
         localProxyPort: @escaping @Sendable () -> Int? = { nil },
         onMetrics: (@Sendable () -> Void)? = nil,
@@ -113,6 +116,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         self.group = group
         self.logger = logger
         self.configProvider = configProvider
+        self.splitDNSProvider = splitDNSProvider
         self.preferProxyPathForDoH = preferProxyPathForDoH
         self.localProxyPort = localProxyPort
         self.onMetrics = onMetrics
@@ -183,6 +187,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             group: group,
             logger: logger,
             configProvider: configProvider,
+            splitDNSProvider: splitDNSProvider,
             preferProxyPathForDoH: preferProxyPathForDoH,
             localProxyPort: localProxyPort,
             pathSatisfied: { [pathSatisfied] in pathSatisfied.withLockedValue { $0 } },
@@ -516,6 +521,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private let group: EventLoopGroup
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
+    private let splitDNSProvider: (@Sendable () -> SplitDNSTable)?
     private let preferProxyPathForDoH: @Sendable () -> Bool
     private let localProxyPort: @Sendable () -> Int?
     private let pathSatisfied: @Sendable () -> Bool
@@ -597,6 +603,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         group: EventLoopGroup,
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
+        splitDNSProvider: (@Sendable () -> SplitDNSTable)? = nil,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool,
         localProxyPort: @escaping @Sendable () -> Int?,
         pathSatisfied: @escaping @Sendable () -> Bool,
@@ -609,6 +616,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         self.group = group
         self.logger = logger
         self.configProvider = configProvider
+        self.splitDNSProvider = splitDNSProvider
         self.preferProxyPathForDoH = preferProxyPathForDoH
         self.localProxyPort = localProxyPort
         self.pathSatisfied = pathSatisfied
@@ -813,7 +821,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
 
         let domain = DNSWireFormat.extractDomainName(from: queryBytes)
         let config = configProvider()
-        let table = SplitDNSTable(manual: config.dnsEntries, detected: [])
+        let table = splitDNSProvider?() ?? SplitDNSTable(manual: config.dnsEntries, detected: [])
         let rule = table.rule(matching: domain)
         let isInternal = rule != nil || DNSWireFormat.isMulticastDNSName(domain)
         let queryType = DNSWireFormat.extractQueryType(from: queryBytes)
