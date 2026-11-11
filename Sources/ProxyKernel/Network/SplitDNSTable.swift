@@ -120,9 +120,10 @@ package struct SplitDNSTable: Hashable, Sendable {
 /// What Settings shows of the detected set, built by `LiveSplitDNSPolicy`.
 package struct DetectedSplitDNSDisplay: Hashable, Sendable, Codable {
     package enum State: String, Hashable, Sendable, Codable {
-        /// The gate allows and the last reading, non-empty, is the set in use.
+        /// The gate allows, and the last reading supplies a resolver in use or nothing is in use.
         case inUse
-        /// The gate allows and an empty reading kept the previous set in use.
+        /// The gate allows and the last reading supplies none of the resolvers in use: it was empty, or it
+        /// named only tunnels that are not live. The set in use is kept from earlier readings.
         case held
         /// The gate withholds; the rows are the last reading, unused.
         case idle
