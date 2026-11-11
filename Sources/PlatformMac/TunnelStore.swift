@@ -89,17 +89,30 @@ extension TunnelSnapshot {
         return segment.isEmpty || segment.contains("/") ? nil : String(segment)
     }
 
-    /// A unicast IPv6 literal that is not link-local, loopback or
-    /// unspecified. A zone index is ignored.
-    package static func isRoutableIPv6(_ address: String) -> Bool {
+    package enum IPv6Kind: Sendable {
+        /// Inside `fe80::/10`.
+        case linkLocal
+        /// Any other unicast address.
+        case routable
+        /// Loopback, unspecified or multicast.
+        case other
+    }
+
+    /// Classifies an IPv6 literal, ignoring a zone index. Nil when `address`
+    /// is not one.
+    package static func ipv6Kind(_ address: String) -> IPv6Kind? {
         var parsed = in6_addr()
         let literal = address.split(separator: "%", maxSplits: 1).first.map(String.init) ?? address
-        guard inet_pton(AF_INET6, literal, &parsed) == 1 else { return false }
+        guard inet_pton(AF_INET6, literal, &parsed) == 1 else { return nil }
         let bytes = withUnsafeBytes(of: &parsed) { Array($0) }
-        let isLinkLocal = bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80
+        if bytes[0] == 0xfe, bytes[1] & 0xc0 == 0x80 { return .linkLocal }
         let isMulticast = bytes[0] == 0xff
         let isLoopbackOrUnspecified = bytes.dropLast().allSatisfy { $0 == 0 } && bytes[15] <= 1
-        return !isLinkLocal && !isMulticast && !isLoopbackOrUnspecified
+        return isMulticast || isLoopbackOrUnspecified ? .other : .routable
+    }
+
+    package static func isRoutableIPv6(_ address: String) -> Bool {
+        ipv6Kind(address) == .routable
     }
 }
 
@@ -185,8 +198,8 @@ package final class SystemTunnelStore: TunnelStoreReading, @unchecked Sendable {
         }
     }
 
-    /// The dictionaries `read()` parses, keyed by store key.
-    private func readKeys() -> Result<[String: Any], TunnelReading.Failure> {
+    /// The dictionaries `read()` parses, keyed by store key, for diagnostics.
+    package func readKeys() -> Result<[String: Any], TunnelReading.Failure> {
         lock.withLock {
             guard let session = readSession ?? SCDynamicStoreCreate(
                 kCFAllocatorDefault, "io.github.srps.Conduit.TunnelStore.read" as CFString, nil, nil

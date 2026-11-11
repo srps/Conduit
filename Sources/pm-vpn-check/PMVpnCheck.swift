@@ -26,10 +26,29 @@
 //   DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" \
 //     xcrun swift run pm-vpn-check --pushed-dns
 //
+//   DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" \
+//     xcrun swift run pm-vpn-check --snapshot
+//   DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" \
+//     xcrun swift run pm-vpn-check --watch --max-duration 600 > connect.ndjson
+//
 // `--pushed-dns` reads the tunnels' pushed resolvers once through
 // `PushedResolverMonitor.readOnce()` and prints them masked: domains as
 // `dN.example`, servers as documentation addresses, service IDs as `serviceN`.
 // The output can be pasted into a public issue.
+//
+// `--snapshot` reads every tunnel key once through `SystemTunnelStore` and
+// prints one line of JSON, masked by `TunnelStoreMask`. `--watch` prints such
+// a line at the start and after every store notification, until Ctrl-C or
+// `--max-duration` seconds. Both only read the store. The lines go to stdout
+// and everything else to stderr, so stdout can be saved as a fixture.
+//
+// No line holds a date. Three clocks are involved:
+//   - `offset` is seconds since the capture began on `ContinuousClock`, which
+//     is monotonic and keeps counting while the Mac sleeps.
+//   - `elapsed` is the same on `systemUptime`, which stops while the Mac
+//     sleeps, so `offset - elapsed` is the time spent asleep.
+//   - `--max-duration` is measured on `DispatchTime`, which also stops while
+//     the Mac sleeps, so a watch that spans a sleep ends later by wall time.
 
 import Dispatch
 import ConduitShared
@@ -45,6 +64,16 @@ enum PMVpnCheck {
         if args.pushedDNS {
             printPushedResolvers()
             return
+        }
+        switch args.capture {
+        case .snapshot:
+            printSnapshot()
+            return
+        case .watch:
+            watchSnapshots(maxDuration: args.maxDurationSeconds)
+            return
+        case nil:
+            break
         }
 
         print("pm-vpn-check — VPNStatusMonitor live diagnostic")
@@ -90,6 +119,39 @@ enum PMVpnCheck {
         var graceSeconds: TimeInterval
         var minVisibleSeconds: TimeInterval
         var pushedDNS = false
+        var capture: CaptureMode?
+        var maxDurationSeconds: TimeInterval
+    }
+
+    private enum CaptureMode {
+        case snapshot
+        case watch
+    }
+
+    /// How long `--watch` runs when `--max-duration` is not given.
+    private static let defaultMaxDurationSeconds: TimeInterval = 900
+    /// The longest `--max-duration` accepted: one week.
+    static let maxDurationCeilingSeconds: TimeInterval = 7 * 24 * 60 * 60
+
+    /// The seconds `--max-duration` asks for, or why they are refused.
+    static func parseMaxDuration(_ text: String?) -> Result<TimeInterval, UsageError> {
+        guard let text, let seconds = Double(text), seconds.isFinite, seconds > 0 else {
+            return .failure(UsageError("--max-duration takes a number of seconds above zero"))
+        }
+        guard seconds <= maxDurationCeilingSeconds else {
+            return .failure(UsageError(
+                "--max-duration is at most \(Int(maxDurationCeilingSeconds)) seconds (one week); \(text) is more"
+            ))
+        }
+        return .success(seconds)
+    }
+
+    struct UsageError: Error, Equatable {
+        let message: String
+
+        init(_ message: String) {
+            self.message = message
+        }
     }
 
     private static func parseArgs() -> Args {
@@ -97,6 +159,8 @@ enum PMVpnCheck {
         var grace: TimeInterval = 2
         var minVisible: TimeInterval = 0.5
         var pushedDNS = false
+        var capture: CaptureMode?
+        var maxDuration = defaultMaxDurationSeconds
 
         var iter = CommandLine.arguments.dropFirst().makeIterator()
         while let arg = iter.next() {
@@ -109,20 +173,131 @@ enum PMVpnCheck {
                 if let next = iter.next(), let v = Double(next) { minVisible = v }
             case "--pushed-dns":
                 pushedDNS = true
+            case "--snapshot":
+                capture = .snapshot
+            case "--watch":
+                capture = .watch
+            case "--max-duration":
+                switch parseMaxDuration(iter.next()) {
+                case .success(let seconds): maxDuration = seconds
+                case .failure(let error): fail(error.message, code: 2)
+                }
             case "--help", "-h":
-                print("Usage: pm-vpn-check [--duration <s>] [--grace <s>] [--min-visible <s>] | --pushed-dns")
+                print("Usage: pm-vpn-check [--duration <s>] [--grace <s>] [--min-visible <s>]")
+                print("       pm-vpn-check --pushed-dns | --snapshot | --watch [--max-duration <s>]")
                 print("  --duration     run for this many seconds (default 60)")
                 print("  --grace        VPN grace window before declaring disconnect (default 2)")
                 print("  --min-visible  minimum-visible-flap debounce (default 0.5)")
                 print("  --pushed-dns   read the tunnels' pushed resolvers once, print them masked, exit")
+                print("  --snapshot     read every tunnel key once, print one masked JSON line, exit")
+                print("  --watch        print a masked JSON line now and after each store notification")
+                print("  --max-duration stop --watch after this many seconds awake (default \(Int(defaultMaxDurationSeconds)))")
+                print("")
+                print("Each capture line has offset and elapsed, both seconds since the capture began.")
+                print("offset counts time asleep and elapsed does not. --max-duration does not either,")
+                print("so a watch that spans a sleep runs past its duration by the time asleep.")
                 exit(0)
             default:
                 FileHandle.standardError.write(Data("Unknown arg: \(arg)\n".utf8))
             }
         }
         return Args(
-            durationSeconds: duration, graceSeconds: grace, minVisibleSeconds: minVisible, pushedDNS: pushedDNS
+            durationSeconds: duration, graceSeconds: grace, minVisibleSeconds: minVisible, pushedDNS: pushedDNS,
+            capture: capture, maxDurationSeconds: maxDuration
         )
+    }
+
+    // MARK: - Tunnel store captures
+
+    private static func printSnapshot() {
+        var mask = TunnelStoreMask()
+        let capture = TunnelStoreCapture(reading: SystemTunnelStore().readKeys(), offset: 0, elapsed: 0, mask: &mask)
+        emit(capture)
+        if let failure = capture.failure {
+            fail("the store could not be read: \(failure) code \(capture.failureCode ?? 0)", code: 1)
+        }
+    }
+
+    private static func watchSnapshots(maxDuration: TimeInterval) {
+        let watch = CaptureWatch()
+        let subscription: any TunnelStoreSubscription
+        switch watch.subscribe() {
+        case .success(let made): subscription = made
+        case .failure(let failure):
+            fail("the store could not be watched: \(failure.step.rawValue) code \(failure.code)", code: 1)
+        }
+        // Subscribed before the first reading, so no change falls between them.
+        watch.queue.async { watch.capture() }
+
+        let interrupted = DispatchSemaphore(value: 0)
+        signal(SIGINT, SIG_IGN)
+        let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+        sigint.setEventHandler { interrupted.signal() }
+        sigint.resume()
+        note("watching the tunnel keys for up to \(Int(maxDuration)) s; Ctrl-C stops")
+
+        let reason = interrupted.wait(timeout: .now() + maxDuration) == .success ? "interrupted" : "max duration reached"
+        sigint.cancel()
+        let cancelled = subscription.cancel()
+        // Lets a line that is being written finish.
+        watch.queue.sync {}
+        note("stopped: \(reason)")
+        if case .failure(let failure) = cancelled {
+            fail("the store refused to end the watch: \(failure.step.rawValue) code \(failure.code)", code: 1)
+        }
+    }
+
+    /// Reads and prints on one queue, so lines come out whole and in order.
+    private final class CaptureWatch: @unchecked Sendable {
+        private static func seconds(_ duration: Duration) -> TimeInterval {
+            Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+        }
+
+        let queue = DispatchQueue(label: "io.github.srps.Conduit.pm-vpn-check.watch")
+        private let store = SystemTunnelStore()
+        private let began = ContinuousClock.now
+        private let beganUptime = ProcessInfo.processInfo.systemUptime
+        /// Touched only on `queue`.
+        private var mask = TunnelStoreMask()
+
+        func subscribe() -> Result<any TunnelStoreSubscription, TunnelReading.Failure> {
+            store.subscribe(
+                queue: queue, onChange: { [self] in capture() },
+                onUncancelledRelease: { outcome in
+                    switch outcome {
+                    case .success: note("the watch was released without a cancel; the store detached it")
+                    case .failure(let failure):
+                        note("the watch was released without a cancel and the store refused to detach it: \(failure.step.rawValue) code \(failure.code)")
+                    }
+                }
+            )
+        }
+
+        /// Runs on `queue`.
+        func capture() {
+            emit(TunnelStoreCapture(
+                reading: store.readKeys(), offset: Self.seconds(began.duration(to: .now)),
+                elapsed: ProcessInfo.processInfo.systemUptime - beganUptime, mask: &mask
+            ))
+        }
+    }
+
+    private static func emit(_ capture: TunnelStoreCapture) {
+        do {
+            print(try capture.line())
+            fflush(stdout)
+        } catch {
+            fail("a capture could not be encoded: \(error)", code: 1)
+        }
+    }
+
+    private static func note(_ message: String) {
+        FileHandle.standardError.write(Data("pm-vpn-check: \(message)\n".utf8))
+    }
+
+    private static func fail(_ message: String, code: Int32) -> Never {
+        note(message)
+        exit(code)
     }
 
     // MARK: - Pushed resolvers

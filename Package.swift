@@ -184,6 +184,7 @@ let package = Package(
                 "RuntimeEvents",
                 "ConduitDaemon",
                 "ConduitRuntime",
+                "pm-vpn-check",
                 .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
