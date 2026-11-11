@@ -292,19 +292,15 @@ package final class RuntimeHost {
     /// Fed by `handleVPNStateChange`; every resolver-file apply path consults
     /// `entriesWanted`.
     var splitDNSGate = SplitDNSVPNGate()
-    /// Which resolvers the connected VPN pushed are in use (decision 0044). Fed in the turn that takes a VPN report
-    /// or a store reading; `RuntimeHostSplitDNSDetection.swift` holds the rules.
-    var liveSplitDNS = LiveSplitDNSPolicy(limits: .standard)
-    /// The tunnels the VPN observer named live with the report the gate last took.
-    var vpnLiveInterfaces: Set<String> = []
+    /// Which resolvers the connected VPN pushed are in use (decision 0044). It takes each store reading where the
+    /// observer delivers it and each VPN report in the gate's turn; `RuntimeHostSplitDNSDetection.swift` applies
+    /// what it decides.
+    let splitDNSDetection = LiveSplitDNSDetection(limits: .standard)
     let pushedResolverObserver: any PushedResolverObserving
-    /// The newest reading the observer reported and the owner has not taken. One slot: readings are whole, so
-    /// only the newest matters, and an older one can never land after it.
-    let pendingPushedReading = NIOLockedValueBox<PushedResolverReading?>(nil)
+    /// One delivery to the owner for a burst of readings, and one more for those that land while it runs.
+    private let pushedResolverUpdates = CoalescedObserverDelivery()
     /// Whether the observer is started. Written only by `reconcileSplitDNSDetection`.
     var splitDNSDetectionRunning = false
-    /// The failure of the last reading taken since the observer started, so one failure is reported once.
-    var splitDNSDetectionFailure: PushedResolverReading.Failure?
     /// A failed entry-file write or removal, retried once the helper is
     /// seen available (#165).
     var splitDNSRepair = SplitDNSEntryFileRepair()
@@ -619,9 +615,11 @@ package final class RuntimeHost {
                 )
             }
         }
-        self.pushedResolverObserver.setOnChange { [weak self, deliveries, pendingPushedReading] reading in
-            pendingPushedReading.withLockedValue { $0 = reading }
-            deliveries.deliver { self?.takePushedResolverReading() }
+        // Each reading is folded into the policy here, in arrival order, because skipping one changes what a flap
+        // holds. Only the hop to the owner coalesces: it applies the newest set, which is whole.
+        self.pushedResolverObserver.setOnChange { [weak self, deliveries, splitDNSDetection, pushedResolverUpdates] reading in
+            splitDNSDetection.receive(reading)
+            pushedResolverUpdates.deliver(using: deliveries) { self?.applyPendingSplitDNSDetection() }
         }
         reconciler.host = self
 
@@ -1326,7 +1324,10 @@ package final class RuntimeHost {
         let entriesWantedChanged = admitted ? splitDNSGate.update(state) : false
         // The same turn as the gate, so the detected set and the entry files never read different verdicts. A
         // repeated `.connected` still counts: the monitor re-delivers it when the live tunnels change.
-        if admitted { applyVPNReportToLiveSplitDNS(state, liveInterfaces: liveInterfaces) }
+        if admitted {
+            splitDNSDetection.report(gate: splitDNSGate, liveInterfaces: liveInterfaces)
+            applyPendingSplitDNSDetection()
+        }
         // Its own delivery, which queues its work in a later turn whatever this one awaits, so it is asked for here.
         deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
         if platformConfig.manageDNSResolvers, entriesWantedChanged {

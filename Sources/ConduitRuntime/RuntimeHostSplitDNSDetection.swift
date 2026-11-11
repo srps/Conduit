@@ -5,9 +5,9 @@ import ProxyKernel
 
 /// Split DNS follows the resolvers a connected VPN pushes (decision 0044, `docs/design-live-vpn-split-dns.md`).
 ///
-/// The host owns the two inputs, the VPN gate and the pushed-resolver observer, and decides with
-/// `LiveSplitDNSPolicy`. It pushes only the detected rules; the orchestrator merges them with the manual entries of
-/// its own config, so manual split DNS never depends on anything here.
+/// The host owns the two inputs, the VPN gate and the pushed-resolver observer, and `LiveSplitDNSDetection`
+/// decides from them with `LiveSplitDNSPolicy`. The host pushes only the detected rules; the orchestrator merges
+/// them with the manual entries of its own config, so manual split DNS never depends on anything here.
 extension RuntimeHost {
     /// Starts or stops the observer so that it runs exactly while the DNS forwarder is up or coming up and
     /// `dns.followVPNResolvers` is on. Idempotent. A restart of the forwarder keeps it running. Stopping it pushes
@@ -17,58 +17,31 @@ extension RuntimeHost {
         let wanted = orchestrator.config.dns.followVPNResolvers && forwarder != .stopped && forwarder != .failed
         guard wanted != splitDNSDetectionRunning else { return }
         splitDNSDetectionRunning = wanted
-        splitDNSDetectionFailure = nil
-        guard !wanted else {
+        if wanted {
+            splitDNSDetection.start()
             pushedResolverObserver.start()
-            return
+        } else {
+            pushedResolverObserver.stop()
+            splitDNSDetection.stop()
+            applyPendingSplitDNSDetection()
         }
-        pushedResolverObserver.stop()
-        pendingPushedReading.withLockedValue { $0 = nil }
-        let before = liveSplitDNS.display
-        liveSplitDNS = LiveSplitDNSPolicy(limits: liveSplitDNS.limits)
-        reportDetectedSplitDNS(before: before, after: liveSplitDNS.display)
-        orchestrator.applyDetectedSplitDNSRules([], display: liveSplitDNS.display, reason: .detectionOff)
     }
 
-    /// Takes the newest reading the observer left. A reading that lands after the observer stopped is dropped: the
-    /// next start reads the store again.
-    func takePushedResolverReading() {
-        let taken = pendingPushedReading.withLockedValue { pending -> PushedResolverReading? in
-            defer { pending = nil }
-            return pending
-        }
-        guard let reading = taken, splitDNSDetectionRunning else { return }
-        if let failure = reading.failure, failure != splitDNSDetectionFailure {
+    /// Applies the newest detected set and reports what the policy rejected or could not read, events first. The
+    /// events describe the step from the set the orchestrator holds to this one, so a set that a burst of
+    /// readings passed through and left is not reported. Idempotent: with nothing pending it does nothing.
+    func applyPendingSplitDNSDetection() {
+        guard let pending = splitDNSDetection.take() else { return }
+        if let failure = pending.failure {
             record(
                 RuntimeEvent(kind: .health, event: "dns.split_detection_failed", detail: "reason=\(failure.rawValue)"),
                 level: .warning
             )
         }
-        splitDNSDetectionFailure = reading.failure
-        updateLiveSplitDNS(reading: reading, reason: .pushed)
-    }
-
-    /// A VPN report the gate admitted, with the live tunnels the observer named beside it. The policy gets its
-    /// last reading back: a verdict changes which of those resolvers are in use, not what the store holds.
-    func applyVPNReportToLiveSplitDNS(_ state: VPNObservedState, liveInterfaces: Set<String>) {
-        vpnLiveInterfaces = liveInterfaces
-        guard splitDNSDetectionRunning else { return }
-        let reason: DetectedSplitDNSChangeReason = switch state {
-        case .connected, .unknown: .vpnConnected
-        case .disconnected: .vpnDisconnected
-        case .reasserting: .flapHeld
-        }
-        updateLiveSplitDNS(reading: liveSplitDNS.lastReading, reason: reason)
-    }
-
-    private func updateLiveSplitDNS(reading: PushedResolverReading, reason: DetectedSplitDNSChangeReason) {
-        let ignoredBefore = liveSplitDNS.ignored
-        let before = liveSplitDNS.display
-        let changed = liveSplitDNS.update(gate: splitDNSGate, liveInterfaces: vpnLiveInterfaces, reading: reading)
-        reportIgnoredResolvers(liveSplitDNS.ignored.subtracting(ignoredBefore))
-        guard changed else { return }
-        reportDetectedSplitDNS(before: before, after: liveSplitDNS.display)
-        orchestrator.applyDetectedSplitDNSRules(liveSplitDNS.detectedRules, display: liveSplitDNS.display, reason: reason)
+        reportIgnoredResolvers(pending.ignored)
+        guard let set = pending.set else { return }
+        reportDetectedSplitDNS(before: orchestrator.snapshot.detectedSplitDNS, after: set.display)
+        orchestrator.applyDetectedSplitDNSRules(set.rules, display: set.display, reason: set.reason)
     }
 
     /// One `dns.split_detected` per resolver that entered or left the set in use, and one per resolver in it when

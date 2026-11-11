@@ -252,4 +252,74 @@ final class RuntimeHostSplitDNSTests: XCTestCase {
         XCTAssertEqual(running.events("dns.split_detection_failed"), ["reason=store_subscribe"])
         XCTAssertEqual(running.events("dns.split_table_changed"), [], "the host runs on manual entries alone")
     }
+
+    // MARK: - Readings that outrun the owner
+
+    /// The fake delivers on the calling thread, which here is the owner's, so no delivery runs between the two.
+    @RuntimeActor func testAWithdrawalThatArrivesBeforeTheOwnerTookTheResolverStillHoldsIt() async throws {
+        let running = try await start()
+        await running.report(.connected, live: ["utun6"])
+
+        running.harness.pushedResolvers.emit(PushedResolverReading(resolvers: [corp()]))
+        running.harness.pushedResolvers.emit(PushedResolverReading())
+        await running.host.deliveries.drain()
+
+        let row = DetectedSplitDNSDisplay.Row(interface: "utun6", domains: ["corp.example"], servers: ["192.0.2.53"])
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS, .init(state: .held, rows: [row]))
+        XCTAssertEqual(running.events("dns.split_table_changed"), ["detected_domains=1 manual_domains=0 rules=1 reason=pushed"])
+        XCTAssertEqual(
+            running.events("dns.split_detected"), ["interface=utun6 domains=corp.example servers=1 outcome=held"],
+            "the set that was in use for no owner turn is not reported"
+        )
+        let answer = try await SplitDNSProbe.resolve("host.corp.example", port: running.port)
+        XCTAssertEqual(answer, corpIP)
+    }
+
+    @RuntimeActor func testABurstOfReadingsQueuesOneDeliveryToTheOwner() async throws {
+        let running = try await start()
+        await running.report(.connected, live: ["utun6"])
+        XCTAssertEqual(running.host.deliveries.inFlightCount, 0)
+
+        for index in 0..<200 {
+            running.harness.pushedResolvers.emit(PushedResolverReading(resolvers: [corp(service: "service-\(index)")]))
+        }
+
+        XCTAssertEqual(running.host.deliveries.inFlightCount, 1)
+        await running.host.deliveries.drain()
+        XCTAssertEqual(running.events("dns.split_table_changed").count, 1)
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .inUse)
+    }
+
+    // MARK: - A store that cannot be read
+
+    @RuntimeActor func testAStoreReadFailureLeavesTheManualEntriesAloneUntilTheStoreReadsAgain() async throws {
+        let running = try await start(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.54"])],
+            primed: PushedResolverReading(resolvers: [corp()])
+        )
+        await running.report(.connected, live: ["utun6"])
+        await running.push(PushedResolverReading())
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .held)
+
+        await running.push(PushedResolverReading(failure: .storeRead))
+
+        XCTAssertEqual(running.events("dns.split_detection_failed"), ["reason=store_read"])
+        XCTAssertEqual(running.events("dns.split_table_changed").last, "detected_domains=0 manual_domains=1 rules=1 reason=detection_failed")
+        XCTAssertEqual(running.events("dns.split_detected").last, "interface=utun6 domains=corp.example servers=1 outcome=cleared")
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS, .init(state: .inUse, rows: []))
+        let failed = try await SplitDNSProbe.resolve("host.corp.example", port: running.port)
+        XCTAssertEqual(failed, manualIP)
+        XCTAssertEqual(running.corp.totalQueries, 0, "the tunnel's server is not asked on a set nothing vouches for")
+
+        await running.report(.connected, live: ["utun6"])
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.rows, [], "a VPN report brings nothing back")
+
+        await running.push(PushedResolverReading(resolvers: [corp()]))
+
+        XCTAssertEqual(running.events("dns.split_detection_failed").count, 1)
+        XCTAssertEqual(running.events("dns.split_table_changed").last, "detected_domains=1 manual_domains=1 rules=1 reason=pushed")
+        XCTAssertEqual(running.events("dns.split_detected").last, "interface=utun6 domains=corp.example servers=1 outcome=applied")
+        let restored = try await SplitDNSProbe.resolve("host.corp.example", port: running.port)
+        XCTAssertEqual(restored, corpIP)
+    }
 }

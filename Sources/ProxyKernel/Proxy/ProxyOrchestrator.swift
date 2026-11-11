@@ -243,6 +243,8 @@ package enum DetectedSplitDNSChangeReason: String, Hashable, Sendable {
     case flapHeld = "flap_held"
     /// Detection stopped, so the host pushed no rules.
     case detectionOff = "detection_off"
+    /// A reading that could not read the store, so the host pushed no rules.
+    case detectionFailed = "detection_failed"
 }
 
 /// The forwarder's split-DNS state: the rules the host last pushed, and the table merged from them and the manual
