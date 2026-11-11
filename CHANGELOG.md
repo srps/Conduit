@@ -50,6 +50,15 @@ packaging; 0.6.1 is the latest published release.
   stand-in answer for a split-DNS name now carries a 5 s TTL, so macOS and
   browsers drop it soon after the VPN is up and the corporate answer takes
   over.
+- The first full-tunnel VPN connect no longer makes macOS ask for the proxy
+  password on Conduit's behalf (decision 0045). DoH lookups went straight to
+  the upstream proxy as well as through Conduit's listener. The upstream
+  answered 407, and macOS tried its saved proxy credential and then showed the
+  dialog. DoH now goes direct or through the listener only. Every Conduit
+  `URLSession` refuses a proxy-authentication challenge instead of handing it
+  to macOS, and reports `auth.proxy_challenge_refused` for DoH. While Conduit
+  is in its brief direct mode after a VPN connect, public names can fail to
+  resolve for a few seconds.
 
 ## 0.6.2
 
