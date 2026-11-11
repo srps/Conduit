@@ -53,14 +53,21 @@ enum DoHSessionFactory {
     ///   configured machine point at Conduit's own listener — the DoH
     ///   lookup would then be silently proxied through the process trying to
     ///   perform it. `Route(proxy: nil)` means explicitly direct.
-    static func session(for route: Route, timeout: TimeInterval = requestTimeout) -> URLSession {
+    /// - Important: the `delegate` refuses every proxy-authentication
+    ///   challenge (decision 0045). With no delegate, CFNetwork answers one by
+    ///   asking macOS for a saved proxy credential, and macOS prompts the user.
+    static func session(
+        for route: Route,
+        delegate: ProxyChallengeRefusingDelegate,
+        timeout: TimeInterval = requestTimeout
+    ) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = timeout
         configuration.timeoutIntervalForResource = timeout * 2
         configuration.connectionProxyDictionary = route.proxy.map {
             proxyDictionary(host: $0.host, port: $0.port)
         } ?? [:]
-        return URLSession(configuration: configuration)
+        return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }
 
     static func proxyDictionary(host: String, port: Int) -> [String: Any] {

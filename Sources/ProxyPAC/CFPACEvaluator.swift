@@ -588,6 +588,22 @@ private final class PACBoundedDownload: NSObject, URLSessionDataDelegate, @unche
         }
     }
 
+    // Decision 0045: CFNetwork's default handling would ask macOS for a saved
+    // proxy credential and prompt the user. The failure reaches
+    // `pac.refresh_failed` or `pac.preview_failed` with the proxy and scheme.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard ProxyChallengeRefusal.isProxyChallenge(challenge) else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        finish(.failure(PACResolverError.fetchFailed(
+            "PAC fetch refused a proxy-authentication challenge (\(ProxyChallengeRefusal.describe(challenge))). Conduit never asks macOS for proxy credentials."
+        )))
+        completionHandler(.cancelAuthenticationChallenge, nil)
+    }
+
     // Preserve HTTPS redirects while refusing credential-bearing URLs and
     // scheme downgrades before sending the redirected request.
     func urlSession(_ session: URLSession, task: URLSessionTask,

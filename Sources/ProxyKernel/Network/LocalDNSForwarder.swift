@@ -414,11 +414,11 @@ private struct DoHTransports: @unchecked Sendable {
     let localProxy: URLSession?
     let localProxyPort: Int?
 
-    init(config: ProxyConfig, boundPort: Int?) {
-        self.direct = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil))
+    init(config: ProxyConfig, boundPort: Int?, delegate: ProxyChallengeRefusingDelegate) {
+        self.direct = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil), delegate: delegate)
         let localRoute = DoHSessionFactory.localProxyRoute(config: config, boundPort: boundPort)
         self.localProxyPort = localRoute?.proxy?.port
-        self.localProxy = localRoute.map { DoHSessionFactory.session(for: $0) }
+        self.localProxy = localRoute.map { DoHSessionFactory.session(for: $0, delegate: delegate) }
     }
 
     func invalidate() {
@@ -584,6 +584,9 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// keeping the rest of the DoH path lock-free. Session invalidation is
     /// deferred through the handle's use-count (see `DoHTransportsHandle`).
     private let transportsBox: NIOLockedValueBox<DoHTransportsHandle>
+    /// Shared by every generation of DoH sessions, so a reset keeps the
+    /// once-a-minute limit on `auth.proxy_challenge_refused`.
+    private let proxyChallengeDelegate: ProxyChallengeRefusingDelegate
     private let responseCache = DNSResponseCache()
 
     init(
@@ -608,8 +611,17 @@ private final class DNSResolutionCore: @unchecked Sendable {
         self.localProxyPort = localProxyPort
         self.pathSatisfied = pathSatisfied
         self.onMetrics = onMetrics
+        let delegate = ProxyChallengeRefusingDelegate(client: "doh", gate: RuntimeEventRepeatGate()) { event in
+            eventSink?(event)
+            logger.log(
+                .warning,
+                "DNS: refused a proxy-authentication challenge on a DoH lookup (\(event.detail ?? "")). Conduit never asks macOS for proxy credentials.",
+                category: .network
+            )
+        }
+        self.proxyChallengeDelegate = delegate
         self.transportsBox = NIOLockedValueBox(
-            DoHTransportsHandle(transports: DoHTransports(config: configProvider(), boundPort: localProxyPort()))
+            DoHTransportsHandle(transports: DoHTransports(config: configProvider(), boundPort: localProxyPort(), delegate: delegate))
         )
     }
 
@@ -645,7 +657,9 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// path says nothing about the new one. Returns the lookups cancelled.
     @discardableResult
     func resetUpstreamTransports() -> Int {
-        let fresh = DoHTransportsHandle(transports: DoHTransports(config: configProvider(), boundPort: localProxyPort()))
+        let fresh = DoHTransportsHandle(transports: DoHTransports(
+            config: configProvider(), boundPort: localProxyPort(), delegate: proxyChallengeDelegate
+        ))
         let old = transportsBox.withLockedValue { current -> DoHTransportsHandle in
             let captured = current
             current = fresh

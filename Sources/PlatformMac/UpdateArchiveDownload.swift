@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import ProxyKernel
 
 /// Downloads to disk with a resource deadline and byte ceiling, including
-/// unknown-length responses. URLSession retains normal system proxy/CA policy.
+/// unknown-length responses. URLSession retains normal system proxy/CA policy,
+/// except that a proxy-authentication challenge is refused (decision 0045).
 private final class UpdateDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     private let destination: URL
     private let lock = NSLock()
@@ -21,6 +23,20 @@ private final class UpdateDownloadDelegate: NSObject, URLSessionDownloadDelegate
             completionHandler(nil); return
         }
         completionHandler(request)
+    }
+
+    // Decision 0045: CFNetwork's default handling would ask macOS for a saved
+    // proxy credential and prompt the user. The preflight worker has no event
+    // stream, so the refusal is its `update.preflight_failed` reason.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard ProxyChallengeRefusal.isProxyChallenge(challenge) else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        lock.withLock { failure = UpdatePreflightError("update_proxy_auth_refused") }
+        completionHandler(.cancelAuthenticationChallenge, nil)
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
