@@ -15,7 +15,9 @@ enum SOCKS5Routing: Sendable {
 
 /// What an upstream-only SOCKS listener admits, and where it reports.
 struct SOCKS5UpstreamOnlyRoute: Sendable {
-    let admits: @Sendable (_ host: String, _ port: Int) -> Bool
+    /// The `host:port` to tunnel to for a request, which need not be spelled
+    /// as the client spelled it, or nil to refuse the request.
+    let authority: @Sendable (_ host: String, _ port: Int) -> String?
     let refused: @Sendable (_ target: String) -> Void
     let opened: @Sendable (_ target: String, _ upstream: String) -> Void
     let failed: @Sendable (_ target: String, _ error: Error) -> Void
@@ -468,7 +470,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         if case .upstreamOnly(let route) = routing {
-            guard route.admits(host, Int(port)) else {
+            guard let authority = route.authority(host, Int(port)) else {
                 route.refused(Self.observableWireTarget(host: host, port: port))
                 sendReply(context: context, rep: 0x02)
                 return false
@@ -478,7 +480,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
                 context.close(promise: nil)
                 return false
             }
-            connectViaUpstream(host: host, port: port, context: context, proxyChain: [], failureLogLevel: .debug)
+            connectViaUpstream(target: authority, context: context, proxyChain: [], failureLogLevel: .debug)
             return false
         }
 
@@ -538,20 +540,10 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     /// A requested target for an event or a log line. The name is bytes a
-    /// client sent, up to 255 of anything. Every scalar a host name or an
-    /// address cannot hold (a space, a newline, `=`, `?`) becomes `_`, so it
-    /// stays one token on one line. A name over 48 scalars is cut: with its
-    /// `target=` key it then stays under the 65 characters at which
-    /// `SensitiveValueSanitizer`, which every event and log line passes,
-    /// replaces a run with `<redacted-token>` and takes the key with it.
+    /// client sent, up to 255 of anything, shown as `TunnelAuthority.printable`
+    /// shows it: one token on one line.
     static func observableWireTarget(host: String, port: UInt16) -> String {
-        let limit = 48
-        var name = String.UnicodeScalarView()
-        for scalar in host.unicodeScalars.prefix(limit) {
-            let kept = scalar.isASCII && (scalar.properties.isAlphabetic || scalar.properties.numericType != nil || ".-_:".unicodeScalars.contains(scalar))
-            name.append(kept ? scalar : "_")
-        }
-        let shown = String(name) + (host.unicodeScalars.count > limit ? "..." : "")
+        let shown = TunnelAuthority.printable(host)
         return shown.contains(":") ? "[\(shown)]:\(port)" : "\(shown):\(port)"
     }
 
@@ -596,8 +588,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         } else {
             logger.log(.info, "SOCKS5 CONNECT via upstream to \(host):\(port)", category: .proxy)
             connectViaUpstream(
-                host: host,
-                port: port,
+                target: host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)",
                 context: context,
                 proxyChain: pacProxyChain,
                 failureLogLevel: HTTPProxyHandler.upstreamFailureLogLevel(for: directCause)
@@ -675,15 +666,13 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func connectViaUpstream(
-        host: String,
-        port: UInt16,
+        target: String,
         context: ChannelHandlerContext,
         proxyChain: [UpstreamProxy],
         failureLogLevel: LogLevel
     ) {
         nonisolated(unsafe) let ctx = context
         let clientEL = ctx.eventLoop
-        let target = host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
         let authSource = context.remoteAddress?.ipAddress
         connectCoordinator.connectUpstreamTunnel(target: target, authSource: authSource, proxyChain: proxyChain)
             .hop(to: clientEL)
@@ -698,7 +687,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
                     if case .upstreamOnly(let route) = self.routing {
                         route.opened(target, endpoint)
                     } else {
-                        self.logger.log(.notice, "SOCKS5 tunnel via \(endpoint) for \(host):\(port)", category: .proxy)
+                        self.logger.log(.notice, "SOCKS5 tunnel via \(endpoint) for \(target)", category: .proxy)
                     }
                     if let id = self.connectionID, let authMethod {
                         self.onConnectionActivity(ConnectionActivity(connectionID: id, authMethod: authMethod))

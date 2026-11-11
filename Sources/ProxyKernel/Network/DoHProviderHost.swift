@@ -7,8 +7,9 @@ import Foundation
 /// The two are written by different hands. A provider URL may carry a
 /// trailing DNS dot, a Unicode name or an IPv4-mapped IPv6 literal, and
 /// CFNetwork sends the listener the punycode name or the bare address.
-/// Parsed, each of those is one value. Anything that does not parse as an
-/// address stays a name and matches exactly.
+/// Parsed, each of those is one value. An IPv4 address is strict
+/// dotted-quad. Anything else that a resolver would still read as an
+/// address names no host, and every other host is a name, matched exactly.
 enum DoHProviderHost: Hashable, Sendable {
     /// Dotted-quad text. An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is this address.
     case ipv4(String)
@@ -21,7 +22,8 @@ enum DoHProviderHost: Hashable, Sendable {
     init?(_ text: String) {
         var host = text.hasPrefix("[") && text.hasSuffix("]") ? String(text.dropFirst().dropLast()) : text
         if host.hasSuffix(".") { host.removeLast() }
-        guard !host.isEmpty else { return nil }
+        // A C parser stops at a NUL and would read only what precedes it.
+        guard !host.isEmpty, !host.utf8.contains(0) else { return nil }
 
         var v6 = in6_addr()
         if inet_pton(AF_INET6, host, &v6) == 1 {
@@ -35,21 +37,48 @@ enum DoHProviderHost: Hashable, Sendable {
             self = .ipv6(String(decoding: printed.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
             return
         }
-        // `inet_aton`, not `inet_pton`: it reads the short and numeric forms a resolver also takes for an address (`127.1`,
-        // `2130706433`), so they cannot pass for a name.
+        if let octets = Self.dottedQuad(host) {
+            self = .ipv4(octets.map(String.init).joined(separator: "."))
+            return
+        }
+        // What only `inet_aton` reads as an address (`127.1`, `2130706433`, `0x7f.1`, `0177.0.0.1`, `192.0.02.10`, or an address
+        // with a space and anything after it) is an address to a resolver and a name to a string compare. It names no host here.
         var v4 = in_addr()
-        if inet_aton(host, &v4) == 1 {
-            self = .ipv4(withUnsafeBytes(of: &v4) { $0.map(String.init).joined(separator: ".") })
-            return
-        }
+        guard inet_aton(host, &v4) != 1 else { return nil }
+        let name: String
         if host.unicodeScalars.allSatisfy(\.isASCII) {
-            self = .name(host.lowercased())
-            return
+            name = host.lowercased()
+        } else {
+            var components = URLComponents()
+            components.host = host
+            guard let encoded = components.encodedHost else { return nil }
+            name = encoded.lowercased()
         }
-        var components = URLComponents()
-        components.host = host
-        guard let encoded = components.encodedHost, !encoded.isEmpty else { return nil }
-        self = .name(encoded.lowercased())
+        guard TunnelAuthority.isWritable(name), !name.contains(where: { ":[]".contains($0) }) else { return nil }
+        self = .name(name)
+    }
+
+    /// Four decimal octets of one to three digits, none above 255 and none
+    /// with a leading zero. Darwin's `inet_pton` takes a leading zero, which
+    /// `inet_aton` reads as octal.
+    private static func dottedQuad(_ text: String) -> [UInt8]? {
+        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return nil }
+        var octets: [UInt8] = []
+        for part in parts {
+            guard (1...3).contains(part.utf8.count), part.utf8.allSatisfy({ (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) }),
+                  part == "0" || !part.hasPrefix("0"), let octet = UInt8(part) else { return nil }
+            octets.append(octet)
+        }
+        return octets
+    }
+
+    /// The host as a CONNECT names it: dotted-quad, bracketed IPv6, or the name.
+    var authorityHost: String {
+        switch self {
+        case .ipv4(let address), .name(let address): address
+        case .ipv6(let address): "[\(address)]"
+        }
     }
 
     /// Whether the host is this machine wherever it is resolved: loopback,

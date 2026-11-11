@@ -92,7 +92,7 @@ final class DoHSessionFactoryTests: XCTestCase {
         ]
         for testCase in cases {
             XCTAssertEqual(
-                DoHSessionFactory.isProviderEndpoint(host: testCase.host, port: testCase.port, config: config),
+                (DoHSessionFactory.providerAuthority(host: testCase.host, port: testCase.port, config: config) != nil),
                 testCase.admitted, "\(testCase.host):\(testCase.port)"
             )
         }
@@ -102,8 +102,8 @@ final class DoHSessionFactoryTests: XCTestCase {
         XCTAssertFalse(DoHSessionFactory.upstreamRouteCarries(provider: "http://[::1]/dns-query"))
 
         config.dohProviders = []
-        XCTAssertTrue(DoHSessionFactory.isProviderEndpoint(host: "1.1.1.1", port: 443, config: config), "an empty list means the shipped defaults")
-        XCTAssertFalse(DoHSessionFactory.isProviderEndpoint(host: "192.0.2.10", port: 443, config: config))
+        XCTAssertEqual(DoHSessionFactory.providerAuthority(host: "1.1.1.1", port: 443, config: config), "1.1.1.1:443", "an empty list means the shipped defaults")
+        XCTAssertNil(DoHSessionFactory.providerAuthority(host: "192.0.2.10", port: 443, config: config))
     }
 
     /// A provider URL and the SOCKS request for it are written by different
@@ -123,9 +123,9 @@ final class DoHSessionFactoryTests: XCTestCase {
             ("doh.corp.example.", true),
             ("DOH.corp.example.", true),
             ("doh.corp.example..", false),
-            // CFNetwork sends the punycode form of a Unicode name.
+            // CFNetwork sends the punycode form of a Unicode name. A request is ASCII.
             ("dns.xn--bcher-kva.corp.example", true),
-            ("dns.b\u{FC}cher.corp.example", true),
+            ("dns.b\u{FC}cher.corp.example", false),
             ("DNS.XN--BCHER-KVA.corp.example.", true),
             ("dns.bucher.corp.example", false),
             // An IPv4 address and its IPv4-mapped IPv6 form are one address.
@@ -146,11 +146,50 @@ final class DoHSessionFactoryTests: XCTestCase {
             ("doh.corp.example.evil.example", false),
             ("", false),
             (".", false),
+            // An address is dotted-quad, as `inet_pton` reads it, with nothing after it. Each of these is 192.0.2.10 to `inet_aton`.
+            ("192.0.2.10\r\nX-Injected: 1", false),
+            ("192.0.2.10\0", false),
+            ("192.0.2.10 GET", false),
+            ("192.0.2.10\t", false),
+            ("192.0.522", false),
+            ("192.522", false),
+            ("3221225994", false),
+            ("0xc000020a", false),
+            ("0300.0.2.10", false),
+            ("192.0.02.10", false),
+            ("192.0.2.010", false),
+            ("::ffff:192.0.2.10\0", false),
+            ("2001:db8::53\0", false),
         ]
         for testCase in cases {
             XCTAssertEqual(
-                DoHSessionFactory.isProviderEndpoint(host: testCase.host, port: 443, config: config),
+                (DoHSessionFactory.providerAuthority(host: testCase.host, port: 443, config: config) != nil),
                 testCase.admitted, "\"\(testCase.host)\""
+            )
+        }
+    }
+
+    /// The route dials the provider the config names, however the request
+    /// spelled it: the request's bytes never reach the CONNECT.
+    func testTheRouteDialsTheConfiguredProvidersOwnAuthority() {
+        var config = ProxyConfig.testFixture()
+        config.dohProviders = [
+            "https://doh.corp.example./dns-query",
+            "https://dns.b\u{FC}cher.corp.example:8443/dns-query",
+            "http://[::ffff:192.0.2.20]/dns-query",
+            "https://[2001:DB8::53]/dns-query",
+        ]
+        let cases: [(host: String, port: Int, dialled: String)] = [
+            ("DOH.Corp.Example", 443, "doh.corp.example.:443"),
+            ("doh.corp.example.", 443, "doh.corp.example.:443"),
+            ("DNS.XN--BCHER-KVA.corp.example.", 8443, "dns.xn--bcher-kva.corp.example:8443"),
+            ("0:0:0:0:0:ffff:c000:214", 80, "192.0.2.20:80"),
+            ("192.0.2.20", 80, "192.0.2.20:80"),
+            ("2001:db8:0:0:0:0:0:53", 443, "[2001:db8::53]:443"),
+        ]
+        for testCase in cases {
+            XCTAssertEqual(
+                DoHSessionFactory.providerAuthority(host: testCase.host, port: testCase.port, config: config), testCase.dialled, testCase.host
             )
         }
     }
@@ -181,7 +220,7 @@ final class DoHSessionFactoryTests: XCTestCase {
         var config = ProxyConfig.testFixture()
         config.dohProviders = local
         for host in ["localhost", "localhost.", "127.0.0.1", "127.1", "0.0.0.0", "::1", "::ffff:127.0.0.1", "::"] {
-            XCTAssertFalse(DoHSessionFactory.isProviderEndpoint(host: host, port: 443, config: config), host)
+            XCTAssertNil(DoHSessionFactory.providerAuthority(host: host, port: 443, config: config), host)
         }
     }
 }

@@ -133,6 +133,60 @@ final class DoHUpstreamRouteTests: XCTestCase {
         )
     }
 
+    /// A request for the provider with bytes after its address, or in a short,
+    /// octal, hex or numeric spelling, is refused, and nothing is dialled.
+    /// Darwin's `inet_aton` reads every one of them as the provider.
+    func testOnlyTheProvidersOwnSpellingIsAdmittedAndNothingRidesAlongWithIt() async throws {
+        let running = try await start(provider: "http://\(Self.providerHost)/dns-query")
+        let routePort = try XCTUnwrap(running.forwarder.doHUpstreamRoutePort)
+        let forged = [
+            "\(Self.providerHost)\r\nX-Injected: 1", "\(Self.providerHost)\nX-Injected: 1", "\(Self.providerHost)\0X-Injected",
+            "\(Self.providerHost) X-Injected", "\(Self.providerHost)\tX-Injected",
+            "192.0.522", "192.522", "3221225994", "0xc000020a", "0300.0.2.10",
+        ]
+        // `SocketAddress` reads a leading-zero form (`192.0.02.10`) as the address and sends its four bytes, so the parse of one
+        // sent as a name is pinned by `DoHSessionFactoryTests` instead.
+
+        for host in forged {
+            let reply = try await socksConnect(host: host, port: 80, to: routePort)
+            XCTAssertEqual(reply, 0x02, host.debugDescription)
+        }
+
+        XCTAssertEqual(running.upstream.connectHeads(), [], "nothing was dialled for a forged spelling")
+        let refusals = running.events.withLockedValue { $0 }.filter { $0.event == "dns.doh_upstream_route_refused" }
+        XCTAssertEqual(refusals.map(\.detail), ["target=[192.0.2.10__X-Injected:_1]:80 reason=not_a_doh_provider suppressed=0"])
+    }
+
+    /// An admitted request is dialled as the provider the config names, not as
+    /// the client spelled it, and its events are keyed by that one spelling.
+    func testAnAdmittedRequestIsDialledAsTheConfiguredProvider() async throws {
+        let running = try await start(provider: "http://[::ffff:\(Self.providerHost)]/dns-query")
+        let routePort = try XCTUnwrap(running.forwarder.doHUpstreamRoutePort)
+
+        for host in [Self.providerHost, "::ffff:\(Self.providerHost)"] {
+            let reply = try await socksConnect(host: host, port: 80, to: routePort)
+            XCTAssertEqual(reply, 0x00, host)
+        }
+
+        let heads = running.upstream.connectHeads()
+        XCTAssertEqual(heads.count, 4, "two challenged CONNECTs and their answers: \(heads)")
+        XCTAssertTrue(heads.allSatisfy { $0.hasPrefix("CONNECT \(Self.providerHost):80 HTTP/1.1\r\nHost: \(Self.providerHost):80\r\n") }, "\(heads)")
+        let used = running.events.withLockedValue { $0 }.filter { $0.event == "dns.doh_upstream_route_used" }
+        XCTAssertEqual(used.map(\.detail), ["target=\(Self.providerHost):80 upstream=127.0.0.1:\(running.upstream.port) suppressed=0"])
+    }
+
+    func testAProviderNameIsDialledInTheConfigsSpelling() async throws {
+        let running = try await start(provider: "http://doh.corp.example/dns-query")
+        let routePort = try XCTUnwrap(running.forwarder.doHUpstreamRoutePort)
+
+        let reply = try await socksConnect(host: "DOH.Corp.Example.", port: 80, to: routePort)
+
+        XCTAssertEqual(reply, 0x00)
+        let heads = running.upstream.connectHeads()
+        XCTAssertFalse(heads.isEmpty)
+        XCTAssertTrue(heads.allSatisfy { $0.hasPrefix("CONNECT doh.corp.example:80 HTTP/1.1\r\n") }, "\(heads)")
+    }
+
     /// The refused name is bytes a local process chose. The event shows it as
     /// one printable token, and a process that sends a new name every time
     /// gets one event a minute, not one per name.
@@ -372,7 +426,7 @@ final class DoHUpstreamRouteTests: XCTestCase {
             logger: logger, group: loop, directModeProvider: { (false, .none) }, pacRoutingEngine: nil,
             configProvider: { frozen }, gatewayMode: false,
             routing: .upstreamOnly(SOCKS5UpstreamOnlyRoute(
-                admits: { _, _ in true },
+                authority: { host, port in "\(host):\(port)" },
                 refused: { _ in outcomes.withLockedValue { $0.append("refused") } },
                 opened: { _, _ in outcomes.withLockedValue { $0.append("opened") } },
                 failed: { _, _ in outcomes.withLockedValue { $0.append("failed") } }

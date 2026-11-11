@@ -64,16 +64,22 @@ enum DoHSessionFactory {
     /// own host and port. Anything else a local process asks it for is refused,
     /// so the route lends Conduit's proxy identity to DoH and nothing else.
     ///
+    /// Returns the `host:port` the route dials for the request: the matching
+    /// provider's, as the config names it, never the bytes the client sent.
+    /// Nil refuses the request. A host holding anything a host name or an
+    /// address is not spelled with is refused before it is parsed.
+    ///
     /// The match is on the host as written, not on an address it resolved to:
     /// a provider configured by name is admitted by that name, and the
     /// upstream resolves it.
-    static func isProviderEndpoint(host: String, port: Int, config: ProxyConfig) -> Bool {
-        guard let asked = DoHProviderHost(host) else { return false }
+    static func providerAuthority(host: String, port: Int, config: ProxyConfig) -> String? {
+        guard TunnelAuthority.isWritable(host), let asked = DoHProviderHost(host) else { return nil }
         let providers = config.dohProviders.isEmpty ? DNSSection.defaultDoHProviders : config.dohProviders
-        return providers.contains { provider in
-            guard let endpoint = upstreamRouteEndpoint(of: provider) else { return false }
-            return endpoint.port == port && endpoint.host == asked
+        for provider in providers {
+            guard let endpoint = upstreamRouteEndpoint(of: provider), endpoint.port == port, endpoint.host == asked else { continue }
+            return "\(endpoint.authorityHost):\(port)"
         }
+        return nil
     }
 
     /// Whether a lookup races the upstream route for `provider`. Not for a
@@ -83,12 +89,14 @@ enum DoHSessionFactory {
         upstreamRouteEndpoint(of: provider) != nil
     }
 
-    private static func upstreamRouteEndpoint(of provider: String) -> (host: DoHProviderHost, port: Int)? {
-        guard let url = URL(string: provider), let host = url.host.flatMap(DoHProviderHost.init),
+    /// `authorityHost` keeps the root dot a provider URL writes, so the upstream resolves the name it was given.
+    private static func upstreamRouteEndpoint(of provider: String) -> (host: DoHProviderHost, authorityHost: String, port: Int)? {
+        guard let url = URL(string: provider), let written = url.host, let host = DoHProviderHost(written),
               let scheme = url.scheme?.lowercased(),
               let port = url.port ?? (scheme == "https" ? 443 : scheme == "http" ? 80 : nil),
               !host.isThisMachine else { return nil }
-        return (host, port)
+        let rooted = if case .name = host, written.hasSuffix(".") { true } else { false }
+        return (host, host.authorityHost + (rooted ? "." : ""), port)
     }
 
     /// - Important: `connectionProxyDictionary` is always set explicitly, never

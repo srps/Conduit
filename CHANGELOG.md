@@ -67,7 +67,10 @@ packaging; 0.6.1 is the latest published release.
   for port tunnels and the transparent proxy. That pool does not count an
   answered 4xx against an upstream; a 5xx still counts. Its `upstream.*`
   events carry `pool=doh`, and the tunnels' pool's now carry `pool=tunnels`.
-  Stopping the DNS forwarder closes every connection the route accepted. The
+  The route admits a provider only in strict dotted-quad or as a name made
+  of host-name characters, and dials the provider as the config names it,
+  never as the request spelled it. Stopping the DNS forwarder closes every
+  connection the route accepted. The
   "all DoH providers failed" warning now names a proxy that refused the
   tunnel, and says that CFNetwork cannot tell a Negotiate-only 407 from a
   policy block there. New events: `dns.doh_upstream_route_used`,

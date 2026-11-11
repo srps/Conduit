@@ -80,15 +80,15 @@ final class DoHUpstreamRoute: Sendable {
             gatewayMode: false,
             inboundBudget: InboundConnectionBudget(fixedLimit: Self.maximumConnections),
             routing: .upstreamOnly(SOCKS5UpstreamOnlyRoute(
-                admits: { host, port in
-                    DoHSessionFactory.isProviderEndpoint(host: host, port: port, config: configProvider())
+                authority: { host, port in
+                    DoHSessionFactory.providerAuthority(host: host, port: port, config: configProvider())
                 },
                 // Every refusal shares one key. Keyed by target, a process that asks for a new name each time would get an
                 // event for each and push the gate's other entries out. The target is whatever a local process sent.
                 refused: { target in
                     report("dns.doh_upstream_route_refused", "", "target=\(target) reason=not_a_doh_provider", .warning)
                 },
-                // Only a configured provider gets this far, so these targets are few and come from the config.
+                // These targets are the providers' own authorities from the config, never a client's spelling, so they are few.
                 opened: { target, upstream in
                     report("dns.doh_upstream_route_used", target, "target=\(target) upstream=\(upstream)", .info)
                 },

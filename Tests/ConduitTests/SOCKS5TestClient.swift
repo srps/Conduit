@@ -39,12 +39,15 @@ final class SOCKS5TestClient: Sendable {
         XCTAssertEqual(bytes(from: 0, count: 2), [0x05, 0x00])
     }
 
+    /// An address goes as an address, anything else as a name. A host with a
+    /// NUL goes as a name: `SocketAddress` would read only what precedes it.
     func sendRequest(host: String, port: Int) async throws {
         var request: [UInt8] = [0x05, 0x01, 0x00]
-        if let address = try? SocketAddress(ipAddress: host, port: port), case .v4(let v4) = address {
+        let address = host.utf8.contains(0) ? nil : try? SocketAddress(ipAddress: host, port: port)
+        if case .v4(let v4) = address {
             request.append(0x01)
             withUnsafeBytes(of: v4.address.sin_addr) { request.append(contentsOf: $0) }
-        } else if let address = try? SocketAddress(ipAddress: host, port: port), case .v6(let v6) = address {
+        } else if case .v6(let v6) = address {
             request.append(0x04)
             withUnsafeBytes(of: v6.address.sin6_addr) { request.append(contentsOf: $0) }
         } else {
