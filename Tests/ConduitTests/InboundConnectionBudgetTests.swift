@@ -2,6 +2,7 @@
 import XCTest
 import NIOEmbedded
 import NIOCore
+import NIOConcurrencyHelpers
 @testable import ProxyKernel
 
 final class InboundConnectionBudgetTests: XCTestCase {
@@ -38,6 +39,35 @@ final class InboundConnectionBudgetTests: XCTestCase {
         XCTAssertEqual(budget.count, 0)
         XCTAssertEqual(events.events.filter { $0.event == "connection.inbound_limit_rejected" }.count, 2)
     }
+    /// The DoH upstream route's budget. Its clients are Conduit's own lookups, which retry in bursts, so a full budget reports once
+    /// and then counts.
+    func testAFixedLimitBudgetReportsRefusalsOnceAnIntervalWithTheCountHeldBack() throws {
+        let clock = NIOLockedValueBox(NIODeadline.uptimeNanoseconds(1_000_000_000))
+        let budget = InboundConnectionBudget(fixedLimit: 1, now: { clock.withLockedValue { $0 } })
+        let events = RuntimeEventLog(capacity: 64)
+        let logger = RecordingLogSink()
+        let config = GenericDefaults.shared.makeConfig()
+        let held = EmbeddedChannel()
+        XCTAssertTrue(budget.admit(held, protocolName: "doh_upstream_route", config: config, logger: logger, eventSink: events.append))
+
+        for _ in 0..<40 {
+            XCTAssertFalse(budget.admit(EmbeddedChannel(), protocolName: "doh_upstream_route", config: config, logger: logger, eventSink: events.append))
+        }
+        clock.withLockedValue { $0 = $0 + InboundConnectionBudget.rejectionReportInterval }
+        XCTAssertFalse(budget.admit(EmbeddedChannel(), protocolName: "doh_upstream_route", config: config, logger: logger, eventSink: events.append))
+
+        let rejections = events.events.filter { $0.event == "connection.inbound_limit_rejected" }
+        XCTAssertEqual(rejections.map(\.detail), [
+            "protocol=doh_upstream_route count=1 limit=1 suppressed=0",
+            "protocol=doh_upstream_route count=1 limit=1 suppressed=39",
+        ])
+        XCTAssertEqual(logger.entries().filter { $0.level == .error }.count, 2, "the log line follows the event")
+        XCTAssertEqual(budget.count, 1, "a refusal holds no reservation")
+        try held.close().wait()
+        held.embeddedEventLoop.run()
+        XCTAssertEqual(budget.count, 0)
+    }
+
     func testNonpositiveLiveLimitsRejectWithoutLosingReservationsAndRecover() throws {
         for invalidLimit in [0, -1, Int.min] {
             let budget = InboundConnectionBudget()
