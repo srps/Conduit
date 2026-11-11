@@ -411,21 +411,11 @@ private struct DoHTransports: @unchecked Sendable {
     // (observed as the 2026-07-01 SIGABRT). All invalidation goes through
     // `DoHTransportsHandle`, which defers it until in-flight uses drain.
     let direct: URLSession
-    let upstream: URLSession?
     let localProxy: URLSession?
     let localProxyPort: Int?
 
     init(config: ProxyConfig, boundPort: Int?) {
         self.direct = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil))
-
-        if let upstream = config.enabledUpstreams.first {
-            self.upstream = DoHSessionFactory.session(
-                for: DoHSessionFactory.Route(proxy: (upstream.host, upstream.port))
-            )
-        } else {
-            self.upstream = nil
-        }
-
         let localRoute = DoHSessionFactory.localProxyRoute(config: config, boundPort: boundPort)
         self.localProxyPort = localRoute?.proxy?.port
         self.localProxy = localRoute.map { DoHSessionFactory.session(for: $0) }
@@ -433,18 +423,15 @@ private struct DoHTransports: @unchecked Sendable {
 
     func invalidate() {
         direct.invalidateAndCancel()
-        upstream?.invalidateAndCancel()
         localProxy?.invalidateAndCancel()
     }
 
     /// On VPN, direct HTTPS to public DoH resolvers is often black-holed; try
-    /// corporate upstream and the local proxy listener first.
+    /// the local proxy listener first. No session goes straight to an
+    /// upstream (decision 0045, `DoHSessionFactory.routes`).
     func sessions(preferProxyPath: Bool) -> [URLSession] {
-        let proxied = [upstream, localProxy].compactMap { $0 }
-        if preferProxyPath {
-            return proxied + [direct]
-        }
-        return [direct] + proxied
+        guard let localProxy else { return [direct] }
+        return preferProxyPath ? [localProxy, direct] : [direct, localProxy]
     }
 }
 
