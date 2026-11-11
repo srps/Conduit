@@ -11,6 +11,8 @@ private struct StoreModel: Hashable {
         case absent
         case ipv6Only
         case addressed
+        /// An addressed IPv4 key and no IPv6 key at all.
+        case ipv4Only
         /// An IPv4 key with no `Addresses`, as seen mid-handshake.
         case emptyIPv4
         /// No interface key; a service key still names the tunnel.
@@ -24,7 +26,10 @@ private struct StoreModel: Hashable {
     var a = Keys.absent
     var b = Keys.absent
 
-    var isUp: Bool { a == .addressed || b == .addressed }
+    /// The tunnels whose IPv4 key lists an address, in name order.
+    var counting: [String] { Self.tunnels.filter { self[$0] == .addressed || self[$0] == .ipv4Only } }
+
+    var isUp: Bool { !counting.isEmpty }
 
     static let all: [StoreModel] = Keys.allCases.flatMap { a in Keys.allCases.map { StoreModel(a: a, b: $0) } }
 
@@ -44,6 +49,9 @@ private struct StoreModel: Hashable {
                 continue
             case .addressed:
                 keys["State:/Network/Interface/\(interface)/IPv4"] = ["Addresses": ["192.0.2.10"]]
+            case .ipv4Only:
+                keys["State:/Network/Interface/\(interface)/IPv4"] = ["Addresses": ["192.0.2.10"]]
+                continue
             case .emptyIPv4:
                 keys["State:/Network/Interface/\(interface)/IPv4"] = ["Addresses": [String]()]
             case .ipv6Only:
@@ -64,8 +72,8 @@ private struct StoreModel: Hashable {
     func observation(_ interface: String) -> UtunRawObservation {
         let state = self[interface]
         return UtunRawObservation(
-            ipv4Present: state == .addressed || state == .emptyIPv4,
-            hasIPv4Address: state == .addressed,
+            ipv4Present: state == .addressed || state == .ipv4Only || state == .emptyIPv4,
+            hasIPv4Address: state == .addressed || state == .ipv4Only,
             ipv6Present: state == .ipv6Only || state == .addressed || state == .emptyIPv4
         )
     }
@@ -89,6 +97,9 @@ private enum Op: CaseIterable {
     /// The tunnel is left with an IPv6 key alone, whatever it had: from
     /// absent, a tunnel that appears without ever having an address.
     case ipv6B
+    /// The tunnel is left with an addressed IPv4 key alone. A drop then
+    /// takes its only key, so it leaves the store with no flap window.
+    case ipv4OnlyB
     /// One notification for both tunnels: A is removed as B comes up.
     case handover
     /// One notification for both tunnels: each loses its IPv4 key.
@@ -106,6 +117,10 @@ private enum Op: CaseIterable {
     case mute
     /// Toggles whether the store can be read.
     case failReads
+    /// Toggles whether deadline wake-ups are late. While they are, a wait
+    /// moves the clock and runs no deadline. The overdue wake-up runs when
+    /// the toggle goes back, unless a reading came first and stood in for it.
+    case stallDeadlines
     /// The owner changes the flap windows in Settings.
     case windowStandard, windowImmediate, windowWide
 
@@ -120,7 +135,7 @@ private enum Op: CaseIterable {
     var touched: String? {
         switch self {
         case .upA, .dropA, .removeA, .emptyA, .strandA: StoreModel.tunnelA
-        case .upB, .dropB, .removeB, .emptyB, .ipv6B: StoreModel.tunnelB
+        case .upB, .dropB, .removeB, .emptyB, .ipv6B, .ipv4OnlyB: StoreModel.tunnelB
         default: nil
         }
     }
@@ -146,7 +161,11 @@ private enum Op: CaseIterable {
     func applied(to store: StoreModel) -> StoreModel {
         // The IPv4 key goes; the IPv6 key stays if there was one.
         func dropped(_ keys: StoreModel.Keys) -> StoreModel.Keys {
-            keys == .absent || keys == .serviceOnly ? keys : .ipv6Only
+            switch keys {
+            case .absent, .serviceOnly: keys
+            case .ipv4Only: .absent
+            case .ipv6Only, .addressed, .emptyIPv4: .ipv6Only
+            }
         }
         var store = store
         switch self {
@@ -160,6 +179,7 @@ private enum Op: CaseIterable {
         case .removeB: store.b = .absent
         case .emptyB: store.b = .emptyIPv4
         case .ipv6B: store.b = .ipv6Only
+        case .ipv4OnlyB: store.b = .ipv4Only
         case .handover:
             store.a = .absent
             store.b = .addressed
@@ -189,7 +209,7 @@ private struct Observation {
 /// `docs/design-vpn-detection-level-triggered.md` and keeps no memory between
 /// calls, so it shares no state and no arithmetic with `VPNFlapTimer`.
 private enum Oracle {
-    private static func counts(_ keys: StoreModel.Keys) -> Bool { keys == .addressed }
+    private static func counts(_ keys: StoreModel.Keys) -> Bool { keys == .addressed || keys == .ipv4Only }
 
     /// In the store under an interface key, with no address.
     private static func waits(_ keys: StoreModel.Keys) -> Bool { keys == .ipv6Only || keys == .emptyIPv4 }
@@ -343,16 +363,18 @@ private struct LevelSession {
         if fault == nil { fault = message }
     }
 
-    /// Runs every deadline up to `target`. Returns how many came due.
+    /// Runs every deadline up to `target`. Returns how many came due. A
+    /// deadline already behind `now` runs at `now`: its wake-up was late.
     @discardableResult
     mutating func advance(
-        _ store: StoreModel, to target: TimeInterval, window: VPNFlapWindow = Windows.standard, readable: Bool = true
+        _ store: StoreModel, from now: TimeInterval = -.infinity, to target: TimeInterval,
+        window: VPNFlapWindow = Windows.standard, readable: Bool = true
     ) -> Int {
         var wakes = 0
         // The cap ends a run whose deadlines never stop coming; the caller
         // fails it for taking more wake-ups than there are windows.
         while let deadline = detection.deadline, deadline <= target, wakes < 8 {
-            reconcile(store, now: deadline, window: window, readable: readable)
+            reconcile(store, now: max(deadline, now), window: window, readable: readable)
             wakes += 1
         }
         return wakes
@@ -454,6 +476,8 @@ private struct World {
     var window = Windows.standard
     var muted = false
     var readable = true
+    /// Deadline wake-ups run on time.
+    var punctual = true
     /// The session's last reading is not of the store as it stands: a
     /// notification was lost, or the read failed.
     var stale = false
@@ -468,13 +492,19 @@ private struct World {
         stale = !readable
     }
 
+    /// Runs the session's deadlines up to `target`, each reading the store
+    /// whether or not notifications are being lost.
+    private mutating func wake(until target: TimeInterval) {
+        if let woken = session?.advance(store, from: now, to: target, window: window, readable: readable), woken > 0 {
+            stale = !readable
+        }
+    }
+
     /// False when the op changes nothing, so the ordering is the same as the
     /// shorter one without it.
     mutating func apply(_ op: Op) -> Bool {
         if let wait = op.wait {
-            if let woken = session?.advance(store, to: now + wait, window: window, readable: readable), woken > 0 {
-                stale = !readable
-            }
+            if punctual { wake(until: now + wait) }
             now += wait
             return true
         }
@@ -499,6 +529,9 @@ private struct World {
             muted.toggle()
         case .failReads:
             readable.toggle()
+        case .stallDeadlines:
+            punctual.toggle()
+            if punctual { wake(until: now) }
         default:
             let changed = op.applied(to: store)
             guard changed != store else { return false }
@@ -562,6 +595,9 @@ final class VPNFlapTimerModelCheckTests: XCTestCase {
         /// How many checked states settled on each verdict, for a session
         /// that watched the store get there.
         var settled: [String: Int] = [:]
+        /// How many checked states were of each kind the alphabet was
+        /// widened to reach.
+        var reached: [String: Int] = [:]
 
         mutating func fail(_ message: String, _ path: [Op]) {
             wrong += 1
@@ -571,6 +607,7 @@ final class VPNFlapTimerModelCheckTests: XCTestCase {
         var summary: String {
             "\(orderings) orderings, \(states) states checked, \(wrong) wrong, settled "
                 + settled.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+                + ", reached " + reached.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
         }
     }
 
@@ -599,7 +636,10 @@ final class VPNFlapTimerModelCheckTests: XCTestCase {
     ///   up and none is, `.unknown` when it never did. So a restart keeps
     ///   connected against disconnected and may change the reason.
     /// - **Notification loss.** Whatever was missed, one later reading (a
-    ///   notification, a deadline, an audit) restores convergence.
+    ///   notification, a deadline, an audit) restores convergence. The check
+    ///   takes that reading itself: nothing here proves one will come.
+    /// - **Late deadlines.** A wake-up that runs after its deadline, under
+    ///   whatever window is set by then, reports what the oracle expects.
     /// - **Blindness.** A failed reading reports `.unknown` with no deadline
     ///   and leaves the memory untouched, and the reading after it is the one
     ///   the oracle expects had the failure not happened.
@@ -613,7 +653,7 @@ final class VPNFlapTimerModelCheckTests: XCTestCase {
         print("VPNFlapTimer model check: \(Op.allCases.count) ops, depth \(Self.exhaustiveDepth), \(tally.summary), "
             + String(format: "%.1f s", Date().timeIntervalSince(started)))
         XCTAssertEqual(tally.examples, [])
-        XCTAssertEqual(tally.orderings, 174_289, "the alphabet or the depth changed")
+        XCTAssertEqual(tally.orderings, 274_666, "the alphabet or the depth changed")
         assertEveryVerdictWasReached(tally)
     }
 
@@ -644,7 +684,13 @@ final class VPNFlapTimerModelCheckTests: XCTestCase {
         for verdict in ["connected", "disconnected unknown", "disconnected userInitiated", "disconnected networkLost"] {
             XCTAssertGreaterThan(tally.settled[verdict, default: 0], 0, "no session settled on \(verdict)", file: file, line: line)
         }
+        for kind in [Self.overdueUnderANewWindow, Self.ipv4OnlyTunnel] {
+            XCTAssertGreaterThan(tally.reached[kind, default: 0], 0, "no state had \(kind)", file: file, line: line)
+        }
     }
+
+    private static let overdueUnderANewWindow = "an overdue deadline under a new window"
+    private static let ipv4OnlyTunnel = "an IPv4-only tunnel"
 
     private func explore(_ world: World, path: inout [Op], tally: inout Tally) {
         check(world, path: path, tally: &tally)
@@ -667,7 +713,7 @@ final class VPNFlapTimerModelCheckTests: XCTestCase {
         let settledLabel = store.isUp ? "connected" : "disconnected"
 
         let fresh = LevelSession(store, now: now, window: window)
-        let counting = StoreModel.tunnels.filter { store[$0] == .addressed }
+        let counting = store.counting
         let freshWant = store.isUp
             ? VPNDetection(phase: .up, carrying: counting, live: counting, deadline: nil)
             : VPNDetection(phase: .down(.unknown), carrying: [], live: [], deadline: nil)
@@ -675,6 +721,10 @@ final class VPNFlapTimerModelCheckTests: XCTestCase {
 
         guard let session = world.session else { return }
         if let fault = session.fault { tally.fail(fault, path) }
+        if store.b == .ipv4Only { tally.reached[Self.ipv4OnlyTunnel, default: 0] += 1 }
+        if let deadline = session.detection.deadline, deadline <= now, session.history.last?.window != window {
+            tally.reached[Self.overdueUnderANewWindow, default: 0] += 1
+        }
 
         if !world.stale {
             let detection = session.detection
@@ -682,7 +732,7 @@ final class VPNFlapTimerModelCheckTests: XCTestCase {
             if detection.state == .unknown { tally.fail("a store that was read reads unknown", path) }
             var settling = session
             // One per debounce still running, and one for grace.
-            if settling.advance(store, to: .infinity, window: window) > detection.live.count + 1 {
+            if settling.advance(store, from: now, to: .infinity, window: window) > detection.live.count + 1 {
                 tally.fail("more deadlines than windows to settle", path)
             }
             if let fault = settling.fault { tally.fail("settling: \(fault)", path) }
@@ -705,7 +755,7 @@ final class VPNFlapTimerModelCheckTests: XCTestCase {
         if let deadline = audited.detection.deadline, deadline <= now || deadline > now + Windows.longest {
             tally.fail("a deadline at \(deadline) from \(now)", path)
         }
-        audited.advance(store, to: .infinity, window: window)
+        audited.advance(store, from: now, to: .infinity, window: window)
         if let fault = audited.fault { tally.fail("after one more reading: \(fault)", path) }
         if audited.detection.state.eventLabel != settledLabel {
             tally.fail("after one more reading settled on \(audited.detection.state), want \(settledLabel)", path)
