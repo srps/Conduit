@@ -103,10 +103,15 @@ extension TunnelSnapshot {
     }
 }
 
-/// A live subscription to store changes. Cancelling it ends the store session
-/// it opened; a second cancel does nothing.
+/// A live subscription to store changes. It owns one store session.
 package protocol TunnelStoreSubscription: AnyObject, Sendable {
-    func cancel()
+    /// Ends the session. A failure means the store refused to detach the
+    /// queue; the session is released either way. A second cancel does
+    /// nothing and succeeds.
+    ///
+    /// The owner cancels before it lets go: a subscription released
+    /// uncancelled keeps its session and its handler alive.
+    func cancel() -> Result<Void, TunnelReading.Failure>
 }
 
 /// The dynamic store as VPN detection uses it: whole readings, and a signal
@@ -118,8 +123,9 @@ package protocol TunnelStoreReading: AnyObject, Sendable {
 
     /// Calls `onChange` on `queue` after a tunnel key changes. The call says
     /// only that the store moved, so the subscriber reads it again; several
-    /// changes may arrive as one call. A call already running when the
-    /// subscription is cancelled still finishes.
+    /// changes may arrive as one call. A call already on its way to `queue`
+    /// when the subscription is cancelled may still run, so a subscriber that
+    /// restarts tells its own calls from an earlier session's.
     func subscribe(
         queue: DispatchQueue, onChange: @escaping @Sendable () -> Void
     ) -> Result<any TunnelStoreSubscription, TunnelReading.Failure>
@@ -127,24 +133,31 @@ package protocol TunnelStoreReading: AnyObject, Sendable {
 
 /// `TunnelStoreReading` over `SCDynamicStore`, read-only.
 package final class SystemTunnelStore: TunnelStoreReading, @unchecked Sendable {
-    private let lock = NSLock()
-    /// The session `read()` uses, opened on first use and kept.
-    private var readSession: SCDynamicStore?
-    private let setNotificationKeys: @Sendable (SCDynamicStore, CFArray) -> Bool
-    private let setDispatchQueue: @Sendable (SCDynamicStore, DispatchQueue?) -> Bool
-
-    /// The two subscription calls default to `SCDynamicStoreSetNotificationKeys`
-    /// and `SCDynamicStoreSetDispatchQueue`; a test injects failing ones.
-    package init(
-        setNotificationKeys: @Sendable @escaping (SCDynamicStore, CFArray) -> Bool = {
+    /// The store calls that can fail. A test replaces one to fail it.
+    package struct Calls: Sendable {
+        package var copyMultiple: @Sendable (SCDynamicStore, CFArray) -> CFDictionary? = {
+            SCDynamicStoreCopyMultiple($0, nil, $1)
+        }
+        package var setNotificationKeys: @Sendable (SCDynamicStore, CFArray) -> Bool = {
             SCDynamicStoreSetNotificationKeys($0, nil, $1)
-        },
-        setDispatchQueue: @Sendable @escaping (SCDynamicStore, DispatchQueue?) -> Bool = {
+        }
+        package var setDispatchQueue: @Sendable (SCDynamicStore, DispatchQueue?) -> Bool = {
             SCDynamicStoreSetDispatchQueue($0, $1)
         }
-    ) {
-        self.setNotificationKeys = setNotificationKeys
-        self.setDispatchQueue = setDispatchQueue
+        /// The reason for the call that just failed on this thread.
+        package var lastError: @Sendable () -> Int32 = { SCError() }
+
+        package init() {}
+    }
+
+    private let lock = NSLock()
+    /// The session `read()` uses, opened on first use and kept until a read
+    /// on it fails.
+    private var readSession: SCDynamicStore?
+    private let calls: Calls
+
+    package init(calls: Calls = Calls()) {
+        self.calls = calls
     }
 
     package func read() -> TunnelReading {
@@ -160,14 +173,16 @@ package final class SystemTunnelStore: TunnelStoreReading, @unchecked Sendable {
             guard let session = readSession ?? SCDynamicStoreCreate(
                 kCFAllocatorDefault, "io.github.srps.Conduit.TunnelStore.read" as CFString, nil, nil
             ) else {
-                return .failure(.storeCreate)
+                return .failure(.init(.storeCreate, code: calls.lastError()))
+            }
+            guard let values = calls.copyMultiple(session, TunnelSnapshot.keyPatterns as CFArray) as? [String: Any] else {
+                let failure = TunnelReading.Failure(.storeRead, code: calls.lastError())
+                // A session that failed a read may be dead, as after configd
+                // restarts. The next read opens another.
+                readSession = nil
+                return .failure(failure)
             }
             readSession = session
-            guard let values = SCDynamicStoreCopyMultiple(
-                session, nil, TunnelSnapshot.keyPatterns as CFArray
-            ) as? [String: Any] else {
-                return .failure(.storeRead)
-            }
             return .success(values)
         }
     }
@@ -192,14 +207,14 @@ package final class SystemTunnelStore: TunnelStoreReading, @unchecked Sendable {
         guard let session = SCDynamicStoreCreate(
             kCFAllocatorDefault, "io.github.srps.Conduit.TunnelStore.watch" as CFString, callback, &context
         ) else {
-            return .failure(.storeCreate)
+            return .failure(.init(.storeCreate, code: calls.lastError()))
         }
-        guard setNotificationKeys(session, TunnelSnapshot.keyPatterns as CFArray),
-              setDispatchQueue(session, queue) else {
+        guard calls.setNotificationKeys(session, TunnelSnapshot.keyPatterns as CFArray),
+              calls.setDispatchQueue(session, queue) else {
             // No queue is attached, and releasing the session drops its keys.
-            return .failure(.storeSubscribe)
+            return .failure(.init(.storeSubscribe, code: calls.lastError()))
         }
-        return .success(Subscription(session: session, setDispatchQueue: setDispatchQueue))
+        return .success(Subscription(session: session, calls: calls))
     }
 
     private final class ChangeHandler {
@@ -210,23 +225,24 @@ package final class SystemTunnelStore: TunnelStoreReading, @unchecked Sendable {
     private final class Subscription: TunnelStoreSubscription, @unchecked Sendable {
         private let lock = NSLock()
         private var session: SCDynamicStore?
-        private let setDispatchQueue: @Sendable (SCDynamicStore, DispatchQueue?) -> Bool
+        private let calls: Calls
 
-        init(session: SCDynamicStore, setDispatchQueue: @escaping @Sendable (SCDynamicStore, DispatchQueue?) -> Bool) {
+        init(session: SCDynamicStore, calls: Calls) {
             self.session = session
-            self.setDispatchQueue = setDispatchQueue
+            self.calls = calls
         }
 
-        deinit { cancel() }
+        deinit {
+            assert(session == nil, "cancel a store subscription before releasing it")
+        }
 
-        func cancel() {
-            let detached = lock.withLock { () -> SCDynamicStore? in
+        func cancel() -> Result<Void, TunnelReading.Failure> {
+            let attached = lock.withLock { () -> SCDynamicStore? in
                 defer { session = nil }
                 return session
             }
-            // Detaching the queue stops delivery; releasing the session then
-            // ends it, whatever the detach returned.
-            if let detached { _ = setDispatchQueue(detached, nil) }
+            guard let attached, !calls.setDispatchQueue(attached, nil) else { return .success(()) }
+            return .failure(.init(.storeUnsubscribe, code: calls.lastError()))
         }
     }
 }

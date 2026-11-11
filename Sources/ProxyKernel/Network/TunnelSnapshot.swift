@@ -57,10 +57,24 @@ package struct TunnelSnapshot: Hashable, Sendable {
 
 /// One attempt to read the store: the whole snapshot, or why there is none.
 package enum TunnelReading: Hashable, Sendable {
-    package enum Failure: String, Hashable, Sendable, Error {
-        case storeCreate = "store_create"
-        case storeSubscribe = "store_subscribe"
-        case storeRead = "store_read"
+    /// A store call that failed, and the store's own reason for it.
+    package struct Failure: Hashable, Sendable, Error {
+        package enum Step: String, Hashable, Sendable {
+            case storeCreate = "store_create"
+            case storeSubscribe = "store_subscribe"
+            case storeRead = "store_read"
+            /// Detaching a subscription's queue on cancel.
+            case storeUnsubscribe = "store_unsubscribe"
+        }
+
+        package let step: Step
+        /// `SCError()` read straight after the call failed.
+        package let code: Int32
+
+        package init(_ step: Step, code: Int32) {
+            self.step = step
+            self.code = code
+        }
     }
 
     case snapshot(TunnelSnapshot)
