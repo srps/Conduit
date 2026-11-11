@@ -97,6 +97,20 @@ packaging; 0.6.1 is the latest published release.
   verdict on its upstream (given up, refused locally, or answered with a
   status that pool does not count) now frees only the probe slot it claimed,
   never another attempt's.
+- A dial that fails on this Mac no longer counts against any upstream, in a
+  tunnel, a request through the pool or a prewarm: no route to the upstream's
+  network (`ENETUNREACH`, `ENETDOWN`), as while a VPN takes its routes down,
+  no local address (`EADDRNOTAVAIL`), or out of descriptors, buffers or memory
+  (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`). Before, a VPN flap's routing gap
+  could open the breaker of every healthy upstream. A refused connect, a
+  connect timeout and a host-unreachable still count.
+- While an upstream is half-open, only its probe decides whether the breaker
+  reopens. When every upstream's probe is taken, a request still goes to the
+  preferred upstream without one, as before, but its failure no longer
+  reopens the breaker underneath the probe; its success still closes it. A
+  health check that meets an idle connection's silence keeps the probe slot
+  through its retry on a fresh connection, so no second probe starts
+  meanwhile.
 - A local client can no longer add lines to the authenticated CONNECT that
   Conduit sends an upstream. The SOCKS5 listener read a requested name as up
   to 255 bytes of anything and wrote it into the CONNECT request line and its
@@ -107,11 +121,13 @@ packaging; 0.6.1 is the latest published release.
   byte) before anything is dialled, and reports it as
   `connection.tunnel_target_rejected`, at most once a minute with
   `suppressed=`. The HTTP listener's parser already refused a CR, an LF or a
-  space in a CONNECT line. A port tunnel's remote host is now held to the
-  characters a host is spelled with when the config is validated, and a
-  Unicode name is refused there with its punycode spelling in the message.
-  As with a bad tunnel port, such a host keeps the proxy from starting until
-  it is corrected.
+  space in a CONNECT line. A proxied port tunnel's remote host is now held to
+  the characters a host is spelled with: the tunnel editor flags any other on
+  the row, a Unicode name with its punycode spelling, and that one tunnel is
+  not started (`tunnel.start_refused`). The proxy and every other tunnel
+  still start. A direct tunnel's host is not checked, since it is resolved
+  locally, where a scoped address such as `fe80::1%en0` or a Unicode name
+  works.
 - A VPN flap recovery, a reconnect after an outage and a wake recovery now
   also close the circuit breakers of the pool behind port tunnels and the
   transparent proxy. Before, only the client listener's pool was reset, so
