@@ -1153,16 +1153,25 @@ package final class ConnectionPool: @unchecked Sendable {
         )
     }
 
-    private func selectProxy(from config: ProxyConfig) -> UpstreamProxy? {
+    /// The upstream the next attempt of a tunnel dials, chosen as any
+    /// selection is but among the enabled upstreams not in `tried`: one call
+    /// asks each upstream at most once, whatever their latency scores say.
+    /// Nil once every enabled upstream has been tried.
+    package func selectTunnelUpstream(excluding tried: Set<UUID>) -> UpstreamProxy? {
+        selectProxy(from: configProvider(), excluding: tried)
+    }
+
+    private func selectProxy(from config: ProxyConfig, excluding tried: Set<UUID> = []) -> UpstreamProxy? {
         let proxies = config.enabledUpstreams
-        guard !proxies.isEmpty else { return nil }
+        let untried = proxies.filter { !tried.contains($0.id) }
+        guard !untried.isEmpty else { return nil }
         let result: (proxy: UpstreamProxy?, pending: [PendingTransitionEmission]) = lock.withLock {
             syncUpstreamStatesLocked(with: proxies)
             let now = Date.now
-            let outcome = selectableProxiesLocked(from: proxies, now: now)
+            let outcome = selectableProxiesLocked(from: untried, now: now)
             guard !outcome.candidates.isEmpty else {
-                let index = min(preferredProxyIndex, max(0, proxies.count - 1))
-                return (proxies[index], outcome.pendingEmissions)
+                let preferred = proxies[min(preferredProxyIndex, max(0, proxies.count - 1))]
+                return (untried.contains(preferred) ? preferred : untried[0], outcome.pendingEmissions)
             }
             let selected = chooseProxyLocked(from: outcome.candidates)
             var pending = outcome.pendingEmissions

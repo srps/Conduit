@@ -76,6 +76,13 @@ packaging; 0.6.1 is the latest published release.
   policy block there. New events: `dns.doh_upstream_route_used`,
   `dns.doh_upstream_route_failed`, `dns.doh_upstream_route_refused`,
   `dns.doh_upstream_route_unavailable`, `connection.socks5_close_failed`.
+- A tunnel through the upstreams now asks every enabled upstream once before
+  it fails. Its failover moved the preferred upstream on, but the next pick
+  still went to the upstream with the best latency score, so an upstream with
+  a fast score that refused the target was asked again and the others never
+  were. Each attempt of one tunnel now leaves out the upstreams it has
+  already tried. This matters most for DoH's own pool, which never opens a
+  breaker for a refusal.
 - A local client can no longer add lines to the authenticated CONNECT that
   Conduit sends an upstream. The SOCKS5 listener read a requested name as up
   to 255 bytes of anything and wrote it into the CONNECT request line and its

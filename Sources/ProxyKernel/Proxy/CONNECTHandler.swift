@@ -66,8 +66,10 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         if !proxyChain.isEmpty {
             return attemptTunnel(target: target, authSource: authSource, proxyChain: proxyChain, index: 0)
         }
-        let maxRetries = pool.enabledUpstreamCount
-        return attemptTunnel(target: target, authSource: authSource, attempt: 1, maxRetries: maxRetries)
+        guard let first = pool.selectTunnelUpstream(excluding: []) else {
+            return pool.eventLoop.makeFailedFuture(ConnectionPoolError.noUpstreamsConfigured)
+        }
+        return attemptTunnel(target: target, authSource: authSource, through: first, tried: [])
     }
 
     private func attemptTunnel(
@@ -99,13 +101,17 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         }
     }
 
+    /// Fails over to an upstream this call has not tried yet. Excluding them,
+    /// not only rotating the preference, is what reaches every upstream: the
+    /// latency chooser would pick a fast upstream that refuses again.
     private func attemptTunnel(
         target: String,
         authSource: String?,
-        attempt: Int,
-        maxRetries: Int
+        through proxy: UpstreamProxy,
+        tried: Set<UUID>
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
-        return attemptTunnel(target: target, authSource: authSource, forcedProxy: nil).flatMapError { [weak self] error -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
+        let tried = tried.union([proxy.id])
+        return attemptTunnel(target: target, authSource: authSource, forcedProxy: proxy).flatMapError { [weak self] error -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
             // Local refusals end here: another upstream would not help, and
             // after a VPN-transition sweep routing may have left the upstreams.
             if ConnectionPoolError.isAuthHandshakeLimitExceeded(error) || ConnectionPoolError.isVPNTransitionDuringConnect(error)
@@ -113,13 +119,12 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                 let el = self?.pool.eventLoop ?? MultiThreadedEventLoopGroup.singleton.next()
                 return el.makeFailedFuture(error)
             }
-            guard let self, attempt < maxRetries else {
+            guard let self, let next = self.pool.selectTunnelUpstream(excluding: tried) else {
                 let el = self?.pool.eventLoop ?? MultiThreadedEventLoopGroup.singleton.next()
                 return el.makeFailedFuture(error)
             }
-            let next = self.pool.switchToNextUpstream() ?? "unknown"
-            self.logger.log(.warning, "Upstream failed for \(SensitiveValueSanitizer.observableTarget(target)), switching to \(next) (attempt \(attempt + 1)/\(maxRetries)).", category: .proxy)
-            return self.attemptTunnel(target: target, authSource: authSource, attempt: attempt + 1, maxRetries: maxRetries)
+            self.logger.log(.warning, "Upstream \(proxy.endpoint) failed for \(SensitiveValueSanitizer.observableTarget(target)), switching to \(next.endpoint) (attempt \(tried.count + 1)/\(self.pool.enabledUpstreamCount)).", category: .proxy)
+            return self.attemptTunnel(target: target, authSource: authSource, through: next, tried: tried)
         }
     }
 
