@@ -56,17 +56,74 @@ final class TunnelStoreTests: XCTestCase {
         XCTAssertEqual(store.subscriptionCount, 1)
 
         store.setInterface("utun6", ipv4: [], ipv6: nil)
-        store.remove("State:/Network/Interface/utun6/IPv4")
-        XCTAssertEqual(signals(), 2)
+        XCTAssertEqual(signals(), 1)
 
-        store.remove("State:/Network/Interface/utun6/IPv4")
-        XCTAssertEqual(signals(), 2, "removing a key that is not there changes nothing")
-
-        subscription.cancel()
-        subscription.cancel()
+        try subscription.cancel().get()
+        try subscription.cancel().get()
         store.setInterface("utun6", ipv4: ["192.0.2.10"], ipv6: nil)
-        XCTAssertEqual(signals(), 2)
+        XCTAssertEqual(signals(), 1)
         XCTAssertEqual(store.subscriptionCount, 0)
+    }
+
+    func testAWriteThatChangesNothingSignalsNothing() throws {
+        let store = FakeTunnelStore()
+        store.setInterface("utun6", ipv4: ["192.0.2.10"], ipv6: nil)
+        let (subscription, signals) = try subscribe(to: store)
+
+        store.setInterface("utun6", ipv4: ["192.0.2.10"], ipv6: nil)
+        store.set("State:/Network/Interface/utun6/IPv4", ["Addresses": ["192.0.2.10"]])
+        store.remove("State:/Network/Interface/utun7/IPv4")
+
+        XCTAssertEqual(signals(), 0)
+        try subscription.cancel().get()
+    }
+
+    func testAKeyOutsideTheSubscribedPatternsSignalsNothing() throws {
+        let store = FakeTunnelStore()
+        let (subscription, signals) = try subscribe(to: store)
+
+        store.set("State:/Network/Interface/en0/IPv4", ["Addresses": ["192.0.2.20"]])
+        store.set("State:/Network/Global/IPv4", ["PrimaryInterface": "en0"])
+        store.set("State:/Network/Interface/utun6/Link", ["Active": true])
+        store.remove("State:/Network/Interface/en0/IPv4")
+        XCTAssertEqual(signals(), 0)
+
+        store.set("State:/Network/Service/com.cisco.anyconnect/IPv6", ["InterfaceName": "utun6"])
+        XCTAssertEqual(signals(), 1, "a service key is subscribed whatever its ID looks like")
+        try subscription.cancel().get()
+    }
+
+    func testChangesBeforeTheSignalRunsArriveAsOneSignal() throws {
+        let store = FakeTunnelStore()
+        let (subscription, signals) = try subscribe(to: store)
+
+        queue.suspend()
+        store.setInterface("utun6", ipv4: ["192.0.2.10"], ipv6: nil)
+        store.setInterface("utun6", ipv4: [], ipv6: nil)
+        store.setInterface("utun7", ipv4: ["192.0.2.11"], ipv6: nil)
+        queue.resume()
+        XCTAssertEqual(signals(), 1, "one signal is queued per subscription, however many changes it stands for")
+
+        store.setInterface("utun7", ipv4: nil, ipv6: nil)
+        XCTAssertEqual(signals(), 2, "a change after the signal ran is a new signal")
+        try subscription.cancel().get()
+    }
+
+    func testSeveralKeysChangedTogetherAreOneSignalAndOneReading() throws {
+        let store = FakeTunnelStore()
+        store.setInterface("utun6", ipv4: ["192.0.2.10"], ipv6: nil)
+        let (subscription, signals) = try subscribe(to: store)
+
+        store.setAll([
+            "State:/Network/Interface/utun6/IPv4": nil,
+            "State:/Network/Interface/utun7/IPv4": ["Addresses": ["192.0.2.11"]],
+        ])
+
+        XCTAssertEqual(signals(), 1)
+        XCTAssertEqual(store.read(), .snapshot(TunnelSnapshot(tunnels: [
+            .init(interface: "utun7", ipv4Addresses: ["192.0.2.11"]),
+        ])))
+        try subscription.cancel().get()
     }
 
     func testEachSubscriptionIsSignalledAndCancelledOnItsOwn() throws {
@@ -75,64 +132,117 @@ final class TunnelStoreTests: XCTestCase {
         let (second, secondSignals) = try subscribe(to: store)
         XCTAssertEqual(store.subscriptionCount, 2)
 
-        first.cancel()
+        try first.cancel().get()
         store.setInterface("utun6", ipv4: ["192.0.2.10"], ipv6: nil)
 
         XCTAssertEqual(firstSignals(), 0)
         XCTAssertEqual(secondSignals(), 1)
-        second.cancel()
+        try second.cancel().get()
     }
 
-    func testADroppedSubscriptionIsCancelled() throws {
-        let store = FakeTunnelStore()
-        do { _ = try subscribe(to: store) }
-
-        XCTAssertEqual(store.subscriptionCount, 0)
-    }
-
-    func testHeldChangesAreSignalledOnceAndDroppedOnesNever() throws {
+    func testACancelTakesBackASignalThatHasNotRun() throws {
         let store = FakeTunnelStore()
         let (subscription, signals) = try subscribe(to: store)
-        defer { subscription.cancel() }
+
+        queue.suspend()
+        store.setInterface("utun6", ipv4: ["192.0.2.10"], ipv6: nil)
+        try subscription.cancel().get()
+        queue.resume()
+
+        XCTAssertEqual(signals(), 0)
+    }
+
+    func testASignalQueuedBeforeACancelRunsWhenTheStoreIsToldToLetIt() throws {
+        let store = FakeTunnelStore()
+        store.signalsQueuedBeforeCancelStillRun = true
+        let (subscription, signals) = try subscribe(to: store)
+
+        queue.suspend()
+        store.setInterface("utun6", ipv4: ["192.0.2.10"], ipv6: nil)
+        try subscription.cancel().get()
+        store.setInterface("utun6", ipv4: nil, ipv6: nil)
+        queue.resume()
+
+        XCTAssertEqual(signals(), 1, "the one already queued, and none for the change after the cancel")
+    }
+
+    func testHeldChangesReachOnlyTheSubscriptionsThatWereThere() throws {
+        let store = FakeTunnelStore()
+        let (early, earlySignals) = try subscribe(to: store)
 
         store.notifications = .held
         store.setInterface("utun6", ipv4: ["192.0.2.10"], ipv6: nil)
         store.setInterface("utun7", ipv4: ["192.0.2.11"], ipv6: nil)
-        XCTAssertEqual(signals(), 0)
+        let (late, lateSignals) = try subscribe(to: store)
+        XCTAssertEqual(earlySignals(), 0)
+
         store.deliverHeld()
-        XCTAssertEqual(signals(), 1, "two changes, one signal")
+        XCTAssertEqual(earlySignals(), 1, "two changes, one signal")
+        XCTAssertEqual(lateSignals(), 0, "a change from before a subscription is never delivered to it")
         store.deliverHeld()
-        XCTAssertEqual(signals(), 1, "nothing was held the second time")
+        XCTAssertEqual(earlySignals(), 1, "nothing was held the second time")
+        try early.cancel().get()
+        try late.cancel().get()
+    }
+
+    func testAHeldChangeIsNotDeliveredToTheNextSession() throws {
+        let store = FakeTunnelStore()
+        let (stopped, stoppedSignals) = try subscribe(to: store)
+        store.notifications = .held
+        store.setInterface("utun6", ipv4: ["192.0.2.10"], ipv6: nil)
+        try stopped.cancel().get()
+
+        let (restarted, restartedSignals) = try subscribe(to: store)
+        store.deliverHeld()
+
+        XCTAssertEqual(stoppedSignals(), 0)
+        XCTAssertEqual(restartedSignals(), 0)
+        try restarted.cancel().get()
+    }
+
+    func testDroppedChangesAreNeverSignalledAndStillRead() throws {
+        let store = FakeTunnelStore()
+        let (subscription, signals) = try subscribe(to: store)
 
         store.notifications = .dropped
-        store.setInterface("utun6", ipv4: nil, ipv6: nil)
+        store.setInterface("utun7", ipv4: ["192.0.2.11"], ipv6: nil)
         store.notifications = .delivered
-        XCTAssertEqual(signals(), 1, "the change is lost")
+        store.deliverHeld()
+
+        XCTAssertEqual(signals(), 0, "the change is lost")
         XCTAssertEqual(store.read(), .snapshot(TunnelSnapshot(tunnels: [
             .init(interface: "utun7", ipv4Addresses: ["192.0.2.11"]),
         ])), "and a read still sees it")
+        try subscription.cancel().get()
     }
 
-    func testReadAndSubscribeFailOnDemandAndRecover() throws {
+    func testReadSubscribeAndCancelFailOnDemandAndRecover() throws {
         let store = FakeTunnelStore()
         store.setInterface("utun6", ipv4: ["192.0.2.10"], ipv6: nil)
 
-        store.readFailure = .storeRead
-        XCTAssertEqual(store.read(), .failed(.storeRead))
+        store.readFailure = .init(.storeRead, code: 1001)
+        XCTAssertEqual(store.read(), .failed(.init(.storeRead, code: 1001)))
         store.readFailure = nil
         XCTAssertEqual(store.read(), .snapshot(TunnelSnapshot(tunnels: [
             .init(interface: "utun6", ipv4Addresses: ["192.0.2.10"]),
         ])))
 
-        store.subscribeFailure = .storeSubscribe
+        store.subscribeFailure = .init(.storeSubscribe, code: 1001)
         XCTAssertThrowsError(try store.subscribe(queue: queue) {}.get()) {
-            XCTAssertEqual($0 as? TunnelReading.Failure, .storeSubscribe)
+            XCTAssertEqual($0 as? TunnelReading.Failure, .init(.storeSubscribe, code: 1001))
         }
         XCTAssertEqual(store.subscriptionCount, 0)
         store.subscribeFailure = nil
-        let (subscription, _) = try subscribe(to: store)
-        XCTAssertEqual(store.subscriptionCount, 1)
-        subscription.cancel()
+
+        let (subscription, signals) = try subscribe(to: store)
+        store.cancelFailure = .init(.storeUnsubscribe, code: 1002)
+        XCTAssertThrowsError(try subscription.cancel().get()) {
+            XCTAssertEqual($0 as? TunnelReading.Failure, .init(.storeUnsubscribe, code: 1002))
+        }
+        XCTAssertEqual(store.subscriptionCount, 0, "a cancel that reports a failure still ends the subscription")
+        try subscription.cancel().get()
+        store.setInterface("utun6", ipv4: nil, ipv6: nil)
+        XCTAssertEqual(signals(), 0)
     }
 
     // MARK: - System store
@@ -148,58 +258,109 @@ final class TunnelStoreTests: XCTestCase {
     func testTheLiveStoreSubscribesAndCancels() throws {
         let (subscription, _) = try subscribe(to: SystemTunnelStore())
 
-        subscription.cancel()
-        subscription.cancel()
+        try subscription.cancel().get()
+        try subscription.cancel().get()
     }
 
-    func testASubscriptionThatEndsReleasesItsHandler() throws {
+    func testACancelledSubscriptionReleasesItsHandler() throws {
         final class Captured: Sendable {}
         weak var cancelled: Captured?
-        weak var dropped: Captured?
         try autoreleasepool {
-            let first = Captured(), second = Captured()
-            cancelled = first
-            dropped = second
-            let store = SystemTunnelStore()
-            try store.subscribe(queue: queue) { _ = first }.get().cancel()
-            _ = try store.subscribe(queue: queue) { _ = second }.get()
+            let captured = Captured()
+            cancelled = captured
+            try SystemTunnelStore().subscribe(queue: queue) { _ = captured }.get().cancel().get()
         }
         // The session lets go of its context a moment after it is detached.
         var waits = 0
-        while cancelled != nil || dropped != nil, waits < 200 {
+        while cancelled != nil, waits < 200 {
             Thread.sleep(forTimeInterval: 0.01)
             waits += 1
         }
 
         XCTAssertNil(cancelled, "the store session was the handler's only owner")
-        XCTAssertNil(dropped, "a subscription let go without a cancel ends the same way")
     }
 
-    func testAFailedNotificationKeySubscriptionIsReportedAndTheNextSucceeds() throws {
+    func testAFailedNotificationKeySubscriptionIsReportedWithTheStoresCodeAndTheNextSucceeds() throws {
         let failsOnce = FailsOnce()
-        let store = SystemTunnelStore(setNotificationKeys: { session, keys in
+        var calls = SystemTunnelStore.Calls()
+        calls.setNotificationKeys = { session, keys in
             failsOnce.attempt() && SCDynamicStoreSetNotificationKeys(session, nil, keys)
-        })
+        }
+        calls.lastError = { 1001 }
 
-        try assertFailsToSubscribeOnce(store)
+        try assertFailsToSubscribeOnce(SystemTunnelStore(calls: calls))
     }
 
-    func testAFailedDispatchQueueSubscriptionIsReportedAndTheNextSucceeds() throws {
+    func testAFailedDispatchQueueSubscriptionIsReportedWithTheStoresCodeAndTheNextSucceeds() throws {
         let failsOnce = FailsOnce()
-        let store = SystemTunnelStore(setDispatchQueue: { session, queue in
+        var calls = SystemTunnelStore.Calls()
+        calls.setDispatchQueue = { session, queue in
             (queue == nil || failsOnce.attempt()) && SCDynamicStoreSetDispatchQueue(session, queue)
-        })
+        }
+        calls.lastError = { 1001 }
 
-        try assertFailsToSubscribeOnce(store)
+        try assertFailsToSubscribeOnce(SystemTunnelStore(calls: calls))
     }
 
     private func assertFailsToSubscribeOnce(
         _ store: SystemTunnelStore, file: StaticString = #filePath, line: UInt = #line
     ) throws {
         XCTAssertThrowsError(try store.subscribe(queue: queue) {}.get(), file: file, line: line) {
-            XCTAssertEqual($0 as? TunnelReading.Failure, .storeSubscribe, file: file, line: line)
+            XCTAssertEqual($0 as? TunnelReading.Failure, .init(.storeSubscribe, code: 1001), file: file, line: line)
         }
-        try store.subscribe(queue: queue) {}.get().cancel()
+        try store.subscribe(queue: queue) {}.get().cancel().get()
+    }
+
+    func testACancelTheStoreRefusesIsReturnedWithTheStoresOwnCode() throws {
+        // The queue is never attached, so the real detach has nothing to
+        // detach and the store itself refuses it.
+        var calls = SystemTunnelStore.Calls()
+        calls.setDispatchQueue = { session, queue in queue != nil || SCDynamicStoreSetDispatchQueue(session, nil) }
+        let subscription = try SystemTunnelStore(calls: calls).subscribe(queue: queue) {}.get()
+
+        XCTAssertThrowsError(try subscription.cancel().get()) {
+            XCTAssertEqual(
+                $0 as? TunnelReading.Failure, .init(.storeUnsubscribe, code: Int32(kSCStatusInvalidArgument))
+            )
+        }
+        try subscription.cancel().get()
+    }
+
+    func testAFailedReadCarriesTheStoresCodeAndTheNextReadOpensANewSession() throws {
+        let sessions = UsedSessions()
+        var calls = SystemTunnelStore.Calls()
+        calls.copyMultiple = { session, patterns in
+            sessions.record(session) == 2 ? nil : SCDynamicStoreCopyMultiple(session, nil, patterns)
+        }
+        calls.lastError = { Int32(kSCStatusNoStoreServer) }
+        let store = SystemTunnelStore(calls: calls)
+
+        guard case .snapshot = store.read() else { return XCTFail("the first read succeeds") }
+        XCTAssertEqual(store.read(), .failed(.init(.storeRead, code: Int32(kSCStatusNoStoreServer))))
+        guard case .snapshot = store.read() else { return XCTFail("the read after a failure succeeds") }
+        guard case .snapshot = store.read() else { return XCTFail("and so does the next") }
+
+        let used = sessions.all
+        XCTAssertTrue(used[0] === used[1], "a session is kept while it reads")
+        XCTAssertFalse(used[1] === used[2], "the session that failed is not used again")
+        XCTAssertTrue(used[2] === used[3])
+    }
+
+    /// Keeps every session a read used, so two of them are never one address
+    /// reused.
+    private final class UsedSessions: @unchecked Sendable {
+        private let lock = NSLock()
+        private var sessions: [SCDynamicStore] = []
+
+        var all: [SCDynamicStore] { lock.withLock { sessions } }
+
+        /// Returns how many reads there have been, this one included.
+        func record(_ session: SCDynamicStore) -> Int {
+            lock.withLock {
+                sessions.append(session)
+                return sessions.count
+            }
+        }
     }
 
     private final class FailsOnce: Sendable {
