@@ -106,9 +106,11 @@ enum DoHSessionFactory {
     static func session(
         for route: Route,
         delegate: ProxyChallengeRefusingDelegate,
-        timeout: TimeInterval = requestTimeout
+        timeout: TimeInterval = requestTimeout,
+        maximumConnectionsPerHost: Int? = nil
     ) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
+        if let maximumConnectionsPerHost { configuration.httpMaximumConnectionsPerHost = maximumConnectionsPerHost }
         configuration.timeoutIntervalForRequest = timeout
         configuration.timeoutIntervalForResource = timeout * 2
         configuration.connectionProxyDictionary = switch route {

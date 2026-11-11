@@ -40,13 +40,20 @@ package enum OriginResolverError: Error, LocalizedError, Equatable {
 /// path costs nothing. A cache miss pays one TLS handshake against a DoH
 /// provider.
 ///
-/// Each lookup builds and tears down its own ephemeral `URLSession`. That is
-/// deliberate, and is the cheap version of the machinery `LocalDNSForwarder`
-/// needs: a long-lived session pins TCP keep-alive sockets to whatever route
-/// existed when they were opened, and this resolver runs *precisely* when the
-/// route just changed (VPN down). A fresh session per miss cannot reuse a
-/// socket pinned to a dead utun, so there is nothing to reset on wake — and no
-/// `invalidate()`-while-in-flight hazard to manage (see `DoHTransports`).
+/// Each lookup builds its own ephemeral `URLSession`s, one for each route, and
+/// tears them down when it ends. That is deliberate, and is the cheap version
+/// of the machinery `LocalDNSForwarder` needs: a long-lived session pins TCP
+/// keep-alive sockets to whatever route existed when they were opened, and
+/// this resolver runs *precisely* when the route just changed (VPN down). A
+/// lookup's fresh sessions cannot reuse a socket pinned to a dead utun, so
+/// there is nothing to reset on wake — and no `invalidate()`-while-in-flight
+/// hazard to manage (see `DoHTransports`).
+///
+/// Within one lookup a route's session is shared by every provider and both
+/// encodings, and holds one connection to a host. Through the upstream route
+/// and the client listener each connection is a CONNECT that Conduit
+/// authenticates, so a lookup opens at most one of those per provider and
+/// route, where a session per request opened two.
 package final class DoHOriginResolver: OriginResolving {
     private struct CacheEntry {
         let ip: String
@@ -191,14 +198,18 @@ package final class DoHOriginResolver: OriginResolving {
         )
         let encoded = host.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? host
         let query = DNSWireFormat.buildQuery(domain: host, qtype: 1)
-        let delegate = proxyChallengeDelegate
+        let sessions = routes.map { route in
+            (route: route, session: DoHSessionFactory.session(for: route, delegate: proxyChallengeDelegate, maximumConnectionsPerHost: 1))
+        }
+        // The group below has awaited every fetch by the time this runs, cancelled ones included.
+        defer { for entry in sessions { entry.session.finishTasksAndInvalidate() } }
 
         return await withTaskGroup(of: (ip: String, ttl: TimeInterval)?.self) { group in
             for provider in providers {
-                for route in routes {
+                for (route, session) in sessions {
                     if case .upstream = route, !DoHSessionFactory.upstreamRouteCarries(provider: provider) { continue }
-                    group.addTask { await Self.fetchJSON(url: "\(provider)?name=\(encoded)&type=A", route: route, delegate: delegate) }
-                    group.addTask { await Self.fetchWire(provider: provider, query: query, route: route, delegate: delegate) }
+                    group.addTask { await Self.fetchJSON(url: "\(provider)?name=\(encoded)&type=A", session: session) }
+                    group.addTask { await Self.fetchWire(provider: provider, query: query, session: session) }
                 }
             }
             for await result in group {
@@ -211,13 +222,8 @@ package final class DoHOriginResolver: OriginResolving {
         }
     }
 
-    private static func fetchJSON(url: String, route: DoHSessionFactory.Route, delegate: ProxyChallengeRefusingDelegate) async -> (ip: String, ttl: TimeInterval)? {
+    private static func fetchJSON(url: String, session: URLSession) async -> (ip: String, ttl: TimeInterval)? {
         guard let url = URL(string: url) else { return nil }
-        // A short-lived session per request. See the type doc: nothing to reset
-        // on wake, and no invalidate-while-in-flight hazard.
-        let session = DoHSessionFactory.session(for: route, delegate: delegate)
-        defer { session.finishTasksAndInvalidate() }
-
         var request = URLRequest(url: url)
         request.setValue("application/dns-json", forHTTPHeaderField: "Accept")
 
@@ -242,11 +248,8 @@ package final class DoHOriginResolver: OriginResolving {
     }
 
     /// RFC 8484 wire format (`POST application/dns-message`).
-    private static func fetchWire(provider: String, query: [UInt8], route: DoHSessionFactory.Route, delegate: ProxyChallengeRefusingDelegate) async -> (ip: String, ttl: TimeInterval)? {
+    private static func fetchWire(provider: String, query: [UInt8], session: URLSession) async -> (ip: String, ttl: TimeInterval)? {
         guard let url = URL(string: provider) else { return nil }
-        let session = DoHSessionFactory.session(for: route, delegate: delegate)
-        defer { session.finishTasksAndInvalidate() }
-
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/dns-message", forHTTPHeaderField: "Content-Type")

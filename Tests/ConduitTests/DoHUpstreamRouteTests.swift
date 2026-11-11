@@ -209,6 +209,43 @@ final class DoHUpstreamRouteTests: XCTestCase {
         }
     }
 
+    // MARK: - Origin resolver
+
+    /// One resolution asks a provider in both encodings. Through the upstream
+    /// route both ride one tunnel, so the upstream is authenticated to once.
+    func testAnOriginResolutionOpensOneTunnelForAProvider() async throws {
+        // The delay holds each answer long enough that a second connection, if the resolver opened one, has asked for its tunnel.
+        let upstream = try await AuthenticatingUpstream.start(group: group, answerIP: Self.answerIP, keepAliveOrigin: .milliseconds(300))
+        self.upstream = upstream
+        var config = ProxyConfig.testFixture()
+        config.upstreams = [UpstreamProxy(name: "corp", host: "127.0.0.1", port: upstream.port, priority: 0)]
+        config.dohProviders = ["http://\(Self.providerHost)/dns-query"]
+        let frozen = config
+        let logger = RecordingLogSink(minLevel: .debug)
+        let pool = ConnectionPool(
+            group: group, logger: logger, configProvider: { frozen }, authenticatorProvider: { _ in StubNegotiateAuthenticator() }
+        )
+        self.pool = pool
+        let route = DoHUpstreamRoute(
+            source: DoHUpstreamRouteSource(
+                pool: pool,
+                coordinator: CONNECTCoordinator(pool: pool, authenticatorProvider: { _ in StubNegotiateAuthenticator() }, logger: logger)
+            ),
+            group: group, logger: logger, configProvider: { frozen }, eventSink: nil
+        )
+        try await route.start()
+        let routePort = try XCTUnwrap(route.listeningPort)
+        let resolver = DoHOriginResolver(logger: logger, configProvider: { frozen }, upstreamRoutePort: { routePort })
+
+        let address = try await resolver.resolveOrigin(host: "origin.corp.example", port: 443, on: group.next()).get()
+        await route.stop()
+
+        XCTAssertEqual(address.ipAddress, Self.answerIP)
+        XCTAssertEqual(upstream.tunnelsOpened, 1, "both encodings share the route's one connection to the provider")
+        XCTAssertEqual(upstream.challengesSent, 1, "one authenticated CONNECT for the resolution")
+        XCTAssertGreaterThanOrEqual(upstream.tunnelRequests, 1)
+    }
+
     // MARK: - Stop
 
     /// A tunnel in use closes with the forwarder, on both of its sides.
@@ -434,6 +471,7 @@ final class AuthenticatingUpstream: @unchecked Sendable {
         var challengesSent = 0
         var tunnelsOpened = 0
         var firstTunnelBytes: [[UInt8]] = []
+        var tunnelRequests = 0
     }
 
     var port: Int { channel.localAddress?.port ?? 0 }
@@ -442,6 +480,8 @@ final class AuthenticatingUpstream: @unchecked Sendable {
     var tunnelsOpened: Int { state.withLockedValue { $0.tunnelsOpened } }
     func firstTunnelBytes() -> [[UInt8]] { state.withLockedValue { $0.firstTunnelBytes } }
     var openConnections: Int { children.withLockedValue { $0.count } }
+    /// Requests a keep-alive origin answered, over every tunnel.
+    var tunnelRequests: Int { state.withLockedValue { $0.tunnelRequests } }
 
     private init(channel: Channel, state: NIOLockedValueBox<State>, children: NIOLockedValueBox<[ObjectIdentifier: Channel]>) {
         self.channel = channel
@@ -449,7 +489,11 @@ final class AuthenticatingUpstream: @unchecked Sendable {
         self.children = children
     }
 
-    static func start(group: EventLoopGroup, answerIP: String) async throws -> AuthenticatingUpstream {
+    /// - Parameter keepAliveOrigin: nil for an origin that answers the
+    ///   tunnel's first request and closes. Otherwise the origin keeps the
+    ///   tunnel open and answers every request on it after this delay: a
+    ///   `dns-json` GET with the answer, anything else with a 400.
+    static func start(group: EventLoopGroup, answerIP: String, keepAliveOrigin: TimeAmount? = nil) async throws -> AuthenticatingUpstream {
         let state = NIOLockedValueBox(State())
         let children = NIOLockedValueBox<[ObjectIdentifier: Channel]>([:])
         let channel = try await ServerBootstrap(group: group)
@@ -458,7 +502,7 @@ final class AuthenticatingUpstream: @unchecked Sendable {
                 let id = ObjectIdentifier(child)
                 children.withLockedValue { if $0.count < 256 { $0[id] = child } }
                 child.closeFuture.whenComplete { _ in children.withLockedValue { $0[id] = nil } }
-                return child.pipeline.addHandler(Session(state: state, answerIP: answerIP))
+                return child.pipeline.addHandler(Session(state: state, answerIP: answerIP, keepAliveOrigin: keepAliveOrigin))
             }
             .bind(host: "127.0.0.1", port: 0).get()
         return AuthenticatingUpstream(channel: channel, state: state, children: children)
@@ -484,12 +528,14 @@ final class AuthenticatingUpstream: @unchecked Sendable {
         private enum Phase { case challenge, authenticate, tunnel, answered }
         private let state: NIOLockedValueBox<State>
         private let answerIP: String
+        private let keepAliveOrigin: TimeAmount?
         private var phase = Phase.challenge
         private var accumulated = ByteBufferAllocator().buffer(capacity: 1024)
 
-        init(state: NIOLockedValueBox<State>, answerIP: String) {
+        init(state: NIOLockedValueBox<State>, answerIP: String, keepAliveOrigin: TimeAmount?) {
             self.state = state
             self.answerIP = answerIP
+            self.keepAliveOrigin = keepAliveOrigin
         }
 
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -514,6 +560,9 @@ final class AuthenticatingUpstream: @unchecked Sendable {
                         context: context
                     )
                 }
+            case .tunnel where keepAliveOrigin != nil:
+                accumulated.writeBuffer(&buffer)
+                answerKeptAliveRequests(context: context)
             case .tunnel:
                 phase = .answered
                 let first = Array(buffer.readableBytesView.prefix(8))
@@ -526,6 +575,28 @@ final class AuthenticatingUpstream: @unchecked Sendable {
                 )
             case .answered:
                 return
+            }
+        }
+
+        /// Answers each complete request in `accumulated`, in order, after the delay.
+        private func answerKeptAliveRequests(context: ChannelHandlerContext) {
+            guard let delay = keepAliveOrigin else { return }
+            while let text = accumulated.getString(at: accumulated.readerIndex, length: accumulated.readableBytes),
+                  let headEnd = text.range(of: "\r\n\r\n") {
+                let head = String(text[..<headEnd.lowerBound])
+                let bodyLength = head.split(separator: "\r\n")
+                    .first { $0.lowercased().hasPrefix("content-length:") }
+                    .flatMap { Int($0.split(separator: ":")[1].trimmingCharacters(in: .whitespaces)) } ?? 0
+                let total = head.utf8.count + 4 + bodyLength
+                guard accumulated.readableBytes >= total else { return }
+                accumulated.moveReaderIndex(forwardBy: total)
+                state.withLockedValue { $0.tunnelRequests += 1 }
+                let body = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"\#(answerIP)"}]}"#
+                let response = head.hasPrefix("GET ")
+                    ? "HTTP/1.1 200 OK\r\nContent-Type: application/dns-json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)"
+                    : "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
+                nonisolated(unsafe) let context = context
+                context.eventLoop.scheduleTask(in: delay) { self.write(response, context: context) }
             }
         }
 
