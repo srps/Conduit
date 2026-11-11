@@ -74,12 +74,14 @@ final class LocallyUnreachableUpstreamTests: XCTestCase {
         for _ in 0..<2 {
             await assertLocalAddressFailure { try await pool.exchange(head: Self.head("http://a.corp.example/"), body: nil).get() }
         }
-        let client = try await StreamingClientSink.make(group: group)
-        let streamed = pool.startStreamingExchange(head: Self.head("http://a.corp.example/"), requestBody: nil, clientChannel: client.channel)
-        await assertLocalAddressFailure { try await streamed.result.get() }
-        await client.close()
+        for _ in 0..<2 {
+            let client = try await StreamingClientSink.make(group: group)
+            let streamed = pool.startStreamingExchange(head: Self.head("http://a.corp.example/"), requestBody: nil, clientChannel: client.channel)
+            await assertLocalAddressFailure { try await streamed.result.get() }
+            await client.close()
+            XCTAssertEqual(streamed.upstream?.id, p.id)
+        }
 
-        XCTAssertEqual(streamed.upstream?.id, p.id)
         XCTAssertEqual(pool.selectTunnelUpstream(excluding: [])?.proxy.id, p.id, "the only upstream is still selected")
         XCTAssertEqual(state(pool, p), .closed)
         XCTAssertEqual(named("upstream.locally_unreachable").count, 1, "reported once, not on every dial")
