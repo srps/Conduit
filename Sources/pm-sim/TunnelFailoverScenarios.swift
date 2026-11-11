@@ -2,6 +2,7 @@
 import Foundation
 import NIOConcurrencyHelpers
 import NIOCore
+import NIOHTTP1
 import NIOPosix
 import ProxyKernel
 
@@ -183,6 +184,87 @@ enum TunnelFailoverScenarios {
                 .init("validation flags only the proxied Unicode row, and nothing blocks the proxy", passA),
                 .init("every other tunnel binds, the direct scoped and Unicode rows included", passB),
                 .init("the refused tunnel is reported once as tunnel.start_refused", passC),
+            ],
+            notes: notes
+        )
+    }
+    /// `pm-sim tunnel-local-dial-uncharged` (decision 0045).
+    ///
+    /// A dial that fails on this machine says nothing about the upstream, so it must not open a breaker: during a VPN
+    /// flap a routing gap would otherwise open every healthy upstream's. A connect to port 0 fails locally with
+    /// `EADDRNOTAVAIL` on macOS, as NIO reports it; a port nothing listens on refuses, which is the upstream's.
+    ///
+    /// | # | condition                                         | expected                                      |
+    /// |---|---------------------------------------------------|-----------------------------------------------|
+    /// | A | `threshold + 1` tunnels and exchanges to port 0  | each fails with `EADDRNOTAVAIL`; the breaker stays closed |
+    /// | B | `threshold` tunnels to a port that refuses        | the breaker opens                             |
+    @RuntimeActor
+    static func aLocalDialFailureOpensNoBreaker(verbose: Bool) async throws -> ScenarioResult {
+        let name = "tunnelLocalDialUncharged"
+        let start = Date()
+        var notes: [String] = []
+        let group = MultiThreadedEventLoopGroup.singleton
+        let unused = try await ServerBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
+        let refusingPort = unused.localAddress?.port ?? 0
+        try await unused.close().get()
+
+        func attempt(port: Int, tunnels: Int, exchanges: Int) async -> (failures: [String], circuit: String) {
+            var config = ProxyConfig()
+            config.circuitBreakerWindowSeconds = 0
+            config.circuitFailureThreshold = 2
+            config.upstreams = [UpstreamProxy(name: "upstream", host: "127.0.0.1", port: port, priority: 0)]
+            let frozen = config
+            let logger = RecordingLogSink(minLevel: verbose ? .debug : .info)
+            let pool = ConnectionPool(
+                group: group, logger: logger, configProvider: { frozen }, authenticatorProvider: { _ in MockAuthenticator() }
+            )
+            ScenarioCleanup.register { pool.closeAll(scope: .all) }
+            let coordinator = CONNECTCoordinator(pool: pool, authenticatorProvider: { _ in MockAuthenticator() }, logger: logger)
+            var failures: [String] = []
+            for index in 0..<tunnels {
+                do {
+                    let opened = try await coordinator.connectUpstreamTunnel(target: "local-\(index).example:443").get()
+                    opened.channel.close(promise: nil)
+                    failures.append("opened")
+                } catch {
+                    failures.append(error.displayDescription)
+                }
+            }
+            var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://local.example/")
+            head.headers.add(name: "Host", value: "local.example")
+            for _ in 0..<exchanges {
+                do {
+                    _ = try await pool.exchange(head: head, body: nil).get()
+                    failures.append("answered")
+                } catch {
+                    failures.append(error.displayDescription)
+                }
+            }
+            return (failures, pool.upstreamStatuses().map { "\($0.circuitState)" }.joined())
+        }
+
+        let local = await attempt(port: 0, tunnels: 3, exchanges: 3)
+        let passA = local.failures.count == 6 && local.failures.allSatisfy { $0.contains("assign requested address") } && local.circuit == "closed"
+        notes.append("A failures=\(Set(local.failures)) circuit=\(local.circuit)")
+
+        let refused = await attempt(port: refusingPort, tunnels: 2, exchanges: 0)
+        let passB = refused.circuit == "open"
+        notes.append("B failures=\(Set(refused.failures)) circuit=\(refused.circuit)")
+
+        let checks = [passA, passB]
+        notes.append(checks.allSatisfy { $0 }
+            ? "PASS — a local dial failure opens no breaker, and a refusal still does"
+            : "FAIL — see per-case lines above")
+        return ScenarioResult(
+            name: name,
+            clientCount: 8, clientsOpened: 0, clientsWithFirstByte: 0, clientsClosedEarly: 0, totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(start),
+            aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("tunnels and exchanges that fail locally with EADDRNOTAVAIL leave the breaker closed", passA),
+                .init("refused dials still open the breaker", passB),
             ],
             notes: notes
         )

@@ -121,6 +121,31 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
             || error as? ConnectionPoolError == .tunnelAbandoned
     }
 
+    /// A dial that failed on this machine, before any upstream could answer or not: out of descriptors, buffers or
+    /// memory (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`), no local address to send from (`EADDRNOTAVAIL`), or no route to
+    /// the upstream's network at all (`ENETUNREACH`, `ENETDOWN`), as while a VPN takes its routes down. It says nothing
+    /// about the upstream, so it is not charged to its breaker: a flap's routing gap would otherwise open every
+    /// healthy upstream's.
+    ///
+    /// A refused connect, a connect timeout and `EHOSTUNREACH` still count. `EHOSTUNREACH` is reported for one
+    /// destination, from a router's host-unreachable or a failed neighbour lookup, with a route to its network in
+    /// place, so another upstream on the same path may still connect; and the breakers a flap opens that way are
+    /// closed when the VPN comes back (`resetCircuitsAfterFlap`).
+    ///
+    /// NIO reports a `connect(host:port:)` failure as `NIOConnectionError`, one `SingleConnectionFailure` per address
+    /// tried, each holding the `IOError`; a dial to one address reports the `IOError` itself. The dial is local only
+    /// when every address failed locally.
+    package static func isLocalDialFailure(_ error: Error) -> Bool {
+        switch error {
+        case let io as IOError:
+            return [EMFILE, ENFILE, ENOBUFS, ENOMEM, EADDRNOTAVAIL, ENETUNREACH, ENETDOWN].contains(io.errnoCode)
+        case let connection as NIOConnectionError:
+            return !connection.connectionErrors.isEmpty && connection.connectionErrors.allSatisfy { isLocalDialFailure($0.error) }
+        default:
+            return false
+        }
+    }
+
     package static func isUpstreamResponseTimedOut(_ error: Error) -> Bool {
         if case ConnectionPoolError.upstreamResponseTimedOut = error {
             return true
@@ -739,7 +764,9 @@ package final class ConnectionPool: @unchecked Sendable {
                             self.release(connection, keepAlive: true)
                             self.logger.log(.debug, "Prewarmed upstream connection for \(proxy.endpoint).", category: .proxy)
                         } catch {
-                            if !ConnectionPoolError.isLocalNonUpstreamFailure(error) { self.recordFailure(for: .forced(proxy)) }
+                            if !ConnectionPoolError.isLocalNonUpstreamFailure(error), !ConnectionPoolError.isLocalDialFailure(error) {
+                                self.recordFailure(for: .forced(proxy))
+                            }
                             self.logger.log(.debug, "Prewarm failed for \(proxy.endpoint): \(error.displayDescription)", category: .proxy)
                         }
                     }
@@ -1471,7 +1498,7 @@ package final class ConnectionPool: @unchecked Sendable {
     /// Feeds the breaker from a failed exchange or tunnel (#197). A response timeout is a silence on
     /// `origin`, which counts only across origins. A status the upstream answered with is an answer, so
     /// it clears the pending silences and then counts as the failure it was before. A local refusal counts nothing
-    /// and gives back the probe slot the selection held.
+    /// and gives back the probe slot the selection held, as does a dial that failed on this machine (`isLocalDialFailure`).
     package func recordExchangeError(_ error: Error, for selection: UpstreamSelection, origin: ExchangeOrigin) {
         if ConnectionPoolError.isUpstreamResponseTimedOut(error) {
             recordSilence(for: selection, origin: origin)
@@ -1480,7 +1507,7 @@ package final class ConnectionPool: @unchecked Sendable {
             recordUncountedAnswer(status: status, for: selection, origin: origin)
         } else if ConnectionPoolError.isUpstreamAnswer(error) {
             recordFailure(for: selection, answered: true)
-        } else if ConnectionPoolError.isLocalNonUpstreamFailure(error) {
+        } else if ConnectionPoolError.isLocalNonUpstreamFailure(error) || ConnectionPoolError.isLocalDialFailure(error) {
             releaseProbe(of: selection)
         } else {
             recordFailure(for: selection)
