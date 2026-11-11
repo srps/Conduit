@@ -7,139 +7,137 @@ import ProxyKernel
 
 /// `pm-sim dns-doh-upstream-407` (decision 0045).
 ///
-/// | # | condition                                          | expected                                                  |
-/// |---|----------------------------------------------------|-----------------------------------------------------------|
-/// | A | a public name, provider over HTTP                  | answered, through the listener                            |
-/// | B | the upstream                                       | sees no request at all                                    |
-/// | C | the listener                                       | saw the lookup                                            |
-/// | D | the listener now answers 407; HTTPS provider       | `auth.proxy_challenge_refused client=doh` for the listener |
-/// | E | every request either fake saw                      | carries no `Proxy-Authorization`                          |
+/// The real runtime: `ProxyOrchestrator` with its client listener, DNS
+/// forwarder, tunnel pool and authenticator. The only upstream demands
+/// authentication (`FakeUpstreamProxy`), and Conduit answers it. The DoH
+/// provider is `192.0.2.10` (TEST-NET-1), which nothing answers directly, and
+/// a no-proxy entry sends it DIRECT at the client listener: the network of a
+/// full-tunnel VPN that drops direct traffic to a public resolver.
+///
+/// | # | condition                                   | expected                                              |
+/// |---|---------------------------------------------|-------------------------------------------------------|
+/// | A | a public name                               | answered                                              |
+/// | B | the upstream                                | tunnelled the lookup after Conduit answered its 407   |
+/// | C | the route                                   | reported `dns.doh_upstream_route_used` for the provider |
+/// | D | every `URLSession`                          | met no proxy challenge (`auth.proxy_challenge_refused` absent) |
+///
+/// No leg puts a 407 in front of a `URLSession`. If the challenge guard ever
+/// regressed, that would open the macOS proxy-password dialog on the machine
+/// running `pm-sim all`; `ProxyChallengeRefusalTests` covers the guard behind
+/// a check that sends nothing.
 enum DoHProxyAuthScenarios {
     private static let providerHost = "192.0.2.10"
     private static let publicIP = "198.51.100.30"
 
     @RuntimeActor
-    static func upstreamChallengeNeverReached(verbose: Bool) async throws -> ScenarioResult {
+    static func resolvesThroughAnAuthenticatingUpstream(verbose: Bool) async throws -> ScenarioResult {
         let name = "dnsDoHUpstream407"
         let start = Date()
         var notes: [String] = []
         let group = MultiThreadedEventLoopGroup.singleton
-        let logger = RecordingConsoleLogSink(minLevel: verbose ? .debug : .warning)
 
-        let upstream = ScriptedHTTPProxy(group: group, mode: .challenge)
+        let origin = ScriptedDoHOrigin(group: group, ip: publicIP)
+        ScenarioCleanup.register { await origin.stop() }
+        try await origin.start()
+        let upstream = FakeUpstreamProxy(group: group, originHost: "127.0.0.1", originPort: origin.port, requireAuth: true)
         ScenarioCleanup.register { await upstream.stop() }
         try await upstream.start()
-        let listener = ScriptedHTTPProxy(group: group, mode: .answer(ip: publicIP))
-        ScenarioCleanup.register { await listener.stop() }
-        try await listener.start()
-        notes.append("upstream 127.0.0.1:\(upstream.port) answers 407; listener stand-in 127.0.0.1:\(listener.port)")
+        notes.append("upstream 127.0.0.1:\(upstream.port) answers 407 Negotiate, then tunnels to the DoH origin 127.0.0.1:\(origin.port)")
 
-        let providers = NIOLockedValueBox(["http://\(providerHost)/dns-query"])
-        var config = ProxyConfig.testFixture()
-        config.upstreams = [UpstreamProxy(name: "corp", host: "127.0.0.1", port: upstream.port, priority: 0)]
-        config.localHost = "127.0.0.1"
-        config.localPort = listener.port
+        var config = ProxyConfig()
+        config.localPort = 0
+        config.localPACEnabled = false
+        config.pacRoutingEnabled = false
+        config.healthCheckIntervalSeconds = 3600
+        config.dnsForwarderEnabled = true
+        config.dnsForwarderPort = 0
         config.dnsEntries = []
-        let base = config
-        let events = NIOLockedValueBox<[RuntimeEvent]>([])
-        let listenerPort = listener.port
-        let forwarder = LocalDNSForwarder(
-            group: group, logger: logger,
-            configProvider: {
-                var current = base
-                current.dohProviders = providers.withLockedValue { $0 }
-                return current
-            },
-            preferProxyPathForDoH: { true },
-            localProxyPort: { listenerPort },
-            eventSink: { event in events.withLockedValue { $0.append(event) } }
+        config.dohProviders = ["http://\(providerHost)/dns-query"]
+        config.noProxyHosts = [providerHost]
+        config.upstreams = [UpstreamProxy(name: "corp", host: "127.0.0.1", port: upstream.port, priority: 0)]
+        let everyUpstreamReachable: @Sendable ([UpstreamProxy]) async -> UpstreamProbeSummary = { targets in
+            UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) })
+        }
+        let orchestrator = ProxyOrchestrator(
+            config: config, logger: RecordingLogSink(minLevel: verbose ? .debug : .info),
+            authenticatorProvider: { _ in MockAuthenticator() }, connectivityProbe: everyUpstreamReachable
         )
-        ScenarioCleanup.register { await forwarder.stop() }
-        try await forwarder.start(host: "127.0.0.1", port: 0)
-        let port = forwarder.listeningPort ?? 0
+        ScenarioCleanup.register {
+            await orchestrator.stopDNS()
+            await orchestrator.stopProxy()
+        }
+        try await orchestrator.startProxy()
+        await orchestrator.startDNS()
+        let dnsPort = orchestrator.snapshot.bindings.dnsPort ?? 0
+        notes.append("listener=\(orchestrator.snapshot.bindings.proxyPort ?? 0) dns=\(dnsPort) noProxy=\(providerHost)")
 
-        let first = DNSWireFormat.buildQuery(domain: "first-lookup.example", txID: 0x4070, qtype: 1)
-        let answer = try await DNSProbe.overUDP(query: first, port: port, timeout: 12)
+        let query = DNSWireFormat.buildQuery(domain: "first-lookup.example", txID: 0x4070, qtype: 1)
+        let answer = try await DNSProbe.overUDP(query: query, port: dnsPort, timeout: 12)
         let answeredIP = answer.flatMap { DNSWireFormat.firstIPv4Answer(in: $0)?.ip }
-        notes.append("A answer=\(answeredIP ?? "none") listenerRequests=\(listener.requests(naming: "first-lookup")) upstreamRequests=\(upstream.requestCount)")
         let passA = answeredIP == publicIP
-        let passC = listener.requests(naming: "first-lookup") > 0
+        notes.append("A answer=\(answeredIP ?? "none")")
 
-        listener.mode = .challenge
-        providers.withLockedValue { $0 = ["https://\(providerHost)/dns-query"] }
-        let second = DNSWireFormat.buildQuery(domain: "second-lookup.example", txID: 0x4071, qtype: 1)
-        _ = try await DNSProbe.overUDP(query: second, port: port, timeout: 12)
-        let refusals = events.withLockedValue { $0 }.filter { $0.event == "auth.proxy_challenge_refused" }
-        notes.append("D refusals=\(refusals.map { $0.detail ?? "" })")
-        let passD = refusals.count == 1
-            && (refusals.first?.detail ?? "").hasPrefix("client=doh proxy=127.0.0.1:\(listener.port) ")
+        let passB = upstream.connectCount > 0 && origin.requests(naming: "first-lookup") > 0
+        notes.append("B upstreamTunnels=\(upstream.connectCount) originRequests=\(origin.requests(naming: "first-lookup"))")
 
-        let passB = upstream.requestCount == 0
-        notes.append("B upstreamRequests=\(upstream.requestCount)")
-        let credentialed = (upstream.heads() + listener.heads()).filter { $0.lowercased().contains("proxy-authorization") }
-        notes.append("E credentialedRequests=\(credentialed.count) listenerRequests=\(listener.requestCount)")
-        let passE = credentialed.isEmpty
+        let events = orchestrator.eventLog.events
+        let used = events.filter { $0.event == "dns.doh_upstream_route_used" }.map { $0.detail ?? "" }
+        let passC = used.contains { $0.hasPrefix("target=\(providerHost):80 upstream=127.0.0.1:\(upstream.port) ") }
+        notes.append("C used=\(used)")
 
-        let checks = [passA, passB, passC, passD, passE]
+        let refusals = events.filter { $0.event == "auth.proxy_challenge_refused" }
+        let passD = refusals.isEmpty
+        notes.append("D refusals=\(refusals.count)")
+
+        let checks = [passA, passB, passC, passD]
         notes.append(checks.allSatisfy { $0 }
-            ? "PASS — DoH never reaches the upstream, and a proxy challenge is refused, never handed to macOS"
+            ? "PASS — with the rules saying DIRECT and direct a black hole, DoH resolves through the upstream Conduit authenticated to"
             : "FAIL — see per-case lines above")
         return ScenarioResult(
             name: name,
-            clientCount: 2,
-            clientsOpened: 2,
+            clientCount: 1,
+            clientsOpened: 1,
             clientsWithFirstByte: passA ? 1 : 0,
-            clientsClosedEarly: passA ? 1 : 2,
+            clientsClosedEarly: passA ? 0 : 1,
             totalBytes: answer?.count ?? 0,
             durationSeconds: Date().timeIntervalSince(start),
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
             assertions: [
-                .init("a public name is answered through the listener", passA),
-                .init("no DoH request reaches the upstream directly", passB),
-                .init("the listener carries the lookup", passC),
-                .init("a proxy challenge is refused with auth.proxy_challenge_refused", passD),
-                .init("no request carries Proxy-Authorization", passE),
+                .init("a public name is answered though the rules say DIRECT and direct is a black hole", passA),
+                .init("the upstream tunnels the lookup after Conduit answers its 407", passB),
+                .init("the upstream route reports the lookup", passC),
+                .init("no URLSession met a proxy challenge", passD),
             ],
             notes: notes
         )
     }
 }
 
-final class ScriptedHTTPProxy: @unchecked Sendable {
-    enum Mode: Sendable {
-        case answer(ip: String)
-        case challenge
-    }
-
+/// A plain-HTTP DoH provider: answers the first request on each connection
+/// with one A record as `dns-json`, and keeps the request heads (at most 256).
+final class ScriptedDoHOrigin: @unchecked Sendable {
     private let group: EventLoopGroup
-    private let modeBox: NIOLockedValueBox<Mode>
+    private let ip: String
     private let headsBox = NIOLockedValueBox<[String]>([])
     private var channel: Channel?
 
     var port: Int { channel?.localAddress?.port ?? 0 }
-    var mode: Mode {
-        get { modeBox.withLockedValue { $0 } }
-        set { modeBox.withLockedValue { $0 = newValue } }
-    }
+    func requests(naming label: String) -> Int { headsBox.withLockedValue { $0 }.filter { $0.contains(label) }.count }
 
-    var requestCount: Int { headsBox.withLockedValue { $0.count } }
-    func heads() -> [String] { headsBox.withLockedValue { $0 } }
-    func requests(naming label: String) -> Int { heads().filter { $0.contains(label) }.count }
-
-    init(group: EventLoopGroup, mode: Mode) {
+    init(group: EventLoopGroup, ip: String) {
         self.group = group
-        self.modeBox = NIOLockedValueBox(mode)
+        self.ip = ip
     }
 
     func start() async throws {
-        let modeBox = modeBox
         let headsBox = headsBox
+        let ip = ip
         channel = try await ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandler(ScriptedHTTPProxyHandler(mode: modeBox, heads: headsBox))
+                channel.pipeline.addHandler(ScriptedDoHOriginHandler(ip: ip, heads: headsBox))
             }
             .bind(host: "127.0.0.1", port: 0)
             .get()
@@ -150,22 +148,22 @@ final class ScriptedHTTPProxy: @unchecked Sendable {
             try await channel?.close().get()
         } catch ChannelError.alreadyClosed {
         } catch {
-            FileHandle.standardError.write(Data("ScriptedHTTPProxy close failed: \(error)\n".utf8))
+            FileHandle.standardError.write(Data("ScriptedDoHOrigin close failed: \(error)\n".utf8))
         }
         channel = nil
     }
 }
 
-private final class ScriptedHTTPProxyHandler: ChannelInboundHandler, @unchecked Sendable {
+private final class ScriptedDoHOriginHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
 
-    private let mode: NIOLockedValueBox<ScriptedHTTPProxy.Mode>
+    private let ip: String
     private let heads: NIOLockedValueBox<[String]>
     private var responded = false
 
-    init(mode: NIOLockedValueBox<ScriptedHTTPProxy.Mode>, heads: NIOLockedValueBox<[String]>) {
-        self.mode = mode
+    init(ip: String, heads: NIOLockedValueBox<[String]>) {
+        self.ip = ip
         self.heads = heads
     }
 
@@ -175,19 +173,9 @@ private final class ScriptedHTTPProxyHandler: ChannelInboundHandler, @unchecked 
         var request = unwrapInboundIn(data)
         let head = String(decoding: request.readBytes(length: request.readableBytes) ?? [], as: UTF8.self)
         heads.withLockedValue { if $0.count < 256 { $0.append(head) } }
-
-        let response: String
-        switch mode.withLockedValue({ $0 }) {
-        case .answer(let ip):
-            let body = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"\#(ip)"}]}"#
-            response = "HTTP/1.1 200 OK\r\nContent-Type: application/dns-json\r\n" +
-                "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-        case .challenge:
-            response = "HTTP/1.1 407 Proxy Authentication Required\r\n" +
-                "Proxy-Authenticate: Negotiate\r\nProxy-Authenticate: NTLM\r\n" +
-                "Proxy-Authenticate: Basic realm=\"corp.example\"\r\n" +
-                "Content-Length: 0\r\nConnection: close\r\n\r\n"
-        }
+        let body = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"\#(ip)"}]}"#
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/dns-json\r\n" +
+            "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
         let channel = context.channel
         var buffer = channel.allocator.buffer(capacity: response.utf8.count)
         buffer.writeString(response)

@@ -92,7 +92,7 @@ enum PMSim {
               audit-socks5-rsv        Audit: SOCKS5 CONNECT non-zero RSV handling
               audit-expect-trailers   Audit: Expect: 100-continue answered, trailers passed through
               dns-doh-blocked         DNS: internal server dead + DoH answering 404 still answers the client
-              dns-doh-upstream-407    DNS: DoH never reaches a 407-answering upstream directly; a proxy challenge is refused, never handed to macOS (0045)
+              dns-doh-upstream-407    DNS: with the rules saying DIRECT and direct a black hole, DoH resolves through an upstream whose 407 Conduit answers (0045)
               dns-upstream-spoof      DNS: wrong-ID and QR-clear replies are dropped, never answered or cached
               dns-internal-unreachable-falls-back  DNS: a split-DNS name whose server is silent resolves through DoH
               dns-ephemeral-pair-rebind  DNS: a taken TCP twin moves the port-0 UDP+TCP pair to a fresh port
@@ -494,7 +494,7 @@ enum PMSim {
         case "dns-doh-blocked":
             return [try await DNSResolverScenarios.dohBlockedStillAnswers(verbose: verbose)]
         case "dns-doh-upstream-407":
-            return [try await DoHProxyAuthScenarios.upstreamChallengeNeverReached(verbose: verbose)]
+            return [try await DoHProxyAuthScenarios.resolvesThroughAnAuthenticatingUpstream(verbose: verbose)]
         case "dns-upstream-spoof":
             return [try await DNSResolverScenarios.upstreamSpoofRejected(verbose: verbose)]
         case "dns-internal-unreachable-falls-back":
