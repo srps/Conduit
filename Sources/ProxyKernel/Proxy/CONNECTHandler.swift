@@ -56,6 +56,13 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         authSource: String? = nil,
         proxyChain: [UpstreamProxy] = []
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
+        // Every path that tunnels through an upstream comes through here, and `target` is written into an authenticated request.
+        guard TunnelAuthority.isWritable(target) else {
+            let event = RuntimeEvent(kind: .connection, event: "connection.tunnel_target_rejected", detail: "target=\(TunnelAuthority.printable(target))")
+            eventSink?(event)
+            logger.log(.warning, "\(event.event) \(event.detail ?? ""): not a host name or an address; no upstream was dialled.", category: .proxy)
+            return pool.eventLoop.makeFailedFuture(ConnectionPoolError.malformedTunnelTarget)
+        }
         if !proxyChain.isEmpty {
             return attemptTunnel(target: target, authSource: authSource, proxyChain: proxyChain, index: 0)
         }

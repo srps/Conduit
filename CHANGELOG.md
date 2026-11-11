@@ -73,6 +73,16 @@ packaging; 0.6.1 is the latest published release.
   policy block there. New events: `dns.doh_upstream_route_used`,
   `dns.doh_upstream_route_failed`, `dns.doh_upstream_route_refused`,
   `dns.doh_upstream_route_unavailable`, `connection.socks5_close_failed`.
+- A local client can no longer add lines to the authenticated CONNECT that
+  Conduit sends an upstream. The SOCKS5 listener read a requested name as up
+  to 255 bytes of anything and wrote it into the CONNECT request line and its
+  `Host` header, after Conduit's own `Proxy-Authorization`, so a name with a
+  CR and an LF in it added headers to that request. Every tunnel through an
+  upstream now refuses a target that holds anything but ASCII letters,
+  digits, `.`, `-`, `_`, `:`, `[` and `]`, before anything is dialled, and
+  reports it as `connection.tunnel_target_rejected`. The HTTP listener's
+  parser already refused a CR, an LF or a space in a CONNECT line; it let
+  `user@host` through, which is now refused too.
 - A VPN flap recovery, a reconnect after an outage and a wake recovery now
   also close the circuit breakers of the pool behind port tunnels and the
   transparent proxy. Before, only the client listener's pool was reset, so

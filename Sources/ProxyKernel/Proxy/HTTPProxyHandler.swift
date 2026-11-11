@@ -450,7 +450,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         case .authenticationUnavailable, .authenticationRejected,
              .noUpstreamsConfigured, .poolExhausted, .authHandshakeLimitExceeded,
              .bodyTooLargeForReplay, .clientClosedDuringResponse, .vpnTransitionDuringConnect,
-             .connectionTrackingFull, .idleConnectionSilent:
+             .connectionTrackingFull, .idleConnectionSilent, .malformedTunnelTarget:
             return false
         case .invalidResponse, .streamingResponseInterrupted, .upstreamResponseTimedOut:
             return true
