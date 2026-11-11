@@ -258,11 +258,12 @@ package struct TunnelStoreCapture: Encodable, Equatable {
         package let overridesPrimary: Bool
     }
 
-    /// Seconds since the capture began on the wall clock, which keeps going
-    /// while the machine sleeps. No line holds a date or a time of day.
+    /// Seconds since the capture began on a monotonic clock that keeps
+    /// counting while the machine sleeps, as `ContinuousClock` does. No line
+    /// holds a date or a time of day.
     package let offset: TimeInterval
     /// Seconds since the capture began on a clock that stops while the
-    /// machine sleeps.
+    /// machine sleeps, as `systemUptime` does.
     package let elapsed: TimeInterval
     package let keys: [String: MaskedStoreValue]?
     package let tunnels: [Tunnel]?

@@ -42,9 +42,13 @@
 // `--max-duration` seconds. Both only read the store. The lines go to stdout
 // and everything else to stderr, so stdout can be saved as a fixture.
 //
-// No line holds a date. `offset` is seconds since the capture began on the
-// wall clock, and `elapsed` the same on a clock that stops while the Mac
-// sleeps, so the two differ by the time spent asleep.
+// No line holds a date. Three clocks are involved:
+//   - `offset` is seconds since the capture began on `ContinuousClock`, which
+//     is monotonic and keeps counting while the Mac sleeps.
+//   - `elapsed` is the same on `systemUptime`, which stops while the Mac
+//     sleeps, so `offset - elapsed` is the time spent asleep.
+//   - `--max-duration` is measured on `DispatchTime`, which also stops while
+//     the Mac sleeps, so a watch that spans a sleep ends later by wall time.
 
 import Dispatch
 import ConduitShared
@@ -164,7 +168,11 @@ enum PMVpnCheck {
                 print("  --pushed-dns   read the tunnels' pushed resolvers once, print them masked, exit")
                 print("  --snapshot     read every tunnel key once, print one masked JSON line, exit")
                 print("  --watch        print a masked JSON line now and after each store notification")
-                print("  --max-duration stop --watch after this many seconds (default \(Int(defaultMaxDurationSeconds)))")
+                print("  --max-duration stop --watch after this many seconds awake (default \(Int(defaultMaxDurationSeconds)))")
+                print("")
+                print("Each capture line has offset and elapsed, both seconds since the capture began.")
+                print("offset counts time asleep and elapsed does not. --max-duration does not either,")
+                print("so a watch that spans a sleep runs past its duration by the time asleep.")
                 exit(0)
             default:
                 FileHandle.standardError.write(Data("Unknown arg: \(arg)\n".utf8))
@@ -218,9 +226,13 @@ enum PMVpnCheck {
 
     /// Reads and prints on one queue, so lines come out whole and in order.
     private final class CaptureWatch: @unchecked Sendable {
+        private static func seconds(_ duration: Duration) -> TimeInterval {
+            Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+        }
+
         let queue = DispatchQueue(label: "io.github.srps.Conduit.pm-vpn-check.watch")
         private let store = SystemTunnelStore()
-        private let began = Date()
+        private let began = ContinuousClock.now
         private let beganUptime = ProcessInfo.processInfo.systemUptime
         /// Touched only on `queue`.
         private var mask = TunnelStoreMask()
@@ -241,7 +253,7 @@ enum PMVpnCheck {
         /// Runs on `queue`.
         func capture() {
             emit(TunnelStoreCapture(
-                reading: store.readKeys(), offset: Date().timeIntervalSince(began),
+                reading: store.readKeys(), offset: Self.seconds(began.duration(to: .now)),
                 elapsed: ProcessInfo.processInfo.systemUptime - beganUptime, mask: &mask
             ))
         }
