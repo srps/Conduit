@@ -207,10 +207,13 @@ enum PMVpnCheck {
 
         let reason = interrupted.wait(timeout: .now() + maxDuration) == .success ? "interrupted" : "max duration reached"
         sigint.cancel()
-        subscription.cancel()
+        let cancelled = subscription.cancel()
         // Lets a line that is being written finish.
         watch.queue.sync {}
         note("stopped: \(reason)")
+        if case .failure(let failure) = cancelled {
+            fail("the store refused to end the watch: \(failure.step.rawValue) code \(failure.code)", code: 1)
+        }
     }
 
     /// Reads and prints on one queue, so lines come out whole and in order.
