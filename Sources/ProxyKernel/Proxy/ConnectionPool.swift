@@ -739,7 +739,7 @@ package final class ConnectionPool: @unchecked Sendable {
                             self.release(connection, keepAlive: true)
                             self.logger.log(.debug, "Prewarmed upstream connection for \(proxy.endpoint).", category: .proxy)
                         } catch {
-                            if !ConnectionPoolError.isLocalNonUpstreamFailure(error) { self.recordFailure(for: proxy) }
+                            if !ConnectionPoolError.isLocalNonUpstreamFailure(error) { self.recordFailure(for: .forced(proxy)) }
                             self.logger.log(.debug, "Prewarm failed for \(proxy.endpoint): \(error.displayDescription)", category: .proxy)
                         }
                     }
@@ -1469,18 +1469,17 @@ package final class ConnectionPool: @unchecked Sendable {
     /// it clears the pending silences and then counts as the failure it was before. A local refusal counts nothing
     /// and gives back the probe slot the selection held.
     package func recordExchangeError(_ error: Error, for selection: UpstreamSelection, origin: ExchangeOrigin) {
-        let proxy = selection.proxy
         if ConnectionPoolError.isUpstreamResponseTimedOut(error) {
             recordSilence(for: selection, origin: origin)
         } else if case .upstreamReturnedStatus(let status, _)? = error as? ConnectionPoolError,
                   !answeredStatusAccounting.counts(status) {
             recordUncountedAnswer(status: status, for: selection, origin: origin)
         } else if ConnectionPoolError.isUpstreamAnswer(error) {
-            recordFailure(for: proxy, answered: true)
+            recordFailure(for: selection, answered: true)
         } else if ConnectionPoolError.isLocalNonUpstreamFailure(error) {
             releaseProbe(of: selection)
         } else {
-            recordFailure(for: proxy)
+            recordFailure(for: selection)
         }
     }
 
@@ -1528,6 +1527,8 @@ package final class ConnectionPool: @unchecked Sendable {
         }
         let outcome: Outcome? = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
+            // Another attempt's probe gives this breaker its verdict (`recordFailureLocked`).
+            if breakers[proxy.id]?.probeIsHeld(byOtherThan: selection.probe) == true { return nil }
             var counts = false
             var pending: [ExchangeOrigin] = []
             if namesCurrentEndpointLocked(proxy) {
@@ -1543,7 +1544,7 @@ package final class ConnectionPool: @unchecked Sendable {
                 return .probeReleased
             }
             guard breaker.state != .open else { return nil }
-            return .counted(origins: pending, transition: recordFailureLocked(for: proxy, thresholds: thresholds))
+            return .counted(origins: pending, transition: recordFailureLocked(for: selection, thresholds: thresholds))
         }
         switch outcome {
         case nil:
@@ -1567,21 +1568,27 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    private func recordFailure(for proxy: UpstreamProxy, answered: Bool = false) {
+    private func recordFailure(for selection: UpstreamSelection, answered: Bool = false) {
+        let proxy = selection.proxy
         let config = configProvider()
         let thresholds = breakerThresholds(from: config)
         let emittedTransition: UpstreamCircuitBreaker.Transition? = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
             if answered, namesCurrentEndpointLocked(proxy) { silences[proxy.id] = nil }
-            return recordFailureLocked(for: proxy, thresholds: thresholds)
+            return recordFailureLocked(for: selection, thresholds: thresholds)
         }
         if let emittedTransition {
             emitTransition(emittedTransition, for: proxy)
         }
     }
 
-    private func recordFailureLocked(for proxy: UpstreamProxy, thresholds: BreakerThresholds) -> UpstreamCircuitBreaker.Transition? {
+    /// A half-open breaker whose probe slot an attempt holds takes its verdict from that attempt alone. Another
+    /// attempt's failure, such as a request the first pick's last resort dialled with no claim while every probe was
+    /// taken, leaves it as it is: counting it would reopen the breaker under the probe. Its success still closes it.
+    private func recordFailureLocked(for selection: UpstreamSelection, thresholds: BreakerThresholds) -> UpstreamCircuitBreaker.Transition? {
+        let proxy = selection.proxy
         var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
+        if breaker.probeIsHeld(byOtherThan: selection.probe) { return nil }
         let transition = breaker.recordFailure(
             now: Date(),
             threshold: thresholds.failureThreshold,

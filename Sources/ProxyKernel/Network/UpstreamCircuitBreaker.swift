@@ -251,6 +251,12 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         }
     }
 
+    /// Whether the half-open probe slot is held by an attempt other than `claim`'s. Only the holder's verdict reopens
+    /// a half-open breaker; an attempt without the slot can still close it with a success.
+    package func probeIsHeld(byOtherThan claim: ProbeClaim?) -> Bool {
+        state == .halfOpen && probe != nil && probe != claim
+    }
+
     /// Takes the probe slot when `mayProbe(now:)`, or nil. The transition is
     /// `.halfOpened` when the claim moved the breaker out of `.open`.
     package mutating func claimProbe(now: Date) -> (claim: ProbeClaim, transition: Transition?)? {

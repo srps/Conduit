@@ -147,6 +147,42 @@ final class TunnelSelectionTests: XCTestCase {
         XCTAssertEqual(pool.allConnectionSnapshot.count, 0)
     }
 
+    /// With one upstream half-open and its probe's CONNECT unanswered, a second request finds no upstream it may ask, and
+    /// the first pick's last resort dials that upstream with no claim. Its 502 reaches the client, but the breaker takes
+    /// its verdict from the probe alone: it stays half-open with the probe held, and the probe's success closes it.
+    func testAFailureWithoutTheProbeLeavesAHalfOpenBreakerToItsProbe() async throws {
+        let p = try await scripted { head in
+            head.contains("probe.corp.example") ? .hold : .answer("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+        }
+        let setup = makeCoordinator(upstreams: [("P", p.port)], openInterval: 0.05)
+        let (pool, coordinator) = (setup.pool, setup.coordinator)
+        for _ in 0..<setup.threshold { pool.recordConnectFailure(for: setup.upstreams[0]) }
+        try await Task.sleep(for: .milliseconds(100))
+
+        let probe = coordinator.connectUpstreamTunnel(target: "probe.corp.example:443")
+        try await waitUntil { p.heads.count == 1 }
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .halfOpen, "precondition")
+
+        do {
+            let opened = try await coordinator.connectUpstreamTunnel(target: "other.corp.example:443").get()
+            opened.channel.close(promise: nil)
+            XCTFail("the 502 was tunnelled")
+        } catch {
+            guard case .upstreamReturnedStatus(502, _)? = error as? ConnectionPoolError else {
+                return XCTFail("the claimless request reaches the upstream and gets its 502, got \(error)")
+            }
+        }
+        XCTAssertEqual(p.heads.count, 2, "the request was dialled, not failed for the busy probe")
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .halfOpen, "the 502 did not reopen the breaker under the probe")
+        XCTAssertNil(pool.selectTunnelUpstream(excluding: [])?.probe, "the probe slot is still held")
+
+        p.answerHeld("HTTP/1.1 200 Connection established\r\n\r\n")
+        let probed = try await probe.get()
+        probed.channel.close(promise: nil)
+        XCTAssertEqual(probed.endpoint, "127.0.0.1:\(p.port)")
+        XCTAssertEqual(pool.upstreamStatuses().first?.circuitState, .closed, "the probe's success closed it")
+    }
+
     // MARK: - Harness
 
     /// P refuses every dial, has the better score, and its breaker is open
@@ -270,6 +306,11 @@ private final class ScriptedUpstream: ChannelInboundHandler, @unchecked Sendable
         func head(_ head: String) { state.withLockedValue { $0.heads.append(head) } }
         func hold(_ channel: Channel) { state.withLockedValue { $0.held.append(channel) } }
         func closeHeld() { for channel in state.withLockedValue({ $0.held }) { channel.close(promise: nil) } }
+        func answerHeld(_ response: String) {
+            for channel in state.withLockedValue({ $0.held }) {
+                channel.writeAndFlush(channel.allocator.buffer(string: response), promise: nil)
+            }
+        }
         var upstream: View { View(record: self) }
 
         struct View: Sendable {
@@ -278,6 +319,7 @@ private final class ScriptedUpstream: ChannelInboundHandler, @unchecked Sendable
             var accepted: Int { record.state.withLockedValue { $0.accepted } }
             var heads: [String] { record.state.withLockedValue { $0.heads } }
             func closeHeld() { record.closeHeld() }
+            func answerHeld(_ response: String) { record.answerHeld(response) }
         }
     }
 
