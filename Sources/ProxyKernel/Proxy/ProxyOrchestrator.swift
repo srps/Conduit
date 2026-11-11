@@ -889,6 +889,7 @@ package final class ProxyOrchestrator {
                 do {
                     try await localProxyServer.reauthenticate()
                     tunnelConnectionPool.resetAuthentication()
+                    dohUpstreamPool.resetAuthentication()
                     emitEvent(.auth, "config.tunnel_auth_reauth", detail: detail)
                     logStore.log(.notice, "Config reload: auth updated (\(detail)); pooled proxy/tunnel connections will re-authenticate on next request.", category: .auth)
                 } catch {
