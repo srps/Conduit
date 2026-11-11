@@ -47,7 +47,7 @@ final class DNSForwarderSplitDNSProviderTests: XCTestCase {
         addTeardownBlock {
             await forwarder.stop()
             await corp.stop()
-            try? await doh.channel.close()
+            await doh.channel.closeForTest()
         }
         return Running(table: table, corp: corp, doh: doh, port: try XCTUnwrap(forwarder.listeningPort))
     }

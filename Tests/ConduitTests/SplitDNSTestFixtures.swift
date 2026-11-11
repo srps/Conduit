@@ -32,7 +32,7 @@ final class FakeSplitDNSServer: @unchecked Sendable {
     }
 
     func stop() async {
-        try? await channel.close()
+        await channel.closeForTest()
     }
 
     private final class Responder: ChannelInboundHandler, @unchecked Sendable {
@@ -63,6 +63,18 @@ final class FakeSplitDNSServer: @unchecked Sendable {
             var out = context.channel.allocator.buffer(capacity: answer.count)
             out.writeBytes(answer)
             context.writeAndFlush(wrapOutboundOut(AddressedEnvelope(remoteAddress: envelope.remoteAddress, data: out)), promise: nil)
+        }
+    }
+}
+
+extension Channel {
+    /// Closes a listener a test opened. One that is already closed is fine; any other failure fails the test.
+    func closeForTest(file: StaticString = #filePath, line: UInt = #line) async {
+        do {
+            try await close()
+        } catch ChannelError.alreadyClosed {
+        } catch {
+            XCTFail("closing a test listener failed: \(error)", file: file, line: line)
         }
     }
 }

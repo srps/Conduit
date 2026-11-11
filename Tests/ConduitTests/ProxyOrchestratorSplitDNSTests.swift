@@ -32,7 +32,7 @@ final class ProxyOrchestratorSplitDNSTests: XCTestCase {
         addTeardownBlock {
             await orchestrator.stopDNS()
             await corp.stop()
-            try? await doh.channel.close()
+            await doh.channel.closeForTest()
         }
         return Running(orchestrator: orchestrator, corp: corp, doh: doh, port: port)
     }

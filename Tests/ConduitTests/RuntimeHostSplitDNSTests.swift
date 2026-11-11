@@ -69,7 +69,7 @@ final class RuntimeHostSplitDNSTests: XCTestCase {
         addTeardownBlock {
             await corp.stop()
             await manual.stop()
-            try? await doh.channel.close()
+            await doh.channel.closeForTest()
         }
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
