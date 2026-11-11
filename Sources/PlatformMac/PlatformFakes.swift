@@ -1067,6 +1067,11 @@ package final class FakePushedResolverObserver: PushedResolverObserving, @unchec
 ///
 /// Cancelling takes the mark away, so a signal queued and not yet run does
 /// nothing. `signalsQueuedBeforeCancelStillRun` turns that off.
+///
+/// A subscription released uncancelled ends as a cancel would end it, hands
+/// that result to its `onUncancelledRelease`, and then traps in a debug
+/// build, as `SystemTunnelStore`'s does. `trapsOnUncancelledRelease` turns
+/// the trap off.
 package final class FakeTunnelStore: TunnelStoreReading, @unchecked Sendable {
     package enum Notifications: Sendable {
         case delivered
@@ -1097,6 +1102,7 @@ package final class FakeTunnelStore: TunnelStoreReading, @unchecked Sendable {
     private var failsRead: TunnelReading.Failure?
     private var failsSubscribe: TunnelReading.Failure?
     private var failsCancel: TunnelReading.Failure?
+    private var trapsOnRelease = true
 
     package init() {}
 
@@ -1128,8 +1134,15 @@ package final class FakeTunnelStore: TunnelStoreReading, @unchecked Sendable {
         set { lock.withLock { failsSubscribe = newValue } }
     }
 
+    /// On by default. A test of what a subscriber does when its subscription
+    /// is released uncancelled turns the debug trap off.
+    package var trapsOnUncancelledRelease: Bool {
+        get { lock.withLock { trapsOnRelease } }
+        set { lock.withLock { trapsOnRelease = newValue } }
+    }
+
     /// While set, a first `cancel()` ends the subscription and returns this
-    /// failure.
+    /// failure, and so does the release of one never cancelled.
     package var cancelFailure: TunnelReading.Failure? {
         get { lock.withLock { failsCancel } }
         set { lock.withLock { failsCancel = newValue } }
@@ -1188,13 +1201,15 @@ package final class FakeTunnelStore: TunnelStoreReading, @unchecked Sendable {
     }
 
     package func subscribe(
-        queue: DispatchQueue, onChange: @escaping @Sendable () -> Void
+        queue: DispatchQueue,
+        onChange: @escaping @Sendable () -> Void,
+        onUncancelledRelease: @escaping @Sendable (Result<Void, TunnelReading.Failure>) -> Void
     ) -> Result<any TunnelStoreSubscription, TunnelReading.Failure> {
         lock.withLock {
             if let failsSubscribe { return .failure(failsSubscribe) }
             nextSubscriber += 1
             subscribers[nextSubscriber] = Subscriber(queue: queue, onChange: onChange)
-            return .success(Subscription(store: self, id: nextSubscriber))
+            return .success(Subscription(store: self, id: nextSubscriber, onUncancelledRelease: onUncancelledRelease))
         }
     }
 
@@ -1243,27 +1258,36 @@ package final class FakeTunnelStore: TunnelStoreReading, @unchecked Sendable {
         }
     }
 
-    private func unsubscribe(_ id: Int) -> Result<Void, TunnelReading.Failure> {
+    /// Ends the subscription and returns how the detach went and whether a
+    /// release that had to make it traps, or nil when it had already ended.
+    private func end(_ id: Int) -> (detach: Result<Void, TunnelReading.Failure>, traps: Bool)? {
         lock.withLock {
-            guard subscribers.removeValue(forKey: id) != nil, let failsCancel else { return .success(()) }
-            return .failure(failsCancel)
+            guard subscribers.removeValue(forKey: id) != nil else { return nil }
+            return (failsCancel.map { .failure($0) } ?? .success(()), trapsOnRelease)
         }
     }
 
     private final class Subscription: TunnelStoreSubscription, @unchecked Sendable {
         private let store: FakeTunnelStore
         private let id: Int
+        private let onUncancelledRelease: @Sendable (Result<Void, TunnelReading.Failure>) -> Void
 
-        init(store: FakeTunnelStore, id: Int) {
+        init(
+            store: FakeTunnelStore, id: Int,
+            onUncancelledRelease: @escaping @Sendable (Result<Void, TunnelReading.Failure>) -> Void
+        ) {
             self.store = store
             self.id = id
+            self.onUncancelledRelease = onUncancelledRelease
         }
 
         deinit {
-            assert(store.lock.withLock { store.subscribers[id] == nil }, "cancel a store subscription before releasing it")
+            guard let ended = store.end(id) else { return }
+            onUncancelledRelease(ended.detach)
+            if ended.traps { assertionFailure("cancel a store subscription before releasing it") }
         }
 
-        func cancel() -> Result<Void, TunnelReading.Failure> { store.unsubscribe(id) }
+        func cancel() -> Result<Void, TunnelReading.Failure> { store.end(id)?.detach ?? .success(()) }
     }
 }
 

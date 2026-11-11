@@ -17,11 +17,49 @@ final class TunnelStoreTests: XCTestCase {
         to store: any TunnelStoreReading, file: StaticString = #filePath, line: UInt = #line
     ) throws -> (subscription: any TunnelStoreSubscription, signals: () -> Int) {
         let count = NIOLockedValueBox(0)
-        let subscription = try store.subscribe(queue: queue) { count.withLockedValue { $0 += 1 } }.get()
+        let subscription = try store.subscribe(
+            queue: queue, onChange: { count.withLockedValue { $0 += 1 } },
+            onUncancelledRelease: Self.cancelledFirst(file: file, line: line)
+        ).get()
         return (subscription, { [queue] in
             queue.sync {}
             return count.withLockedValue { $0 }
         })
+    }
+
+    /// The `onUncancelledRelease` of a subscription the test cancels.
+    private static func cancelledFirst(
+        file: StaticString = #filePath, line: UInt = #line
+    ) -> @Sendable (Result<Void, TunnelReading.Failure>) -> Void {
+        { XCTFail("a cancelled subscription reported an uncancelled release: \($0)", file: file, line: line) }
+    }
+
+    /// Subscribes, lets the subscription go without a cancel, and returns
+    /// the signal count and what each uncancelled release reported.
+    private func subscribeAndRelease(
+        on store: any TunnelStoreReading
+    ) throws -> (signals: () -> Int, reports: () -> [Result<Void, TunnelReading.Failure>]) {
+        let count = NIOLockedValueBox(0)
+        let reported = NIOLockedValueBox<[Result<Void, TunnelReading.Failure>]>([])
+        _ = try store.subscribe(
+            queue: queue, onChange: { count.withLockedValue { $0 += 1 } },
+            onUncancelledRelease: { outcome in reported.withLockedValue { $0.append(outcome) } }
+        ).get()
+        return ({ [queue] in
+            queue.sync {}
+            return count.withLockedValue { $0 }
+        }, { reported.withLockedValue { $0 } })
+    }
+
+    private func assertReports(
+        _ reports: [Result<Void, TunnelReading.Failure>], _ expected: [TunnelReading.Failure?],
+        _ message: String = "", file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let failures = reports.map { report -> TunnelReading.Failure? in
+            if case .failure(let failure) = report { return failure }
+            return nil
+        }
+        XCTAssertEqual(failures, expected, message, file: file, line: line)
     }
 
     // MARK: - Fake
@@ -228,7 +266,9 @@ final class TunnelStoreTests: XCTestCase {
         ])))
 
         store.subscribeFailure = .init(.storeSubscribe, code: 1001)
-        XCTAssertThrowsError(try store.subscribe(queue: queue) {}.get()) {
+        XCTAssertThrowsError(
+            try store.subscribe(queue: queue, onChange: {}, onUncancelledRelease: Self.cancelledFirst()).get()
+        ) {
             XCTAssertEqual($0 as? TunnelReading.Failure, .init(.storeSubscribe, code: 1001))
         }
         XCTAssertEqual(store.subscriptionCount, 0)
@@ -243,6 +283,29 @@ final class TunnelStoreTests: XCTestCase {
         try subscription.cancel().get()
         store.setInterface("utun6", ipv4: nil, ipv6: nil)
         XCTAssertEqual(signals(), 0)
+    }
+
+    func testASubscriptionReleasedUncancelledStopsDeliveringAndReportsIt() throws {
+        let store = FakeTunnelStore()
+        store.trapsOnUncancelledRelease = false
+
+        let (signals, reports) = try subscribeAndRelease(on: store)
+        XCTAssertEqual(store.subscriptionCount, 0, "the release ended the subscription")
+        store.setInterface("utun6", ipv4: ["192.0.2.10"], ipv6: nil)
+
+        XCTAssertEqual(signals(), 0)
+        assertReports(reports(), [nil], "one report, of a detach that succeeded")
+    }
+
+    func testASubscriptionReleasedUncancelledReportsADetachTheStoreRefuses() throws {
+        let store = FakeTunnelStore()
+        store.trapsOnUncancelledRelease = false
+        store.cancelFailure = .init(.storeUnsubscribe, code: 1002)
+
+        let (_, reports) = try subscribeAndRelease(on: store)
+
+        assertReports(reports(), [.init(.storeUnsubscribe, code: 1002)])
+        XCTAssertEqual(store.subscriptionCount, 0)
     }
 
     // MARK: - System store
@@ -268,16 +331,63 @@ final class TunnelStoreTests: XCTestCase {
         try autoreleasepool {
             let captured = Captured()
             cancelled = captured
-            try SystemTunnelStore().subscribe(queue: queue) { _ = captured }.get().cancel().get()
+            try SystemTunnelStore().subscribe(
+                queue: queue, onChange: { _ = captured }, onUncancelledRelease: Self.cancelledFirst()
+            ).get().cancel().get()
         }
-        // The session lets go of its context a moment after it is detached.
+
+        XCTAssertTrue(isReleased { cancelled }, "the store session was the handler's only owner")
+    }
+
+    func testALiveSubscriptionReleasedUncancelledDetachesReportsAndReleasesItsHandler() throws {
+        final class Captured: Sendable {}
+        let detaches = NIOLockedValueBox(0)
+        let reported = NIOLockedValueBox<[Result<Void, TunnelReading.Failure>]>([])
+        var calls = SystemTunnelStore.Calls()
+        calls.setDispatchQueue = { session, queue in
+            if queue == nil { detaches.withLockedValue { $0 += 1 } }
+            return SCDynamicStoreSetDispatchQueue(session, queue)
+        }
+        calls.releasedUncancelled = {}
+        weak var released: Captured?
+        try autoreleasepool {
+            let captured = Captured()
+            released = captured
+            _ = try SystemTunnelStore(calls: calls).subscribe(
+                queue: queue, onChange: { _ = captured },
+                onUncancelledRelease: { outcome in reported.withLockedValue { $0.append(outcome) } }
+            ).get()
+        }
+
+        XCTAssertEqual(detaches.withLockedValue { $0 }, 1, "the release detached the queue")
+        assertReports(reported.withLockedValue { $0 }, [nil], "one report, of a detach that succeeded")
+        XCTAssertTrue(isReleased { released }, "the store session was the handler's only owner")
+    }
+
+    func testALiveSubscriptionReleasedUncancelledReportsADetachTheStoreRefuses() throws {
+        // The queue is never attached, so the store itself refuses the detach.
+        let reported = NIOLockedValueBox<[Result<Void, TunnelReading.Failure>]>([])
+        var calls = SystemTunnelStore.Calls()
+        calls.setDispatchQueue = { session, queue in queue != nil || SCDynamicStoreSetDispatchQueue(session, nil) }
+        calls.releasedUncancelled = {}
+
+        _ = try SystemTunnelStore(calls: calls).subscribe(
+            queue: queue, onChange: {},
+            onUncancelledRelease: { outcome in reported.withLockedValue { $0.append(outcome) } }
+        ).get()
+
+        assertReports(reported.withLockedValue { $0 }, [.init(.storeUnsubscribe, code: Int32(kSCStatusInvalidArgument))])
+    }
+
+    /// The session lets go of its context a moment after it is detached, so
+    /// this waits up to two seconds for the object to go.
+    private func isReleased(_ object: () -> AnyObject?) -> Bool {
         var waits = 0
-        while cancelled != nil, waits < 200 {
+        while object() != nil, waits < 200 {
             Thread.sleep(forTimeInterval: 0.01)
             waits += 1
         }
-
-        XCTAssertNil(cancelled, "the store session was the handler's only owner")
+        return object() == nil
     }
 
     func testAFailedNotificationKeySubscriptionIsReportedWithTheStoresCodeAndTheNextSucceeds() throws {
@@ -305,10 +415,13 @@ final class TunnelStoreTests: XCTestCase {
     private func assertFailsToSubscribeOnce(
         _ store: SystemTunnelStore, file: StaticString = #filePath, line: UInt = #line
     ) throws {
-        XCTAssertThrowsError(try store.subscribe(queue: queue) {}.get(), file: file, line: line) {
+        XCTAssertThrowsError(
+            try store.subscribe(queue: queue, onChange: {}, onUncancelledRelease: Self.cancelledFirst()).get(),
+            file: file, line: line
+        ) {
             XCTAssertEqual($0 as? TunnelReading.Failure, .init(.storeSubscribe, code: 1001), file: file, line: line)
         }
-        try store.subscribe(queue: queue) {}.get().cancel().get()
+        try store.subscribe(queue: queue, onChange: {}, onUncancelledRelease: Self.cancelledFirst()).get().cancel().get()
     }
 
     func testACancelTheStoreRefusesIsReturnedWithTheStoresOwnCode() throws {
@@ -316,7 +429,9 @@ final class TunnelStoreTests: XCTestCase {
         // detach and the store itself refuses it.
         var calls = SystemTunnelStore.Calls()
         calls.setDispatchQueue = { session, queue in queue != nil || SCDynamicStoreSetDispatchQueue(session, nil) }
-        let subscription = try SystemTunnelStore(calls: calls).subscribe(queue: queue) {}.get()
+        let subscription = try SystemTunnelStore(calls: calls).subscribe(
+            queue: queue, onChange: {}, onUncancelledRelease: Self.cancelledFirst()
+        ).get()
 
         XCTAssertThrowsError(try subscription.cancel().get()) {
             XCTAssertEqual(

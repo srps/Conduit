@@ -111,8 +111,11 @@ package protocol TunnelStoreSubscription: AnyObject, Sendable {
     /// subscriber reports the failure and ignores calls from that session.
     /// A second cancel does nothing and succeeds.
     ///
-    /// The owner cancels before it lets go: a subscription released
-    /// uncancelled keeps its session and its handler alive.
+    /// The owner cancels before it lets go. A subscription released
+    /// uncancelled is a bug in its owner, and a debug build traps on it. As
+    /// a backstop the release detaches the queue itself and hands the
+    /// result to the `onUncancelledRelease` given to `subscribe`, so the
+    /// session and its handler do not outlive the subscription unreported.
     func cancel() -> Result<Void, TunnelReading.Failure>
 }
 
@@ -128,8 +131,16 @@ package protocol TunnelStoreReading: AnyObject, Sendable {
     /// changes may arrive as one call. A call already on its way to `queue`
     /// when the subscription is cancelled may still run, so a subscriber that
     /// restarts tells its own calls from an earlier session's.
+    ///
+    /// `onUncancelledRelease` runs once if the subscription is released
+    /// without a cancel, on whichever thread released it, with the result of
+    /// the detach that release made: success when the session ended after
+    /// all, or the failure a cancel would have returned. It never runs for a
+    /// subscription that was cancelled.
     func subscribe(
-        queue: DispatchQueue, onChange: @escaping @Sendable () -> Void
+        queue: DispatchQueue,
+        onChange: @escaping @Sendable () -> Void,
+        onUncancelledRelease: @escaping @Sendable (Result<Void, TunnelReading.Failure>) -> Void
     ) -> Result<any TunnelStoreSubscription, TunnelReading.Failure>
 }
 
@@ -148,6 +159,11 @@ package final class SystemTunnelStore: TunnelStoreReading, @unchecked Sendable {
         }
         /// The reason for the call that just failed on this thread.
         package var lastError: @Sendable () -> Int32 = { SCError() }
+        /// Runs after a subscription released uncancelled has detached and
+        /// reported. A test of that backstop replaces the trap.
+        package var releasedUncancelled: @Sendable () -> Void = {
+            assertionFailure("cancel a store subscription before releasing it")
+        }
 
         package init() {}
     }
@@ -190,7 +206,9 @@ package final class SystemTunnelStore: TunnelStoreReading, @unchecked Sendable {
     }
 
     package func subscribe(
-        queue: DispatchQueue, onChange: @escaping @Sendable () -> Void
+        queue: DispatchQueue,
+        onChange: @escaping @Sendable () -> Void,
+        onUncancelledRelease: @escaping @Sendable (Result<Void, TunnelReading.Failure>) -> Void
     ) -> Result<any TunnelStoreSubscription, TunnelReading.Failure> {
         // The store retains and releases the handler through its context, so
         // the handler lives exactly as long as a callback can reach it.
@@ -216,7 +234,7 @@ package final class SystemTunnelStore: TunnelStoreReading, @unchecked Sendable {
             // No queue is attached, and releasing the session drops its keys.
             return .failure(.init(.storeSubscribe, code: calls.lastError()))
         }
-        return .success(Subscription(session: session, calls: calls))
+        return .success(Subscription(session: session, calls: calls, onUncancelledRelease: onUncancelledRelease))
     }
 
     private final class ChangeHandler {
@@ -228,14 +246,21 @@ package final class SystemTunnelStore: TunnelStoreReading, @unchecked Sendable {
         private let lock = NSLock()
         private var session: SCDynamicStore?
         private let calls: Calls
+        private let onUncancelledRelease: @Sendable (Result<Void, TunnelReading.Failure>) -> Void
 
-        init(session: SCDynamicStore, calls: Calls) {
+        init(
+            session: SCDynamicStore, calls: Calls,
+            onUncancelledRelease: @escaping @Sendable (Result<Void, TunnelReading.Failure>) -> Void
+        ) {
             self.session = session
             self.calls = calls
+            self.onUncancelledRelease = onUncancelledRelease
         }
 
         deinit {
-            assert(session == nil, "cancel a store subscription before releasing it")
+            guard let session else { return }
+            onUncancelledRelease(detach(session))
+            calls.releasedUncancelled()
         }
 
         func cancel() -> Result<Void, TunnelReading.Failure> {
@@ -243,8 +268,12 @@ package final class SystemTunnelStore: TunnelStoreReading, @unchecked Sendable {
                 defer { session = nil }
                 return session
             }
-            guard let attached, !calls.setDispatchQueue(attached, nil) else { return .success(()) }
-            return .failure(.init(.storeUnsubscribe, code: calls.lastError()))
+            return attached.map(detach) ?? .success(())
+        }
+
+        private func detach(_ session: SCDynamicStore) -> Result<Void, TunnelReading.Failure> {
+            calls.setDispatchQueue(session, nil)
+                ? .success(()) : .failure(.init(.storeUnsubscribe, code: calls.lastError()))
         }
     }
 }
