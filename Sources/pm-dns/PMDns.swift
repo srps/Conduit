@@ -35,7 +35,7 @@ enum PMDns {
 
             The forwarder tries corporate DNS first for internal domains,
             then falls back to Cloudflare DoH for external names.
-            DoH fetches try direct, then upstream proxy, then local proxy.
+            DoH fetches race direct and the local proxy listener.
             """)
             return
         }

@@ -165,8 +165,9 @@ package final class DoHOriginResolver: OriginResolving {
     /// `DoHSessionFactory.routes` rather than dialling directly. This resolver
     /// runs on exactly the networks where a direct dial to a public resolver is
     /// dropped: under a full-tunnel VPN, direct 443 to a DoH endpoint times out
-    /// while the same request through the corporate proxy succeeds. Direct-only
-    /// meant the transparent proxy's direct path silently black-holed there.
+    /// while the same request through Conduit's listener, and from there the
+    /// corporate proxy, succeeds. Direct-only meant the transparent proxy's
+    /// direct path silently black-holed there.
     /// Same reasoning as `DNSResolutionCore.resolveViaDoH`.
     private func lookupA(host: String, config: ProxyConfig) async -> (ip: String, ttl: TimeInterval)? {
         let providers = config.dohProviders.isEmpty

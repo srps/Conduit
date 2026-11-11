@@ -24,18 +24,18 @@ enum DoHSessionFactory {
     /// involves no third party. But direct is also the route that dies first:
     /// under a full-tunnel VPN, outbound 443 to a public resolver is commonly
     /// dropped outright, and on a split-DNS corporate network the provider's
-    /// own hostname may not resolve. The proxied routes are what keep DoH
-    /// working there — the corporate upstream because it is the sanctioned way
-    /// out, and Conduit's own listener because it applies the upstream's
-    /// authentication on our behalf.
+    /// own hostname may not resolve. Conduit's own listener is what keeps DoH
+    /// working there: it reaches the corporate upstream, the sanctioned way
+    /// out, and applies the upstream's authentication on our behalf.
+    ///
+    /// No route goes straight to an upstream (decision 0045). The upstream
+    /// answers that with 407, and CFNetwork would ask macOS for a proxy
+    /// credential, which prompts the user when the saved one fails.
     ///
     /// Callers race all of these concurrently, so the order is a tiebreak among
     /// simultaneous successes rather than a sequence of fallbacks.
     static func routes(for config: ProxyConfig, localProxyPort: Int?) -> [Route] {
         var routes = [Route(proxy: nil)]
-        if let upstream = config.enabledUpstreams.first {
-            routes.append(Route(proxy: (upstream.host, upstream.port)))
-        }
         if let local = localProxyRoute(config: config, boundPort: localProxyPort) {
             routes.append(local)
         }
