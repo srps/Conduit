@@ -209,6 +209,56 @@ final class DoHUpstreamRouteTests: XCTestCase {
         }
     }
 
+    /// A provider configured by name, with the root dot and in mixed case.
+    /// CFNetwork sends the listener the name unresolved, in its own
+    /// spelling, and the upstream is asked for that name.
+    func testAProviderConfiguredByNameIsCarriedThroughTheRealListener() async throws {
+        // The CONNECT targets are what CFNetwork sent the listener on macOS 26: lowercased with the root dot kept, and punycode.
+        let cases = [
+            (provider: "http://DoH.Corp.Example./dns-query", asked: "doh.corp.example.:80"),
+            (provider: "http://dns.b\u{FC}cher.corp.example:8053/dns-query", asked: "dns.xn--bcher-kva.corp.example:8053"),
+        ]
+        for (provider, asked) in cases {
+            let upstream = try await AuthenticatingUpstream.start(group: group, answerIP: Self.answerIP)
+            var config = ProxyConfig.testFixture()
+            config.upstreams = [UpstreamProxy(name: "corp", host: "127.0.0.1", port: upstream.port, priority: 0)]
+            config.dohProviders = [provider]
+            let frozen = config
+            let logger = RecordingLogSink(minLevel: .debug)
+            let pool = ConnectionPool(
+                group: group, logger: logger, configProvider: { frozen }, authenticatorProvider: { _ in StubNegotiateAuthenticator() }
+            )
+            let events = NIOLockedValueBox<[RuntimeEvent]>([])
+            let route = DoHUpstreamRoute(
+                source: DoHUpstreamRouteSource(
+                    pool: pool,
+                    coordinator: CONNECTCoordinator(pool: pool, authenticatorProvider: { _ in StubNegotiateAuthenticator() }, logger: logger)
+                ),
+                group: group, logger: logger, configProvider: { frozen },
+                eventSink: { event in events.withLockedValue { $0.append(event) } }
+            )
+            try await route.start()
+            let delegate = ProxyChallengeRefusingDelegate(client: .doh) { event in events.withLockedValue { $0.append(event) } }
+            let session = DoHSessionFactory.session(for: .upstream(port: try XCTUnwrap(route.listeningPort)), delegate: delegate)
+
+            let url = try XCTUnwrap(URL(string: "\(provider)?name=by-name.example&type=A"))
+            let result: Result<(Data, URLResponse), Error>
+            do { result = .success(try await session.data(from: url)) } catch { result = .failure(error) }
+            session.invalidateAndCancel()
+            await route.stop()
+            await upstream.stop()
+
+            let named = events.withLockedValue { $0 }.map { "\($0.event) \($0.detail ?? "")" }
+            let (data, response) = try XCTUnwrap(try? result.get(), "\(provider): \(result) \(named)")
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, provider)
+            XCTAssertTrue(String(decoding: data, as: UTF8.self).contains(Self.answerIP), provider)
+            let heads = upstream.connectHeads()
+            XCTAssertEqual(upstream.tunnelsOpened, 1, "\(provider): \(heads)")
+            XCTAssertTrue(heads.allSatisfy { $0.hasPrefix("CONNECT \(asked) ") }, "\(provider): \(heads)")
+            XCTAssertFalse(named.contains { $0.hasPrefix("dns.doh_upstream_route_refused") }, "\(provider): \(named)")
+        }
+    }
+
     // MARK: - Origin resolver
 
     /// One resolution asks a provider in both encodings. Through the upstream

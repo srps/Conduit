@@ -105,4 +105,83 @@ final class DoHSessionFactoryTests: XCTestCase {
         XCTAssertTrue(DoHSessionFactory.isProviderEndpoint(host: "1.1.1.1", port: 443, config: config), "an empty list means the shipped defaults")
         XCTAssertFalse(DoHSessionFactory.isProviderEndpoint(host: "192.0.2.10", port: 443, config: config))
     }
+
+    /// A provider URL and the SOCKS request for it are written by different
+    /// hands. Each legitimate spelling of one host is admitted, and nothing else.
+    func testAProviderIsAdmittedInEverySpellingOfItsHost() {
+        var config = ProxyConfig.testFixture()
+        config.dohProviders = [
+            "https://doh.corp.example./dns-query",
+            "https://dns.b\u{FC}cher.corp.example/dns-query",
+            "https://192.0.2.10/dns-query",
+            "https://[::ffff:192.0.2.20]/dns-query",
+            "https://[2001:DB8::53]/dns-query",
+        ]
+        let cases: [(host: String, admitted: Bool)] = [
+            // The DNS root dot, on either side or both.
+            ("doh.corp.example", true),
+            ("doh.corp.example.", true),
+            ("DOH.corp.example.", true),
+            ("doh.corp.example..", false),
+            // CFNetwork sends the punycode form of a Unicode name.
+            ("dns.xn--bcher-kva.corp.example", true),
+            ("dns.b\u{FC}cher.corp.example", true),
+            ("DNS.XN--BCHER-KVA.corp.example.", true),
+            ("dns.bucher.corp.example", false),
+            // An IPv4 address and its IPv4-mapped IPv6 form are one address.
+            ("192.0.2.10", true),
+            ("::ffff:192.0.2.10", true),
+            ("[::ffff:192.0.2.10]", true),
+            ("0:0:0:0:0:ffff:c000:20a", true),
+            ("192.0.2.20", true),
+            ("::ffff:192.0.2.20", true),
+            ("::ffff:192.0.2.30", false),
+            // IPv6, compressed or as the listener prints it off the wire.
+            ("2001:db8::53", true),
+            ("2001:db8:0:0:0:0:0:53", true),
+            ("[2001:DB8::53]", true),
+            ("2001:db8::54", false),
+            // A name is matched exactly: no suffix, no prefix, no address behind it.
+            ("evil.doh.corp.example", false),
+            ("doh.corp.example.evil.example", false),
+            ("", false),
+            (".", false),
+        ]
+        for testCase in cases {
+            XCTAssertEqual(
+                DoHSessionFactory.isProviderEndpoint(host: testCase.host, port: 443, config: config),
+                testCase.admitted, "\"\(testCase.host)\""
+            )
+        }
+    }
+
+    /// The route is not raced for a provider on this machine, however the
+    /// address is written, and is raced for a name that only looks like one.
+    func testAProviderOnThisMachineIsRecognisedByItsAddressNotItsSpelling() {
+        let local = [
+            "https://localhost/dns-query", "https://localhost./dns-query", "https://LOCALHOST:5053/dns-query",
+            "https://doh.localhost/dns-query",
+            "https://127.0.0.1/dns-query", "https://127.8.9.10/dns-query", "https://127.1/dns-query", "https://2130706433/dns-query",
+            "https://0.0.0.0/dns-query",
+            "https://[::1]/dns-query", "https://[0:0:0:0:0:0:0:1]/dns-query", "https://[::]/dns-query",
+            "https://[::ffff:127.0.0.1]/dns-query", "https://[::ffff:7f00:1]/dns-query", "https://[::127.0.0.1]/dns-query",
+        ]
+        for provider in local {
+            XCTAssertFalse(DoHSessionFactory.upstreamRouteCarries(provider: provider), provider)
+        }
+        let remote = [
+            "https://127.example/dns-query", "https://127.corp.example/dns-query", "https://localhost.corp.example/dns-query",
+            "https://notlocalhost/dns-query", "https://192.0.2.127/dns-query", "https://[2001:db8::1]/dns-query",
+            "https://[::ffff:192.0.2.10]/dns-query",
+        ]
+        for provider in remote {
+            XCTAssertTrue(DoHSessionFactory.upstreamRouteCarries(provider: provider), provider)
+        }
+
+        var config = ProxyConfig.testFixture()
+        config.dohProviders = local
+        for host in ["localhost", "localhost.", "127.0.0.1", "127.1", "0.0.0.0", "::1", "::ffff:127.0.0.1", "::"] {
+            XCTAssertFalse(DoHSessionFactory.isProviderEndpoint(host: host, port: 443, config: config), host)
+        }
+    }
 }

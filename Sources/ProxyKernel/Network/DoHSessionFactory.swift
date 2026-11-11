@@ -63,11 +63,16 @@ enum DoHSessionFactory {
     /// The upstream route carries a connection only to a configured provider's
     /// own host and port. Anything else a local process asks it for is refused,
     /// so the route lends Conduit's proxy identity to DoH and nothing else.
+    ///
+    /// The match is on the host as written, not on an address it resolved to:
+    /// a provider configured by name is admitted by that name, and the
+    /// upstream resolves it.
     static func isProviderEndpoint(host: String, port: Int, config: ProxyConfig) -> Bool {
+        guard let asked = DoHProviderHost(host) else { return false }
         let providers = config.dohProviders.isEmpty ? DNSSection.defaultDoHProviders : config.dohProviders
         return providers.contains { provider in
             guard let endpoint = upstreamRouteEndpoint(of: provider) else { return false }
-            return endpoint.port == port && endpoint.host == canonicalHost(host)
+            return endpoint.port == port && endpoint.host == asked
         }
     }
 
@@ -78,24 +83,12 @@ enum DoHSessionFactory {
         upstreamRouteEndpoint(of: provider) != nil
     }
 
-    private static func upstreamRouteEndpoint(of provider: String) -> (host: String, port: Int)? {
-        guard let url = URL(string: provider), let providerHost = url.host,
+    private static func upstreamRouteEndpoint(of provider: String) -> (host: DoHProviderHost, port: Int)? {
+        guard let url = URL(string: provider), let host = url.host.flatMap(DoHProviderHost.init),
               let scheme = url.scheme?.lowercased(),
-              let port = url.port ?? (scheme == "https" ? 443 : scheme == "http" ? 80 : nil) else { return nil }
-        let host = canonicalHost(providerHost)
-        guard host != "localhost", host != "::1", !host.hasPrefix("127.") else { return nil }
+              let port = url.port ?? (scheme == "https" ? 443 : scheme == "http" ? 80 : nil),
+              !host.isThisMachine else { return nil }
         return (host, port)
-    }
-
-    /// One spelling per host, so an IPv6 literal the listener read off the
-    /// wire matches the same address written compressed in a provider URL.
-    private static func canonicalHost(_ host: String) -> String {
-        let bare = host.hasPrefix("[") && host.hasSuffix("]") ? String(host.dropFirst().dropLast()) : host
-        var address = in6_addr()
-        guard inet_pton(AF_INET6, bare, &address) == 1 else { return bare.lowercased() }
-        var text = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-        guard inet_ntop(AF_INET6, &address, &text, socklen_t(text.count)) != nil else { return bare.lowercased() }
-        return String(cString: text)
     }
 
     /// - Important: `connectionProxyDictionary` is always set explicitly, never
