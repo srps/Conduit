@@ -11,7 +11,8 @@ extension ControlRuntimeSnapshot {
         case tunnelsRunState, tunnelsError, directModeCause, vpnState, vpnInterfaceName, bindings
         case lastAuthOutcome, lastAuthOutcomeAt, lastAuthFallbackReason, metrics
         case dnsQueryCount, dnsDoHFallbackCount, dnsCacheHitCount, tunnelActiveCount, tunnelSessionCount
-        case tunnelDNSOverride, vpnFlap, collections, appliedState, systemDNSRecoveryDeclined, displayNotices
+        case tunnelDNSOverride, vpnFlap, collections, appliedState, systemDNSRecoveryDeclined, detectedSplitDNS
+        case displayNotices
     }
 
     /// The text this record displays, in the owner's canonical field order. It names every field of the owner, nil when absent.
@@ -64,6 +65,7 @@ extension ControlRuntimeSnapshot {
         collections = try container.decode(ControlRuntimeCollections.self, forKey: .collections)
         appliedState = try container.decode(ControlAppliedState.self, forKey: .appliedState)
         systemDNSRecoveryDeclined = try container.decodeIfPresent(Bool.self, forKey: .systemDNSRecoveryDeclined) ?? false
+        detectedSplitDNS = try container.decodeIfPresent(ControlDetectedSplitDNS.self, forKey: .detectedSplitDNS) ?? .none
         displayNotices = try ControlDisplayCheck.decodeNotices(from: container, forKey: .displayNotices, owner: .snapshot)
         try ControlDisplayCheck.checkDecoded(
             owner: .snapshot, notices: displayNotices, values: displayValues, codingPath: decoder.codingPath
@@ -103,7 +105,37 @@ extension ControlRuntimeSnapshot {
         try container.encode(collections, forKey: .collections)
         try container.encode(appliedState, forKey: .appliedState)
         if systemDNSRecoveryDeclined { try container.encode(true, forKey: .systemDNSRecoveryDeclined) }
+        if detectedSplitDNS != .none { try container.encode(detectedSplitDNS, forKey: .detectedSplitDNS) }
         try container.encode(displayNotices, forKey: .displayNotices)
+    }
+}
+
+/// Refuses a value past its caps on encode and on decode. The policy that builds it never exceeds them.
+extension ControlDetectedSplitDNS: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case state, rows
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        state = try container.decode(ControlDetectedSplitDNSState.self, forKey: .state)
+        rows = try container.decode([ControlDetectedSplitDNSRow].self, forKey: .rows)
+        guard isWithinCaps else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .rows, in: container, debugDescription: "a detected split-DNS set past its caps"
+            )
+        }
+    }
+
+    package func encode(to encoder: any Encoder) throws {
+        guard isWithinCaps else {
+            throw EncodingError.invalidValue(self, .init(
+                codingPath: encoder.codingPath, debugDescription: "a detected split-DNS set past its caps"
+            ))
+        }
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(state, forKey: .state)
+        try container.encode(rows, forKey: .rows)
     }
 }
 
