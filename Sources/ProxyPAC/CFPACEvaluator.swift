@@ -394,6 +394,12 @@ package final class CFPACEvaluator: PacEvaluator, @unchecked Sendable {
         }
     }
 
+    /// The delegate every PAC download session gets, so a test can check its
+    /// challenge handling before it lets a proxy answer 407.
+    package static func makeDownloadDelegateForTesting() -> any URLSessionTaskDelegate {
+        PACBoundedDownload()
+    }
+
     private func fetchHTTPS(_ url: URL) async throws -> String {
         let download = PACBoundedDownload()
         return try await withTaskCancellationHandler {
