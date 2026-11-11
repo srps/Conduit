@@ -408,6 +408,50 @@ final class DoHUpstreamRouteTests: XCTestCase {
         XCTAssertEqual(client.receivedBytes.count, 2, "no reply was written for a tunnel that never opened")
     }
 
+    /// Closing the first upstream's unanswered CONNECT fails its handshake,
+    /// which a failover would retry on the next upstream. After the stop
+    /// nothing is dialled for the route, so the second upstream hears nothing.
+    func testAStopDialsNoOtherUpstreamForAConnectionWaitingOnItsFirst() async throws {
+        let silent = try await SilentUpstream.start(group: group)
+        addTeardownBlock { await silent.stop() }
+        let working = try await AuthenticatingUpstream.start(group: group, answerIP: Self.answerIP)
+        self.upstream = working
+        var config = ProxyConfig.testFixture()
+        config.upstreams = [
+            UpstreamProxy(name: "working", host: "127.0.0.1", port: working.port, priority: 0),
+            UpstreamProxy(name: "silent", host: "127.0.0.1", port: silent.port, priority: 1),
+        ]
+        config.dohProviders = ["http://\(Self.providerHost)/dns-query"]
+        let frozen = config
+        let logger = RecordingLogSink(minLevel: .debug)
+        let pool = ConnectionPool(
+            group: group, logger: logger, configProvider: { frozen }, authenticatorProvider: { _ in StubNegotiateAuthenticator() }
+        )
+        self.pool = pool
+        let route = DoHUpstreamRoute(
+            source: DoHUpstreamRouteSource(
+                pool: pool,
+                coordinator: CONNECTCoordinator(pool: pool, authenticatorProvider: { _ in StubNegotiateAuthenticator() }, logger: logger)
+            ),
+            group: group, logger: logger, configProvider: { frozen }, eventSink: nil
+        )
+        try await route.start()
+        let client = try await SOCKS5TestClient.connect(to: try XCTUnwrap(route.listeningPort), group: group)
+        try await client.greet()
+        try await client.sendRequest(host: Self.providerHost, port: 80)
+        try await waitUntil { silent.requestsReceived == 1 }
+        XCTAssertEqual(silent.requestsReceived, 1, "precondition: the first CONNECT is in flight at the silent upstream")
+
+        await route.stop()
+
+        let gaveUp: @Sendable () -> Bool = { logger.entries().contains { $0.message.contains("given up: the listener stopped") } }
+        try await waitUntil { !working.connectHeads().isEmpty || gaveUp() }
+        XCTAssertEqual(working.connectHeads(), [], "a CONNECT was sent for the route after its stop")
+        XCTAssertTrue(gaveUp(), "the tunnel was given up")
+        try await waitUntil { silent.openConnections == 0 }
+        XCTAssertEqual(silent.openConnections, 0)
+    }
+
     /// The stop marks the listener stopped before it closes each connection.
     /// A request read in between closes its connection and dials nothing.
     func testARequestReadAfterTheStopBeganDialsNothing() throws {

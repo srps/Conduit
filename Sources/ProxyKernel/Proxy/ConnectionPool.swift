@@ -59,6 +59,10 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
     /// with, so it was not written into a CONNECT (`TunnelAuthority`). Local:
     /// no upstream was dialled.
     case malformedTunnelTarget
+    /// The tunnel's caller gave it up while it was being dialled, such as
+    /// the DoH upstream route stopping: nothing is dialled, retried or
+    /// pooled for it after that. Local: the upstream did nothing wrong.
+    case tunnelAbandoned
 
     package var errorDescription: String? {
         switch self {
@@ -92,6 +96,8 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
             return OutboundSocketRegistry.fullMessage
         case .malformedTunnelTarget:
             return "The tunnel's target is not a host name or an address."
+        case .tunnelAbandoned:
+            return "The tunnel was given up before it opened."
         }
     }
 
@@ -112,6 +118,7 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
     package static func isLocalNonUpstreamFailure(_ error: Error) -> Bool {
         isAuthHandshakeLimitExceeded(error) || isPoolExhausted(error) || isVPNTransitionDuringConnect(error)
             || isConnectionTrackingFull(error) || isIdleConnectionSilent(error) || error as? ConnectionPoolError == .malformedTunnelTarget
+            || error as? ConnectionPoolError == .tunnelAbandoned
     }
 
     package static func isUpstreamResponseTimedOut(_ error: Error) -> Bool {
@@ -532,14 +539,19 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
+    /// - Parameter isWanted: false once the caller has given the tunnel up.
+    ///   Read before the dial and again when it connects, before the
+    ///   connection joins the pool: a connection that is no longer wanted is
+    ///   closed there and the attempt fails with `tunnelAbandoned`.
     package func makeDedicatedTunnelConnection(
-        forcedProxy: UpstreamProxy? = nil, target: String? = nil
+        forcedProxy: UpstreamProxy? = nil, target: String? = nil, isWanted: @escaping @Sendable () -> Bool = { true }
     ) -> EventLoopFuture<(PooledUpstreamConnection, ProxyConfig)> {
+        guard isWanted() else { return group.next().makeFailedFuture(ConnectionPoolError.tunnelAbandoned) }
         let config = configProvider()
         guard let proxy = forcedProxy ?? selectProxy(from: config) else {
             return group.next().makeFailedFuture(ConnectionPoolError.noUpstreamsConfigured)
         }
-        return acquireDedicatedTunnelConnection(for: proxy, target: target ?? proxy.endpoint, config: config)
+        return acquireDedicatedTunnelConnection(for: proxy, target: target ?? proxy.endpoint, config: config, isWanted: isWanted)
     }
 
     private func authHandshakeLimits() -> AuthHandshakeLimiter.Limits {
@@ -905,7 +917,8 @@ package final class ConnectionPool: @unchecked Sendable {
     private func acquireDedicatedTunnelConnection(
         for proxy: UpstreamProxy,
         target: String,
-        config: ProxyConfig
+        config: ProxyConfig,
+        isWanted: @escaping @Sendable () -> Bool
     ) -> EventLoopFuture<(PooledUpstreamConnection, ProxyConfig)> {
         let maxConns = config.maxConnections
         var retired: [PooledUpstreamConnection] = []
@@ -930,7 +943,7 @@ package final class ConnectionPool: @unchecked Sendable {
         case .exhausted:
             return group.next().makeFailedFuture(ConnectionPoolError.poolExhausted)
         case .needsNew:
-            return makeRawConnection(to: proxy, target: target).map { conn in
+            return makeRawConnection(to: proxy, target: target, isWanted: isWanted).map { conn in
                 (conn, config)
             }.always { [weak self] _ in
                 self?.lock.withLockVoid {
@@ -973,9 +986,16 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    private func makeRawConnection(to proxy: UpstreamProxy, target: String) -> EventLoopFuture<PooledUpstreamConnection> {
+    private func makeRawConnection(
+        to proxy: UpstreamProxy, target: String, isWanted: @escaping @Sendable () -> Bool
+    ) -> EventLoopFuture<PooledUpstreamConnection> {
         return connectToUpstreamProxy(proxy)
             .flatMapThrowing { [weak self] channel in
+                guard isWanted() else {
+                    channel.close(mode: .all, promise: nil)
+                    self?.recordAbandonedAttempt(for: proxy)
+                    throw ConnectionPoolError.tunnelAbandoned
+                }
                 // Only dedicated CONNECT tunnels dial raw; classified before
                 // the pool publishes it, so no `closeAll(scope:
                 // .allButDedicated)` can take it for a pooled connection.
@@ -1379,6 +1399,16 @@ package final class ConnectionPool: @unchecked Sendable {
             recordFailure(for: proxy, answered: true)
         } else if !ConnectionPoolError.isLocalNonUpstreamFailure(error) {
             recordFailure(for: proxy)
+        }
+    }
+
+    /// A tunnel attempt its caller gave up before the upstream answered says
+    /// nothing about the upstream. It frees a half-open probe slot the
+    /// attempt's selection claimed, so the next request can probe.
+    package func recordAbandonedAttempt(for proxy: UpstreamProxy) {
+        lock.withLockVoid {
+            var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
+            if breaker.releaseHalfOpenProbe() { breakers[proxy.id] = breaker }
         }
     }
 

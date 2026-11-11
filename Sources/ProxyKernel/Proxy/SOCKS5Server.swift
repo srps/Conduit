@@ -674,7 +674,9 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let clientEL = ctx.eventLoop
         let authSource = context.remoteAddress?.ipAddress
-        connectCoordinator.connectUpstreamTunnel(target: target, authSource: authSource, proxyChain: proxyChain)
+        // The listener's stop fences the tunnel: from then on nothing is dialled, retried or pooled for it.
+        let isWanted: @Sendable () -> Bool = { [accepted] in accepted?.isStopped != true }
+        connectCoordinator.connectUpstreamTunnel(target: target, authSource: authSource, proxyChain: proxyChain, isWanted: isWanted)
             .hop(to: clientEL)
             .whenComplete { result in
                 switch result {
@@ -694,6 +696,11 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
                     }
                     self.attachRelay(context: ctx, upstream: upstream, isUpstreamTunnel: true)
                 case .failure(let error):
+                    if error as? ConnectionPoolError == .tunnelAbandoned {
+                        self.logger.log(.debug, "SOCKS5 tunnel to \(target) given up: the listener stopped before it opened.", category: .proxy)
+                        self.sendReply(context: ctx, rep: 0x05)
+                        return
+                    }
                     if case .upstreamOnly(let route) = self.routing {
                         route.failed(target, error)
                     }

@@ -51,10 +51,16 @@ package final class CONNECTCoordinator: @unchecked Sendable {
     /// Establish CONNECT tunnel to upstream proxy, returning the raw tunnel channel.
     /// Uses the configured ProxyAuthenticator for 407 challenge-response.
     /// Retries with the next upstream on connection failure.
+    ///
+    /// - Parameter isWanted: false once the caller has given the tunnel up.
+    ///   From then on no upstream is dialled, retried or pooled for it, the
+    ///   attempt in flight fails with `tunnelAbandoned`, and no upstream is
+    ///   charged for it.
     package func connectUpstreamTunnel(
         target: String,
         authSource: String? = nil,
-        proxyChain: [UpstreamProxy] = []
+        proxyChain: [UpstreamProxy] = [],
+        isWanted: @escaping @Sendable () -> Bool = { true }
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
         // Every path that tunnels through an upstream comes through here, and `target` is written into an authenticated request.
         guard TunnelAuthority.isWritable(target) else {
@@ -64,30 +70,30 @@ package final class CONNECTCoordinator: @unchecked Sendable {
             return pool.eventLoop.makeFailedFuture(ConnectionPoolError.malformedTunnelTarget)
         }
         if !proxyChain.isEmpty {
-            return attemptTunnel(target: target, authSource: authSource, proxyChain: proxyChain, index: 0)
+            return attemptTunnel(target: target, authSource: authSource, proxyChain: proxyChain, index: 0, isWanted: isWanted)
         }
+        guard isWanted() else { return pool.eventLoop.makeFailedFuture(ConnectionPoolError.tunnelAbandoned) }
         guard let first = pool.selectTunnelUpstream(excluding: []) else {
             return pool.eventLoop.makeFailedFuture(ConnectionPoolError.noUpstreamsConfigured)
         }
-        return attemptTunnel(target: target, authSource: authSource, through: first, tried: [])
+        return attemptTunnel(target: target, authSource: authSource, through: first, tried: [], isWanted: isWanted)
     }
 
     private func attemptTunnel(
         target: String,
         authSource: String?,
         proxyChain: [UpstreamProxy],
-        index: Int
+        index: Int,
+        isWanted: @escaping @Sendable () -> Bool
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
         let forcedProxy = proxyChain[index]
         return attemptTunnel(
             target: target,
             authSource: authSource,
-            forcedProxy: forcedProxy
+            forcedProxy: forcedProxy,
+            isWanted: isWanted
         ).flatMapError { [weak self] error in
-            // Local refusals end here: another upstream would not help, and
-            // after a VPN-transition sweep routing may have left the upstreams.
-            if ConnectionPoolError.isAuthHandshakeLimitExceeded(error) || ConnectionPoolError.isVPNTransitionDuringConnect(error)
-                || ConnectionPoolError.isConnectionTrackingFull(error) {
+            if Self.endsFailover(error) {
                 let el = self?.pool.eventLoop ?? MultiThreadedEventLoopGroup.singleton.next()
                 return el.makeFailedFuture(error)
             }
@@ -97,7 +103,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
             }
             let next = proxyChain[index + 1].endpoint
             self.logger.log(.warning, "PAC upstream \(forcedProxy.endpoint) failed for \(SensitiveValueSanitizer.observableTarget(target)), trying \(next).", category: .proxy)
-            return self.attemptTunnel(target: target, authSource: authSource, proxyChain: proxyChain, index: index + 1)
+            return self.attemptTunnel(target: target, authSource: authSource, proxyChain: proxyChain, index: index + 1, isWanted: isWanted)
         }
     }
 
@@ -108,34 +114,38 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         target: String,
         authSource: String?,
         through proxy: UpstreamProxy,
-        tried: Set<UUID>
+        tried: Set<UUID>,
+        isWanted: @escaping @Sendable () -> Bool
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
         let tried = tried.union([proxy.id])
-        return attemptTunnel(target: target, authSource: authSource, forcedProxy: proxy).flatMapError { [weak self] error -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
-            // Local refusals end here: another upstream would not help, and
-            // after a VPN-transition sweep routing may have left the upstreams.
-            if ConnectionPoolError.isAuthHandshakeLimitExceeded(error) || ConnectionPoolError.isVPNTransitionDuringConnect(error)
-                || ConnectionPoolError.isConnectionTrackingFull(error) {
+        return attemptTunnel(target: target, authSource: authSource, forcedProxy: proxy, isWanted: isWanted).flatMapError { [weak self] error -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
+            if Self.endsFailover(error) {
                 let el = self?.pool.eventLoop ?? MultiThreadedEventLoopGroup.singleton.next()
                 return el.makeFailedFuture(error)
+            }
+            // Checked before selecting: a selection can claim an upstream's half-open probe.
+            guard isWanted() else {
+                let el = self?.pool.eventLoop ?? MultiThreadedEventLoopGroup.singleton.next()
+                return el.makeFailedFuture(ConnectionPoolError.tunnelAbandoned)
             }
             guard let self, let next = self.pool.selectTunnelUpstream(excluding: tried) else {
                 let el = self?.pool.eventLoop ?? MultiThreadedEventLoopGroup.singleton.next()
                 return el.makeFailedFuture(error)
             }
             self.logger.log(.warning, "Upstream \(proxy.endpoint) failed for \(SensitiveValueSanitizer.observableTarget(target)), switching to \(next.endpoint) (attempt \(tried.count + 1)/\(self.pool.enabledUpstreamCount)).", category: .proxy)
-            return self.attemptTunnel(target: target, authSource: authSource, through: next, tried: tried)
+            return self.attemptTunnel(target: target, authSource: authSource, through: next, tried: tried, isWanted: isWanted)
         }
     }
 
     private func attemptTunnel(
         target: String,
         authSource: String?,
-        forcedProxy: UpstreamProxy?
+        forcedProxy: UpstreamProxy,
+        isWanted: @escaping @Sendable () -> Bool
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
         let pool = self.pool
         let start = Date()
-        return pool.makeDedicatedTunnelConnection(forcedProxy: forcedProxy, target: target).flatMap { [weak self] (connection: PooledUpstreamConnection, _: ProxyConfig) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
+        return pool.makeDedicatedTunnelConnection(forcedProxy: forcedProxy, target: target, isWanted: isWanted).flatMap { [weak self] (connection: PooledUpstreamConnection, _: ProxyConfig) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
             guard let self else {
                 return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
             }
@@ -172,6 +182,11 @@ package final class CONNECTCoordinator: @unchecked Sendable {
             }.flatMapError { error in
                 connection.channel.close(mode: .all, promise: nil)
                 pool.removeDedicatedTunnel(connection)
+                // The caller gave the tunnel up, and its stop may be what closed this handshake.
+                guard isWanted() else {
+                    pool.recordAbandonedAttempt(for: connection.proxy)
+                    return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.tunnelAbandoned)
+                }
                 // A VPN-transition sweep closed it mid-handshake (#148): the
                 // upstream did nothing wrong, and it is not retried.
                 let error: Error = connection.wasRetiredByVPNTransition ? ConnectionPoolError.vpnTransitionDuringConnect : error
@@ -179,6 +194,13 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                 return connection.channel.eventLoop.makeFailedFuture(error)
             }
         }
+    }
+
+    /// Local refusals end a failover: another upstream would not help, after a VPN-transition sweep routing may have left the
+    /// upstreams, and an abandoned tunnel is wanted by no one.
+    private static func endsFailover(_ error: Error) -> Bool {
+        ConnectionPoolError.isAuthHandshakeLimitExceeded(error) || ConnectionPoolError.isVPNTransitionDuringConnect(error)
+            || ConnectionPoolError.isConnectionTrackingFull(error) || error as? ConnectionPoolError == .tunnelAbandoned
     }
 
     private static let handshakeHandlerName = "rawConnectHandshake"

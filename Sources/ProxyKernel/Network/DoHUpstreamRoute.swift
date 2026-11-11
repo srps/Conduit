@@ -107,7 +107,10 @@ final class DoHUpstreamRoute: Sendable {
 
     /// Closes the listener, every connection it accepted, and what is left
     /// in the route's pool: a tunnel still in its CONNECT handshake has no
-    /// client to go back to.
+    /// client to go back to. The listener's stop fences each tunnel first,
+    /// so a handshake this closes is not retried on another upstream, and a
+    /// dial that connects afterwards is closed before it joins the pool or
+    /// sends a CONNECT.
     func stop() async {
         boundPort.withLockedValue { $0 = nil }
         let accepted = await server.stop()
