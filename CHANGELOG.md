@@ -85,7 +85,18 @@ packaging; 0.6.1 is the latest published release.
   a fast score that refused the target was asked again and the others never
   were. Each attempt of one tunnel now leaves out the upstreams it has
   already tried. This matters most for DoH's own pool, which never opens a
-  breaker for a refusal.
+  breaker for a refusal. A failover asks only an upstream whose breaker is
+  closed or whose backoff has elapsed: when the healthy upstream refuses a
+  blocked site, the client gets that refusal at once instead of a dial to an
+  upstream in its backoff and a wait for its silence.
+- A tunnel whose dial to an upstream is refused or times out now counts
+  against that upstream's circuit breaker, as a request through the pool
+  already did. Before, such a dial counted nothing, and when it was the
+  upstream's single half-open probe it held that probe's slot until the next
+  reset, so the upstream was never probed again. An attempt that ends with no
+  verdict on its upstream (given up, refused locally, or answered with a
+  status that pool does not count) now frees only the probe slot it claimed,
+  never another attempt's.
 - A local client can no longer add lines to the authenticated CONNECT that
   Conduit sends an upstream. The SOCKS5 listener read a requested name as up
   to 255 bytes of anything and wrote it into the CONNECT request line and its
@@ -94,8 +105,13 @@ packaging; 0.6.1 is the latest published release.
   upstream now refuses a target that is not one token of visible ASCII (a
   CR, an LF, a space, a tab, a NUL, another control, DEL or a non-ASCII
   byte) before anything is dialled, and reports it as
-  `connection.tunnel_target_rejected`. The HTTP listener's parser already
-  refused a CR, an LF or a space in a CONNECT line.
+  `connection.tunnel_target_rejected`, at most once a minute with
+  `suppressed=`. The HTTP listener's parser already refused a CR, an LF or a
+  space in a CONNECT line. A port tunnel's remote host is now held to the
+  characters a host is spelled with when the config is validated, and a
+  Unicode name is refused there with its punycode spelling in the message.
+  As with a bad tunnel port, such a host keeps the proxy from starting until
+  it is corrected.
 - A VPN flap recovery, a reconnect after an outage and a wake recovery now
   also close the circuit breakers of the pool behind port tunnels and the
   transparent proxy. Before, only the client listener's pool was reset, so
