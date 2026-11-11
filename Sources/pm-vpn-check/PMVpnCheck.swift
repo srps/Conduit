@@ -41,6 +41,10 @@
 // a line at the start and after every store notification, until Ctrl-C or
 // `--max-duration` seconds. Both only read the store. The lines go to stdout
 // and everything else to stderr, so stdout can be saved as a fixture.
+//
+// No line holds a date. `offset` is seconds since the capture began on the
+// wall clock, and `elapsed` the same on a clock that stops while the Mac
+// sleeps, so the two differ by the time spent asleep.
 
 import Dispatch
 import ConduitShared
@@ -176,9 +180,11 @@ enum PMVpnCheck {
 
     private static func printSnapshot() {
         var mask = TunnelStoreMask()
-        let capture = TunnelStoreCapture(reading: SystemTunnelStore().readKeys(), at: Date(), elapsed: 0, mask: &mask)
+        let capture = TunnelStoreCapture(reading: SystemTunnelStore().readKeys(), offset: 0, elapsed: 0, mask: &mask)
         emit(capture)
-        if let failure = capture.failure { fail("the store could not be read: \(failure)", code: 1) }
+        if let failure = capture.failure {
+            fail("the store could not be read: \(failure) code \(capture.failureCode ?? 0)", code: 1)
+        }
     }
 
     private static func watchSnapshots(maxDuration: TimeInterval) {
@@ -211,7 +217,8 @@ enum PMVpnCheck {
     private final class CaptureWatch: @unchecked Sendable {
         let queue = DispatchQueue(label: "io.github.srps.Conduit.pm-vpn-check.watch")
         private let store = SystemTunnelStore()
-        private let began = ProcessInfo.processInfo.systemUptime
+        private let began = Date()
+        private let beganUptime = ProcessInfo.processInfo.systemUptime
         /// Touched only on `queue`.
         private var mask = TunnelStoreMask()
 
@@ -231,8 +238,8 @@ enum PMVpnCheck {
         /// Runs on `queue`.
         func capture() {
             emit(TunnelStoreCapture(
-                reading: store.readKeys(), at: Date(),
-                elapsed: ProcessInfo.processInfo.systemUptime - began, mask: &mask
+                reading: store.readKeys(), offset: Date().timeIntervalSince(began),
+                elapsed: ProcessInfo.processInfo.systemUptime - beganUptime, mask: &mask
             ))
         }
     }

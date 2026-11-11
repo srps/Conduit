@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import ConduitShared
-import CryptoKit
+import Darwin
 import Foundation
 import ProxyKernel
 
@@ -39,25 +39,78 @@ package indirect enum MaskedStoreValue: Equatable, Encodable, Sendable {
     }
 }
 
-/// Replaces what identifies a machine or a network in the tunnel store keys,
-/// and keeps what detection reads: which keys exist, which fields they have,
-/// how many addresses, and whether an IPv6 address is link-local.
+/// Builds a public copy of the tunnel store keys from an allowlist. Nothing
+/// is passed through because it looks harmless: a key, a field name or a
+/// value reaches the output only if a rule here names it, and everything else
+/// is a placeholder. What detection reads survives: which tunnel keys exist,
+/// which known fields they have, how many addresses, and whether an IPv6
+/// address is link-local, routable or neither.
 ///
-/// One mask gives the same placeholder to the same address every time, so a
-/// stream of captures shows an address staying or changing.
+/// One mask gives the same placeholder to the same input every time, so a
+/// stream of captures shows an address or a service staying or changing.
 ///
-/// - An IPv4 address becomes an RFC 5737 documentation address.
-/// - An IPv6 address becomes `fe80::N` if it is link-local and `2001:db8::N`
-///   otherwise. Loopback, unspecified and multicast addresses are kept.
-/// - A service ID becomes `service-` and eight hex digits of its SHA-256,
-///   unless it is in `knownServiceIDs`.
-/// - Numbers, booleans, subnet masks and interface names are kept.
-/// - Every other string, and every value of another type, becomes
-///   `maskedPlaceholder`. Field names are kept.
+/// - A `utun` interface key is kept. A service key is kept, under a
+///   placeholder ID, if its `InterfaceName` is a `utun` or its ID is in
+///   `knownServiceIDs`. Every other key is left out and counted: Wi-Fi and
+///   Ethernet services never reach the output.
+/// - A service ID becomes `service-N`, numbered in the order this mask met
+///   them, unless it is in `knownServiceIDs`. The number says nothing about
+///   the ID, so an ID cannot be confirmed by guessing it.
+/// - A field named in `schema` keeps its name. Any other field becomes
+///   `<unknown-N>` and its value `maskedPlaceholder`.
+/// - In an address field, an IPv4 literal becomes an RFC 5737 documentation
+///   address. An IPv6 literal becomes `fe80::N` if it is link-local,
+///   `2001:db8::N` if it is any other unicast address, and `ff00::N` if it is
+///   multicast, loopback or unspecified. A zone index goes with the rest.
+/// - A subnet mask, a `utun` interface name, and a number or boolean in a
+///   numeric field are kept.
+/// - Every other value becomes `maskedPlaceholder`.
 package struct TunnelStoreMask {
     /// Vendor service IDs that are the same on every machine.
     package static let knownServiceIDs: Set<String> = ["com.cisco.anyconnect"]
     package static let maskedPlaceholder = "<masked>"
+
+    /// What a known field may hold.
+    private enum Field {
+        /// IP literals, each replaced by a placeholder of its kind.
+        case address
+        /// IPv4 subnet masks, kept.
+        case subnetMask
+        /// A `utun` name, kept.
+        case interfaceName
+        /// Numbers and booleans, kept.
+        case number
+        /// Dictionaries of these same fields.
+        case routes
+        /// The name is kept and the value never is.
+        case opaque
+    }
+
+    /// The fields of `State:/Network/Interface/<utun>/IPv4|IPv6` and
+    /// `State:/Network/Service/<id>/IPv4|IPv6`, and of their route entries.
+    private static let schema: [String: Field] = [
+        "Addresses": .address,
+        "DestAddresses": .address,
+        "BroadcastAddresses": .address,
+        "Router": .address,
+        "ServerAddress": .address,
+        "DestinationAddress": .address,
+        "Gateway": .address,
+        "ARPResolvedIPAddress": .address,
+        "SubnetMasks": .subnetMask,
+        "SubnetMask": .subnetMask,
+        "InterfaceName": .interfaceName,
+        "ConfirmedInterfaceName": .interfaceName,
+        "OverridePrimary": .number,
+        "Flags": .number,
+        "PrefixLength": .number,
+        "AdditionalRoutes": .routes,
+        "ExcludedRoutes": .routes,
+        "IncludedRoutes": .routes,
+        "ARPResolvedHardwareAddress": .opaque,
+        "ConfigMethod": .opaque,
+        "NetworkSignature": .opaque,
+    ]
 
     /// The three RFC 5737 blocks, 254 hosts each. An address past that many
     /// distinct ones becomes `maskedPlaceholder` and is not remembered.
@@ -65,83 +118,92 @@ package struct TunnelStoreMask {
     private static let ipv4Capacity = ipv4Blocks.count * 254
     /// One hextet of host numbers under each IPv6 prefix.
     private static let ipv6Capacity = 0xffff
+    /// Distinct service IDs one mask numbers. A service past that many is
+    /// left out and counted.
+    private static let serviceCapacity = 256
 
     private static let interfacePrefix = "State:/Network/Interface/"
     private static let servicePrefix = "State:/Network/Service/"
-    private static let verbatimAddressFields: Set<String> = ["SubnetMasks", "SubnetMask"]
-    private static let interfaceNameFields: Set<String> = ["InterfaceName", "ConfirmedInterfaceName"]
 
     private var ipv4: [String: String] = [:]
     private var linkLocalIPv6: [String: String] = [:]
     private var routableIPv6: [String: String] = [:]
+    private var otherIPv6: [String: String] = [:]
+    private var services: [String: String] = [:]
 
     package init() {}
 
-    /// The masked keys, and how many keys were left out because they are not
-    /// a tunnel interface key or a service key.
-    package mutating func mask(keys: [String: Any]) -> (keys: [String: MaskedStoreValue], unrecognized: Int) {
+    /// The masked keys, and how many keys were left out.
+    package mutating func mask(keys: [String: Any]) -> (keys: [String: MaskedStoreValue], omitted: Int) {
         var masked: [String: MaskedStoreValue] = [:]
-        var unrecognized = 0
         for key in keys.keys.sorted() {
-            guard let maskedKey = Self.mask(key: key) else {
-                unrecognized += 1
+            guard let fields = keys[key] as? [String: Any], let maskedKey = mask(key: key, fields: fields) else {
                 continue
             }
-            masked[maskedKey] = mask(keys[key] as Any, field: nil)
+            masked[maskedKey] = mask(fields: fields)
         }
-        return (masked, unrecognized)
+        return (masked, keys.count - masked.count)
     }
 
-    package static func mask(serviceID: String) -> String {
-        if knownServiceIDs.contains(serviceID) { return serviceID }
-        let digest = SHA256.hash(data: Data(serviceID.utf8))
-        return "service-" + digest.prefix(4).map { String(format: "%02x", $0) }.joined()
+    /// The placeholder for a service ID; nil once this mask has numbered
+    /// `serviceCapacity` of them.
+    package mutating func mask(serviceID: String) -> String? {
+        if Self.knownServiceIDs.contains(serviceID) { return serviceID }
+        if let known = services[serviceID] { return known }
+        guard services.count < Self.serviceCapacity else { return nil }
+        let made = "service-\(services.count + 1)"
+        services[serviceID] = made
+        return made
     }
 
-    private static func mask(key: String) -> String? {
+    /// The key to publish `fields` under; nil for a key that is left out.
+    private mutating func mask(key: String, fields: [String: Any]) -> String? {
         guard let family = ["/IPv4", "/IPv6"].first(where: key.hasSuffix) else { return nil }
-        if key.hasPrefix(interfacePrefix) {
-            let interface = String(key.dropFirst(interfacePrefix.count).dropLast(family.count))
+        if key.hasPrefix(Self.interfacePrefix) {
+            let interface = String(key.dropFirst(Self.interfacePrefix.count).dropLast(family.count))
             return PushedResolverReading.isTunnelInterface(interface) ? key : nil
         }
-        if key.hasPrefix(servicePrefix) {
-            let serviceID = String(key.dropFirst(servicePrefix.count).dropLast(family.count))
-            guard !serviceID.isEmpty, !serviceID.contains("/") else { return nil }
-            return servicePrefix + mask(serviceID: serviceID) + family
-        }
-        return nil
+        guard key.hasPrefix(Self.servicePrefix) else { return nil }
+        let serviceID = String(key.dropFirst(Self.servicePrefix.count).dropLast(family.count))
+        guard !serviceID.isEmpty, !serviceID.contains("/") else { return nil }
+        let namesTunnel = (fields["InterfaceName"] as? String).map(PushedResolverReading.isTunnelInterface) ?? false
+        guard namesTunnel || Self.knownServiceIDs.contains(serviceID) else { return nil }
+        return mask(serviceID: serviceID).map { Self.servicePrefix + $0 + family }
     }
 
-    private mutating func mask(_ value: Any, field: String?) -> MaskedStoreValue {
-        switch value {
-        case let text as String:
-            return .string(mask(text: text, field: field))
-        case let number as NSNumber:
-            if CFGetTypeID(number) == CFBooleanGetTypeID() { return .bool(number.boolValue) }
-            return CFNumberIsFloatType(number) ? .number(number.doubleValue) : .integer(number.int64Value)
-        case let list as [Any]:
-            return .array(list.map { mask($0, field: field) })
-        case let dictionary as [String: Any]:
-            var masked: [String: MaskedStoreValue] = [:]
-            for name in dictionary.keys.sorted() {
-                // A field named by an address would leak it as a name.
-                let maskedName = address(name) ?? name
-                masked[maskedName] = mask(dictionary[name] as Any, field: name)
+    private mutating func mask(fields: [String: Any]) -> MaskedStoreValue {
+        var masked: [String: MaskedStoreValue] = [:]
+        var unknown = 0
+        for name in fields.keys.sorted() {
+            if let field = Self.schema[name] {
+                masked[name] = mask(fields[name] as Any, as: field)
+            } else {
+                unknown += 1
+                masked["<unknown-\(unknown)>"] = .string(Self.maskedPlaceholder)
             }
-            return .dictionary(masked)
+        }
+        return .dictionary(masked)
+    }
+
+    private mutating func mask(_ value: Any, as field: Field) -> MaskedStoreValue {
+        if let list = value as? [Any] { return .array(list.map { mask($0, as: field) }) }
+        switch (field, value) {
+        case (.address, let text as String):
+            return .string(address(text) ?? Self.maskedPlaceholder)
+        case (.subnetMask, let text as String) where Self.isSubnetMask(text):
+            return .string(text)
+        case (.interfaceName, let text as String) where PushedResolverReading.isTunnelInterface(text):
+            return .string(text)
+        case (.number, let number as NSNumber):
+            if CFGetTypeID(number) == CFBooleanGetTypeID() { return .bool(number.boolValue) }
+            if !CFNumberIsFloatType(number) { return .integer(number.int64Value) }
+            // JSON has no infinity or NaN.
+            return number.doubleValue.isFinite ? .number(number.doubleValue) : .string(Self.maskedPlaceholder)
+        case (.routes, let route as [String: Any]):
+            return mask(fields: route)
         default:
             return .string(Self.maskedPlaceholder)
         }
-    }
-
-    private mutating func mask(text: String, field: String?) -> String {
-        if let field, Self.interfaceNameFields.contains(field) {
-            return Self.isInterfaceName(text) ? text : Self.maskedPlaceholder
-        }
-        if let field, Self.verbatimAddressFields.contains(field), IPAddressSyntax.isIPv4(text) {
-            return text
-        }
-        return address(text) ?? Self.maskedPlaceholder
     }
 
     /// The placeholder for an IP literal; nil when `text` is not one.
@@ -162,7 +224,11 @@ package struct TunnelStoreMask {
                 "2001:db8::" + String($0 + 1, radix: 16)
             }
         case .other:
-            return text
+            // `ff00::/16` is reserved multicast: it parses as neither
+            // link-local nor routable, as the address it stands for did.
+            return Self.placeholder(for: text, in: &otherIPv6, capacity: Self.ipv6Capacity) {
+                "ff00::" + String($0 + 1, radix: 16)
+            }
         }
     }
 
@@ -176,11 +242,12 @@ package struct TunnelStoreMask {
         return made
     }
 
-    /// Lowercase letters then digits, as `en0`, `utun6` or `bridge100`.
-    private static func isInterfaceName(_ text: String) -> Bool {
-        let letters = text.prefix { $0.isASCII && $0.isLowercase }
-        let digits = text.dropFirst(letters.count)
-        return !letters.isEmpty && !digits.isEmpty && digits.allSatisfy { $0.isASCII && $0.isNumber }
+    /// A dotted quad of ones followed by zeros, as `255.255.255.0`.
+    private static func isSubnetMask(_ text: String) -> Bool {
+        var parsed = in_addr()
+        guard IPAddressSyntax.isIPv4(text), inet_pton(AF_INET, text, &parsed) == 1 else { return false }
+        let zeros = ~UInt32(bigEndian: parsed.s_addr)
+        return zeros & (zeros &+ 1) == 0
     }
 }
 
@@ -196,33 +263,38 @@ package struct TunnelStoreCapture: Encodable, Equatable {
         package let overridesPrimary: Bool
     }
 
-    /// Wall-clock time of the reading.
-    package let at: Date
-    /// Seconds since the capture began, on a clock that stops while the
+    /// Seconds since the capture began on the wall clock, which keeps going
+    /// while the machine sleeps. No line holds a date or a time of day.
+    package let offset: TimeInterval
+    /// Seconds since the capture began on a clock that stops while the
     /// machine sleeps.
     package let elapsed: TimeInterval
     package let keys: [String: MaskedStoreValue]?
     package let tunnels: [Tunnel]?
     /// Whether `VPNUpPredicate.anyIPv4Tunnel` holds for `tunnels`.
     package let up: Bool?
-    package let unrecognizedKeys: Int?
+    /// Keys read and left out: anything that is not a tunnel's.
+    package let omittedKeys: Int?
     package let failure: String?
+    /// The store's `SCError()` for `failure`.
+    package let failureCode: Int32?
 
     package init(
         reading: Result<[String: Any], TunnelReading.Failure>,
-        at: Date,
+        offset: TimeInterval,
         elapsed: TimeInterval,
         mask: inout TunnelStoreMask
     ) {
-        self.at = at
-        self.elapsed = elapsed
+        self.offset = Self.milliseconds(offset)
+        self.elapsed = Self.milliseconds(elapsed)
         switch reading {
         case .failure(let failure):
             keys = nil
             tunnels = nil
             up = nil
-            unrecognizedKeys = nil
+            omittedKeys = nil
             self.failure = failure.step.rawValue
+            failureCode = failure.code
         case .success(let raw):
             let masked = mask.mask(keys: raw)
             // Parsed from the masked keys, so the line is consistent with
@@ -236,12 +308,17 @@ package struct TunnelStoreCapture: Encodable, Equatable {
                 )
             }
             up = VPNUpPredicate.anyIPv4Tunnel.holds(for: snapshot)
-            unrecognizedKeys = masked.unrecognized
+            omittedKeys = masked.omitted
             failure = nil
+            failureCode = nil
         }
     }
 
-    /// One line of JSON with sorted keys and Unix-epoch timestamps.
+    private static func milliseconds(_ seconds: TimeInterval) -> TimeInterval {
+        (seconds * 1000).rounded() / 1000
+    }
+
+    /// One line of JSON with sorted keys.
     package func line() throws -> String {
         String(decoding: try CanonicalJSON.encoder().encode(self), as: UTF8.self)
     }
