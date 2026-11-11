@@ -589,12 +589,11 @@ private final class PACBoundedDownload: NSObject, URLSessionDataDelegate, @unche
     }
 
     // Decision 0045: CFNetwork's default handling would ask macOS for a saved
-    // proxy credential and prompt the user. The failure reaches
-    // `pac.refresh_failed` or `pac.preview_failed` with the proxy and scheme.
+    // proxy credential and prompt the user.
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        guard ProxyChallengeRefusal.isProxyChallenge(challenge) else {
+        guard challenge.protectionSpace.isProxy() else {
             completionHandler(.performDefaultHandling, nil)
             return
         }

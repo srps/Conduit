@@ -15,13 +15,6 @@ import Foundation
 /// handling. `.rejectProtectionSpace` would only move it to the proxy's next
 /// offered scheme, and after the last one leave the outcome to CFNetwork.
 package enum ProxyChallengeRefusal {
-    /// True for a proxy's challenge, whatever its scheme. Every other
-    /// challenge (server trust, an origin's 401) keeps CFNetwork's default
-    /// handling.
-    package static func isProxyChallenge(_ challenge: URLAuthenticationChallenge) -> Bool {
-        challenge.protectionSpace.isProxy()
-    }
-
     /// `proxy=<host>:<port> method=<scheme>`, the tokens every refusal reports.
     package static func describe(_ challenge: URLAuthenticationChallenge) -> String {
         let space = challenge.protectionSpace
@@ -52,15 +45,18 @@ package enum ProxyChallengeRefusal {
 /// callback: it cancels every proxy challenge and reports it, at most once a
 /// minute per proxy and scheme, and leaves every other challenge to CFNetwork.
 package final class ProxyChallengeRefusingDelegate: NSObject, URLSessionTaskDelegate, Sendable {
-    private let client: String
-    private let gate: RuntimeEventRepeatGate
+    package enum Client: String, Sendable {
+        case doh
+        case originResolver = "origin_resolver"
+    }
+
+    private let client: Client
+    private let gate = RuntimeEventRepeatGate()
     private let report: @Sendable (RuntimeEvent) -> Void
 
-    /// `client` names the session's job in the event (`doh`, `origin_resolver`).
-    /// Sessions that share a `gate` share its once-a-minute limit.
-    package init(client: String, gate: RuntimeEventRepeatGate, report: @escaping @Sendable (RuntimeEvent) -> Void) {
+    /// The sessions that share this delegate share its once-a-minute limit.
+    package init(client: Client, report: @escaping @Sendable (RuntimeEvent) -> Void) {
         self.client = client
-        self.gate = gate
         self.report = report
     }
 
@@ -70,13 +66,13 @@ package final class ProxyChallengeRefusingDelegate: NSObject, URLSessionTaskDele
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        guard ProxyChallengeRefusal.isProxyChallenge(challenge) else {
+        guard challenge.protectionSpace.isProxy() else {
             completionHandler(.performDefaultHandling, nil)
             return
         }
         let space = challenge.protectionSpace
-        if let suppressed = gate.admit(host: "\(client) \(space.host):\(space.port)", reason: space.authenticationMethod) {
-            report(ProxyChallengeRefusal.event(for: challenge, client: client, suppressed: suppressed))
+        if let suppressed = gate.admit(host: "\(space.host):\(space.port)", reason: space.authenticationMethod) {
+            report(ProxyChallengeRefusal.event(for: challenge, client: client.rawValue, suppressed: suppressed))
         }
         completionHandler(.cancelAuthenticationChallenge, nil)
     }

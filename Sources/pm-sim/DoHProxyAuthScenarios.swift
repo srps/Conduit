@@ -5,11 +5,7 @@ import NIOCore
 import NIOPosix
 import ProxyKernel
 
-/// `pm-sim dns-doh-upstream-407` (decision 0045). The only enabled upstream
-/// answers 407 to everything, as a corporate proxy does before Conduit has a
-/// Kerberos service ticket. On 0.6.2, DoH sent lookups straight at it, and
-/// macOS answered its challenge with a credential dialog. The DoH provider is
-/// a TEST-NET address, so only a proxy can answer for it.
+/// `pm-sim dns-doh-upstream-407` (decision 0045).
 ///
 /// | # | condition                                          | expected                                                  |
 /// |---|----------------------------------------------------|-----------------------------------------------------------|
@@ -111,10 +107,6 @@ enum DoHProxyAuthScenarios {
     }
 }
 
-/// A loopback HTTP proxy stand-in. `.answer` replies to every request with one
-/// `application/dns-json` A record, as Conduit's listener does once it has
-/// reached a provider. `.challenge` replies 407 with Negotiate, NTLM and Basic,
-/// as a corporate upstream does. Keeps each request's first read.
 final class ScriptedHTTPProxy: @unchecked Sendable {
     enum Mode: Sendable {
         case answer(ip: String)
@@ -157,7 +149,6 @@ final class ScriptedHTTPProxy: @unchecked Sendable {
         do {
             try await channel?.close().get()
         } catch ChannelError.alreadyClosed {
-            // Nothing left to release.
         } catch {
             FileHandle.standardError.write(Data("ScriptedHTTPProxy close failed: \(error)\n".utf8))
         }

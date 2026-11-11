@@ -6,10 +6,6 @@ import XCTest
 @testable import ProxyKernel
 @testable import ProxyPAC
 
-/// Decision 0045: a Conduit DoH session never lets CFNetwork answer a proxy's
-/// 407, which on a real network asked macOS for a saved credential and then
-/// prompted the user. The proxy is a loopback fake; the DoH target is a
-/// TEST-NET address the fake never dials.
 final class ProxyChallengeRefusalTests: XCTestCase {
     private let group = MultiThreadedEventLoopGroup.singleton
     private var proxy: ChallengingProxy?
@@ -27,7 +23,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         let proxy = try await ChallengingProxy.start(group: group)
         self.proxy = proxy
         let events = NIOLockedValueBox<[RuntimeEvent]>([])
-        let delegate = ProxyChallengeRefusingDelegate(client: "doh", gate: RuntimeEventRepeatGate()) { event in
+        let delegate = ProxyChallengeRefusingDelegate(client: .doh) { event in
             events.withLockedValue { $0.append(event) }
         }
         let session = DoHSessionFactory.session(
@@ -75,9 +71,6 @@ final class ProxyChallengeRefusalTests: XCTestCase {
     }
 }
 
-/// Answers every request, CONNECT or not, with a 407 offering Negotiate,
-/// NTLM and Basic, the way a corporate proxy does, and keeps each request's
-/// head.
 private final class ChallengingProxy: @unchecked Sendable {
     let channel: Channel
     private let heads: NIOLockedValueBox<[String]>
