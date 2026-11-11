@@ -1358,7 +1358,11 @@ package final class ConnectionPool: @unchecked Sendable {
                     isHealthCheck: isHealthCheck
                 )
             }
-            self.recordExchangeError(error, for: selection, origin: ExchangeOrigin(head))
+            // Only a health check meets an idle socket's silence, and it asks a fresh connection with this same
+            // selection next. That attempt settles it, so the probe slot stays claimed across the retry.
+            if !ConnectionPoolError.isIdleConnectionSilent(error) {
+                self.recordExchangeError(error, for: selection, origin: ExchangeOrigin(head))
+            }
             return self.group.next().makeFailedFuture(error)
         }
     }

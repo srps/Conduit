@@ -293,6 +293,36 @@ final class UpstreamSilenceTests: XCTestCase {
         XCTAssertEqual(status(pool)?.circuitState, .open)
     }
 
+    /// A half-open upstream's health check takes the probe slot, meets an idle socket's silence and asks a fresh
+    /// connection. The slot stays claimed until that retry answers: a selection made while the retry is at the upstream
+    /// gets no probe of its own.
+    func testAHealthCheckKeepsItsProbeAcrossTheIdleSocketRetry() async throws {
+        let warmed = NIOLockedValueBox<Set<Int>>([])
+        let poolBox = NIOLockedValueBox<ConnectionPool?>(nil)
+        let probeDuringRetry = NIOLockedValueBox<[Bool]>([])
+        let upstream = try await startUpstream { connection, line in
+            if line.hasPrefix("CONNECT ") { return .status(502) }
+            if line.contains("/first") { warmed.withLockedValue { _ = $0.insert(connection) } }
+            guard line.contains("/second") else { return .ok }
+            if warmed.withLockedValue({ $0.contains(connection) }) { return .silent }
+            let selection = poolBox.withLockedValue { $0 }?.selectTunnelUpstream(excluding: [])
+            probeDuringRetry.withLockedValue { $0.append(selection?.probe != nil) }
+            return .ok
+        }
+        let pool = makePool(port: upstream.port)
+        defer { pool.closeAll() }
+        poolBox.withLockedValue { $0 = pool }
+
+        await warmTwoIdleConnections(pool)
+        try await tripOnAnAnswerAndWaitForTheProbe(pool)
+        let result = await pool.healthCheck(urlString: "http://check.test/second")
+
+        XCTAssertTrue(result.healthy, "the fresh retry answered: \(result)")
+        XCTAssertEqual(upstream.requestLines.filter { $0.hasPrefix("HEAD ") }.count, 2, "the idle socket's silence was retried")
+        XCTAssertEqual(probeDuringRetry.withLockedValue { $0 }, [false], "no other selection claimed the probe while the retry ran")
+        XCTAssertEqual(status(pool)?.circuitState, .closed, "the retry's answer is the probe's verdict")
+    }
+
     func testAHealthCheckSilentOnAFreshRetryIsOneSilenceOnTheCheckOrigin() async throws {
         let upstream = try await startUpstream { _, line in line.contains("/first") ? .ok : .silent }
         let pool = makePool(port: upstream.port)
