@@ -55,7 +55,7 @@ final class CircuitBreakerWindowTests: XCTestCase {
         // With a 10s window guard, none of these are spaced enough to satisfy
         // "elapsed >= window", so the breaker stays closed.
         for _ in 0..<10 {
-            pool.recordDedicatedTunnelFailure(for: proxy)
+            pool.recordConnectFailure(for: proxy)
         }
 
         let status = pool.upstreamStatuses().first { $0.id == proxy.id }
@@ -71,13 +71,13 @@ final class CircuitBreakerWindowTests: XCTestCase {
         defer { pool.closeAll() }
 
         // First failure anchors the window.
-        pool.recordDedicatedTunnelFailure(for: proxy)
+        pool.recordConnectFailure(for: proxy)
         // Wait long enough to clear the window.
         try await Task.sleep(for: .milliseconds(100))
         // Now fire 4 more (5 total). The threshold is met AND the elapsed
         // time since first failure exceeds the window.
         for _ in 0..<4 {
-            pool.recordDedicatedTunnelFailure(for: proxy)
+            pool.recordConnectFailure(for: proxy)
         }
 
         let status = pool.upstreamStatuses().first { $0.id == proxy.id }
@@ -94,7 +94,7 @@ final class CircuitBreakerWindowTests: XCTestCase {
         // 5 back-to-back failures with the guard disabled trip the breaker
         // immediately, matching pre-Phase-5 behavior.
         for _ in 0..<5 {
-            pool.recordDedicatedTunnelFailure(for: proxy)
+            pool.recordConnectFailure(for: proxy)
         }
 
         let status = pool.upstreamStatuses().first { $0.id == proxy.id }
@@ -111,7 +111,7 @@ final class CircuitBreakerWindowTests: XCTestCase {
 
         // 4 failures (one short of threshold). No trip yet.
         for _ in 0..<4 {
-            pool.recordDedicatedTunnelFailure(for: proxy)
+            pool.recordConnectFailure(for: proxy)
         }
         XCTAssertEqual(pool.upstreamStatuses().first { $0.id == proxy.id }?.circuitState, .closed)
 
@@ -124,7 +124,7 @@ final class CircuitBreakerWindowTests: XCTestCase {
         // cleared by the success, the window now anchors at the first NEW
         // failure — which is now-ish — so the burst should NOT trip.
         for _ in 0..<5 {
-            pool.recordDedicatedTunnelFailure(for: proxy)
+            pool.recordConnectFailure(for: proxy)
         }
         XCTAssertEqual(pool.upstreamStatuses().first { $0.id == proxy.id }?.circuitState, .closed,
                        "Success must reset firstFailureAt; subsequent burst stays closed")
@@ -137,7 +137,7 @@ final class CircuitBreakerWindowTests: XCTestCase {
         defer { pool.closeAll() }
 
         // Anchor a failure window with one failure.
-        pool.recordDedicatedTunnelFailure(for: proxy)
+        pool.recordConnectFailure(for: proxy)
         // Reset: this should clear firstFailureAt as well as consecutiveFailures.
         pool.resetCircuitsAfterFlap()
         try await Task.sleep(for: .milliseconds(100))
@@ -146,7 +146,7 @@ final class CircuitBreakerWindowTests: XCTestCase {
         // failures here would trip (because elapsed-since-the-pre-reset-anchor
         // is now > window). We assert it stays closed.
         for _ in 0..<5 {
-            pool.recordDedicatedTunnelFailure(for: proxy)
+            pool.recordConnectFailure(for: proxy)
         }
         let status = pool.upstreamStatuses().first { $0.id == proxy.id }
         XCTAssertEqual(status?.circuitState, .closed,

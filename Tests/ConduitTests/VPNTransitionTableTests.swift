@@ -964,7 +964,7 @@ final class ResetCircuitsAfterFlapTests: XCTestCase {
         XCTAssertNotNil(beforeEWMA)
 
         // Trip the breaker via 5 consecutive failures.
-        for _ in 0..<5 { pool.recordDedicatedTunnelFailure(for: proxy) }
+        for _ in 0..<5 { pool.recordConnectFailure(for: proxy) }
         let opened = pool.upstreamStatuses().first { $0.id == proxy.id }
         XCTAssertEqual(opened?.circuitState, .open, "Pre-condition: circuit is open after threshold failures")
 

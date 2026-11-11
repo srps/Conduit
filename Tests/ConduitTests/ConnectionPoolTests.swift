@@ -770,7 +770,7 @@ final class ConnectionPoolTests: XCTestCase {
         defer { pool.closeAll() }
 
         do {
-            _ = try await pool.makeDedicatedTunnelConnection(forcedProxy: proxy).get()
+            _ = try await pool.makeDedicatedTunnelConnection(.forced(proxy)).get()
             XCTFail("Dedicated CONNECT tunnel acquisition should respect maxConnections")
         } catch ConnectionPoolError.poolExhausted {
             // Expected.
@@ -808,7 +808,7 @@ final class ConnectionPoolTests: XCTestCase {
 
         let proxy = config.enabledUpstreams[0]
         for _ in 0..<5 {
-            pool.recordDedicatedTunnelFailure(for: proxy)
+            pool.recordConnectFailure(for: proxy)
         }
 
         let opened = pool.upstreamStatuses().first { $0.id == proxy.id }

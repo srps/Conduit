@@ -55,7 +55,9 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
     package private(set) var firstFailureAt: Date?
     package private(set) var openUntil: Date?
     package private(set) var lastOpenedAt: Date?
-    package private(set) var halfOpenProbeInFlight: Bool = false
+    /// The attempt holding the half-open probe slot, if one does.
+    package private(set) var probe: ProbeClaim?
+    package var halfOpenProbeInFlight: Bool { probe != nil }
     /// The open interval (seconds) applied at the most recent trip. Default = 30,
     /// matching the legacy `ConnectionPool.baseCircuitOpenInterval`. The default
     /// is harmless because before any failure has been recorded the value is
@@ -122,6 +124,14 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         case manualOverride
     }
 
+    /// The half-open probe slot, as held by the one attempt whose selection
+    /// took it. Only that attempt can give the slot back without a verdict
+    /// (`releaseProbe`): an attempt that ends without one, or a late
+    /// completion of another attempt, cannot free a slot it does not hold.
+    package struct ProbeClaim: Hashable, Sendable {
+        private let id = UUID()
+    }
+
     package init() {}
 
     // MARK: - Mutations
@@ -146,7 +156,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
             state = .closed
             openUntil = nil
             lastOpenedAt = nil
-            halfOpenProbeInFlight = false
+            probe = nil
             nextOpenInterval = lastBaseOpenInterval
             return .closed(.probeSuccess)
         }
@@ -225,7 +235,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         state = .open
         openUntil = now.addingTimeInterval(appliedInterval)
         lastOpenedAt = now
-        halfOpenProbeInFlight = false
+        probe = nil
         consecutiveFailures = 0
         firstFailureAt = nil
         nextOpenInterval = appliedInterval
@@ -233,7 +243,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
     }
 
     package func mayProbe(now: Date) -> Bool {
-        guard !halfOpenProbeInFlight else { return false }
+        guard probe == nil else { return false }
         switch state {
         case .closed: return false
         case .halfOpen: return true
@@ -241,24 +251,27 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         }
     }
 
-    @discardableResult
-    package mutating func claimProbe(now: Date) -> Transition? {
+    /// Takes the probe slot when `mayProbe(now:)`, or nil. The transition is
+    /// `.halfOpened` when the claim moved the breaker out of `.open`.
+    package mutating func claimProbe(now: Date) -> (claim: ProbeClaim, transition: Transition?)? {
         guard mayProbe(now: now) else { return nil }
-        guard state == .open else {
-            halfOpenProbeInFlight = true
-            return nil
-        }
+        let claim = ProbeClaim()
+        probe = claim
+        guard state == .open else { return (claim, nil) }
 
         let elapsed = now.timeIntervalSince(lastOpenedAt ?? openUntil ?? now)
         state = .halfOpen
-        halfOpenProbeInFlight = true
         openUntil = nil
-        return .halfOpened(elapsedSeconds: elapsed)
+        return (claim, .halfOpened(elapsedSeconds: elapsed))
     }
 
-    package mutating func releaseHalfOpenProbe() -> Bool {
-        guard state == .halfOpen, halfOpenProbeInFlight else { return false }
-        halfOpenProbeInFlight = false
+    /// Gives `claim`'s probe slot back with no verdict on the upstream, so
+    /// the next attempt can probe. False, changing nothing, when `claim` no
+    /// longer holds the slot: a verdict already settled it, or it was
+    /// another attempt's.
+    package mutating func releaseProbe(_ claim: ProbeClaim) -> Bool {
+        guard state == .halfOpen, probe == claim else { return false }
+        probe = nil
         return true
     }
 
@@ -273,15 +286,15 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
     ///
     /// Returns `nil` (and leaves state unchanged) if the breaker isn't
     /// `.open` or already has a probe in flight — both cases mean the
-    /// half-open slot is already accounted for.
-    @discardableResult
-    package mutating func forceHalfOpen() -> Transition? {
-        guard state == .open else { return nil }
-        guard !halfOpenProbeInFlight else { return nil }
+    /// half-open slot is already accounted for. Otherwise the caller holds
+    /// the probe slot it returns.
+    package mutating func forceHalfOpen() -> (claim: ProbeClaim, transition: Transition)? {
+        guard state == .open, probe == nil else { return nil }
+        let claim = ProbeClaim()
         state = .halfOpen
-        halfOpenProbeInFlight = true
+        probe = claim
         openUntil = nil
-        return .halfOpened(elapsedSeconds: 0)
+        return (claim, .halfOpened(elapsedSeconds: 0))
     }
 
     /// Force the breaker closed with the supplied `baseOpenInterval`.
@@ -298,7 +311,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
             && openUntil == nil
             && lastOpenedAt == nil
             && nextOpenInterval == baseOpenInterval
-            && !halfOpenProbeInFlight
+            && probe == nil
         lastBaseOpenInterval = baseOpenInterval
         if alreadyClean {
             return nil
@@ -308,7 +321,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         firstFailureAt = nil
         openUntil = nil
         lastOpenedAt = nil
-        halfOpenProbeInFlight = false
+        probe = nil
         nextOpenInterval = baseOpenInterval
         return .closed(.reset(reason))
     }

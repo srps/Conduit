@@ -144,7 +144,7 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         }
         // openUntil = 12 + 30 = 42 s after openedAt
         let pastBackoff = openedAt.addingTimeInterval(43)
-        let transition = breaker.claimProbe(now: pastBackoff)
+        let transition = breaker.claimProbe(now: pastBackoff)?.transition
         XCTAssertNotNil(transition)
         if case let .halfOpened(elapsedSeconds) = transition! {
             XCTAssertGreaterThanOrEqual(elapsedSeconds, 30)

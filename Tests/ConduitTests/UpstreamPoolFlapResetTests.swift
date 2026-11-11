@@ -83,7 +83,7 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
     @RuntimeActor private func openEveryBreaker(of pool: ConnectionPool, in orchestrator: ProxyOrchestrator) {
         let threshold = orchestrator.config.circuitFailureThreshold
         for proxy in orchestrator.config.enabledUpstreams {
-            for _ in 0..<threshold { pool.recordDedicatedTunnelFailure(for: proxy) }
+            for _ in 0..<threshold { pool.recordConnectFailure(for: proxy) }
         }
         XCTAssertEqual(pool.upstreamStatuses().map(\.circuitState), [.open, .open], "precondition: every breaker is open")
     }

@@ -28,7 +28,7 @@ final class DoHUpstreamPoolIsolationTests: XCTestCase {
         let tunnels = running.orchestrator.tunnelConnectionPool
         // State the tunnels' own traffic left: Primary's breaker open, Secondary carrying.
         let primary = running.orchestrator.config.enabledUpstreams[0]
-        for _ in 0..<running.orchestrator.config.circuitFailureThreshold { tunnels.recordDedicatedTunnelFailure(for: primary) }
+        for _ in 0..<running.orchestrator.config.circuitFailureThreshold { tunnels.recordConnectFailure(for: primary) }
         XCTAssertEqual(tunnels.switchToNextUpstream(), running.orchestrator.config.enabledUpstreams[1].endpoint)
         let before = Health(of: tunnels)
         XCTAssertEqual(before.circuits, [.open, .closed], "precondition")
@@ -65,20 +65,24 @@ final class DoHUpstreamPoolIsolationTests: XCTestCase {
         XCTAssertEqual(health.consecutiveFailures, [0, 0])
 
         // Closed and unmoved would also be the state of a pool the route never dialled through. With both breakers open, a
-        // lookup forces each into a half-open probe; the 403 that answers it is seen by this pool, frees the probe and counts nothing.
+        // lookup forces the longest-open one into a half-open probe; the 403 that answers it is seen by this pool, frees the
+        // probe and counts nothing. The failover asks no upstream still in its backoff, so Secondary is not dialled.
+        let refusalsBefore = running.refusals.withLockedValue { $0 }
         for proxy in running.orchestrator.config.enabledUpstreams {
-            for _ in 0..<running.orchestrator.config.circuitFailureThreshold { pool.recordDedicatedTunnelFailure(for: proxy) }
+            for _ in 0..<running.orchestrator.config.circuitFailureThreshold { pool.recordConnectFailure(for: proxy) }
         }
         XCTAssertEqual(Health(of: pool).circuits, [.open, .open], "precondition")
         let reply = try await SOCKS5TestClient.reply(
             connecting: Self.provider.host, port: Self.provider.port, through: running.routePort, group: group
         )
         XCTAssertEqual(reply, 0x05)
+        let primary = running.orchestrator.config.enabledUpstreams[0]
         let released = running.orchestrator.eventLog.events.filter { $0.event == "upstream.probe_released" }
-        XCTAssertEqual(released.map { $0.detail ?? "" }.sorted(), running.orchestrator.config.enabledUpstreams.map {
-            "upstream=\($0.name) endpoint=\($0.endpoint) origin=\(Self.provider.host):\(Self.provider.port) answered=403 pool=doh"
-        }.sorted(), "each upstream's probe met the route's 403 in the route's own pool")
-        XCTAssertEqual(Health(of: pool).circuits, [.halfOpen, .halfOpen])
+        XCTAssertEqual(released.map { $0.detail ?? "" }, [
+            "upstream=\(primary.name) endpoint=\(primary.endpoint) origin=\(Self.provider.host):\(Self.provider.port) answered=403 pool=doh",
+        ], "the forced probe met the route's 403 in the route's own pool")
+        XCTAssertEqual(running.refusals.withLockedValue { $0 } - refusalsBefore, 1, "only the forced probe was dialled")
+        XCTAssertEqual(Health(of: pool).circuits, [.halfOpen, .open])
         await stop(running)
     }
 
@@ -241,10 +245,14 @@ final class AnsweredStatusAccountingTests: XCTestCase {
     }
 
     private func refuse(_ status: Int, _ pool: ConnectionPool, _ proxy: UpstreamProxy, times: Int) {
+        refuse(status, pool, .forced(proxy), times: times)
+    }
+
+    private func refuse(_ status: Int, _ pool: ConnectionPool, _ selection: UpstreamSelection, times: Int) {
         for _ in 0..<times {
             pool.recordExchangeError(
                 ConnectionPoolError.upstreamReturnedStatus(status, target: "192.0.2.10:443"),
-                for: proxy, origin: .connect("192.0.2.10:443")
+                for: selection, origin: .connect("192.0.2.10:443")
             )
         }
     }
@@ -269,7 +277,7 @@ final class AnsweredStatusAccountingTests: XCTestCase {
     func testARejectedAuthenticationStillCounts() {
         let (pool, proxy, threshold) = makePool(.serverErrorsOnly)
         for _ in 0..<threshold {
-            pool.recordExchangeError(ConnectionPoolError.authenticationRejected, for: proxy, origin: .connect("192.0.2.10:443"))
+            pool.recordExchangeError(ConnectionPoolError.authenticationRejected, for: .forced(proxy), origin: .connect("192.0.2.10:443"))
         }
         XCTAssertEqual(pool.upstreamStatuses().map(\.circuitState), [.open])
     }
@@ -283,10 +291,10 @@ final class AnsweredStatusAccountingTests: XCTestCase {
         refuse(502, pool, proxy, times: threshold)
         XCTAssertEqual(pool.upstreamStatuses().map(\.circuitState), [.open])
         // The only upstream is open, so selecting it forces the half-open probe.
-        _ = pool.makeDedicatedTunnelConnection()
+        let probe = try XCTUnwrap(pool.selectTunnelUpstream(excluding: []))
         XCTAssertEqual(pool.upstreamStatuses().map(\.circuitState), [.halfOpen])
 
-        refuse(403, pool, proxy, times: 1)
+        refuse(403, pool, probe, times: 1)
 
         XCTAssertEqual(pool.upstreamStatuses().map(\.circuitState), [.halfOpen])
         let released = events.withLockedValue { $0 }.filter { $0.event == "upstream.probe_released" }

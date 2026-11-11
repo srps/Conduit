@@ -73,11 +73,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         if !proxyChain.isEmpty {
             return attemptTunnel(target: target, authSource: authSource, proxyChain: proxyChain, index: 0, isWanted: isWanted)
         }
-        guard isWanted() else { return pool.eventLoop.makeFailedFuture(ConnectionPoolError.tunnelAbandoned) }
-        guard let first = pool.selectTunnelUpstream(excluding: []) else {
-            return pool.eventLoop.makeFailedFuture(ConnectionPoolError.noUpstreamsConfigured)
-        }
-        return attemptTunnel(target: target, authSource: authSource, through: first, tried: [], isWanted: isWanted)
+        return failover(target: target, authSource: authSource, tried: [], lastFailure: nil, isWanted: isWanted)
     }
 
     /// One shared key: the target is whatever a local client sent, so a key per target would let a client that names a
@@ -103,7 +99,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         return attemptTunnel(
             target: target,
             authSource: authSource,
-            forcedProxy: forcedProxy,
+            selection: .forced(forcedProxy),
             isWanted: isWanted
         ).flatMapError { [weak self] error in
             if Self.endsFailover(error) {
@@ -120,46 +116,53 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         }
     }
 
-    /// Fails over to an upstream this call has not tried yet. Excluding them,
-    /// not only rotating the preference, is what reaches every upstream: the
-    /// latency chooser would pick a fast upstream that refuses again.
-    private func attemptTunnel(
+    /// Each attempt dials an upstream this call has not tried yet. Excluding
+    /// them, not only rotating the preference, is what reaches every
+    /// upstream: the latency chooser would pick a fast upstream that refuses
+    /// again. A failover asks only an upstream the pool may ask now; with
+    /// none, `lastFailure` stands.
+    private func failover(
         target: String,
         authSource: String?,
-        through proxy: UpstreamProxy,
         tried: Set<UUID>,
+        lastFailure: (proxy: UpstreamProxy, error: Error)?,
         isWanted: @escaping @Sendable () -> Bool
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
-        let tried = tried.union([proxy.id])
-        return attemptTunnel(target: target, authSource: authSource, forcedProxy: proxy, isWanted: isWanted).flatMapError { [weak self] error -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
-            if Self.endsFailover(error) {
+        // Checked before selecting: a selection can claim an upstream's half-open probe.
+        guard isWanted() else { return pool.eventLoop.makeFailedFuture(ConnectionPoolError.tunnelAbandoned) }
+        guard let selection = pool.selectTunnelUpstream(excluding: tried) else {
+            return pool.eventLoop.makeFailedFuture(lastFailure?.error ?? ConnectionPoolError.noUpstreamsConfigured)
+        }
+        if let lastFailure {
+            logger.log(.warning, "Upstream \(lastFailure.proxy.endpoint) failed for \(SensitiveValueSanitizer.observableTarget(target)), switching to \(selection.proxy.endpoint) (attempt \(tried.count + 1)/\(pool.enabledUpstreamCount)).", category: .proxy)
+        }
+        return attemptTunnel(target: target, authSource: authSource, selection: selection, isWanted: isWanted).flatMapError { [weak self] error in
+            guard let self, !Self.endsFailover(error) else {
                 let el = self?.pool.eventLoop ?? MultiThreadedEventLoopGroup.singleton.next()
                 return el.makeFailedFuture(error)
             }
-            // Checked before selecting: a selection can claim an upstream's half-open probe.
-            guard isWanted() else {
-                let el = self?.pool.eventLoop ?? MultiThreadedEventLoopGroup.singleton.next()
-                return el.makeFailedFuture(ConnectionPoolError.tunnelAbandoned)
-            }
-            guard let self, let next = self.pool.selectTunnelUpstream(excluding: tried) else {
-                let el = self?.pool.eventLoop ?? MultiThreadedEventLoopGroup.singleton.next()
-                return el.makeFailedFuture(error)
-            }
-            self.logger.log(.warning, "Upstream \(proxy.endpoint) failed for \(SensitiveValueSanitizer.observableTarget(target)), switching to \(next.endpoint) (attempt \(tried.count + 1)/\(self.pool.enabledUpstreamCount)).", category: .proxy)
-            return self.attemptTunnel(target: target, authSource: authSource, through: next, tried: tried, isWanted: isWanted)
+            return self.failover(
+                target: target, authSource: authSource, tried: tried.union([selection.proxy.id]),
+                lastFailure: (selection.proxy, error), isWanted: isWanted
+            )
         }
     }
 
+    /// Settles `selection` once: the pool does until it hands over the
+    /// dialled connection, and this from the handshake on.
     private func attemptTunnel(
         target: String,
         authSource: String?,
-        forcedProxy: UpstreamProxy,
+        selection: UpstreamSelection,
         isWanted: @escaping @Sendable () -> Bool
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
         let pool = self.pool
         let start = Date()
-        return pool.makeDedicatedTunnelConnection(forcedProxy: forcedProxy, target: target, isWanted: isWanted).flatMap { [weak self] (connection: PooledUpstreamConnection, _: ProxyConfig) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
+        return pool.makeDedicatedTunnelConnection(selection, target: target, isWanted: isWanted).flatMap { [weak self] (connection: PooledUpstreamConnection, _: ProxyConfig) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
             guard let self else {
+                connection.channel.close(mode: .all, promise: nil)
+                pool.removeDedicatedTunnel(connection)
+                pool.releaseProbe(of: selection)
                 return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
             }
 
@@ -182,29 +185,27 @@ package final class CONNECTCoordinator: @unchecked Sendable {
             return connection.channel.pipeline.addHandler(handler, name: Self.handshakeHandlerName).flatMap {
                 handler.start()
                 return promise.futureResult
-            }.flatMap { (established: PooledUpstreamConnection) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
+            }.flatMapError { error in
+                connection.channel.close(mode: .all, promise: nil)
+                pool.removeDedicatedTunnel(connection)
+                // The caller gave the tunnel up, and its stop may be what closed this handshake.
+                guard isWanted() else {
+                    pool.releaseProbe(of: selection)
+                    return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.tunnelAbandoned)
+                }
+                // A VPN-transition sweep closed it mid-handshake (#148): the
+                // upstream did nothing wrong, and it is not retried.
+                let error: Error = connection.wasRetiredByVPNTransition ? ConnectionPoolError.vpnTransitionDuringConnect : error
+                pool.recordExchangeError(error, for: selection, origin: .connect(target))
+                return connection.channel.eventLoop.makeFailedFuture(error)
+            }.flatMapThrowing { (established: PooledUpstreamConnection) -> (channel: Channel, endpoint: String, authMethod: String?) in
                 pool.recordDedicatedTunnelSuccess(
                     for: established.proxy,
                     latencyMS: Int(Date().timeIntervalSince(start) * 1_000)
                 )
                 // The handshake handler stays, holding reads paused and any
                 // server-first bytes, until `attachRelay` hands them over.
-                return established.channel.eventLoop.makeSucceededFuture(
-                    (channel: established.channel, endpoint: established.proxy.endpoint, authMethod: established.authMethod)
-                )
-            }.flatMapError { error in
-                connection.channel.close(mode: .all, promise: nil)
-                pool.removeDedicatedTunnel(connection)
-                // The caller gave the tunnel up, and its stop may be what closed this handshake.
-                guard isWanted() else {
-                    pool.recordAbandonedAttempt(for: connection.proxy)
-                    return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.tunnelAbandoned)
-                }
-                // A VPN-transition sweep closed it mid-handshake (#148): the
-                // upstream did nothing wrong, and it is not retried.
-                let error: Error = connection.wasRetiredByVPNTransition ? ConnectionPoolError.vpnTransitionDuringConnect : error
-                pool.recordExchangeError(error, for: connection.proxy, origin: .connect(target))
-                return connection.channel.eventLoop.makeFailedFuture(error)
+                return (channel: established.channel, endpoint: established.proxy.endpoint, authMethod: established.authMethod)
             }
         }
     }
