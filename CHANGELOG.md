@@ -52,13 +52,16 @@ packaging; 0.6.1 is the latest published release.
   over.
 - The first full-tunnel VPN connect no longer makes macOS ask for the proxy
   password on Conduit's behalf (decision 0045). DoH lookups went straight to
-  the upstream proxy as well as through Conduit's listener. The upstream
-  answered 407, and macOS tried its saved proxy credential and then showed the
-  dialog. DoH now goes direct or through the listener only. Every Conduit
-  `URLSession` refuses a proxy-authentication challenge instead of handing it
-  to macOS, and reports `auth.proxy_challenge_refused` for DoH. While Conduit
-  is in its brief direct mode after a VPN connect, public names can fail to
-  resolve for a few seconds.
+  the upstream proxy through a session that let macOS answer its 407 with a
+  saved proxy credential, and then with the dialog. DoH now reaches the
+  upstream only through Conduit: a new upstream route, a loopback listener the
+  DNS forwarder owns, tunnels to the configured DoH providers through the
+  upstream with Conduit's own Kerberos/NTLM. It ignores PAC, bypass entries
+  and direct mode, so a rule that sends a provider DIRECT no longer leaves
+  public names unresolvable under a VPN that drops direct 443. The DoH and
+  PAC-download sessions also refuse a proxy-authentication challenge instead
+  of handing it to macOS, and DoH reports it as `auth.proxy_challenge_refused`.
+  `pm-dns` gets the upstream route too when its config enables an upstream.
 
 ## 0.6.2
 
