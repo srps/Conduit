@@ -8,7 +8,7 @@ import ProxyKernel
 /// `pm-sim dns-doh-upstream-407` (decision 0045).
 ///
 /// The real runtime: `ProxyOrchestrator` with its client listener, DNS
-/// forwarder, tunnel pool and authenticator. The only upstream demands
+/// forwarder, the upstream route's pool and authenticator. The only upstream demands
 /// authentication (`FakeUpstreamProxy`), and Conduit answers it. The DoH
 /// provider is `192.0.2.10` (TEST-NET-1), which nothing answers directly, and
 /// a no-proxy entry sends it DIRECT at the client listener: the network of a
@@ -109,6 +109,124 @@ enum DoHProxyAuthScenarios {
                 .init("the upstream tunnels the lookup after Conduit answers its 407", passB),
                 .init("the upstream route reports the lookup", passC),
                 .init("no URLSession met a proxy challenge", passD),
+            ],
+            notes: notes
+        )
+    }
+
+    /// `pm-sim dns-doh-upstream-refused` (decision 0045).
+    ///
+    /// The real runtime again, with two upstreams that answer 403 to every
+    /// CONNECT: a corporate proxy that blocks DoH by policy. Direct is a black
+    /// hole, so every lookup fails. What must not happen is the refusals
+    /// reaching a circuit breaker: the route dials through a pool of its own,
+    /// and that pool does not count an answered 4xx.
+    ///
+    /// | # | condition                         | expected                                                    |
+    /// |---|-----------------------------------|-------------------------------------------------------------|
+    /// | A | three public names                | none answered                                               |
+    /// | B | each upstream                     | refused at least `circuitFailureThreshold` CONNECTs         |
+    /// | C | the route                         | reported `dns.doh_upstream_route_failed` naming HTTP 403    |
+    /// | D | every pool                        | opened no breaker (`upstream.circuit_opened` absent)        |
+    /// | E | every `URLSession`                | met no proxy challenge                                      |
+    @RuntimeActor
+    static func aRefusingUpstreamOpensNoBreaker(verbose: Bool) async throws -> ScenarioResult {
+        let name = "dnsDoHUpstreamRefused"
+        let start = Date()
+        var notes: [String] = []
+        let group = MultiThreadedEventLoopGroup.singleton
+
+        var config = ProxyConfig()
+        config.localPort = 0
+        config.localPACEnabled = false
+        config.pacRoutingEnabled = false
+        config.healthCheckIntervalSeconds = 3600
+        config.dnsForwarderEnabled = true
+        config.dnsForwarderPort = 0
+        config.dnsEntries = []
+        config.dohProviders = ["http://\(providerHost)/dns-query"]
+        config.noProxyHosts = [providerHost]
+        // A breaker opens on two back-to-back failures, so a counted refusal would show.
+        config.circuitBreakerWindowSeconds = 0
+        config.circuitFailureThreshold = 2
+        var upstreams: [FakeUpstreamProxy] = []
+        for (index, label) in ["primary", "secondary"].enumerated() {
+            let upstream = FakeUpstreamProxy(group: group, originHost: "127.0.0.1", originPort: 9, requireAuth: false)
+            ScenarioCleanup.register { await upstream.stop() }
+            try await upstream.start()
+            upstream.connectRefusalStatus = 403
+            upstreams.append(upstream)
+            config.upstreams.append(UpstreamProxy(name: label, host: "127.0.0.1", port: upstream.port, priority: index))
+        }
+        notes.append("upstreams \(upstreams.map { "127.0.0.1:\($0.port)" }) answer 403 to every CONNECT")
+        let everyUpstreamReachable: @Sendable ([UpstreamProxy]) async -> UpstreamProbeSummary = { targets in
+            UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) })
+        }
+        let orchestrator = ProxyOrchestrator(
+            config: config, logger: RecordingLogSink(minLevel: verbose ? .debug : .info),
+            authenticatorProvider: { _ in MockAuthenticator() }, connectivityProbe: everyUpstreamReachable
+        )
+        ScenarioCleanup.register {
+            await orchestrator.stopDNS()
+            await orchestrator.stopProxy()
+        }
+        try await orchestrator.startProxy()
+        await orchestrator.startDNS()
+        let dnsPort = orchestrator.snapshot.bindings.dnsPort ?? 0
+
+        let answers = try await withThrowingTaskGroup(of: String?.self) { lookups -> [String?] in
+            for index in 0..<3 {
+                lookups.addTask {
+                    let query = DNSWireFormat.buildQuery(domain: "refused-\(index).example", txID: UInt16(0x4030 + index), qtype: 1)
+                    let answer = try await DNSProbe.overUDP(query: query, port: dnsPort, timeout: 12)
+                    return answer.flatMap { DNSWireFormat.firstIPv4Answer(in: $0)?.ip }
+                }
+            }
+            var collected: [String?] = []
+            for try await answer in lookups { collected.append(answer) }
+            return collected
+        }
+        let passA = answers.count == 3 && answers.allSatisfy { $0 == nil }
+        notes.append("A answers=\(answers.map { $0 ?? "none" })")
+
+        let attempts = upstreams.map(\.connectAttemptCount)
+        let passB = attempts.allSatisfy { $0 >= config.circuitFailureThreshold }
+        notes.append("B connectAttempts=\(attempts) threshold=\(config.circuitFailureThreshold)")
+
+        let events = orchestrator.eventLog.events
+        let failed = events.filter { $0.event == "dns.doh_upstream_route_failed" }.map { $0.detail ?? "" }
+        let passC = failed.contains { $0.hasPrefix("target=\(providerHost):80 ") && $0.contains("HTTP 403") }
+        notes.append("C failed=\(failed)")
+
+        let opened = events.filter { $0.event == "upstream.circuit_opened" }.map { $0.detail ?? "" }
+        let passD = opened.isEmpty
+        notes.append("D opened=\(opened)")
+
+        let refusals = events.filter { $0.event == "auth.proxy_challenge_refused" }
+        let passE = refusals.isEmpty
+        notes.append("E refusals=\(refusals.count)")
+
+        let checks = [passA, passB, passC, passD, passE]
+        notes.append(checks.allSatisfy { $0 }
+            ? "PASS — upstreams that refuse DoH fail the lookups and open no circuit breaker"
+            : "FAIL — see per-case lines above")
+        return ScenarioResult(
+            name: name,
+            clientCount: 3,
+            clientsOpened: 3,
+            clientsWithFirstByte: 0,
+            clientsClosedEarly: 0,
+            totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(start),
+            aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("no lookup is answered while every upstream refuses the provider", passA),
+                .init("each upstream refused enough CONNECTs to open a breaker that counted them", passB),
+                .init("the upstream route reports the refusal", passC),
+                .init("no circuit breaker opened in any pool", passD),
+                .init("no URLSession met a proxy challenge", passE),
             ],
             notes: notes
         )
