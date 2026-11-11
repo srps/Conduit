@@ -434,6 +434,29 @@ private struct DoHTransports: @unchecked Sendable {
     }
 }
 
+/// Why every provider failed, as far as one lookup could see. The warning
+/// repeats at once when this changes and at most every 5 s while it holds.
+struct DoHFailureSignature: Equatable {
+    let statuses: [Int]
+    /// A proxy on one of the routes asked for authentication and the session
+    /// cancelled the request (`auth.proxy_challenge_refused`).
+    let proxyChallengeRefused: Bool
+
+    var explanation: String {
+        let refusal = "a proxy on the route asked for authentication and Conduit refused the challenge instead of asking macOS for a credential (auth.proxy_challenge_refused names the proxy)"
+        let advice = "Public names cannot be resolved until a reachable provider is configured (IP-literal endpoints avoid both failure modes)."
+        switch (statuses.isEmpty, proxyChallengeRefused) {
+        case (true, true):
+            return "\(refusal), and no other route got an HTTP response. Public names cannot be resolved until a route to a provider works without that proxy."
+        case (true, false):
+            return "no HTTP response at all — the providers were unreachable, timed out, or their hostnames did not resolve. \(advice)"
+        case (false, let refused):
+            let answered = "every attempt that got a response answered HTTP \(statuses.map(String.init).joined(separator: "/")) instead of a DNS payload, which is what a DoH-blocking proxy looks like"
+            return refused ? "\(answered); also, \(refusal). \(advice)" : "\(answered). \(advice)"
+        }
+    }
+}
+
 /// Reference-counted lifecycle guard around a `DoHTransports` value.
 ///
 /// Invariant: `transports.invalidate()` runs exactly once, and only when the
@@ -577,7 +600,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private let dohFailureLock = NSLock()
     private var dohFailuresSinceLastReport = 0
     private var lastDoHFailureReport: Date?
-    private var lastDoHFailureSignature: [Int]?
+    private var lastDoHFailureSignature: DoHFailureSignature?
     /// Swappable on `resetUpstreamTransports`. Reads via `currentHandle()`
     /// take the lock briefly, copy the reference out, release the lock —
     /// keeping the rest of the DoH path lock-free. Session invalidation is
@@ -766,7 +789,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// different diagnoses, and a transition between them is exactly the moment
     /// the log has to speak. A changed signature reports immediately; an
     /// unchanged one waits out the interval.
-    private func doHFailureCountToReport(signature: [Int]) -> Int? {
+    private func doHFailureCountToReport(signature: DoHFailureSignature) -> Int? {
         dohFailureLock.withLock {
             dohFailuresSinceLastReport += 1
             let now = Date.now
@@ -1247,6 +1270,8 @@ private final class DNSResolutionCore: @unchecked Sendable {
         defer { handle.endUse() }
         let sessions = handle.transports.sessions(preferProxyPath: preferProxyPathForDoH())
 
+        let refusalsBefore = proxyChallengeDelegate.refusalCount
+
         // `withTaskGroup` awaits all children before returning (including
         // after the early-exit `cancelAll`), so no fetch outlives the use
         // window closed by the `defer` above.
@@ -1286,21 +1311,21 @@ private final class DNSResolutionCore: @unchecked Sendable {
             return .cancelled
         }
 
-        do {
-            let statuses = observedStatuses.withLockedValue { $0 }.sorted()
-            if let failures = doHFailureCountToReport(signature: statuses) {
-                let detail = statuses.isEmpty
-                    ? "no HTTP response at all — the providers were unreachable, timed out, or their hostnames did not resolve"
-                    : "every attempt answered HTTP \(statuses.map(String.init).joined(separator: "/")) instead of a DNS payload, which is what a DoH-blocking proxy looks like"
-                let alsoFailed = failures > 1
-                    ? " (and \(failures - 1) other name(s) since the last such warning)"
-                    : ""
-                logger.log(
-                    .warning,
-                    "DNS: all \(providers.count) DoH provider(s) failed for \(domain)\(alsoFailed) — \(detail). Public names cannot be resolved until a reachable provider is configured (IP-literal endpoints avoid both failure modes).",
-                    category: .network
-                )
-            }
+        let statuses = observedStatuses.withLockedValue { $0 }.sorted()
+        // Refusals are counted across lookups, so a concurrent lookup's
+        // refusal can be named here too. The warning is shared between
+        // lookups already, and its cause is the same proxy either way.
+        let refused = proxyChallengeDelegate.refusalCount > refusalsBefore
+        let signature = DoHFailureSignature(statuses: statuses, proxyChallengeRefused: refused)
+        if let failures = doHFailureCountToReport(signature: signature) {
+            let alsoFailed = failures > 1
+                ? " (and \(failures - 1) other name(s) since the last such warning)"
+                : ""
+            logger.log(
+                .warning,
+                "DNS: all \(providers.count) DoH provider(s) failed for \(domain)\(alsoFailed) — \(signature.explanation)",
+                category: .network
+            )
         }
 
         return .unanswered
