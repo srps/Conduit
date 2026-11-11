@@ -99,6 +99,8 @@ enum PMSim {
               dns-no-split-entries    DNS: with no enabled split-DNS entry a public name makes no internal attempt (#296)
               dns-internal-server-circuit  DNS: a silent internal server's circuit opens, is skipped, probed closed and reset; servers in order; longest suffix (#290)
               dns-internal-stage-budget  DNS: six silent servers under one entry still answer inside the relay window; unasked servers see nothing (#290)
+              dns-split-follows-vpn   DNS: the actual host asks the server a connected VPN pushed, and stops on disconnect, with no forwarder restart (0044)
+              dns-split-flap-holds    DNS: a VPN flap with the DNS key withdrawn keeps the pushed server answering; a disconnect stops it (0044)
               observable-target-redaction  Query/fragment privacy across observations
               private-config-boundary  Private configuration frame: cap, read schedules, redaction and refusals
               private-editor-codec  Private editor read and reply: correlation, admission, observation, reply cap and kinds
@@ -298,6 +300,8 @@ enum PMSim {
         "dns-no-split-entries",
         "dns-internal-server-circuit",
         "dns-internal-stage-budget",
+        "dns-split-follows-vpn",
+        "dns-split-flap-holds",
         "observable-target-redaction",
         "private-config-boundary",
         "private-editor-codec",
@@ -499,6 +503,10 @@ enum PMSim {
             return [try await DNSHealthScenarios.internalServerCircuit(verbose: verbose)]
         case "dns-internal-stage-budget":
             return [try await DNSHealthScenarios.internalStageBudget(verbose: verbose)]
+        case "dns-split-follows-vpn":
+            return [try await SplitDNSFollowsVPNScenarios.followsVPN()]
+        case "dns-split-flap-holds":
+            return [try await SplitDNSFollowsVPNScenarios.flapHolds()]
         case "observable-target-redaction":
             return [try await ObservableTargetScenarios.redaction()]
         case "private-config-boundary":
