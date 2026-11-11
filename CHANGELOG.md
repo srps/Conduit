@@ -62,6 +62,22 @@ packaging; 0.6.1 is the latest published release.
   PAC-download sessions also refuse a proxy-authentication challenge instead
   of handing it to macOS, and DoH reports it as `auth.proxy_challenge_refused`.
   `pm-dns` gets the upstream route too when its config enables an upstream.
+  The route dials through an upstream pool of its own, so a proxy that blocks
+  DoH by policy cannot open circuit breakers or move the preferred upstream
+  for port tunnels and the transparent proxy. That pool does not count an
+  answered 4xx against an upstream; a 5xx still counts. Its `upstream.*`
+  events carry `pool=doh`, and the tunnels' pool's now carry `pool=tunnels`.
+  Stopping the DNS forwarder closes every connection the route accepted. The
+  "all DoH providers failed" warning now names a proxy that refused the
+  tunnel, and says that CFNetwork cannot tell a Negotiate-only 407 from a
+  policy block there. New events: `dns.doh_upstream_route_used`,
+  `dns.doh_upstream_route_failed`, `dns.doh_upstream_route_refused`,
+  `dns.doh_upstream_route_unavailable`, `connection.socks5_close_failed`.
+- A VPN flap recovery, a reconnect after an outage and a wake recovery now
+  also close the circuit breakers of the pool behind port tunnels and the
+  transparent proxy. Before, only the client listener's pool was reset, so
+  tunnels kept passing over an upstream that had recovered until each open
+  interval ran out.
 
 ## 0.6.2
 
