@@ -64,9 +64,9 @@ package final class CONNECTCoordinator: @unchecked Sendable {
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
         // Every path that tunnels through an upstream comes through here, and `target` is written into an authenticated request.
         guard TunnelAuthority.isWritable(target) else {
-            let event = RuntimeEvent(kind: .connection, event: "connection.tunnel_target_rejected", detail: "target=\(TunnelAuthority.printable(target))")
+            let event = RuntimeEvent(kind: .connection, event: "connection.tunnel_target_rejected", detail: "target=\(TunnelAuthority.printable(SensitiveValueSanitizer.observableTarget(target)))")
             eventSink?(event)
-            logger.log(.warning, "\(event.event) \(event.detail ?? ""): not a host name or an address; no upstream was dialled.", category: .proxy)
+            logger.log(.warning, "\(event.event) \(event.detail ?? ""): not one visible-ASCII token; no upstream was dialled.", category: .proxy)
             return pool.eventLoop.makeFailedFuture(ConnectionPoolError.malformedTunnelTarget)
         }
         if !proxyChain.isEmpty {

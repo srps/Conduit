@@ -91,11 +91,11 @@ packaging; 0.6.1 is the latest published release.
   to 255 bytes of anything and wrote it into the CONNECT request line and its
   `Host` header, after Conduit's own `Proxy-Authorization`, so a name with a
   CR and an LF in it added headers to that request. Every tunnel through an
-  upstream now refuses a target that holds anything but ASCII letters,
-  digits, `.`, `-`, `_`, `:`, `[` and `]`, before anything is dialled, and
-  reports it as `connection.tunnel_target_rejected`. The HTTP listener's
-  parser already refused a CR, an LF or a space in a CONNECT line; it let
-  `user@host` through, which is now refused too.
+  upstream now refuses a target that is not one token of visible ASCII (a
+  CR, an LF, a space, a tab, a NUL, another control, DEL or a non-ASCII
+  byte) before anything is dialled, and reports it as
+  `connection.tunnel_target_rejected`. The HTTP listener's parser already
+  refused a CR, an LF or a space in a CONNECT line.
 - A VPN flap recovery, a reconnect after an outage and a wake recovery now
   also close the circuit breakers of the pool behind port tunnels and the
   transparent proxy. Before, only the client listener's pool was reset, so

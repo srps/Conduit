@@ -26,8 +26,7 @@ final class CONNECTTargetValidationTests: XCTestCase {
         "a.corp.example\0X-Injected",
         "a.corp.example X-Injected",
         "a.corp.example\tX-Injected",
-        "a.corp.example/X-Injected",
-        "user@a.corp.example",
+        "a.corp.example\u{7f}X-Injected",
         "bücher.corp.example",
     ]
 
@@ -36,11 +35,18 @@ final class CONNECTTargetValidationTests: XCTestCase {
             XCTAssertTrue(TunnelAuthority.isWritable(host), host)
             XCTAssertTrue(TunnelAuthority.isWritable("\(host):443"), host)
         }
-        for host in Self.forgedHosts + ["a.corp.example\r", "a.corp.example\u{7f}"] {
+        for host in Self.forgedHosts + ["a.corp.example\r", "a.corp.example\u{1}"] {
             XCTAssertFalse(TunnelAuthority.isWritable(host), host.debugDescription)
             XCTAssertFalse(TunnelAuthority.isWritable("\(host):443"), host.debugDescription)
         }
         XCTAssertFalse(TunnelAuthority.isWritable(""))
+        // Not request-line metacharacters: what a client wrote after the authority is carried as it was sent.
+        for target in ["user@a.corp.example:443", "a.corp.example:443?sig=s#f", "a.corp.example/path:443"] {
+            XCTAssertTrue(TunnelAuthority.isWritable(target), target)
+            XCTAssertFalse(TunnelAuthority.isHostText(target), target)
+        }
+        XCTAssertTrue(TunnelAuthority.isHostText("[2001:db8::1]:443"))
+        XCTAssertEqual(TunnelAuthority.printable("a b=c\r\nd"), "a_b_c__d")
     }
 
     /// Every path that writes a CONNECT line goes through the coordinator.
@@ -96,7 +102,8 @@ final class CONNECTTargetValidationTests: XCTestCase {
     }
 
     /// The HTTP listener's parser already refuses a request line that a CR,
-    /// an LF or a space would split, and the coordinator refuses the rest.
+    /// an LF or a space would split, and the coordinator refuses the rest:
+    /// a tab, a NUL, DEL and a non-ASCII byte.
     func testTheHTTPListenerCarriesNoForgedTargetIntoACONNECT() async throws {
         let upstream = try await AuthenticatingUpstream.start(group: group, answerIP: "198.51.100.30")
         self.upstream = upstream

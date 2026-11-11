@@ -55,8 +55,8 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
     /// The runtime's transition registry is full, so the connection could
     /// not be tracked for VPN migration and was closed (#156). Local.
     case connectionTrackingFull
-    /// The tunnel's target holds a byte a host or an address is not spelled
-    /// with, so it was not written into a CONNECT (`TunnelAuthority`). Local:
+    /// The tunnel's target holds a space, a control or a non-ASCII byte, so it
+    /// was not written into a CONNECT (`TunnelAuthority.isWritable`). Local:
     /// no upstream was dialled.
     case malformedTunnelTarget
     /// The tunnel's caller gave it up while it was being dialled, such as
@@ -95,7 +95,7 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
         case .connectionTrackingFull:
             return OutboundSocketRegistry.fullMessage
         case .malformedTunnelTarget:
-            return "The tunnel's target is not a host name or an address."
+            return "The tunnel's target holds a space, a control character or a non-ASCII byte."
         case .tunnelAbandoned:
             return "The tunnel was given up before it opened."
         }

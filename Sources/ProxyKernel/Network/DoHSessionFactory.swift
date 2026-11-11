@@ -73,7 +73,7 @@ enum DoHSessionFactory {
     /// a provider configured by name is admitted by that name, and the
     /// upstream resolves it.
     static func providerAuthority(host: String, port: Int, config: ProxyConfig) -> String? {
-        guard TunnelAuthority.isWritable(host), let asked = DoHProviderHost(host) else { return nil }
+        guard TunnelAuthority.isHostText(host), let asked = DoHProviderHost(host) else { return nil }
         let providers = config.dohProviders.isEmpty ? DNSSection.defaultDoHProviders : config.dohProviders
         for provider in providers {
             guard let endpoint = upstreamRouteEndpoint(of: provider), endpoint.port == port, endpoint.host == asked else { continue }

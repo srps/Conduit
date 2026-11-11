@@ -54,7 +54,7 @@ enum DoHProviderHost: Hashable, Sendable {
             guard let encoded = components.encodedHost else { return nil }
             name = encoded.lowercased()
         }
-        guard TunnelAuthority.isWritable(name), !name.contains(where: { ":[]".contains($0) }) else { return nil }
+        guard TunnelAuthority.isHostText(name), !name.contains(where: { ":[]".contains($0) }) else { return nil }
         self = .name(name)
     }
 
