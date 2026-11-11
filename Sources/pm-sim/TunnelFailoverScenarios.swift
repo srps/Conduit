@@ -188,6 +188,92 @@ enum TunnelFailoverScenarios {
             notes: notes
         )
     }
+    /// `pm-sim upstream-local-dial-failover` (decision 0045).
+    ///
+    /// A local dial failure charges no breaker, so an upstream that can never be dialled from this machine would stay
+    /// preferred for its latency score, and a plain-HTTP request, which has no failover of its own, would fail on it
+    /// every time. P (`127.0.0.1:0`, which macOS fails with `EADDRNOTAVAIL`) has the better score; S answers.
+    ///
+    /// | # | condition                         | expected                                                        |
+    /// |---|-----------------------------------|-----------------------------------------------------------------|
+    /// | A | four plain-HTTP exchanges          | each answered through S, the first included                     |
+    /// | B | P                                  | its breaker still closed, `upstream.locally_unreachable` once   |
+    /// | C | a flap reset                       | P selectable again, with `upstream.locally_reachable`           |
+    @RuntimeActor
+    static func aLocallyUnreachableUpstreamIsPassedOver(verbose: Bool) async throws -> ScenarioResult {
+        let name = "upstreamLocalDialFailover"
+        let start = Date()
+        var notes: [String] = []
+        let group = MultiThreadedEventLoopGroup.singleton
+        let secondary = FakeUpstreamProxy(
+            group: group, originHost: "127.0.0.1", originPort: 9, requireAuth: false,
+            plainHTTPResponse: "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+        )
+        ScenarioCleanup.register { await secondary.stop() }
+        try await secondary.start()
+
+        var config = ProxyConfig()
+        config.circuitBreakerWindowSeconds = 0
+        config.circuitFailureThreshold = 2
+        config.upstreams = [
+            UpstreamProxy(name: "P", host: "127.0.0.1", port: 0, priority: 0),
+            UpstreamProxy(name: "S", host: "127.0.0.1", port: secondary.channel?.localAddress?.port ?? 0, priority: 1),
+        ]
+        let frozen = config
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let logger = RecordingLogSink(minLevel: verbose ? .debug : .info)
+        let pool = ConnectionPool(
+            group: group, logger: logger, configProvider: { frozen }, authenticatorProvider: { _ in MockAuthenticator() },
+            eventSink: { event in events.withLockedValue { $0.append(event) } }
+        )
+        ScenarioCleanup.register { pool.closeAll(scope: .all) }
+        let p = frozen.enabledUpstreams[0], s = frozen.enabledUpstreams[1]
+        pool.recordDedicatedTunnelSuccess(for: p, latencyMS: 1)
+        pool.recordDedicatedTunnelSuccess(for: s, latencyMS: 1_000)
+
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://local.example/")
+        head.headers.add(name: "Host", value: "local.example")
+        var answeredBy: [String] = []
+        for _ in 0..<4 {
+            do {
+                answeredBy.append(try await pool.exchange(head: head, body: nil).get().upstream.name)
+            } catch {
+                answeredBy.append(error.displayDescription)
+            }
+        }
+        let passA = answeredBy == ["S", "S", "S", "S"]
+        notes.append("A answeredBy=\(answeredBy)")
+
+        let named = { (event: String) in events.withLockedValue { $0 }.filter { $0.event == event }.map { $0.detail ?? "" } }
+        let circuit = pool.upstreamStatuses().first { $0.id == p.id }.map { "\($0.circuitState)" } ?? "missing"
+        let passB = circuit == "closed" && named("upstream.locally_unreachable").count == 1
+        notes.append("B circuit=\(circuit) locallyUnreachable=\(named("upstream.locally_unreachable"))")
+
+        pool.resetCircuitsAfterFlap()
+        let picked = pool.selectTunnelUpstream(excluding: [])?.proxy.name ?? "none"
+        let passC = picked == "P" && named("upstream.locally_reachable").first?.hasSuffix("reason=reset_vpn_flap") == true
+        notes.append("C picked=\(picked) locallyReachable=\(named("upstream.locally_reachable"))")
+
+        let checks = [passA, passB, passC]
+        notes.append(checks.allSatisfy { $0 }
+            ? "PASS — a locally unreachable upstream is passed over, and its requests fail over"
+            : "FAIL — see per-case lines above")
+        return ScenarioResult(
+            name: name,
+            clientCount: 4, clientsOpened: 0, clientsWithFirstByte: 0, clientsClosedEarly: 0, totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(start),
+            aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("plain-HTTP exchanges whose dial fails locally on P are answered through S", passA),
+                .init("P's breaker stays closed and it is reported once as locally unreachable", passB),
+                .init("a flap reset makes P selectable again", passC),
+            ],
+            notes: notes
+        )
+    }
+
     /// `pm-sim tunnel-local-dial-uncharged` (decision 0045).
     ///
     /// A dial that fails on this machine says nothing about the upstream, so it must not open a breaker: during a VPN

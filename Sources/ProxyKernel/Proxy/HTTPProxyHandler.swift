@@ -645,10 +645,6 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             authSource: authSource,
             forcedProxy: pacPlan.proxyChain.first
         )
-        // The upstream this exchange dials, fixed at selection: the pool's
-        // last selection may belong to a concurrent request by the time a
-        // failure is reported.
-        let exchangeUpstream = attempt.upstream.map { SensitiveValueSanitizer.observableTarget($0.endpoint) }
         attempt.result
             .hop(to: clientEL)
             .whenComplete { result in
@@ -678,6 +674,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     // The only report of this failure: the pool leaves it to
                     // its caller.
                     let observedTarget = SensitiveValueSanitizer.observableTarget(head.uri)
+                    // The upstream this exchange last dialled, not the pool's
+                    // last selection, which may belong to a concurrent request.
+                    let exchangeUpstream = attempt.upstream.map { SensitiveValueSanitizer.observableTarget($0.endpoint) }
                     let failedUpstream = Self.attributedUpstream(exchangeUpstream, for: error)
                     let message = Self.exchangeFailureMessage(target: observedTarget, upstream: failedUpstream, error: error)
                     if Self.shouldFallbackToDirectAfterProxyExchangeFailure(

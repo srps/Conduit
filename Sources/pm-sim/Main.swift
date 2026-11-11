@@ -96,6 +96,7 @@ enum PMSim {
               dns-doh-upstream-refused DNS: upstreams that answer 403 for the DoH provider fail the lookups and open no circuit breaker (0045)
               tunnel-failover-backoff Tunnels: refused dials open a breaker, and a failover asks no upstream in its backoff (0045)
               tunnel-local-dial-uncharged Tunnels: a dial that fails on this machine opens no breaker; a refused dial still does (0045)
+              upstream-local-dial-failover Upstreams: one that fails every dial locally is passed over, and plain HTTP fails over from it (0045)
               tunnel-remote-host-refused Tunnels: a proxied tunnel whose remote host a CONNECT cannot carry is refused alone, blocking nothing else (0045)
               dns-upstream-spoof      DNS: wrong-ID and QR-clear replies are dropped, never answered or cached
               dns-internal-unreachable-falls-back  DNS: a split-DNS name whose server is silent resolves through DoH
@@ -304,6 +305,7 @@ enum PMSim {
         "tunnel-failover-backoff",
         "tunnel-remote-host-refused",
         "tunnel-local-dial-uncharged",
+        "upstream-local-dial-failover",
         "dns-upstream-spoof",
         "dns-internal-unreachable-falls-back",
         "dns-ephemeral-pair-rebind",
@@ -509,6 +511,8 @@ enum PMSim {
             return [try await TunnelFailoverScenarios.aFailoverSkipsAnUpstreamInItsBackoff(verbose: verbose)]
         case "tunnel-local-dial-uncharged":
             return [try await TunnelFailoverScenarios.aLocalDialFailureOpensNoBreaker(verbose: verbose)]
+        case "upstream-local-dial-failover":
+            return [try await TunnelFailoverScenarios.aLocallyUnreachableUpstreamIsPassedOver(verbose: verbose)]
         case "tunnel-remote-host-refused":
             return [try await TunnelFailoverScenarios.aProxiedTunnelsUnwritableHostIsRefusedAlone(verbose: verbose)]
         case "dns-upstream-spoof":
