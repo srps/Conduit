@@ -100,6 +100,44 @@ final class TunnelForwarderTests: XCTestCase {
         try await targetServer.close().get()
     }
 
+    // MARK: - A remote host a proxied tunnel cannot send
+
+    /// Validation flags a proxied tunnel's non-ASCII or CR LF remote host without blocking the proxy, so the tunnel
+    /// start refuses that one tunnel, with an event, and starts the rest. A direct tunnel hands its host to getaddrinfo,
+    /// which reads a scoped address and a Unicode name, so it starts.
+    func testAProxiedTunnelWhoseRemoteHostIsNotHostTextIsRefusedAlone() async throws {
+        let logger = RecordingLogSink(minLevel: .debug)
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let pool = ConnectionPool(
+            group: group, logger: logger, configProvider: { ProxyConfig.testFixture() },
+            authenticatorProvider: { _ in StubAuthenticator() }
+        )
+        defer { pool.closeAll() }
+        let coordinator = CONNECTCoordinator(pool: pool, authenticatorProvider: { _ in StubAuthenticator() }, logger: logger)
+        let forwarder = TunnelForwarder(
+            group: group, connectCoordinator: coordinator, connectionPool: pool, logger: logger,
+            eventSink: { event in events.withLockedValue { $0.append(event) } }
+        )
+
+        let result = await forwarder.start(
+            tunnels: [
+                TunnelDefinition(localPort: 0, remoteHost: "bücher.corp.example", remotePort: 5432, proxied: true, label: "unicode"),
+                TunnelDefinition(localPort: 0, remoteHost: "db.corp.example", remotePort: 5432, proxied: true, label: "proxied"),
+                TunnelDefinition(localPort: 0, remoteHost: "fe80::1%en0", remotePort: 5432, proxied: false, label: "scoped"),
+                TunnelDefinition(localPort: 0, remoteHost: "bücher.corp.example", remotePort: 5432, proxied: false, label: "direct-unicode"),
+            ],
+            listenHost: "127.0.0.1"
+        )
+        await forwarder.stop()
+
+        XCTAssertEqual(result.bindings.map(\.label), ["proxied", "scoped", "direct-unicode"])
+        XCTAssertEqual(result.failed, 1)
+        XCTAssertEqual(
+            events.withLockedValue { $0 }.filter { $0.event == "tunnel.start_refused" }.map(\.detail),
+            ["localPort=0 remoteHost=b__cher.corp.example reason=remote_host_not_host_text"]
+        )
+    }
+
     // MARK: - Proxied tunnel through production TunnelForwarder
 
     @MainActor

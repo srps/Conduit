@@ -1412,7 +1412,8 @@ package final class ProxyOrchestrator {
         connectCoordinator: tunnelCoordinator,
         connectionPool: tunnelConnectionPool,
         logger: logStore,
-        resolverManager: resolverManager
+        resolverManager: resolverManager,
+        eventSink: { [eventLog] event in eventLog.append(event) }
     )
 
     private lazy var originResolver: any OriginResolving = DoHOriginResolver(

@@ -116,4 +116,75 @@ enum TunnelFailoverScenarios {
             notes: notes
         )
     }
+    /// `pm-sim tunnel-remote-host-refused` (decision 0045).
+    ///
+    /// A proxied tunnel writes its remote host into a CONNECT; a direct one hands it to getaddrinfo. A proxied row whose
+    /// host is a Unicode name is flagged by validation without blocking the proxy, and the tunnel start refuses that row
+    /// alone.
+    ///
+    /// | # | condition                                   | expected                                                 |
+    /// |---|---------------------------------------------|----------------------------------------------------------|
+    /// | A | validate a proxied Unicode row, a direct scoped address and a direct Unicode row | one non-blocking `invalid_tunnel_remote_host`, for the proxied row |
+    /// | B | start the tunnels                           | the two direct rows and a valid proxied row bind; the Unicode proxied row does not |
+    /// | C | the refusal                                 | one `tunnel.start_refused` naming its port and printable host |
+    @RuntimeActor
+    static func aProxiedTunnelsUnwritableHostIsRefusedAlone(verbose: Bool) async throws -> ScenarioResult {
+        let name = "tunnelRemoteHostRefused"
+        let start = Date()
+        var notes: [String] = []
+        let group = MultiThreadedEventLoopGroup.singleton
+
+        var config = ProxyConfig()
+        config.tunnels.definitions = [
+            TunnelDefinition(localPort: 0, remoteHost: "bücher.corp.example", remotePort: 5432, proxied: true, label: "proxied-unicode"),
+            TunnelDefinition(localPort: 0, remoteHost: "db.corp.example", remotePort: 5432, proxied: true, label: "proxied"),
+            TunnelDefinition(localPort: 0, remoteHost: "fe80::1%en0", remotePort: 5432, label: "direct-scoped"),
+            TunnelDefinition(localPort: 0, remoteHost: "bücher.corp.example", remotePort: 5432, label: "direct-unicode"),
+        ]
+        let problems = config.validate().map(\.check)
+        let passA = problems == ["invalid_tunnel_remote_host field=tunnels.definitions[0].remoteHost"]
+            && config.startBlockingProblems.isEmpty
+        notes.append("A problems=\(problems) blocking=\(config.startBlockingProblems.map(\.check))")
+
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let sink: @Sendable (RuntimeEvent) -> Void = { event in events.withLockedValue { $0.append(event) } }
+        let logger = RecordingLogSink(minLevel: verbose ? .debug : .info)
+        let frozen = config
+        let pool = ConnectionPool(
+            group: group, logger: logger, configProvider: { frozen }, authenticatorProvider: { _ in MockAuthenticator() }
+        )
+        ScenarioCleanup.register { pool.closeAll(scope: .all) }
+        let coordinator = CONNECTCoordinator(pool: pool, authenticatorProvider: { _ in MockAuthenticator() }, logger: logger)
+        let forwarder = TunnelForwarder(
+            group: group, connectCoordinator: coordinator, connectionPool: pool, logger: logger, eventSink: sink
+        )
+        let result = await forwarder.start(tunnels: frozen.tunnels.definitions, listenHost: "127.0.0.1")
+        await forwarder.stop()
+        let bound = result.bindings.map(\.label)
+        let passB = bound == ["proxied", "direct-scoped", "direct-unicode"] && result.failed == 1
+        notes.append("B bound=\(bound) failed=\(result.failed)")
+
+        let refused = events.withLockedValue { $0 }.filter { $0.event == "tunnel.start_refused" }.map { $0.detail ?? "" }
+        let passC = refused == ["localPort=0 remoteHost=b__cher.corp.example reason=remote_host_not_host_text"]
+        notes.append("C refused=\(refused)")
+
+        let checks = [passA, passB, passC]
+        notes.append(checks.allSatisfy { $0 }
+            ? "PASS — one proxied tunnel is refused and nothing else is held back"
+            : "FAIL — see per-case lines above")
+        return ScenarioResult(
+            name: name,
+            clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0, clientsClosedEarly: 0, totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(start),
+            aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("validation flags only the proxied Unicode row, and nothing blocks the proxy", passA),
+                .init("every other tunnel binds, the direct scoped and Unicode rows included", passB),
+                .init("the refused tunnel is reported once as tunnel.start_refused", passC),
+            ],
+            notes: notes
+        )
+    }
 }

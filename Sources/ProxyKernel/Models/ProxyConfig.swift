@@ -840,6 +840,13 @@ package struct TunnelDefinition: Codable, Equatable, Hashable, Identifiable {
         "\(localPort):\(remoteHost):\(remotePort)"
     }
 
+    /// A proxied tunnel writes `remoteHost` into the CONNECT it sends, which carries only host text. A direct tunnel hands
+    /// it to getaddrinfo, which reads a scoped address or a Unicode name, so only a proxied one is held to it. An empty
+    /// host is a row not yet typed into.
+    package var remoteHostIsUnwritable: Bool {
+        proxied && !remoteHost.isEmpty && !TunnelAuthority.isHostText(remoteHost)
+    }
+
     /// Whether replacing `existing` (same ID) with this definition closes
     /// its listener and binds a new one. `label` and `preset` are metadata
     /// and update in place. `TunnelForwarder.reconcile` and `ConfigDiff`

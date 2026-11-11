@@ -12,6 +12,9 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
     /// budget range). Named by field only: the value is not echoed.
     case unrepresentableDuration(field: String)
     case invalidHost(field: String, value: String)
+    /// A proxied port tunnel's remote host that a CONNECT cannot carry. The tunnel start refuses that one tunnel
+    /// (`tunnel.start_refused`); the proxy and every other tunnel start.
+    case invalidTunnelRemoteHost(field: String, value: String)
     /// An intercept pattern whose derived resolver domain is unusable. Carries
     /// the index so the Settings row can be pointed at, and the reason so it
     /// can say which character to change.
@@ -60,6 +63,7 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
         case .invalidDuration(let field, _): return "invalid_duration field=\(Self.fieldPath(field))"
         case .unrepresentableDuration(let field): return "unrepresentable_duration field=\(Self.fieldPath(field))"
         case .invalidHost(let field, _): return "invalid_host field=\(Self.fieldPath(field))"
+        case .invalidTunnelRemoteHost(let field, _): return "invalid_tunnel_remote_host field=\(Self.fieldPath(field))"
         case .invalidInterceptPattern(let index, _, _): return "invalid_intercept_pattern field=dns.interceptRules[\(index)]"
         case .invalidInterceptIP(let index, _): return "invalid_intercept_ip field=dns.interceptRules[\(index)]"
         case .invalidTransparentProxyIP: return "invalid_transparent_proxy_ip field=dns.transparentProxyIP"
@@ -84,6 +88,10 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
             // The transparent-proxy IP is in the same category: the listener
             // bound to it is `startTransparentProxy`, whose failure is already
             // a logged warning rather than a start failure.
+            return false
+        case .invalidTunnelRemoteHost:
+            // Only that tunnel consumes it, and the tunnel start refuses it alone. Blocking here took all proxying down
+            // for one leftover row, as an intercept rule once did.
             return false
         case .invalidPort, .invalidLimit, .invalidDuration, .unrepresentableDuration, .invalidHost, .conflict:
             return true
@@ -116,10 +124,11 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
             if field == "routing.pacURL" {
                 return "routing.pacURL must not include a username or password."
             }
-            if let ascii = Self.asciiSpelling(ofHost: value) {
-                return "\(field): '\(value)' is not a valid host. Write a Unicode name in its ASCII (punycode) form: '\(ascii)'"
-            }
             return "\(field): '\(value)' is not a valid host"
+        case .invalidTunnelRemoteHost(let field, let value):
+            let message = "\(field): '\(value)' is not a valid host for a proxied tunnel"
+            guard let ascii = Self.asciiSpelling(ofHost: value) else { return message }
+            return "\(message). Write a Unicode name in its ASCII (punycode) form: '\(ascii)'"
         case .invalidInterceptPattern(let index, let pattern, let reason):
             return "dns.interceptRules[\(index)]: '\(pattern)' does not name a usable "
                  + "resolver domain. \(reason.localizedDescription)"
@@ -383,10 +392,8 @@ extension ProxyConfig {
             let label = tunnel.effectiveLabel
             validatePort("tunnels.definitions[\(i)](\(label)).localPort", tunnel.localPort, into: &errors)
             validatePort("tunnels.definitions[\(i)](\(label)).remotePort", tunnel.remotePort, into: &errors)
-            // Written into the CONNECT a proxied tunnel sends, so held to the characters a host is spelled with. An empty
-            // host is a row not yet typed into.
-            if !tunnel.remoteHost.isEmpty, !TunnelAuthority.isHostText(tunnel.remoteHost) {
-                errors.append(.invalidHost(field: "tunnels.definitions[\(i)](\(label)).remoteHost", value: tunnel.remoteHost))
+            if tunnel.remoteHostIsUnwritable {
+                errors.append(.invalidTunnelRemoteHost(field: "tunnels.definitions[\(i)](\(label)).remoteHost", value: tunnel.remoteHost))
             }
         }
 

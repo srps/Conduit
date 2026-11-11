@@ -263,6 +263,7 @@ package final class TunnelForwarder: @unchecked Sendable {
     package let sessionTracker: TunnelSessionTracker
     private let dnsResponder: TunnelDNSResponder
     private let resolverManager: (any TunnelResolverApplying)?
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private var managedHostnames: [String] = []
     /// Last computed DNS override status. Cached so reconcile() can return an accurate value when
     /// the active proxied hostname set hasn't changed (and we skipped the DNS refresh) — without
@@ -280,8 +281,10 @@ package final class TunnelForwarder: @unchecked Sendable {
         connectCoordinator: CONNECTCoordinator,
         connectionPool: ConnectionPool,
         logger: any LogSink,
-        resolverManager: (any TunnelResolverApplying)? = nil
+        resolverManager: (any TunnelResolverApplying)? = nil,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) {
+        self.eventSink = eventSink
         self.group = group
         self.connectCoordinator = connectCoordinator
         self.connectionPool = connectionPool
@@ -317,6 +320,17 @@ package final class TunnelForwarder: @unchecked Sendable {
     private func bindTunnels(_ tunnels: [TunnelDefinition], listenHost: String) async -> BindingBatch {
         var batch = BindingBatch()
         for tunnel in tunnels where tunnel.enabled {
+            // Validation flags the row without blocking the proxy, so the one tunnel is refused here.
+            guard !tunnel.remoteHostIsUnwritable else {
+                batch.failed += 1
+                let event = RuntimeEvent(
+                    kind: .config, event: "tunnel.start_refused",
+                    detail: "localPort=\(tunnel.localPort) remoteHost=\(TunnelAuthority.printable(tunnel.remoteHost)) reason=remote_host_not_host_text"
+                )
+                eventSink?(event)
+                logger.log(.error, "\(event.event) \(event.detail ?? ""): a proxied tunnel's remote host must be ASCII host text; this tunnel was not started.", category: .tunnel)
+                continue
+            }
             do {
                 let def = tunnel
                 let tracker = self.sessionTracker

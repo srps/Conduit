@@ -86,6 +86,32 @@ final class ProxyStartGateTests: XCTestCase {
         XCTAssertNotNil(server.listeningPort)
     }
 
+    /// A port tunnel's remote host is consumed only by that tunnel. A leftover disabled row, a direct row with a scoped
+    /// address or a Unicode name (getaddrinfo reads both), and a proxied row a CONNECT cannot carry all leave the proxy
+    /// to start; the tunnel start refuses the proxied one alone.
+    func testATunnelRemoteHostNeverWithholdsTheProxyListener() async throws {
+        let rows: [(name: String, tunnel: TunnelDefinition)] = [
+            ("disabled", TunnelDefinition(localPort: 15432, remoteHost: "db.corp.example\r\nX-Injected: 1", remotePort: 5432, enabled: false, proxied: true)),
+            ("direct scoped", TunnelDefinition(localPort: 15433, remoteHost: "fe80::1%en0", remotePort: 5432, proxied: false)),
+            ("direct unicode", TunnelDefinition(localPort: 15434, remoteHost: "bücher.corp.example", remotePort: 5432, proxied: false)),
+            ("proxied unicode", TunnelDefinition(localPort: 15435, remoteHost: "bücher.corp.example", remotePort: 5432, proxied: true)),
+        ]
+        for row in rows {
+            var config = makeConfig()
+            config.tunnels.definitions = [row.tunnel]
+            XCTAssertEqual(config.startBlockingProblems.map(\.check), [String](), row.name)
+
+            let server = makeServer(config)
+            do {
+                try await server.start()
+                XCTAssertNotNil(server.listeningPort, row.name)
+            } catch {
+                XCTFail("\(row.name): \(error.localizedDescription)")
+            }
+            await server.stop()
+        }
+    }
+
     /// An intercept IP that is not an address is the same category: it is only
     /// ever written into a resolver file's synthesized answer.
     func testAnUnusableInterceptIPStillLetsTheProxyStart() async throws {
@@ -167,6 +193,7 @@ final class ProxyStartGateTests: XCTestCase {
         XCTAssertTrue(ConfigValidationError.invalidHost(field: "h", value: "!").blocksProxyStart)
         XCTAssertTrue(ConfigValidationError.conflict(description: "c").blocksProxyStart)
         XCTAssertFalse(ConfigValidationError.invalidSystemProxyBypass(reason: "too large").blocksProxyStart)
+        XCTAssertFalse(ConfigValidationError.invalidTunnelRemoteHost(field: "t", value: "\r\n").blocksProxyStart)
     }
 }
 

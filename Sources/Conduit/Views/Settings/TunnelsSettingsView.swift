@@ -147,6 +147,7 @@ struct TunnelsSettingsView: View {
         let label = binding.wrappedValue.effectiveLabel
         let localProblem = problems.message(for: "tunnels.definitions[\(index)](\(label)).localPort")
         let remoteProblem = problems.message(for: "tunnels.definitions[\(index)](\(label)).remotePort")
+        let hostProblem = problems.message(for: "tunnels.definitions[\(index)](\(label)).remoteHost")
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
@@ -201,6 +202,7 @@ struct TunnelsSettingsView: View {
                 )
                 .textFieldStyle(.roundedBorder)
                 .labelsHidden()
+                .modifier(InvalidFieldHighlight(isInvalid: hostProblem != nil))
                 .accessibilityLabel("Remote host")
 
                 Text(":")
@@ -217,6 +219,9 @@ struct TunnelsSettingsView: View {
 
             if let localProblem {
                 FieldProblem(message: localProblem)
+            }
+            if let hostProblem {
+                FieldProblem(message: hostProblem)
             }
             if let remoteProblem {
                 FieldProblem(message: remoteProblem)
