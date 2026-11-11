@@ -45,12 +45,11 @@ final class TunnelStoreCaptureTests: XCTestCase {
 
         for secret in [
             "203.0.113.77", "203.0.113.99", "198.51.100.200", "198.51.100.1", "aaaa:bbbb", "cccc:dddd", "2001:db8:ffff",
-            "vpn.corp.example", "corp", Self.wifiService, "en0", "NetworkSignature",
+            "vpn.corp.example", "corp", Self.wifiService, "en0", "NetworkSignature", "255.255", "1024",
         ] {
             XCTAssertFalse(line.contains(secret), "\(secret) is in \(line)")
         }
         XCTAssertTrue(line.contains("com.cisco.anyconnect"), "a vendor's fixed service ID is kept")
-        XCTAssertTrue(line.contains("255.255.255.0"), "a subnet mask is not an address")
     }
 
     func testTheMaskedKeysKeepWhatDetectionReads() {
@@ -82,18 +81,21 @@ final class TunnelStoreCaptureTests: XCTestCase {
 
         XCTAssertEqual(keys?["State:/Network/Interface/utun6/IPv6"], .dictionary([
             "Addresses": .array([.string("fe80::2"), .string("2001:db8::1")]),
-            "Flags": .array([.integer(0), .integer(1024)]),
-        ]), "link-local stays link-local, routable stays routable, numbers are kept")
+            "Flags": .string("<masked>"),
+        ]), "link-local stays link-local, routable stays routable, and detection never reads the flags")
+        XCTAssertEqual(keys?["State:/Network/Interface/utun6/IPv4"], .dictionary([
+            "Addresses": .array([.string("192.0.2.1")]),
+            "DestAddresses": .string("<masked>"),
+            "SubnetMasks": .string("<masked>"),
+        ]))
         XCTAssertEqual(keys?["State:/Network/Service/com.cisco.anyconnect/IPv4"], .dictionary([
             "InterfaceName": .string("utun6"),
             "Addresses": .array([.string("192.0.2.1")]),
-            "Router": .string("192.0.2.3"),
+            "Router": .string("<masked>"),
             "OverridePrimary": .integer(1),
             "ServerAddress": .string("<masked>"),
-            "AdditionalRoutes": .array([.dictionary([
-                "DestinationAddress": .string("192.0.2.2"), "SubnetMask": .string("255.255.255.255"),
-            ])]),
-        ]), "the router is an address like any other, and the same address gets the same placeholder everywhere")
+            "AdditionalRoutes": .string("<masked>"),
+        ]), "the same address gets the same placeholder in every key, and a route list keeps nothing of its shape")
     }
 
     func testAServiceThatIsNotOnATunnelIsLeftOut() throws {
@@ -205,43 +207,55 @@ final class TunnelStoreCaptureTests: XCTestCase {
         XCTAssertEqual(TunnelSnapshot.ipv6Kind("ff00::1"), .other)
     }
 
-    func testAnAddressFieldHoldsOnlyPlaceholders() {
+    func testAnAddressListKeepsItsShapeAndOnlyPlaceholders() {
+        XCTAssertEqual(fields([
+            "Addresses": ["vpn.corp.example", "203.0.113.77", 7, ["203.0.113.77"], NSNull()] as [Any],
+        ]), .dictionary([
+            "Addresses": .array([.string("<masked>"), .string("192.0.2.1"), .opaque, .opaque, .opaque]),
+        ]), "a list that was not all strings still is not, so it still reads as no addresses")
+        XCTAssertEqual(fields(["Addresses": "203.0.113.77"]), .dictionary(["Addresses": .string("192.0.2.1")]))
+        XCTAssertEqual(fields(["Addresses": ["nested": "203.0.113.77"]]), .dictionary(["Addresses": .opaque]))
+    }
+
+    func testAFieldDetectionNeverReadsKeepsItsNameAndNoneOfItsValue() {
         XCTAssertEqual(fields([
             "Router": "fe80::aaaa:bbbb%utun6",
             "ServerAddress": "203.0.113.77",
-            "DestAddresses": ["vpn.corp.example", "203.0.113.77", 7] as [Any],
-            "Gateway": ["nested": "203.0.113.77"],
+            "DestAddresses": ["vpn.corp.example", "203.0.113.77"],
+            "SubnetMasks": ["255.255.255.0"],
+            "ConfirmedInterfaceName": "utun6",
+            "Flags": [true, 0.5, Double.infinity] as [Any],
+            "PrefixLength": [64],
+            "NetworkSignature": "IPv4.Router=203.0.113.77",
+            "AdditionalRoutes": [["DestinationAddress": "203.0.113.77", "SubnetMask": "255.255.255.255"]],
+            "IncludedRoutes": [["DestinationAddress": "203.0.113.0", "SubnetMask": "255.255.255.0"]],
+            "ExcludedRoutes": "203.0.113.77",
         ]), .dictionary([
-            "Router": .string("fe80::1"),
-            "ServerAddress": .string("192.0.2.1"),
-            "DestAddresses": .array([.string("<masked>"), .string("192.0.2.1"), .opaque]),
-            "Gateway": .opaque,
-        ]), "a value that is not a string stays one, so a list that was not all strings still is not")
+            "Router": .string("<masked>"),
+            "ServerAddress": .string("<masked>"),
+            "DestAddresses": .string("<masked>"),
+            "SubnetMasks": .string("<masked>"),
+            "ConfirmedInterfaceName": .string("<masked>"),
+            "Flags": .string("<masked>"),
+            "PrefixLength": .string("<masked>"),
+            "NetworkSignature": .string("<masked>"),
+            "AdditionalRoutes": .string("<masked>"),
+            "IncludedRoutes": .string("<masked>"),
+            "ExcludedRoutes": .string("<masked>"),
+        ]), "not even how many routes there were")
     }
 
-    func testAKnownFieldHoldingTheWrongKindOfValueIsMasked() {
-        XCTAssertEqual(fields([
-            "SubnetMasks": ["255.255.255.0", "203.0.113.77", "255.0.255.0"],
-            "InterfaceName": "en0",
-            "ConfirmedInterfaceName": "utun6",
-            "OverridePrimary": "203.0.113.77",
-            "Flags": [true, 0.5, Double.infinity] as [Any],
-            "PrefixLength": Data([1, 2, 3]),
-            "NetworkSignature": "IPv4.Router=203.0.113.77",
-            "AdditionalRoutes": ["203.0.113.77", ["Gateway": "203.0.113.77", "vpn.corp.example": 1]] as [Any],
-        ]), .dictionary([
-            "SubnetMasks": .array([.string("255.255.255.0"), .string("<masked>"), .string("<masked>")]),
-            "InterfaceName": .string("<masked>"),
-            "ConfirmedInterfaceName": .string("utun6"),
-            "OverridePrimary": .opaque,
-            "Flags": .array([.bool(true), .number(0.5), .bool(NSNumber(value: Double.infinity).boolValue)]),
-            "PrefixLength": .opaque,
-            "NetworkSignature": .string("<masked>"),
-            "AdditionalRoutes": .array([
-                .string("<masked>"),
-                .dictionary(["Gateway": .string("192.0.2.1"), "<unknown-1>": .string("<masked>")]),
-            ]),
+    func testAFieldDetectionReadsKeepsTheTypeItHad() {
+        XCTAssertEqual(fields(["InterfaceName": "en0", "OverridePrimary": "203.0.113.77"]), .dictionary([
+            "InterfaceName": .string("<masked>"), "OverridePrimary": .opaque,
         ]))
+        XCTAssertEqual(fields(["InterfaceName": 6, "OverridePrimary": true]), .dictionary([
+            "InterfaceName": .opaque, "OverridePrimary": .bool(true),
+        ]))
+        XCTAssertEqual(fields(["OverridePrimary": 0.5]), .dictionary(["OverridePrimary": .number(0.5)]))
+        XCTAssertEqual(fields(["OverridePrimary": Double.infinity]), .dictionary([
+            "OverridePrimary": .bool(NSNumber(value: Double.infinity).boolValue),
+        ]), "JSON has no infinity, so only the truth detection reads is kept")
     }
 
     func testOneMaskKeepsAnAddressOnItsPlaceholderAcrossCaptures() {

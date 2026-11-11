@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 import ConduitShared
-import Darwin
 import Foundation
 import ProxyKernel
 
@@ -47,10 +46,12 @@ package indirect enum MaskedStoreValue: Equatable, Encodable, Sendable {
 /// Builds a public copy of the tunnel store keys from an allowlist. Nothing
 /// is passed through because it looks harmless: a key, a field name or a
 /// value reaches the output only if a rule here names it, and everything else
-/// is a placeholder. What detection reads survives with its type, so a masked
-/// capture parses to the same detection as the store it came from: which
-/// tunnel keys exist, which known fields they have, the shape of each address
-/// list, and whether an IPv6 address is link-local, routable or neither.
+/// is a placeholder.
+///
+/// What detection reads survives with its type, so a masked capture parses
+/// to the same detection as the store it came from: which tunnel keys exist,
+/// the shape of each `Addresses` list, each `InterfaceName`, and each
+/// `OverridePrimary`. No other value is kept.
 ///
 /// One mask gives the same placeholder to the same input every time, so a
 /// stream of captures shows an address or a service staying or changing.
@@ -62,20 +63,20 @@ package indirect enum MaskedStoreValue: Equatable, Encodable, Sendable {
 /// - A service ID becomes `service-N`, numbered in the order this mask met
 ///   them, unless it is in `knownServiceIDs`. The number says nothing about
 ///   the ID, so an ID cannot be confirmed by guessing it.
-/// - A field named in `schema` keeps its name. Any other field becomes
-///   `<unknown-N>` and its value `maskedPlaceholder`.
-/// - In an address field, an IPv4 literal becomes an RFC 5737 documentation
+/// - In `Addresses`, an IPv4 literal becomes an RFC 5737 documentation
 ///   address. An IPv6 literal becomes `fe80::N` if it is link-local,
 ///   `2001:db8::N` if it is any other unicast address, and `ff00::N` if it is
 ///   multicast, loopback or unspecified. A zone index goes with the rest. Any
 ///   other string becomes `maskedPlaceholder`, and anything that is not a
 ///   string becomes `.opaque`, so a list that was not all strings still is
 ///   not.
-/// - A subnet mask, a `utun` interface name, and a number or boolean in a
-///   numeric field are kept. Any other string in an interface name field
-///   becomes `maskedPlaceholder`, and a value in it or in a numeric field
-///   that is not of its type becomes `.opaque`.
-/// - Every other value becomes `maskedPlaceholder`.
+/// - A `utun` `InterfaceName` is kept, any other string becomes
+///   `maskedPlaceholder`, and a value that is not a string `.opaque`.
+/// - An `OverridePrimary` number or boolean is kept, and any other value
+///   becomes `.opaque`.
+/// - Any other field named in `schema` keeps its name, and its value
+///   becomes `maskedPlaceholder` whatever its structure. A field outside
+///   `schema` becomes `<unknown-N>` with that value.
 package struct TunnelStoreMask {
     /// Vendor service IDs that are the same on every machine.
     package static let knownServiceIDs: Set<String> = ["com.cisco.anyconnect"]
@@ -83,42 +84,36 @@ package struct TunnelStoreMask {
 
     /// What a known field may hold.
     private enum Field {
-        /// IP literals, each replaced by a placeholder of its kind.
-        case address
-        /// IPv4 subnet masks, kept.
-        case subnetMask
-        /// A `utun` name, kept.
+        /// `Addresses`: IP literals, each replaced by a placeholder of its kind.
+        case addresses
+        /// `InterfaceName`: a `utun` name, kept.
         case interfaceName
-        /// Numbers and booleans, kept.
-        case number
-        /// Dictionaries of these same fields.
-        case routes
-        /// The name is kept and the value never is.
+        /// `OverridePrimary`: a number or boolean, kept.
+        case flag
+        /// Detection never reads it. The name is kept and the value never is.
         case opaque
     }
 
     /// The fields of `State:/Network/Interface/<utun>/IPv4|IPv6` and
-    /// `State:/Network/Service/<id>/IPv4|IPv6`, and of their route entries.
+    /// `State:/Network/Service/<id>/IPv4|IPv6`.
     private static let schema: [String: Field] = [
-        "Addresses": .address,
-        "DestAddresses": .address,
-        "BroadcastAddresses": .address,
-        "Router": .address,
-        "ServerAddress": .address,
-        "DestinationAddress": .address,
-        "Gateway": .address,
-        "ARPResolvedIPAddress": .address,
-        "SubnetMasks": .subnetMask,
-        "SubnetMask": .subnetMask,
+        "Addresses": .addresses,
         "InterfaceName": .interfaceName,
-        "ConfirmedInterfaceName": .interfaceName,
-        "OverridePrimary": .number,
-        "Flags": .number,
-        "PrefixLength": .number,
-        "AdditionalRoutes": .routes,
-        "ExcludedRoutes": .routes,
-        "IncludedRoutes": .routes,
+        "OverridePrimary": .flag,
+        "DestAddresses": .opaque,
+        "BroadcastAddresses": .opaque,
+        "Router": .opaque,
+        "ServerAddress": .opaque,
+        "SubnetMasks": .opaque,
+        "SubnetMask": .opaque,
+        "ConfirmedInterfaceName": .opaque,
+        "Flags": .opaque,
+        "PrefixLength": .opaque,
+        "AdditionalRoutes": .opaque,
+        "ExcludedRoutes": .opaque,
+        "IncludedRoutes": .opaque,
         "ARPResolvedHardwareAddress": .opaque,
+        "ARPResolvedIPAddress": .opaque,
         "ConfigMethod": .opaque,
         "NetworkSignature": .opaque,
     ]
@@ -197,29 +192,20 @@ package struct TunnelStoreMask {
     }
 
     private mutating func mask(_ value: Any, as field: Field) -> MaskedStoreValue {
-        switch (field, value) {
-        case (.address, let list as [Any]):
+        switch field {
+        case .addresses:
+            guard let list = value as? [Any] else { return mask(address: value) }
             return .array(list.map { mask(address: $0) })
-        case (.address, _):
-            return mask(address: value)
-        case (_, let list as [Any]):
-            return .array(list.map { mask($0, as: field) })
-        case (.subnetMask, let text as String) where Self.isSubnetMask(text):
-            return .string(text)
-        case (.interfaceName, let text as String):
+        case .interfaceName:
+            guard let text = value as? String else { return .opaque }
             return .string(PushedResolverReading.isTunnelInterface(text) ? text : Self.maskedPlaceholder)
-        case (.interfaceName, _):
-            return .opaque
-        case (.number, let number as NSNumber):
+        case .flag:
+            guard let number = value as? NSNumber else { return .opaque }
             if CFGetTypeID(number) == CFBooleanGetTypeID() { return .bool(number.boolValue) }
             if !CFNumberIsFloatType(number) { return .integer(number.int64Value) }
             // JSON has no infinity or NaN, and detection reads only the truth.
             return number.doubleValue.isFinite ? .number(number.doubleValue) : .bool(number.boolValue)
-        case (.number, _):
-            return .opaque
-        case (.routes, let route as [String: Any]):
-            return mask(fields: route)
-        default:
+        case .opaque:
             return .string(Self.maskedPlaceholder)
         }
     }
@@ -257,14 +243,6 @@ package struct TunnelStoreMask {
         let made = make(table.count)
         table[text] = made
         return made
-    }
-
-    /// A dotted quad of ones followed by zeros, as `255.255.255.0`.
-    private static func isSubnetMask(_ text: String) -> Bool {
-        var parsed = in_addr()
-        guard IPAddressSyntax.isIPv4(text), inet_pton(AF_INET, text, &parsed) == 1 else { return false }
-        let zeros = ~UInt32(bigEndian: parsed.s_addr)
-        return zeros & (zeros &+ 1) == 0
     }
 }
 
