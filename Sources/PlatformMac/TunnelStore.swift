@@ -106,8 +106,10 @@ extension TunnelSnapshot {
 /// A live subscription to store changes. It owns one store session.
 package protocol TunnelStoreSubscription: AnyObject, Sendable {
     /// Ends the session. A failure means the store refused to detach the
-    /// queue; the session is released either way. A second cancel does
-    /// nothing and succeeds.
+    /// queue. The subscription lets go of its session either way, but a
+    /// queue the store did not detach can go on calling `onChange`, so the
+    /// subscriber reports the failure and ignores calls from that session.
+    /// A second cancel does nothing and succeeds.
     ///
     /// The owner cancels before it lets go: a subscription released
     /// uncancelled keeps its session and its handler alive.

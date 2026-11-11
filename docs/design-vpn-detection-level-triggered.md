@@ -34,7 +34,7 @@ Treat every input as a prompt to read the whole store and reconcile. A notificat
 
 `TunnelReading` is `.snapshot(TunnelSnapshot)` or `.failed(Failure)`. A `Failure` names the step that failed (`storeCreate`, `storeSubscribe`, `storeRead`, or `storeUnsubscribe`) and carries the `SCError()` code read straight after the call. A failure is a value the caller must handle, so it cannot be silent.
 
-`TunnelStoreReading` (in `PlatformMac`) is the store as detection uses it. `read()` returns a `TunnelReading`. `subscribe(queue:onChange:)` returns a subscription or a failure. `onChange` carries no keys, so a subscriber cannot act on a delta. A subscription owns one store session. `cancel()` ends the session and returns a failure if the store refused to detach the queue. The owner must cancel before it releases a subscription. A debug build traps on one released uncancelled, because the store session would outlive it.
+`TunnelStoreReading` (in `PlatformMac`) is the store as detection uses it. `read()` returns a `TunnelReading`. `subscribe(queue:onChange:)` returns a subscription or a failure. `onChange` carries no keys, so a subscriber cannot act on a delta. A subscription owns one store session. `cancel()` ends the session and returns a failure if the store refused to detach the queue. After a failed cancel the store can go on calling `onChange`, so the subscriber reports the failure and ignores calls from that session. The owner must cancel before it releases a subscription. A debug build traps on one released uncancelled, because the store session would outlive it.
 
 `SystemTunnelStore` is the `SCDynamicStore` implementation. It keeps one session for reads and drops it after a read fails, so the next read opens a new one.
 
