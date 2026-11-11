@@ -235,7 +235,8 @@ package enum PrivateConfigurationBridge {
                 },
                 transparentProxyEnabled: dns.transparentProxyEnabled,
                 transparentProxyIP: dns.transparentProxyIP,
-                transparentProxyPort: dns.transparentProxyPort
+                transparentProxyPort: dns.transparentProxyPort,
+                followVPNResolvers: dns.followVPNResolvers
             ),
             tunnels: PrivateTunnelSettings(
                 definitions: tunnels.definitions.map { definition in
@@ -346,7 +347,8 @@ package enum PrivateConfigurationBridge {
                 },
                 transparentProxyEnabled: dns.transparentProxyEnabled,
                 transparentProxyIP: dns.transparentProxyIP,
-                transparentProxyPort: dns.transparentProxyPort
+                transparentProxyPort: dns.transparentProxyPort,
+                followVPNResolvers: dns.followVPNResolvers
             ),
             tunnels: TunnelSection(
                 definitions: tunnels.definitions.map { definition in

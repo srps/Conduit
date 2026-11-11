@@ -219,6 +219,7 @@ enum RuntimeHostEffectsScenario {
             }(),
             networkLocationStoreFactory: { _ in locations },
             vpnStatusMonitor: { _, _ in vpn },
+            pushedResolvers: FakePushedResolverObserver(),
             wake: wake,
             homeDirectory: home,
             resolverDirectory: machine.resolverDirectory.path,

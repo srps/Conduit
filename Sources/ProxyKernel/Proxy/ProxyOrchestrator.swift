@@ -151,6 +151,9 @@ package struct ProxyOrchestratorSnapshot: Sendable, Equatable, Codable {
     /// distinguish "TGT missing" from "TGT expired" without round-tripping
     /// through the event stream.
     package var lastAuthFallbackReason: String?
+    /// The split-DNS set the connected tunnel pushed, as Settings shows it. Set only by
+    /// `ProxyOrchestrator.applyDetectedSplitDNSRules`; `.none` in a snapshot written before the field existed.
+    package var detectedSplitDNS: DetectedSplitDNSDisplay
 
     package init(
         runtimeStatus: ProxyRuntimeStatus = .initial,
@@ -173,7 +176,8 @@ package struct ProxyOrchestratorSnapshot: Sendable, Equatable, Codable {
         bindings: ProxyOrchestratorBindings = .init(),
         lastAuthOutcome: RuntimeAuthOutcome? = nil,
         lastAuthOutcomeAt: Date? = nil,
-        lastAuthFallbackReason: String? = nil
+        lastAuthFallbackReason: String? = nil,
+        detectedSplitDNS: DetectedSplitDNSDisplay = .none
     ) {
         self.runtimeStatus = runtimeStatus
         self.activeConnections = activeConnections
@@ -196,7 +200,58 @@ package struct ProxyOrchestratorSnapshot: Sendable, Equatable, Codable {
         self.lastAuthOutcome = lastAuthOutcome
         self.lastAuthOutcomeAt = lastAuthOutcomeAt
         self.lastAuthFallbackReason = lastAuthFallbackReason
+        self.detectedSplitDNS = detectedSplitDNS
     }
+
+    package init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        runtimeStatus = try c.decode(ProxyRuntimeStatus.self, forKey: .runtimeStatus)
+        activeConnections = try c.decode(ActiveConnectionStore.self, forKey: .activeConnections)
+        upstreamStatuses = try c.decode([UpstreamRuntimeStatus].self, forKey: .upstreamStatuses)
+        directModeCause = try c.decode(DirectModeCause.self, forKey: .directModeCause)
+        vpnState = try c.decode(VPNObservedState.self, forKey: .vpnState)
+        vpnInterfaceName = try c.decodeIfPresent(String.self, forKey: .vpnInterfaceName)
+        proxyError = try c.decodeIfPresent(String.self, forKey: .proxyError)
+        dnsError = try c.decodeIfPresent(String.self, forKey: .dnsError)
+        dnsRunState = try c.decode(ModuleRunState.self, forKey: .dnsRunState)
+        dnsQueryCount = try c.decode(Int.self, forKey: .dnsQueryCount)
+        dnsDoHFallbackCount = try c.decode(Int.self, forKey: .dnsDoHFallbackCount)
+        dnsCacheHitCount = try c.decode(Int.self, forKey: .dnsCacheHitCount)
+        tunnelsRunState = try c.decode(ModuleRunState.self, forKey: .tunnelsRunState)
+        tunnelsError = try c.decodeIfPresent(String.self, forKey: .tunnelsError)
+        tunnelActiveCount = try c.decode(Int.self, forKey: .tunnelActiveCount)
+        tunnelSessionCount = try c.decode(Int.self, forKey: .tunnelSessionCount)
+        tunnelDNSOverrideStatus = try c.decode(TunnelDNSOverrideStatus.self, forKey: .tunnelDNSOverrideStatus)
+        bindings = try c.decode(ProxyOrchestratorBindings.self, forKey: .bindings)
+        lastAuthOutcome = try c.decodeIfPresent(RuntimeAuthOutcome.self, forKey: .lastAuthOutcome)
+        lastAuthOutcomeAt = try c.decodeIfPresent(Date.self, forKey: .lastAuthOutcomeAt)
+        lastAuthFallbackReason = try c.decodeIfPresent(String.self, forKey: .lastAuthFallbackReason)
+        detectedSplitDNS = try c.decodeIfPresent(DetectedSplitDNSDisplay.self, forKey: .detectedSplitDNS) ?? .none
+    }
+}
+
+/// The host input that changed the detected split-DNS rules: the `reason` of `dns.split_table_changed`. A config
+/// change is not a case, because the orchestrator's `config` setter sees it and reports `reason=config` itself.
+package enum DetectedSplitDNSChangeReason: String, Hashable, Sendable {
+    /// A pushed-resolver reading.
+    case pushed
+    /// A VPN report of `.connected` or `.unknown`.
+    case vpnConnected = "vpn_connected"
+    /// A VPN report of `.disconnected`.
+    case vpnDisconnected = "vpn_disconnected"
+    /// A VPN report of `.reasserting`.
+    case flapHeld = "flap_held"
+    /// Detection stopped, so the host pushed no rules.
+    case detectionOff = "detection_off"
+    /// A reading that could not read the store, so the host pushed no rules.
+    case detectionFailed = "detection_failed"
+}
+
+/// The forwarder's split-DNS state: the rules the host last pushed, and the table merged from them and the manual
+/// entries. Queries read `table`; nothing merges per query.
+private struct SplitDNSState: Sendable {
+    var detected: [SplitDNSRule]
+    var table: SplitDNSTable
 }
 
 package enum ProxyOrchestratorEvent: Sendable {
@@ -673,7 +728,42 @@ package final class ProxyOrchestrator {
 
     package var config: ProxyConfig {
         get { configBox.current }
-        set { configBox.current = newValue }
+        set {
+            // `configBox` first, as `configSnapshotProvider` requires. Every config write passes here, direct ones
+            // included, so the forwarder's table never keeps entries the config no longer has.
+            configBox.current = newValue
+            swapSplitDNSTable(reason: "config")
+        }
+    }
+
+    /// The detected half of the forwarder's split-DNS table from now on. The merged table is
+    /// `SplitDNSTable(manual: config.dnsEntries, detected: rules)`; a change swaps it and emits
+    /// `dns.split_table_changed`. Never restarts the forwarder, and is safe before it has started.
+    package func applyDetectedSplitDNSRules(
+        _ rules: [SplitDNSRule], display: DetectedSplitDNSDisplay, reason: DetectedSplitDNSChangeReason
+    ) {
+        swapSplitDNSTable(detected: rules, reason: reason.rawValue)
+        if snapshot.detectedSplitDNS != display {
+            mutateSnapshot { $0.detectedSplitDNS = display }
+        }
+    }
+
+    /// Rebuilds the merged table from the current config and `detected`, or the stored rules when nil.
+    private func swapSplitDNSTable(detected: [SplitDNSRule]? = nil, reason: String) {
+        let manual = configBox.current.dnsEntries
+        let swapped = splitDNSBox.withLockedValue { state -> SplitDNSTable? in
+            if let detected { state.detected = detected }
+            let table = SplitDNSTable(manual: manual, detected: state.detected)
+            guard table != state.table else { return nil }
+            state.table = table
+            return table
+        }
+        guard let table = swapped else { return }
+        let detectedDomains = table.rules.count { $0.origins.contains { $0 != .manual } }
+        let manualDomains = SplitDNSTable.manualDomainCount(in: manual)
+        let detail = "detected_domains=\(detectedDomains) manual_domains=\(manualDomains) rules=\(table.rules.count) reason=\(reason)"
+        emitEvent(.health, "dns.split_table_changed", detail: detail)
+        logStore.log(.notice, "Split-DNS table changed: \(detail)", category: .network)
     }
 
     /// Whether the proxy listener is in a state that can meaningfully service
@@ -1082,6 +1172,9 @@ package final class ProxyOrchestrator {
     /// `@Sendable` DoH transport preference (NIO handlers cannot read the owner's
     /// snapshot). Updated in `handleVPNStateChange`.
     private let vpnConnectedForDNSBox = NIOLockedValueBox(false)
+    /// The forwarder's split-DNS table, in a box for the same reason. Written only by `swapSplitDNSTable`.
+    private let splitDNSBox: NIOLockedValueBox<SplitDNSState>
+    private let dnsForwarderTuning: DNSForwarderTuning
 
     /// Phase 4: Monotonic instant of the most recent `.connected → .reasserting`
     /// transition, read from `flapClock.elapsedNow` so a wall-clock step cannot
@@ -1158,6 +1251,7 @@ package final class ProxyOrchestrator {
         group: MultiThreadedEventLoopGroup.singleton,
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
+        splitDNSProvider: { [splitDNSBox] in splitDNSBox.withLockedValue { $0.table } },
         preferProxyPathForDoH: { [vpnConnectedForDNSBox] in
             vpnConnectedForDNSBox.withLockedValue { $0 }
         },
@@ -1173,6 +1267,7 @@ package final class ProxyOrchestrator {
                 s.emitSnapshotCoalesced()
             }
         },
+        tuning: dnsForwarderTuning,
         eventSink: { [eventLog] event in eventLog.append(event) }
     )
 
@@ -1327,8 +1422,10 @@ package final class ProxyOrchestrator {
         strandedResweepDelays: [Duration] = [.seconds(2), .seconds(10)],
         strandedResweepSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         directReprobeInterval: @escaping @Sendable (DirectModeCause) -> TimeInterval = ProxyOrchestrator.directReprobeInterval(for:),
-        flapClock: VPNFlapClock = .system
+        flapClock: VPNFlapClock = .system,
+        dnsForwarderTuning: DNSForwarderTuning = DNSForwarderTuning()
     ) {
+        self.dnsForwarderTuning = dnsForwarderTuning
         self.reprobeInterval = directReprobeInterval
         self.flapClock = flapClock
         self.connectivityProbe = connectivityProbe
@@ -1344,6 +1441,9 @@ package final class ProxyOrchestrator {
         self.eventLog = eventLog
         let configBox = ProxyConfigBox(config)
         self.configBox = configBox
+        self.splitDNSBox = NIOLockedValueBox(
+            SplitDNSState(detected: [], table: SplitDNSTable(manual: config.dnsEntries, detected: []))
+        )
         // Capture the box once at init for the snapshot-provider closure.
         // `[configBox]` keeps the closure self-contained; reading its
         // `current` property is one lock acquire and one struct copy.
@@ -1765,6 +1865,10 @@ package final class ProxyOrchestrator {
             $0.bindings.dnsPort = nil
         }
     }
+
+    /// Whether the latest DNS start or stop admitted is a start. It stays true through a restart for a DNS edit, which passes through
+    /// `dnsRunState == .stopped`, and through a failed start, so a reader that follows the forwarder reads this beside the run state.
+    package var dnsForwarderAdmitted: Bool { dnsLifecycle.admitsRunning }
 
     /// Restarts the running forwarder on the applied config as one operation under `epoch`, the running start the caller found admitted:
     /// a start or stop admitted after it supersedes the restart, which neither rebinds nor publishes after that operation.

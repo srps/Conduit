@@ -220,16 +220,6 @@ package enum DNSWireFormat {
         return nil
     }
 
-    package static func isInternalDomain(_ domain: String, config: ProxyConfig) -> Bool {
-        enabledDNSEntryDomain(containing: domain, config: config) != nil || isMulticastDNSName(domain)
-    }
-
-    /// The domain of the enabled split-DNS entry that `domain` is at or under,
-    /// the longest when several match, lowercased, or nil when there is none.
-    package static func enabledDNSEntryDomain(containing domain: String, config: ProxyConfig) -> String? {
-        SplitDNSTable(manual: config.dnsEntries, detected: []).rule(matching: domain)?.domain
-    }
-
     /// Whether `domain` is a `.local` name, which belongs to multicast DNS and
     /// never has a public answer.
     package static func isMulticastDNSName(_ domain: String) -> Bool {
@@ -336,7 +326,7 @@ package enum DNSWireFormat {
         emptyDNSResponse(originalQuery: originalQuery, rcode: 2)
     }
 
-    static func emptyDNSResponse(originalQuery: [UInt8], rcode: UInt8) -> [UInt8]? {
+    package static func emptyDNSResponse(originalQuery: [UInt8], rcode: UInt8) -> [UInt8]? {
         guard originalQuery.count >= 12, hasExactlyOneQuestion(originalQuery) else { return nil }
 
         let txID = Array(originalQuery[0..<2])

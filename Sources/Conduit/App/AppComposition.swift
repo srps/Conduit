@@ -131,6 +131,7 @@ extension AppComposition {
                 vpnStatusMonitor: { graceSeconds, minVisibleSeconds in
                     VPNStatusMonitor(graceSecondsProvider: graceSeconds, minVisibleSecondsProvider: minVisibleSeconds)
                 },
+                pushedResolvers: PushedResolverMonitor(),
                 wake: WorkspaceSystemWakeObserver(),
                 homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
                 resolverDirectory: "/etc/resolver",

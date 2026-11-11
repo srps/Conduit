@@ -65,7 +65,24 @@ package enum RuntimeSnapshotControlProjection {
             vpnFlap: try vpnFlapMetrics(status.metrics),
             collections: try collections(snapshot, revisions: collectionRevisions),
             appliedState: .unavailable(.pendingAppliedStateSlice),
+            detectedSplitDNS: detectedSplitDNS(snapshot.detectedSplitDNS),
             displayNotices: notices.canonicalNotices
+        )
+    }
+
+    /// The pushed split-DNS set, value for value. Its text is domains, IP literals and interface names the platform
+    /// boundary already validated, so none of it goes through the display policy.
+    static func detectedSplitDNS(_ display: DetectedSplitDNSDisplay) -> ControlDetectedSplitDNS {
+        let state: ControlDetectedSplitDNSState = switch display.state {
+        case .inUse: .inUse
+        case .held: .held
+        case .idle: .idle
+        }
+        return ControlDetectedSplitDNS(
+            state: state,
+            rows: display.rows.map {
+                ControlDetectedSplitDNSRow(interface: $0.interface, domains: $0.domains, servers: $0.servers)
+            }
         )
     }
 

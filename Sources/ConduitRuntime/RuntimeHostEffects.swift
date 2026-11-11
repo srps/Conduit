@@ -82,6 +82,9 @@ package struct RuntimeHostEffects: Sendable {
     package let networkLocation: any NetworkLocationObserving
     package let networkLocationStoreFactory: @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?
     package let vpnStatusMonitor: RuntimeVPNStatusMonitorFactory
+    /// The resolvers a connected VPN pushes (decision 0044). Production reads the dynamic store's DNS keys
+    /// (`PushedResolverMonitor`); a test or simulator emits readings from `FakePushedResolverObserver`.
+    package let pushedResolvers: any PushedResolverObserving
     /// The system wake source, observed from open until the quit. The daemon names the inert adapter; the app composition names the
     /// workspace adapter, so this target imports no AppKit.
     package let wake: any SystemWakeObserving
@@ -111,6 +114,7 @@ package struct RuntimeHostEffects: Sendable {
         networkLocation: any NetworkLocationObserving,
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?,
         vpnStatusMonitor: @escaping RuntimeVPNStatusMonitorFactory,
+        pushedResolvers: any PushedResolverObserving,
         wake: any SystemWakeObserving,
         homeDirectory: URL,
         resolverDirectory: String,
@@ -130,6 +134,7 @@ package struct RuntimeHostEffects: Sendable {
         self.networkLocation = networkLocation
         self.networkLocationStoreFactory = networkLocationStoreFactory
         self.vpnStatusMonitor = vpnStatusMonitor
+        self.pushedResolvers = pushedResolvers
         self.wake = wake
         self.homeDirectory = homeDirectory
         self.resolverDirectory = resolverDirectory

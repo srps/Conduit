@@ -96,6 +96,9 @@ final class InteractiveHostHarness {
         /// What the injected DNS probe answers; a launch-recovery test names one that times out before `makeHost()`.
         var dnsProbe = FakeDNSProbe()
         let vpn = FakeVPNStatusObserver()
+        let pushedResolvers = FakePushedResolverObserver()
+        /// Where the forwarder reaches its split-DNS servers; a split-DNS test points them at loopback sockets before `makeHost()`.
+        var dnsForwarderTuning = DNSForwarderTuning()
         /// The PAC evaluator the orchestrator fetches through; a test that holds a Start before its bind names a `HeldPACFetch`.
         var pacEvaluator: any PacEvaluator = FakePacEvaluator()
         /// The state-file access the host's store uses; a test that parks a store step names a `HeldStateFileRead`.
@@ -160,13 +163,15 @@ final class InteractiveHostHarness {
                     networkLocation: FakeNetworkLocationObserver(),
                     networkLocationStoreFactory: { _ in nil },
                     vpnStatusMonitor: { _, _ in vpn },
+                    pushedResolvers: pushedResolvers,
                     wake: FakeSystemWakeObserver(),
                     homeDirectory: directory.appendingPathComponent("home", isDirectory: true),
                     resolverDirectory: machine.resolverDirectory.path,
                     stateFiles: stateFiles
                 ),
                 reapplyRetrySchedule: ConfigReapplyRetry.Schedule(delays: [.seconds(3600)]),
-                splitDNSHelperCheckInterval: .seconds(3600)
+                splitDNSHelperCheckInterval: .seconds(3600),
+                dnsForwarderTuning: dnsForwarderTuning
             )
             await built.awaitLaunchRecovery()
             host = built

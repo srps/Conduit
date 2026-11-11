@@ -792,7 +792,8 @@ enum PrivateConfigSamples {
                         interceptIP: "127.0.0.2", enabled: false
                     ),
                 ],
-                transparentProxyEnabled: false, transparentProxyIP: "127.44.3.0", transparentProxyPort: 10_443
+                transparentProxyEnabled: false, transparentProxyIP: "127.44.3.0", transparentProxyPort: 10_443,
+                followVPNResolvers: true
             ),
             tunnels: PrivateTunnelSettings(
                 definitions: [

@@ -268,7 +268,7 @@ final class PrivateEditorReplyCodecTests: XCTestCase {
     }
 
     /// The exact body of `PrivateEditorMaximumFixture.reply`, pinned so a change to the reply shape shows its cost.
-    static let maximumReplyBodyBytes = 7_487_859
+    static let maximumReplyBodyBytes = 7_487_886
 
     // MARK: - Redaction and coding
 

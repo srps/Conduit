@@ -37,6 +37,7 @@ extension RuntimeHostEffects {
             vpnStatusMonitor: { graceSeconds, minVisibleSeconds in
                 VPNStatusMonitor(graceSecondsProvider: graceSeconds, minVisibleSecondsProvider: minVisibleSeconds)
             },
+            pushedResolvers: PushedResolverMonitor(),
             // The daemon has no workspace session, so it hears no wake; the app composition will name the workspace adapter.
             wake: InertSystemWakeObserver(),
             homeDirectory: homeDirectory,

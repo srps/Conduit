@@ -446,6 +446,7 @@ The one surviving match is the orchestrator's internal box. `VPNStatusMonitor`'s
 - **System**: manage system proxy, environment variables, DNS resolvers
 - **DNS**: forwarder port, DoH providers, manage system DNS
 - **DNS intercept**: `dnsInterceptRules` (pattern, interceptIP, enabled), `transparentProxyEnabled`, `transparentProxyIP`, `transparentProxyPort`
+- **Split DNS from the VPN**: `dnsFollowVPNResolvers` (default on; decision 0044)
 - **Tunnels**: `tunnelDefinitions` (local port, remote host/port, proxied flag, preset, label), `maxTunnelSessions`, `maxSessionsPerTunnel`
 - **Limits**: max connections, stalled timeout, body buffer limit, connection thresholds
 - **Behavior**: gateway mode, strict mode, auto VPN enable/disable, verbose logging

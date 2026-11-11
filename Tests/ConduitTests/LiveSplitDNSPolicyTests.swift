@@ -46,6 +46,21 @@ final class LiveSplitDNSPolicyTests: XCTestCase {
         XCTAssertEqual(policy.display.state, .held)
     }
 
+    func testAFailedReadingHoldsNothingUnderAnyVerdict() {
+        for state in [VPNObservedState.connected, .reasserting, .unknown] {
+            var policy = policy()
+            _ = policy.update(gate: gate(state), reading: reading(corp))
+
+            XCTAssertTrue(policy.update(gate: gate(state), reading: PushedResolverReading(failure: .storeRead)), "\(state)")
+            XCTAssertEqual(policy.detectedInUse, [], "\(state)")
+            XCTAssertEqual(policy.detectedRules, [], "\(state)")
+            XCTAssertFalse(policy.update(gate: gate(state), reading: policy.lastReading), "a verdict brings nothing back")
+
+            XCTAssertTrue(policy.update(gate: gate(state), reading: reading(lab)))
+            XCTAssertEqual(policy.detectedInUse, [lab], "the next reading the store gives is applied as any other")
+        }
+    }
+
     func testReassertingEmptyKeepsAndNonEmptyReplaces() {
         var policy = policy()
         _ = policy.update(gate: gate(.connected), reading: reading(corp))

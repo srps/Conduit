@@ -1012,9 +1012,13 @@ package final class FakePushedResolverObserver: PushedResolverObserving, @unchec
     private let lock = NSLock()
     private var callback: (@Sendable (PushedResolverReading) -> Void)?
     private var started = false
+    private var starts = 0
     private var primed: PushedResolverReading?
 
     package init() {}
+
+    /// Stopped-to-started transitions so far.
+    package var startCount: Int { lock.withLock { starts } }
 
     package var primedReading: PushedResolverReading? {
         get { lock.withLock { primed } }
@@ -1031,6 +1035,7 @@ package final class FakePushedResolverObserver: PushedResolverObserving, @unchec
     package func start() {
         let delivery = lock.withLock { () -> (() -> Void)? in
             defer { started = true }
+            if !started { starts += 1 }
             guard !started, let primed, let callback else { return nil }
             return { callback(primed) }
         }

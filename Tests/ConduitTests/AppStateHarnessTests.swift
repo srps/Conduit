@@ -126,6 +126,7 @@ final class AppStateHarness {
                 networkLocation: locationObserver,
                 networkLocationStoreFactory: { _ in locationStore },
                 vpnStatusMonitor: { _, _ in vpn },
+                pushedResolvers: FakePushedResolverObserver(),
                 wake: wake,
                 homeDirectory: homeDirectory,
                 resolverDirectory: machine.resolverDirectory.path,

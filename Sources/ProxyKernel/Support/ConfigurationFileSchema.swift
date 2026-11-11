@@ -203,7 +203,7 @@ package enum ConfigurationFileSchema {
              .maxSessionsPerTunnel, .transparentProxyPort:
             .number
         case .socksEnabled, .localPACEnabled, .pacRoutingEnabled, .strictMode, .verboseLogging, .auditLogEnabled,
-             .gatewayMode, .dnsForwarderEnabled, .transparentProxyEnabled:
+             .gatewayMode, .dnsForwarderEnabled, .transparentProxyEnabled, .dnsFollowVPNResolvers:
             .bool
         case .authMode:
             .decodedString

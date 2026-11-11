@@ -167,8 +167,8 @@ imports only `ConduitShared` (no XCTest, no `@testable`), so a Release probe can
 with `-package-name conduit`. Every approved count and UTF-8 ceiling comes from
 `DomainResourceField`; every text byte is a six-byte escape; the bypass list sits exactly on
 its canonical aggregate; numbers take their widest spelling and baselines are `UInt64.max`.
-It is a wire-width maximum, not a storability claim. Its reply body counts **7,487,859
-bytes** (frame 7,487,875), under the 8,388,608-byte cap by 900,733 bytes, in the
+It is a wire-width maximum, not a storability claim. Its reply body counts **7,487,886
+bytes** (frame 7,487,902), under the 8,388,608-byte cap by 900,706 bytes, in the
 debug counting pass, which is deterministic. `PrivateEditorReplyCodecTests` pins it, and
 round-trips the full reply through the reader and decoder. Release lifetimes, host and
 client coexistence and Stop/status latency are not measured here.

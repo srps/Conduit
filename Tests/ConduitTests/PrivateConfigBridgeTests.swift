@@ -41,6 +41,7 @@ final class PrivateConfigBridgeTests: XCTestCase {
         "dnsInterceptRules": "runtime.dns.interceptRules",
         "transparentProxyEnabled": "runtime.dns.transparentProxyEnabled",
         "transparentProxyIP": "runtime.dns.transparentProxyIP", "transparentProxyPort": "runtime.dns.transparentProxyPort",
+        "dnsFollowVPNResolvers": "runtime.dns.followVPNResolvers",
         "tunnelDefinitions": "runtime.tunnels.definitions", "maxTunnelSessions": "runtime.tunnels.maxSessions",
         "maxSessionsPerTunnel": "runtime.tunnels.maxSessionsPerTunnel",
         "healthCheckURL": "runtime.health.checkURL", "healthCheckIntervalSeconds": "runtime.health.checkIntervalSeconds",
@@ -75,8 +76,8 @@ final class PrivateConfigBridgeTests: XCTestCase {
         // `Codable` omits a nil optional. `richConfig` sets `auditLogPath`, so the key is present here.
         // A config with no audit path would encode without the key, and the inventory would not see it.
         XCTAssertNotNil(object["auditLogPath"])
-        // 55 stored keys, plus `schemaVersion`, which the encoder also writes and the DTO omits.
-        XCTAssertEqual(Self.legacyKeyPaths.count, 55)
+        // 56 stored keys, plus `schemaVersion`, which the encoder also writes and the DTO omits.
+        XCTAssertEqual(Self.legacyKeyPaths.count, 56)
     }
 
     func testEnumMirrorsMatchTheKernelRawValues() {
@@ -539,7 +540,8 @@ final class PrivateConfigBridgeTests: XCTestCase {
             dohProviders: ["https://1.1.1.1/dns-query?key=DOH-SECRET-1", "https://9.9.9.9/dns-query"],
             entries: [DomainDNSEntry(id: uuid(41), domain: "corp.example.test", servers: ["10.1.2.3", "10.1.2.4"], enabled: true)],
             interceptRules: [DNSInterceptRule(id: uuid(51), pattern: "*.intercept.example.test", interceptIP: "127.44.3.9", enabled: false)],
-            transparentProxyEnabled: true, transparentProxyIP: "127.44.3.1", transparentProxyPort: 10_444
+            transparentProxyEnabled: true, transparentProxyIP: "127.44.3.1", transparentProxyPort: 10_444,
+            followVPNResolvers: false
         )
         config.tunnels = TunnelSection(
             definitions: [

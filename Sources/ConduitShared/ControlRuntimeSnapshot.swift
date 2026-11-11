@@ -247,6 +247,54 @@ package struct ControlTunnelDNSSummary: Codable, Sendable, Equatable {
     }
 }
 
+/// Whether the split-DNS set a VPN pushed is in use (decision 0044).
+package enum ControlDetectedSplitDNSState: String, Codable, Sendable, Equatable, CaseIterable {
+    /// The VPN gate allows the set and a resolver from the last reading is in use.
+    case inUse = "in_use"
+    /// The VPN gate allows the set, the last reading put nothing in use, and the previous set stays in use.
+    case held
+    /// The VPN gate withholds the set. The rows are the last reading, unused.
+    case idle
+}
+
+/// One resolver a VPN pushed: its tunnel, the domains it claims and the servers asked for them.
+package struct ControlDetectedSplitDNSRow: Codable, Sendable, Equatable {
+    package var interface: String
+    package var domains: [String]
+    package var servers: [String]
+
+    package init(interface: String, domains: [String], servers: [String]) {
+        self.interface = interface
+        self.domains = domains
+        self.servers = servers
+    }
+}
+
+/// The split-DNS set a VPN pushed, inline because it is small by construction. The caps are the bounds of every
+/// value `LiveSplitDNSPolicy` builds (`SplitDNSLimits.standard`), so the codec refusing one means a bug, not a
+/// large network. `ControlDisplayRecordCodec.swift` holds the codec that checks them.
+package struct ControlDetectedSplitDNS: Sendable, Equatable {
+    package static let maxRows = 16
+    /// Across all rows.
+    package static let maxDomains = 16
+    package static let maxServersPerRow = DomainResourceLimits.dnsServers
+    package static let none = ControlDetectedSplitDNS(state: .idle, rows: [])
+
+    package var state: ControlDetectedSplitDNSState
+    package var rows: [ControlDetectedSplitDNSRow]
+
+    package init(state: ControlDetectedSplitDNSState, rows: [ControlDetectedSplitDNSRow]) {
+        self.state = state
+        self.rows = rows
+    }
+
+    package var isWithinCaps: Bool {
+        rows.count <= Self.maxRows
+            && rows.allSatisfy { $0.servers.count <= Self.maxServersPerRow && $0.domains.count <= Self.maxDomains }
+            && rows.reduce(0) { $0 + $1.domains.count } <= Self.maxDomains
+    }
+}
+
 /// Why per-surface applied state is not reported. It arrives with #194; until then
 /// it is never inferred from an enabled flag.
 package enum ControlAppliedStateUnavailableReason: String, Codable, Sendable, Equatable, CaseIterable {
@@ -313,6 +361,8 @@ package struct ControlRuntimeSnapshot: Codable, Sendable, Equatable {
     /// Launch recovery left the previous session's system DNS in place because its probe timed out, and no DNS Start or Stop has
     /// written system DNS since (#201). Absent on the wire when false.
     package var systemDNSRecoveryDeclined: Bool
+    /// The split-DNS set the VPN pushed. Absent on the wire when it is `.none`.
+    package var detectedSplitDNS: ControlDetectedSplitDNS
     /// The notices of the display text above, in canonical order. Each names a field whose text was shortened or omitted.
     package var displayNotices: [ControlDisplayNotice]
 
@@ -350,6 +400,7 @@ package struct ControlRuntimeSnapshot: Codable, Sendable, Equatable {
         collections: ControlRuntimeCollections,
         appliedState: ControlAppliedState,
         systemDNSRecoveryDeclined: Bool = false,
+        detectedSplitDNS: ControlDetectedSplitDNS = .none,
         displayNotices: [ControlDisplayNotice] = []
     ) {
         self.stamp = stamp
@@ -380,6 +431,7 @@ package struct ControlRuntimeSnapshot: Codable, Sendable, Equatable {
         self.collections = collections
         self.appliedState = appliedState
         self.systemDNSRecoveryDeclined = systemDNSRecoveryDeclined
+        self.detectedSplitDNS = detectedSplitDNS
         self.displayNotices = displayNotices
     }
 }

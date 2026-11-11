@@ -558,7 +558,7 @@ private struct WireDNS: Decodable {
 
     private enum Keys: String, CodingKey {
         case forwarderEnabled, forwarderPort, dohProviders, entries, interceptRules
-        case transparentProxyEnabled, transparentProxyIP, transparentProxyPort
+        case transparentProxyEnabled, transparentProxyIP, transparentProxyPort, followVPNResolvers
     }
 
     init(from decoder: any Decoder) throws {
@@ -571,7 +571,8 @@ private struct WireDNS: Decodable {
             interceptRules: try c.decode([WireInterceptRule].self, forKey: .interceptRules).map(\.value),
             transparentProxyEnabled: try c.decode(Bool.self, forKey: .transparentProxyEnabled),
             transparentProxyIP: try c.decode(String.self, forKey: .transparentProxyIP),
-            transparentProxyPort: try c.decode(Int.self, forKey: .transparentProxyPort)
+            transparentProxyPort: try c.decode(Int.self, forKey: .transparentProxyPort),
+            followVPNResolvers: try c.decode(Bool.self, forKey: .followVPNResolvers)
         )
     }
 }

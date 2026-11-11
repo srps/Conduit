@@ -69,7 +69,8 @@ private func makeHostEffects(
     homeDirectory: URL,
     resolverDirectory: String,
     stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem(),
-    wake: any SystemWakeObserving = FakeSystemWakeObserver()
+    wake: any SystemWakeObserving = FakeSystemWakeObserver(),
+    pushedResolvers: any PushedResolverObserving = FakePushedResolverObserver()
 ) -> RuntimeHostEffects {
     RuntimeHostEffects(
         privilege: privilege,
@@ -86,6 +87,7 @@ private func makeHostEffects(
         networkLocation: networkLocation,
         networkLocationStoreFactory: networkLocationStoreFactory,
         vpnStatusMonitor: vpnStatusMonitor,
+        pushedResolvers: pushedResolvers,
         wake: wake,
         homeDirectory: homeDirectory,
         resolverDirectory: resolverDirectory,
@@ -164,7 +166,8 @@ private func hostEffects(
     homeDirectory: URL,
     resolverDirectory: String,
     stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem(),
-    wake: any SystemWakeObserving = FakeSystemWakeObserver()
+    wake: any SystemWakeObserving = FakeSystemWakeObserver(),
+    pushedResolvers: any PushedResolverObserving = FakePushedResolverObserver()
 ) -> RuntimeHostEffects {
     makeHostEffects(
         loopbackPortProbe: loopbackPortProbe,
@@ -182,7 +185,8 @@ private func hostEffects(
         homeDirectory: homeDirectory,
         resolverDirectory: resolverDirectory,
         stateFiles: stateFiles,
-        wake: wake
+        wake: wake,
+        pushedResolvers: pushedResolvers
     )
 }
 

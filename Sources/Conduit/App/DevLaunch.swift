@@ -549,6 +549,7 @@ enum DevLaunch {
                 networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in location },
                 vpnStatusMonitor: { _, _ in vpn },
+                pushedResolvers: FakePushedResolverObserver(),
                 wake: WorkspaceSystemWakeObserver(),
                 homeDirectory: home,
                 resolverDirectory: machine.resolverDirectory.path,

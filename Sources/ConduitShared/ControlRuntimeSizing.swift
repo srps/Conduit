@@ -267,6 +267,30 @@ extension ControlRuntimeSnapshot {
         try budget.text(bindings.localPAC?.host)
         try budget.text(bindings.dns?.host)
         try budget.text(bindings.transparentProxy?.host)
+        try detectedSplitDNS.measure(into: &budget)
         try budget.elements(displayNotices.count)
+    }
+}
+
+extension ControlDetectedSplitDNS {
+    package func measure(into budget: inout ControlFrameBudget) throws {
+        try budget.elements(rows.count)
+        for row in rows {
+            try row.measure(into: &budget)
+        }
+    }
+}
+
+extension ControlDetectedSplitDNSRow {
+    package func measure(into budget: inout ControlFrameBudget) throws {
+        try budget.text(interface)
+        try budget.elements(domains.count)
+        for domain in domains {
+            try budget.text(domain)
+        }
+        try budget.elements(servers.count)
+        for server in servers {
+            try budget.text(server)
+        }
     }
 }

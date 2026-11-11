@@ -73,6 +73,7 @@ final class ConfigDiffListenerTests: XCTestCase {
         "dns.transparentProxyEnabled": Row(replacesListeners: true) { $0.dns.transparentProxyEnabled.toggle() },
         "dns.transparentProxyIP": Row(replacesListeners: true) { $0.dns.transparentProxyIP = "127.44.3.9" },
         "dns.transparentProxyPort": Row(replacesListeners: true) { $0.dns.transparentProxyPort += 1 },
+        "dns.followVPNResolvers": Row(replacesListeners: true) { $0.dns.followVPNResolvers.toggle() },
 
         "tunnels.maxSessions": Row(replacesListeners: false) { $0.tunnels.maxSessions += 1 },
         "tunnels.maxSessionsPerTunnel": Row(replacesListeners: false) { $0.tunnels.maxSessionsPerTunnel += 1 },
