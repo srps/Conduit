@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 
 /// Refuses the proxy-authentication challenges that reach a Conduit-owned
 /// `URLSession` (decision 0045).
@@ -52,6 +53,11 @@ package final class ProxyChallengeRefusingDelegate: NSObject, URLSessionTaskDele
 
     private let client: Client
     private let gate = RuntimeEventRepeatGate()
+    private let refusals = NIOLockedValueBox(0)
+
+    /// Every refusal so far, reported or held back by the limit. A caller
+    /// reads it before and after its requests to learn whether one was refused.
+    package var refusalCount: Int { refusals.withLockedValue { $0 } }
     private let report: @Sendable (RuntimeEvent) -> Void
 
     /// The sessions that share this delegate share its once-a-minute limit.
@@ -71,6 +77,7 @@ package final class ProxyChallengeRefusingDelegate: NSObject, URLSessionTaskDele
             return
         }
         let space = challenge.protectionSpace
+        refusals.withLockedValue { $0 += 1 }
         if let suppressed = gate.admit(host: "\(space.host):\(space.port)", reason: space.authenticationMethod) {
             report(ProxyChallengeRefusal.event(for: challenge, client: client.rawValue, suppressed: suppressed))
         }
