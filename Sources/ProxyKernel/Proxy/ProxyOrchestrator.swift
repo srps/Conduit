@@ -1866,6 +1866,10 @@ package final class ProxyOrchestrator {
         }
     }
 
+    /// Whether the latest DNS start or stop admitted is a start. It stays true through a restart for a DNS edit, which passes through
+    /// `dnsRunState == .stopped`, and through a failed start, so a reader that follows the forwarder reads this beside the run state.
+    package var dnsForwarderAdmitted: Bool { dnsLifecycle.admitsRunning }
+
     /// Restarts the running forwarder on the applied config as one operation under `epoch`, the running start the caller found admitted:
     /// a start or stop admitted after it supersedes the restart, which neither rebinds nor publishes after that operation.
     private func restartDNS(epoch: Int) async {

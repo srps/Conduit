@@ -9,12 +9,13 @@ import ProxyKernel
 /// decides from them with `LiveSplitDNSPolicy`. The host pushes only the detected rules; the orchestrator merges
 /// them with the manual entries of its own config, so manual split DNS never depends on anything here.
 extension RuntimeHost {
-    /// Starts or stops the observer so that it runs exactly while the DNS forwarder is up or coming up and
-    /// `dns.followVPNResolvers` is on. Idempotent. A restart of the forwarder keeps it running. Stopping it pushes
-    /// an empty detected set, so the table holds the manual entries alone.
+    /// Starts or stops the observer so that it runs exactly while `dns.followVPNResolvers` is on and the DNS
+    /// forwarder is admitted to run and has not failed. Idempotent. It reads the admission, not `stopped`, because
+    /// a restart for a DNS edit passes through `stopped` and must keep the observer and the held set. Stopping it
+    /// pushes an empty detected set, so the table holds the manual entries alone.
     func reconcileSplitDNSDetection() {
-        let forwarder = orchestrator.snapshot.dnsRunState
-        let wanted = orchestrator.config.dns.followVPNResolvers && forwarder != .stopped && forwarder != .failed
+        let wanted = orchestrator.config.dns.followVPNResolvers && orchestrator.dnsForwarderAdmitted
+            && orchestrator.snapshot.dnsRunState != .failed
         guard wanted != splitDNSDetectionRunning else { return }
         splitDNSDetectionRunning = wanted
         if wanted {

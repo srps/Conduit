@@ -322,4 +322,58 @@ final class RuntimeHostSplitDNSTests: XCTestCase {
         let restored = try await SplitDNSProbe.resolve("host.corp.example", port: running.port)
         XCTAssertEqual(restored, corpIP)
     }
+
+    // MARK: - Lifecycle
+
+    /// The forwarder restarts for a DNS edit and passes through `stopped` on the way. Detection must not follow it
+    /// down: stopping drops the held set, and the tunnel's withdrawn key would not bring it back.
+    @RuntimeActor func testAForwarderRestartForADNSEditKeepsDetectionRunningAndTheHeldSet() async throws {
+        let running = try await start(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.54"])],
+            primed: PushedResolverReading(resolvers: [corp()])
+        )
+        await running.report(.connected, live: ["utun6"])
+        await running.push(PushedResolverReading())
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .held)
+
+        var edited = try ProxyConfigPersistence.load(in: running.harness.environment, allowMissing: false)
+        edited.dnsEntries.append(DomainDNSEntry(domain: "branch.example", servers: ["192.0.2.54"]))
+        try ProxyConfigPersistence.save(edited, in: running.harness.environment)
+        await running.host.reloadConfiguration()
+        await running.host.deliveries.drain()
+
+        XCTAssertEqual(running.events("config.dns_restart").count, 1, "the edit restarted the forwarder")
+        XCTAssertEqual(running.host.orchestrator.snapshot.dnsRunState, .running)
+        XCTAssertTrue(running.harness.pushedResolvers.isObserving)
+        XCTAssertEqual(running.harness.pushedResolvers.startCount, 1, "the observer was not stopped and started again")
+        XCTAssertFalse(running.events("dns.split_table_changed").contains { $0.hasSuffix("reason=detection_off") })
+        XCTAssertEqual(running.events("dns.split_table_changed").last, "detected_domains=1 manual_domains=2 rules=2 reason=config")
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .held)
+        let answer = try await SplitDNSProbe.resolve("host.corp.example", port: running.port)
+        XCTAssertEqual(answer, corpIP)
+    }
+
+    /// The VPN observer reports a verdict only when it changes, across its own stop and start too, so the verdict
+    /// the gate holds at a stop is the one the next start has to judge by. Forgetting it would leave the gate at
+    /// `.unknown`, which admits every reading, with no report coming to correct it.
+    @RuntimeActor func testAStopKeepsTheVPNVerdictForTheNextStartsFirstReading() async throws {
+        let running = try await start(primed: PushedResolverReading(resolvers: [corp()]))
+        await running.report(.disconnected(reason: .userInitiated), live: [])
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .idle)
+        let reported = running.events("dns.split_detected")
+
+        await running.host.stopRuntime()
+        await running.host.deliveries.drain()
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS, .none)
+        try await running.host.startRuntime()
+        await running.host.deliveries.drain()
+
+        XCTAssertEqual(running.harness.pushedResolvers.startCount, 2, "the observer read the store again")
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .idle, "the reading is not in use off the VPN")
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.rows.count, 1)
+        XCTAssertEqual(running.events("dns.split_detected"), reported, "nothing entered the set in use")
+        let asked = running.corp.totalQueries
+        _ = try await SplitDNSProbe.resolve("host.corp.example", port: running.port)
+        XCTAssertEqual(running.corp.totalQueries, asked)
+    }
 }
