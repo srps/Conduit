@@ -9,8 +9,9 @@ import PlatformMac
 import ProxyAuth
 import ProxyKernel
 
-/// `pm-sim dns-split-follows-vpn` and `pm-sim dns-split-flap-holds` (decision 0044): split DNS follows the
-/// resolvers a connected VPN pushes, through the actual `RuntimeHost` over a scratch root.
+/// `pm-sim dns-split-follows-vpn`, `pm-sim dns-split-flap-holds` and `pm-sim dns-split-detection-failed`
+/// (decision 0044): split DNS follows the resolvers a connected VPN pushes, through the actual `RuntimeHost` over a
+/// scratch root.
 ///
 /// The machine is fakes throughout: a fake VPN observer, a fake pushed-resolver observer, a loopback UDP server
 /// standing in for the tunnel's DNS server at `192.0.2.53`, and a loopback DoH provider. The host's forwarder
@@ -28,12 +29,12 @@ enum SplitDNSFollowsVPNScenarios {
     @RuntimeActor
     static func followsVPN() async throws -> ScenarioResult {
         try await run(name: "dns-split-follows-vpn") { stage, check in
-            await stage.report(.disconnected(reason: .userInitiated), live: [])
+            try await stage.report(.disconnected(reason: .userInitiated), live: [])
             check("off the VPN the name resolves publicly", try await stage.resolve(internalName) == publicIP)
             check("off the VPN the tunnel's server is never asked", stage.corp.total == 0)
 
             stage.pushed.emit(PushedResolverReading(resolvers: [stage.corpResolver]))
-            await stage.report(.connected, live: ["utun6"])
+            try await stage.report(.connected, live: ["utun6"])
             check("the pushed set shows as in use", try await stage.settles { $0.state == .inUse && $0.rows.count == 1 })
             check("on the VPN the tunnel's server answers, not the cached public answer", try await stage.resolve(internalName) == corpIP)
             check("the tunnel's server was asked once for the name", stage.corp.count(internalName) == 1)
@@ -42,7 +43,7 @@ enum SplitDNSFollowsVPNScenarios {
             check("a public name is asked of the tunnel's server once", stage.corp.count(publicName) == 1)
             check("DoH answers the public name after the server's NXDOMAIN", publicAnswer == publicIP)
 
-            await stage.report(.disconnected(reason: .userInitiated), live: [])
+            try await stage.report(.disconnected(reason: .userInitiated), live: [])
             check("after a disconnect the set shows as idle", try await stage.settles { $0.state == .idle })
             let asked = stage.corp.total
             let after = [try await stage.resolve(internalName), try await stage.resolve(publicName)]
@@ -70,38 +71,93 @@ enum SplitDNSFollowsVPNScenarios {
     static func flapHolds() async throws -> ScenarioResult {
         try await run(name: "dns-split-flap-holds") { stage, check in
             stage.pushed.emit(PushedResolverReading(resolvers: [stage.corpResolver]))
-            await stage.report(.connected, live: ["utun6"])
+            try await stage.report(.connected, live: ["utun6"])
             check("the pushed set shows as in use", try await stage.settles { $0.state == .inUse })
             check("on the VPN the tunnel's server answers", try await stage.resolve(internalName) == corpIP)
 
-            await stage.report(.reasserting, live: ["utun6"])
+            try await stage.report(.reasserting, live: ["utun6"])
             stage.pushed.emit(PushedResolverReading())
             check("in a flap with the DNS key withdrawn the set shows as held", try await stage.settles { $0.state == .held && $0.rows.count == 1 })
             check("in a flap the tunnel's server keeps answering", try await stage.resolve(internalName) == corpIP)
             check("the tunnel's server was asked again", stage.corp.count(internalName) == 2)
 
-            await stage.report(.disconnected(reason: .networkLost), live: [])
+            try await stage.report(.disconnected(reason: .networkLost), live: [])
             check("the grace window ending in a disconnect leaves nothing in use", try await stage.settles { $0.state == .idle })
             check("after the disconnect the name resolves publicly", try await stage.resolve(internalName) == publicIP)
             check("after the disconnect the tunnel's server is not asked", stage.corp.count(internalName) == 2)
 
             stage.pushed.emit(PushedResolverReading(resolvers: [stage.corpResolver]))
-            await stage.report(.connected, live: ["utun6"])
+            try await stage.report(.connected, live: ["utun6"])
             check("a reconnect puts the set back in use", try await stage.settles { $0.state == .inUse })
             check("after the reconnect the tunnel's server answers again", try await stage.resolve(internalName) == corpIP)
+
+            try await stage.report(.disconnected(reason: .networkLost), live: [])
+            stage.pushed.emit(PushedResolverReading())
+            check("a tunnel that went down with its key leaves no row", try await stage.settles { $0.state == .idle && $0.rows.isEmpty })
+            try await stage.report(.connected, live: ["utun6"])
+            // Both on this turn, so the host takes neither before the second has arrived.
+            stage.pushed.emit(PushedResolverReading(resolvers: [stage.corpResolver]))
+            stage.pushed.emit(PushedResolverReading())
+            check(
+                "a key published and withdrawn before the host's next turn is held",
+                try await stage.settles { $0.state == .held && $0.rows.count == 1 }
+            )
+            check("the held server answers", try await stage.resolve(internalName) == corpIP)
         } verify: { events, _, check in
             let reasons = events.filter { $0.event == "dns.split_table_changed" }.compactMap(\.detail).map {
                 $0.split(separator: " ").last.map(String.init) ?? ""
             }
             check(
-                "the table was swapped on the push, the disconnect, the reconnect and the stop, and not in the flap",
-                reasons == ["reason=pushed", "reason=vpn_disconnected", "reason=vpn_connected", "reason=detection_off"]
+                "the table was swapped on the push, each disconnect, the reconnect, the held key and the stop, and not in the flap",
+                reasons == [
+                    "reason=pushed", "reason=vpn_disconnected", "reason=vpn_connected", "reason=vpn_disconnected", "reason=pushed",
+                    "reason=detection_off",
+                ]
             )
             let outcomes = events.filter { $0.event == "dns.split_detected" }.compactMap(\.detail).map {
                 $0.split(separator: " ").last.map(String.init) ?? ""
             }
-            check("the host reported applied, held, cleared, applied, and cleared at the stop", outcomes == [
-                "outcome=applied", "outcome=held", "outcome=cleared", "outcome=applied", "outcome=cleared",
+            check("the host reported applied, held, cleared, applied, cleared, held, and cleared at the stop", outcomes == [
+                "outcome=applied", "outcome=held", "outcome=cleared", "outcome=applied", "outcome=cleared", "outcome=held",
+                "outcome=cleared",
+            ])
+        }
+    }
+
+    /// A store that cannot be read vouches for nothing: the set in use is dropped, held or not, the name takes
+    /// the public path, and the next reading the store gives puts the tunnel's server back.
+    @RuntimeActor
+    static func detectionFailed() async throws -> ScenarioResult {
+        try await run(name: "dns-split-detection-failed") { stage, check in
+            stage.pushed.emit(PushedResolverReading(resolvers: [stage.corpResolver]))
+            try await stage.report(.connected, live: ["utun6"])
+            check("the pushed set shows as in use", try await stage.settles { $0.state == .inUse && $0.rows.count == 1 })
+            check("on the VPN the tunnel's server answers", try await stage.resolve(internalName) == corpIP)
+
+            stage.pushed.emit(PushedResolverReading(failure: .storeRead))
+            check("after a failed reading no detected row is left", try await stage.settles { $0.rows.isEmpty })
+            let asked = stage.corp.total
+            check("after a failed reading the name resolves publicly", try await stage.resolve(internalName) == publicIP)
+            check("after a failed reading the tunnel's server is not asked", stage.corp.total == asked)
+
+            stage.pushed.emit(PushedResolverReading(resolvers: [stage.corpResolver]))
+            check("the next good reading puts the set back in use", try await stage.settles { $0.state == .inUse && $0.rows.count == 1 })
+            check("the tunnel's server answers again", try await stage.resolve(internalName) == corpIP)
+        } verify: { events, _, check in
+            let failures = events.filter { $0.event == "dns.split_detection_failed" }.compactMap(\.detail)
+            check("the failure was reported once", failures == ["reason=store_read"])
+            let swaps = events.filter { $0.event == "dns.split_table_changed" }.compactMap(\.detail)
+            check("the table was swapped on the push, the failure, the recovery and the stop", swaps == [
+                "detected_domains=1 manual_domains=0 rules=1 reason=pushed",
+                "detected_domains=0 manual_domains=0 rules=0 reason=detection_failed",
+                "detected_domains=1 manual_domains=0 rules=1 reason=pushed",
+                "detected_domains=0 manual_domains=0 rules=0 reason=detection_off",
+            ])
+            let outcomes = events.filter { $0.event == "dns.split_detected" }.compactMap(\.detail).map {
+                $0.split(separator: " ").last.map(String.init) ?? ""
+            }
+            check("the host reported applied, cleared, applied, and cleared at the stop", outcomes == [
+                "outcome=applied", "outcome=cleared", "outcome=applied", "outcome=cleared",
             ])
         }
     }
@@ -133,7 +189,8 @@ enum SplitDNSFollowsVPNScenarios {
         private var reported = ControlVPNState.unknown
 
         /// Emits a VPN report with the live tunnels the observer names beside it, and waits until the host shows it.
-        func report(_ state: VPNObservedState, live: [String]) async {
+        /// Throws when a snapshot cannot be read or the host has not shown it within ten seconds.
+        func report(_ state: VPNObservedState, live: [String]) async throws {
             vpn.liveInterfaceNames = live
             vpn.connectedInterfaceName = live.first
             vpn.emit(state)
@@ -145,9 +202,10 @@ enum SplitDNSFollowsVPNScenarios {
             case .disconnected: .disconnected(.networkLost)
             }
             for _ in 0..<1000 {
-                if let snapshot = try? await snapshot(), snapshot.vpnState == reported { return }
-                try? await Task.sleep(for: .milliseconds(10))
+                if try await snapshot().vpnState == reported { return }
+                try await Task.sleep(for: .milliseconds(10))
             }
+            throw ScenarioExecutionError(message: "the host never showed the VPN report \(reported)")
         }
 
         private func snapshot() async throws -> ControlRuntimeSnapshot {
@@ -282,7 +340,17 @@ enum SplitDNSFollowsVPNScenarios {
             notes.append("events or configuration unreadable: \(error)")
             check("the events file and the saved configuration are readable", false)
         }
-        check("no resolver file was written for a detected domain", (try? FileManager.default.contentsOfDirectory(atPath: machine.resolverDirectory.path))?.isEmpty ?? true)
+        // The host creates the directory only to write a file into it, so a missing one holds none. Any other
+        // failure to list it leaves the check unanswered, which fails it.
+        var resolverFiles: [String]?
+        do {
+            resolverFiles = try FileManager.default.contentsOfDirectory(atPath: machine.resolverDirectory.path)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            resolverFiles = []
+        } catch {
+            notes.append("resolver directory unreadable: \(error)")
+        }
+        check("no resolver file was written for a detected domain", resolverFiles?.isEmpty == true)
 
         session = nil
         if settled == .settled, flush.allConfirmed, releaseFailures.withLockedValue({ $0 }) == 0 {
