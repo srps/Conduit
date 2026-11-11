@@ -328,6 +328,23 @@ package final class PooledUpstreamConnection: @unchecked Sendable {
     }
 }
 
+/// What a status the upstream answered with says about the upstream's health.
+package enum AnsweredStatusAccounting: Sendable {
+    /// Every answered status counts as a failure of the upstream.
+    case everyStatus
+    /// A 4xx is the upstream's policy on the target and counts nothing; a 5xx counts.
+    /// For a pool that only ever asks for a few fixed targets, where a policy
+    /// block would otherwise open every breaker on a healthy upstream.
+    case serverErrorsOnly
+
+    func counts(_ status: Int) -> Bool {
+        switch self {
+        case .everyStatus: true
+        case .serverErrorsOnly: !(400..<500).contains(status)
+        }
+    }
+}
+
 package final class ConnectionPool: @unchecked Sendable {
     /// Default circuit-breaker thresholds. Used when `HealthSection` doesn't
     /// override them. The names mirror `UpstreamCircuitBreaker` for grep-ability;
@@ -347,6 +364,9 @@ package final class ConnectionPool: @unchecked Sendable {
     private let authHandshakeLimiter: AuthHandshakeLimiter
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let minimumConnectTimeout: TimeInterval
+    private let answeredStatusAccounting: AnsweredStatusAccounting
+    /// ` pool=<label>` on this pool's `upstream.*` events, or empty for the client listener's pool.
+    private let poolTag: String
     private let lock = NIOLock()
     private var idleConnections: [UUID: [PooledUpstreamConnection]] = [:]
     private var allConnections: [UUID: PooledUpstreamConnection] = [:]
@@ -375,11 +395,15 @@ package final class ConnectionPool: @unchecked Sendable {
         authHandshakeLimiter: AuthHandshakeLimiter = AuthHandshakeLimiter(),
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         sockets: OutboundSocketRegistry = .standalone(),
+        answeredStatusAccounting: AnsweredStatusAccounting = .everyStatus,
+        label: String? = nil,
         // Exposed only so failover tests can dial dead upstreams without
         // waiting out the production floor once per upstream.
         minimumConnectTimeout: TimeInterval = ConnectionPool.defaultMinimumConnectTimeout
     ) {
         self.minimumConnectTimeout = minimumConnectTimeout
+        self.answeredStatusAccounting = answeredStatusAccounting
+        self.poolTag = label.map { " pool=\($0)" } ?? ""
         self.group = group
         self.logger = logger
         self.configProvider = configProvider
@@ -1333,11 +1357,32 @@ package final class ConnectionPool: @unchecked Sendable {
     package func recordExchangeError(_ error: Error, for proxy: UpstreamProxy, origin: ExchangeOrigin) {
         if ConnectionPoolError.isUpstreamResponseTimedOut(error) {
             recordSilence(for: proxy, origin: origin)
+        } else if case .upstreamReturnedStatus(let status, _)? = error as? ConnectionPoolError,
+                  !answeredStatusAccounting.counts(status) {
+            recordUncountedAnswer(status: status, for: proxy, origin: origin)
         } else if ConnectionPoolError.isUpstreamAnswer(error) {
             recordFailure(for: proxy, answered: true)
         } else if !ConnectionPoolError.isLocalNonUpstreamFailure(error) {
             recordFailure(for: proxy)
         }
+    }
+
+    /// An answer this pool does not count: it clears the pending silences, as any answer does, and frees a half-open probe slot it held.
+    private func recordUncountedAnswer(status: Int, for proxy: UpstreamProxy, origin: ExchangeOrigin) {
+        let probeReleased = lock.withLock {
+            syncUpstreamStatesLocked(with: configProvider().enabledUpstreams)
+            if namesCurrentEndpointLocked(proxy) { silences[proxy.id] = nil }
+            var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
+            guard breaker.releaseHalfOpenProbe() else { return false }
+            breakers[proxy.id] = breaker
+            return true
+        }
+        guard probeReleased else { return }
+        eventSink?(RuntimeEvent(
+            kind: .health, event: "upstream.probe_released",
+            detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) origin=\(origin) answered=\(status)\(poolTag)"
+        ))
+        logger.log(.info, "Upstream \(proxy.name)'s half-open probe got HTTP \(status) for \(origin), which this pool does not count; the next request probes again.", category: .network)
     }
 
     /// A completion about an endpoint this id no longer names says nothing about the current one.
@@ -1377,14 +1422,14 @@ package final class ConnectionPool: @unchecked Sendable {
         case .probeReleased:
             eventSink?(RuntimeEvent(
                 kind: .health, event: "upstream.probe_released",
-                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) origin=\(origin)"
+                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) origin=\(origin)\(poolTag)"
             ))
             logger.log(.info, "Upstream \(proxy.name)'s half-open probe met only a silence from \(origin); the next request probes again.", category: .network)
         case let .counted(counted, transition):
             let origins = counted.map(\.description)
             eventSink?(RuntimeEvent(
                 kind: .health, event: "upstream.silence_counted",
-                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) origin=\(origin) origins=\(origins.joined(separator: ","))"
+                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) origin=\(origin) origins=\(origins.joined(separator: ","))\(poolTag)"
             ))
             logger.log(.notice, "Upstream \(proxy.name) answered nothing for \(origins.count) origins (\(origins.joined(separator: ", "))); counting the silence as a failure.", category: .network)
             if let transition {
@@ -1603,14 +1648,14 @@ package final class ConnectionPool: @unchecked Sendable {
             event = RuntimeEvent(
                 kind: .health,
                 event: "upstream.circuit_opened",
-                detail: "upstream=\(name) endpoint=\(endpoint) reason=\(reasonTag) failures=\(consecutiveFailures) openInterval=\(Int(openInterval))s"
+                detail: "upstream=\(name) endpoint=\(endpoint) reason=\(reasonTag) failures=\(consecutiveFailures) openInterval=\(Int(openInterval))s\(poolTag)"
             )
             logMessage = "Upstream \(name) circuit opened (\(reasonTag), \(Int(openInterval))s backoff)."
         case let .halfOpened(elapsedSeconds):
             event = RuntimeEvent(
                 kind: .health,
                 event: "upstream.circuit_half_opened",
-                detail: "upstream=\(name) endpoint=\(endpoint) openForSeconds=\(Int(elapsedSeconds))"
+                detail: "upstream=\(name) endpoint=\(endpoint) openForSeconds=\(Int(elapsedSeconds))\(poolTag)"
             )
             logMessage = "Upstream \(name) circuit half-open (probe armed, was open \(Int(elapsedSeconds))s)."
         case let .closed(reason):
@@ -1627,7 +1672,7 @@ package final class ConnectionPool: @unchecked Sendable {
             event = RuntimeEvent(
                 kind: .health,
                 event: "upstream.circuit_closed",
-                detail: "upstream=\(name) endpoint=\(endpoint) reason=\(reasonTag)"
+                detail: "upstream=\(name) endpoint=\(endpoint) reason=\(reasonTag)\(poolTag)"
             )
             logMessage = "Upstream \(name) circuit closed (\(reasonTag))."
         }

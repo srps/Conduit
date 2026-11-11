@@ -6,15 +6,20 @@ import NIOCore
 /// What a host gives the DNS forwarder so DoH can reach a provider through an
 /// upstream proxy whatever the client routing rules say (decision 0045).
 package struct DoHUpstreamRouteSource: Sendable {
+    let pool: ConnectionPool
     let coordinator: CONNECTCoordinator
     let offered: @Sendable () -> Bool
 
     /// - Parameters:
-    ///   - coordinator: dials the upstream, answers its 407 with Conduit's own
-    ///     authenticator and fails over, as it does for every other tunnel.
+    ///   - pool: the route's own, shared with no other traffic: what DoH
+    ///     learns about an upstream must not move anything else, and the
+    ///     route closes the pool's connections when it stops.
+    ///   - coordinator: dials the upstream through `pool`, answers its 407
+    ///     with Conduit's own authenticator and fails over.
     ///   - offered: false while the host has decided upstreams are out of
     ///     play and dials none, so lookups do not dial one either.
-    package init(coordinator: CONNECTCoordinator, offered: @escaping @Sendable () -> Bool = { true }) {
+    package init(pool: ConnectionPool, coordinator: CONNECTCoordinator, offered: @escaping @Sendable () -> Bool = { true }) {
+        self.pool = pool
         self.coordinator = coordinator
         self.offered = offered
     }

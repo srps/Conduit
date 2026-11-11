@@ -1256,10 +1256,10 @@ package final class ProxyOrchestrator {
             vpnConnectedForDNSBox.withLockedValue { $0 }
         },
         localProxyPort: { [server = localProxyServer] in server.listeningPort },
-        // The tunnels' pool: it dials an upstream whatever the client routing rules say, and outlives a listener restart. Not offered
-        // while client traffic goes direct (VPN off, no upstream): the runtime dials no upstream then, and direct DoH works.
+        // Not offered while client traffic goes direct (VPN off, no upstream): the runtime dials no upstream then, and direct DoH works.
         upstreamRoute: DoHUpstreamRouteSource(
-            coordinator: tunnelCoordinator,
+            pool: dohUpstreamPool,
+            coordinator: dohUpstreamCoordinator,
             offered: { [directModeBox] in !directModeBox.withLockedValue { $0.cause }.routesClientTrafficDirectly }
         ),
         // A signal only: the hop reads the running core's counters when it runs. A stop clears them, and a later start's core counts
@@ -1352,7 +1352,8 @@ package final class ProxyOrchestrator {
         authenticatorProvider: lateBoundAuthenticatorProvider,
         authHandshakeLimiter: tunnelAuthHandshakeLimiter,
         eventSink: { [eventLog] event in eventLog.append(event) },
-        sockets: sockets
+        sockets: sockets,
+        label: "tunnels"
     )
 
     private lazy var tunnelCoordinator = CONNECTCoordinator(
@@ -1360,6 +1361,38 @@ package final class ProxyOrchestrator {
         authenticatorProvider: lateBoundAuthenticatorProvider,
         logger: logStore,
         authHandshakeLimiter: tunnelAuthHandshakeLimiter,
+        authLimitProvider: { [configBox] in
+            let config = configBox.current
+            return AuthHandshakeLimiter.Limits(
+                total: config.pendingAuthHandshakeGlobalLimit,
+                perSource: config.pendingAuthHandshakesPerSource
+            )
+        },
+        eventSink: { [eventLog] event in eventLog.append(event) }
+    )
+
+    private let dohAuthHandshakeLimiter = AuthHandshakeLimiter()
+
+    /// The DoH upstream route's own pool (decision 0045). A provider the upstream refuses, or one it cannot reach, is a fact about DoH:
+    /// in a pool of its own it cannot open a breaker or move the preferred upstream under the tunnels and the transparent proxy. It
+    /// dials whatever the client routing rules say and outlives a listener restart. Internal so a test can read its breakers.
+    lazy var dohUpstreamPool = ConnectionPool(
+        group: MultiThreadedEventLoopGroup.singleton,
+        logger: logStore,
+        configProvider: { [configBox] in configBox.current },
+        authenticatorProvider: lateBoundAuthenticatorProvider,
+        authHandshakeLimiter: dohAuthHandshakeLimiter,
+        eventSink: { [eventLog] event in eventLog.append(event) },
+        sockets: sockets,
+        answeredStatusAccounting: .serverErrorsOnly,
+        label: "doh"
+    )
+
+    private lazy var dohUpstreamCoordinator = CONNECTCoordinator(
+        pool: dohUpstreamPool,
+        authenticatorProvider: lateBoundAuthenticatorProvider,
+        logger: logStore,
+        authHandshakeLimiter: dohAuthHandshakeLimiter,
         authLimitProvider: { [configBox] in
             let config = configBox.current
             return AuthHandshakeLimiter.Limits(
@@ -2300,6 +2333,7 @@ package final class ProxyOrchestrator {
     private func resetUpstreamCircuitsAfterFlap() {
         localProxyServer.resetCircuitsAfterFlap()
         tunnelConnectionPool.resetCircuitsAfterFlap()
+        dohUpstreamPool.resetCircuitsAfterFlap()
     }
 
     /// Ends the current flap and returns its monotonic duration in seconds, or 0 when no flap start was recorded.

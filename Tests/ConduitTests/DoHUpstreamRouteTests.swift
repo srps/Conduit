@@ -198,7 +198,7 @@ final class DoHUpstreamRouteTests: XCTestCase {
         let forwarder = LocalDNSForwarder(
             group: group, logger: logger, configProvider: { frozen },
             preferProxyPathForDoH: { true },
-            upstreamRoute: offerRoute ? DoHUpstreamRouteSource(coordinator: coordinator, offered: offered) : nil,
+            upstreamRoute: offerRoute ? DoHUpstreamRouteSource(pool: pool, coordinator: coordinator, offered: offered) : nil,
             eventSink: { event in events.withLockedValue { $0.append(event) } }
         )
         self.forwarder = forwarder
@@ -229,35 +229,8 @@ final class DoHUpstreamRouteTests: XCTestCase {
         return answer.withLockedValue { $0 }
     }
 
-    /// One SOCKS5 CONNECT to the route's listener; returns the reply code.
     private func socksConnect(host: String, port: Int, to routePort: Int) async throws -> UInt8? {
-        let received = NIOLockedValueBox<[UInt8]>([])
-        let channel = try await ClientBootstrap(group: group)
-            .channelInitializer { $0.pipeline.addHandler(ByteCollector(bytes: received)) }
-            .connect(host: "127.0.0.1", port: routePort).get()
-        var greeting = channel.allocator.buffer(capacity: 3)
-        greeting.writeBytes([0x05, 0x01, 0x00])
-        try await channel.writeAndFlush(greeting).get()
-        for _ in 0..<200 where received.withLockedValue({ $0.count }) < 2 {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        XCTAssertEqual(received.withLockedValue { Array($0.prefix(2)) }, [0x05, 0x00])
-
-        var request = channel.allocator.buffer(capacity: 64)
-        if let address = try? SocketAddress(ipAddress: host, port: port), case .v4(let v4) = address {
-            request.writeBytes([0x05, 0x01, 0x00, 0x01])
-            withUnsafeBytes(of: v4.address.sin_addr) { request.writeBytes($0) }
-        } else {
-            request.writeBytes([0x05, 0x01, 0x00, 0x03, UInt8(host.utf8.count)])
-            request.writeString(host)
-        }
-        request.writeInteger(UInt16(port))
-        try await channel.writeAndFlush(request).get()
-        for _ in 0..<600 where received.withLockedValue({ $0.count }) < 4 {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        channel.close(promise: nil)
-        return received.withLockedValue { $0.count >= 4 ? $0[3] : nil }
+        try await SOCKS5TestClient.reply(connecting: host, port: port, through: routePort, group: group)
     }
 }
 
@@ -270,18 +243,6 @@ private final class DatagramCollector: ChannelInboundHandler, @unchecked Sendabl
         var buffer = unwrapInboundIn(data).data
         let bytes = buffer.readBytes(length: buffer.readableBytes) ?? []
         answer.withLockedValue { $0 = bytes }
-    }
-}
-
-private final class ByteCollector: ChannelInboundHandler, @unchecked Sendable {
-    typealias InboundIn = ByteBuffer
-    private let bytes: NIOLockedValueBox<[UInt8]>
-    init(bytes: NIOLockedValueBox<[UInt8]>) { self.bytes = bytes }
-
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        var buffer = unwrapInboundIn(data)
-        let read = buffer.readBytes(length: buffer.readableBytes) ?? []
-        bytes.withLockedValue { if $0.count < 64 { $0.append(contentsOf: read) } }
     }
 }
 

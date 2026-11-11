@@ -114,8 +114,12 @@ enum PMDns {
             credentialProvider: InMemoryCredentialProvider(),
             eventSink: { event in logger.log(.error, "\(event.event): \(event.detail ?? "")", category: .auth) }
         )
-        let pool = ConnectionPool(group: group, logger: logger, configProvider: { config }, authenticatorProvider: authProvider)
+        let pool = ConnectionPool(
+            group: group, logger: logger, configProvider: { config }, authenticatorProvider: authProvider,
+            answeredStatusAccounting: .serverErrorsOnly, label: "doh"
+        )
         return DoHUpstreamRouteSource(
+            pool: pool,
             coordinator: CONNECTCoordinator(pool: pool, authenticatorProvider: authProvider, logger: logger)
         )
     }

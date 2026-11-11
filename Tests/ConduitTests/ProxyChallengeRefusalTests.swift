@@ -55,7 +55,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         let forwarder = LocalDNSForwarder(
             group: group, logger: logger, configProvider: { frozen },
             localProxyPort: { 3128 },
-            upstreamRoute: DoHUpstreamRouteSource(coordinator: CONNECTCoordinator(
+            upstreamRoute: DoHUpstreamRouteSource(pool: pool, coordinator: CONNECTCoordinator(
                 pool: pool, authenticatorProvider: { _ in StubNegotiateAuthenticator() }, logger: logger
             ))
         )
