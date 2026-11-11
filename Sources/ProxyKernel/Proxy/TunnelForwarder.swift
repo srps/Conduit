@@ -64,10 +64,13 @@ package enum TunnelDNSOverrideStatus: Sendable, Equatable, Codable {
 
 package struct TunnelStartResult: Sendable {
     package var started: Int
+    /// Tunnels whose listener failed to bind.
     package var failed: Int
     package var boundPorts: [Int]
     package var bindings: [TunnelBindingInfo] = []
     package var dnsOverrideStatus: TunnelDNSOverrideStatus = .notNeeded
+    /// Proxied tunnels not started because their remote host is not host text (`tunnel.start_refused`); nothing was bound for them.
+    package var refused: Int = 0
 }
 
 package struct TunnelBindingInfo: Sendable, Codable, Equatable {
@@ -273,6 +276,7 @@ package final class TunnelForwarder: @unchecked Sendable {
     private struct BindingBatch {
         var started: Int = 0
         var failed: Int = 0
+        var refused: Int = 0
         var bindings: [TunnelBindingInfo] = []
     }
 
@@ -307,7 +311,8 @@ package final class TunnelForwarder: @unchecked Sendable {
             started: batch.started,
             failed: batch.failed,
             boundPorts: batch.bindings.map(\.localPort),
-            bindings: batch.bindings
+            bindings: batch.bindings,
+            refused: batch.refused
         )
         await reconcileDNSOverride()
         result.dnsOverrideStatus = dnsOverrideStatus
@@ -322,7 +327,7 @@ package final class TunnelForwarder: @unchecked Sendable {
         for tunnel in tunnels where tunnel.enabled {
             // Validation flags the row without blocking the proxy, so the one tunnel is refused here.
             guard !tunnel.remoteHostIsUnwritable else {
-                batch.failed += 1
+                batch.refused += 1
                 let event = RuntimeEvent(
                     kind: .config, event: "tunnel.start_refused",
                     detail: "localPort=\(tunnel.localPort) remoteHost=\(TunnelAuthority.printable(tunnel.remoteHost)) reason=remote_host_not_host_text"
@@ -526,9 +531,11 @@ package final class TunnelForwarder: @unchecked Sendable {
         }
 
         var addFailed = 0
+        var addRefused = 0
         if !toAdd.isEmpty {
             let batch = await bindTunnels(toAdd, listenHost: listenHost)
             addFailed = batch.failed
+            addRefused = batch.refused
         }
 
         await reconcileDNSOverride()
@@ -555,7 +562,8 @@ package final class TunnelForwarder: @unchecked Sendable {
             failed: addFailed,
             boundPorts: orderedBindings.map(\.localPort),
             bindings: orderedBindings,
-            dnsOverrideStatus: dnsOverrideStatus
+            dnsOverrideStatus: dnsOverrideStatus,
+            refused: addRefused
         )
     }
 

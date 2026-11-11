@@ -162,8 +162,8 @@ enum TunnelFailoverScenarios {
         let result = await forwarder.start(tunnels: frozen.tunnels.definitions, listenHost: "127.0.0.1")
         await forwarder.stop()
         let bound = result.bindings.map(\.label)
-        let passB = bound == ["proxied", "direct-scoped", "direct-unicode"] && result.failed == 1
-        notes.append("B bound=\(bound) failed=\(result.failed)")
+        let passB = bound == ["proxied", "direct-scoped", "direct-unicode"] && result.refused == 1 && result.failed == 0
+        notes.append("B bound=\(bound) refused=\(result.refused) failed=\(result.failed)")
 
         let refused = events.withLockedValue { $0 }.filter { $0.event == "tunnel.start_refused" }.map { $0.detail ?? "" }
         let passC = refused == ["localPort=0 remoteHost=b__cher.corp.example reason=remote_host_not_host_text"]

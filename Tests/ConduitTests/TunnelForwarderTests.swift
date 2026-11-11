@@ -131,11 +131,32 @@ final class TunnelForwarderTests: XCTestCase {
         await forwarder.stop()
 
         XCTAssertEqual(result.bindings.map(\.label), ["proxied", "scoped", "direct-unicode"])
-        XCTAssertEqual(result.failed, 1)
+        XCTAssertEqual(result.refused, 1, "the Unicode proxied tunnel was refused")
+        XCTAssertEqual(result.failed, 0, "a refused tunnel is not a bind failure")
         XCTAssertEqual(
             events.withLockedValue { $0 }.filter { $0.event == "tunnel.start_refused" }.map(\.detail),
             ["localPort=0 remoteHost=b__cher.corp.example reason=remote_host_not_host_text"]
         )
+    }
+
+    /// The status line names a refused tunnel as refused: nothing was bound for it, so "failed to bind" would send the
+    /// user looking for a port conflict.
+    func testTheStatusLineTellsARefusedTunnelFromABindFailure() {
+        XCTAssertEqual(
+            ProxyOrchestrator.tunnelStartProblem(failed: 0, refused: 1, noneStarted: true),
+            "No tunnel started: 1 proxied tunnel(s) refused because the remote host is not host text."
+        )
+        XCTAssertEqual(
+            ProxyOrchestrator.tunnelStartProblem(failed: 0, refused: 1, noneStarted: false),
+            "1 proxied tunnel(s) refused because the remote host is not host text."
+        )
+        XCTAssertEqual(
+            ProxyOrchestrator.tunnelStartProblem(failed: 2, refused: 1, noneStarted: false),
+            "2 tunnel(s) failed to bind and 1 proxied tunnel(s) refused because the remote host is not host text — check logs."
+        )
+        XCTAssertEqual(ProxyOrchestrator.tunnelStartProblem(failed: 2, refused: 0, noneStarted: true), "All tunnel listeners failed to bind.")
+        XCTAssertEqual(ProxyOrchestrator.tunnelStartProblem(failed: 2, refused: 0, noneStarted: false), "2 tunnel(s) failed to bind — check logs.")
+        XCTAssertNil(ProxyOrchestrator.tunnelStartProblem(failed: 0, refused: 0, noneStarted: false))
     }
 
     // MARK: - Proxied tunnel through production TunnelForwarder
