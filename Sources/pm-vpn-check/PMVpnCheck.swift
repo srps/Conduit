@@ -130,6 +130,29 @@ enum PMVpnCheck {
 
     /// How long `--watch` runs when `--max-duration` is not given.
     private static let defaultMaxDurationSeconds: TimeInterval = 900
+    /// The longest `--max-duration` accepted: one week.
+    static let maxDurationCeilingSeconds: TimeInterval = 7 * 24 * 60 * 60
+
+    /// The seconds `--max-duration` asks for, or why they are refused.
+    static func parseMaxDuration(_ text: String?) -> Result<TimeInterval, UsageError> {
+        guard let text, let seconds = Double(text), seconds.isFinite, seconds > 0 else {
+            return .failure(UsageError("--max-duration takes a number of seconds above zero"))
+        }
+        guard seconds <= maxDurationCeilingSeconds else {
+            return .failure(UsageError(
+                "--max-duration is at most \(Int(maxDurationCeilingSeconds)) seconds (one week); \(text) is more"
+            ))
+        }
+        return .success(seconds)
+    }
+
+    struct UsageError: Error, Equatable {
+        let message: String
+
+        init(_ message: String) {
+            self.message = message
+        }
+    }
 
     private static func parseArgs() -> Args {
         var duration: TimeInterval = 60
@@ -155,10 +178,10 @@ enum PMVpnCheck {
             case "--watch":
                 capture = .watch
             case "--max-duration":
-                guard let next = iter.next(), let seconds = Double(next), seconds > 0, seconds.isFinite else {
-                    fail("--max-duration takes a number of seconds above zero", code: 2)
+                switch parseMaxDuration(iter.next()) {
+                case .success(let seconds): maxDuration = seconds
+                case .failure(let error): fail(error.message, code: 2)
                 }
-                maxDuration = seconds
             case "--help", "-h":
                 print("Usage: pm-vpn-check [--duration <s>] [--grace <s>] [--min-visible <s>]")
                 print("       pm-vpn-check --pushed-dns | --snapshot | --watch [--max-duration <s>]")
