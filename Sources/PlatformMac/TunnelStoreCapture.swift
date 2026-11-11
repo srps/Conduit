@@ -12,6 +12,9 @@ package indirect enum MaskedStoreValue: Equatable, Encodable, Sendable {
     case bool(Bool)
     case array([MaskedStoreValue])
     case dictionary([String: MaskedStoreValue])
+    /// A value that is neither a string nor a number, written as JSON
+    /// `null`. Read back it is neither, as the value it stands for was.
+    case opaque
 
     package func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
@@ -22,6 +25,7 @@ package indirect enum MaskedStoreValue: Equatable, Encodable, Sendable {
         case .bool(let value): try container.encode(value)
         case .array(let value): try container.encode(value)
         case .dictionary(let value): try container.encode(value)
+        case .opaque: try container.encodeNil()
         }
     }
 
@@ -35,6 +39,7 @@ package indirect enum MaskedStoreValue: Equatable, Encodable, Sendable {
         case .bool(let value): NSNumber(value: value)
         case .array(let value): value.map(\.storeValue)
         case .dictionary(let value): value.mapValues(\.storeValue)
+        case .opaque: NSNull()
         }
     }
 }
@@ -42,9 +47,10 @@ package indirect enum MaskedStoreValue: Equatable, Encodable, Sendable {
 /// Builds a public copy of the tunnel store keys from an allowlist. Nothing
 /// is passed through because it looks harmless: a key, a field name or a
 /// value reaches the output only if a rule here names it, and everything else
-/// is a placeholder. What detection reads survives: which tunnel keys exist,
-/// which known fields they have, how many addresses, and whether an IPv6
-/// address is link-local, routable or neither.
+/// is a placeholder. What detection reads survives with its type, so a masked
+/// capture parses to the same detection as the store it came from: which
+/// tunnel keys exist, which known fields they have, the shape of each address
+/// list, and whether an IPv6 address is link-local, routable or neither.
 ///
 /// One mask gives the same placeholder to the same input every time, so a
 /// stream of captures shows an address or a service staying or changing.
@@ -61,9 +67,14 @@ package indirect enum MaskedStoreValue: Equatable, Encodable, Sendable {
 /// - In an address field, an IPv4 literal becomes an RFC 5737 documentation
 ///   address. An IPv6 literal becomes `fe80::N` if it is link-local,
 ///   `2001:db8::N` if it is any other unicast address, and `ff00::N` if it is
-///   multicast, loopback or unspecified. A zone index goes with the rest.
+///   multicast, loopback or unspecified. A zone index goes with the rest. Any
+///   other string becomes `maskedPlaceholder`, and anything that is not a
+///   string becomes `.opaque`, so a list that was not all strings still is
+///   not.
 /// - A subnet mask, a `utun` interface name, and a number or boolean in a
-///   numeric field are kept.
+///   numeric field are kept. Any other string in an interface name field
+///   becomes `maskedPlaceholder`, and a value in it or in a numeric field
+///   that is not of its type becomes `.opaque`.
 /// - Every other value becomes `maskedPlaceholder`.
 package struct TunnelStoreMask {
     /// Vendor service IDs that are the same on every machine.
@@ -112,11 +123,13 @@ package struct TunnelStoreMask {
         "NetworkSignature": .opaque,
     ]
 
-    /// The three RFC 5737 blocks, 254 hosts each. An address past that many
-    /// distinct ones becomes `maskedPlaceholder` and is not remembered.
+    /// The three RFC 5737 blocks, 254 hosts each. Every address past that
+    /// many distinct ones shares `ipv4Overflow` and is not remembered.
     private static let ipv4Blocks = ["192.0.2.", "198.51.100.", "203.0.113."]
     private static let ipv4Capacity = ipv4Blocks.count * 254
-    /// One hextet of host numbers under each IPv6 prefix.
+    private static let ipv4Overflow = "192.0.2.255"
+    /// One hextet of host numbers under each IPv6 prefix. Every address past
+    /// that many of a kind shares `<prefix>1:0`, which is still of that kind.
     private static let ipv6Capacity = 0xffff
     /// Distinct service IDs one mask numbers. A service past that many is
     /// left out and counted.
@@ -126,9 +139,7 @@ package struct TunnelStoreMask {
     private static let servicePrefix = "State:/Network/Service/"
 
     private var ipv4: [String: String] = [:]
-    private var linkLocalIPv6: [String: String] = [:]
-    private var routableIPv6: [String: String] = [:]
-    private var otherIPv6: [String: String] = [:]
+    private var ipv6: [TunnelSnapshot.IPv6Kind: [String: String]] = [:]
     private var services: [String: String] = [:]
 
     package init() {}
@@ -186,19 +197,26 @@ package struct TunnelStoreMask {
     }
 
     private mutating func mask(_ value: Any, as field: Field) -> MaskedStoreValue {
-        if let list = value as? [Any] { return .array(list.map { mask($0, as: field) }) }
         switch (field, value) {
-        case (.address, let text as String):
-            return .string(address(text) ?? Self.maskedPlaceholder)
+        case (.address, let list as [Any]):
+            return .array(list.map { mask(address: $0) })
+        case (.address, _):
+            return mask(address: value)
+        case (_, let list as [Any]):
+            return .array(list.map { mask($0, as: field) })
         case (.subnetMask, let text as String) where Self.isSubnetMask(text):
             return .string(text)
-        case (.interfaceName, let text as String) where PushedResolverReading.isTunnelInterface(text):
-            return .string(text)
+        case (.interfaceName, let text as String):
+            return .string(PushedResolverReading.isTunnelInterface(text) ? text : Self.maskedPlaceholder)
+        case (.interfaceName, _):
+            return .opaque
         case (.number, let number as NSNumber):
             if CFGetTypeID(number) == CFBooleanGetTypeID() { return .bool(number.boolValue) }
             if !CFNumberIsFloatType(number) { return .integer(number.int64Value) }
-            // JSON has no infinity or NaN.
-            return number.doubleValue.isFinite ? .number(number.doubleValue) : .string(Self.maskedPlaceholder)
+            // JSON has no infinity or NaN, and detection reads only the truth.
+            return number.doubleValue.isFinite ? .number(number.doubleValue) : .bool(number.boolValue)
+        case (.number, _):
+            return .opaque
         case (.routes, let route as [String: Any]):
             return mask(fields: route)
         default:
@@ -206,37 +224,36 @@ package struct TunnelStoreMask {
         }
     }
 
+    private mutating func mask(address value: Any) -> MaskedStoreValue {
+        guard let text = value as? String else { return .opaque }
+        return .string(address(text) ?? Self.maskedPlaceholder)
+    }
+
     /// The placeholder for an IP literal; nil when `text` is not one.
     private mutating func address(_ text: String) -> String? {
         if IPAddressSyntax.isIPv4(text) {
-            return Self.placeholder(for: text, in: &ipv4, capacity: Self.ipv4Capacity) { index in
-                Self.ipv4Blocks[index / 254] + String(index % 254 + 1)
+            return Self.placeholder(for: text, in: &ipv4, capacity: Self.ipv4Capacity, overflow: Self.ipv4Overflow) {
+                Self.ipv4Blocks[$0 / 254] + String($0 % 254 + 1)
             }
         }
         guard let kind = TunnelSnapshot.ipv6Kind(text) else { return nil }
-        switch kind {
-        case .linkLocal:
-            return Self.placeholder(for: text, in: &linkLocalIPv6, capacity: Self.ipv6Capacity) {
-                "fe80::" + String($0 + 1, radix: 16)
-            }
-        case .routable:
-            return Self.placeholder(for: text, in: &routableIPv6, capacity: Self.ipv6Capacity) {
-                "2001:db8::" + String($0 + 1, radix: 16)
-            }
-        case .other:
-            // `ff00::/16` is reserved multicast: it parses as neither
-            // link-local nor routable, as the address it stands for did.
-            return Self.placeholder(for: text, in: &otherIPv6, capacity: Self.ipv6Capacity) {
-                "ff00::" + String($0 + 1, radix: 16)
-            }
+        // `ff00::/16` is reserved multicast: it parses as neither link-local
+        // nor routable, as the address it stands for did.
+        let prefix = switch kind {
+        case .linkLocal: "fe80::"
+        case .routable: "2001:db8::"
+        case .other: "ff00::"
         }
+        return Self.placeholder(
+            for: text, in: &ipv6[kind, default: [:]], capacity: Self.ipv6Capacity, overflow: prefix + "1:0"
+        ) { prefix + String($0 + 1, radix: 16) }
     }
 
     private static func placeholder(
-        for text: String, in table: inout [String: String], capacity: Int, _ make: (Int) -> String
+        for text: String, in table: inout [String: String], capacity: Int, overflow: String, _ make: (Int) -> String
     ) -> String {
         if let known = table[text] { return known }
-        guard table.count < capacity else { return maskedPlaceholder }
+        guard table.count < capacity else { return overflow }
         let made = make(table.count)
         table[text] = made
         return made

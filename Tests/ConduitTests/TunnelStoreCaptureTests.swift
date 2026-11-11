@@ -214,9 +214,9 @@ final class TunnelStoreCaptureTests: XCTestCase {
         ]), .dictionary([
             "Router": .string("fe80::1"),
             "ServerAddress": .string("192.0.2.1"),
-            "DestAddresses": .array([.string("<masked>"), .string("192.0.2.1"), .string("<masked>")]),
-            "Gateway": .string("<masked>"),
-        ]))
+            "DestAddresses": .array([.string("<masked>"), .string("192.0.2.1"), .opaque]),
+            "Gateway": .opaque,
+        ]), "a value that is not a string stays one, so a list that was not all strings still is not")
     }
 
     func testAKnownFieldHoldingTheWrongKindOfValueIsMasked() {
@@ -233,9 +233,9 @@ final class TunnelStoreCaptureTests: XCTestCase {
             "SubnetMasks": .array([.string("255.255.255.0"), .string("<masked>"), .string("<masked>")]),
             "InterfaceName": .string("<masked>"),
             "ConfirmedInterfaceName": .string("utun6"),
-            "OverridePrimary": .string("<masked>"),
-            "Flags": .array([.bool(true), .number(0.5), .string("<masked>")]),
-            "PrefixLength": .string("<masked>"),
+            "OverridePrimary": .opaque,
+            "Flags": .array([.bool(true), .number(0.5), .bool(NSNumber(value: Double.infinity).boolValue)]),
+            "PrefixLength": .opaque,
             "NetworkSignature": .string("<masked>"),
             "AdditionalRoutes": .array([
                 .string("<masked>"),
@@ -256,7 +256,7 @@ final class TunnelStoreCaptureTests: XCTestCase {
         XCTAssertEqual(addresses(["203.0.113.77"]), ["192.0.2.1"])
     }
 
-    func testAddressesPastTheDocumentationBlocksAreMaskedWithoutAPlaceholder() {
+    func testAddressesPastTheDocumentationBlocksShareOnePlaceholder() {
         var mask = TunnelStoreMask()
         let many = (0..<763).map { "10.\($0 / 256).\($0 % 256).1" }
 
@@ -266,7 +266,7 @@ final class TunnelStoreCaptureTests: XCTestCase {
 
         XCTAssertEqual(masked?.first, "192.0.2.1")
         XCTAssertEqual(masked?[761], "203.0.113.254")
-        XCTAssertEqual(masked?[762], "<masked>")
+        XCTAssertEqual(masked?[762], "192.0.2.255", "still an IPv4 address, so the tunnel still counts")
     }
 
     func testAFailedReadingIsALineThatNamesTheFailureAndItsCode() throws {
