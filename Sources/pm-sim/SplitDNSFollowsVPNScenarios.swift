@@ -327,7 +327,12 @@ enum SplitDNSFollowsVPNScenarios {
         }
 
         await host.stopRuntime()
-        check("stopping the runtime stops the pushed-resolver observer", await stopped(pushed))
+        do {
+            check("stopping the runtime stops the pushed-resolver observer", try await stopped(pushed))
+        } catch {
+            notes.append("the wait for the observer to stop ended early: \(error)")
+            check("stopping the runtime stops the pushed-resolver observer", false)
+        }
         let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
         let flush = await host.flushEvents()
         check("the host settles and flushes", settled == .settled && flush.allConfirmed)
@@ -370,9 +375,9 @@ enum SplitDNSFollowsVPNScenarios {
 
     /// The observer stops on the delivery that carries the forwarder's stopped state, a turn after the stop returns.
     @RuntimeActor
-    private static func stopped(_ pushed: FakePushedResolverObserver) async -> Bool {
+    private static func stopped(_ pushed: FakePushedResolverObserver) async throws -> Bool {
         for _ in 0..<1000 where pushed.isObserving {
-            try? await Task.sleep(for: .milliseconds(10))
+            try await Task.sleep(for: .milliseconds(10))
         }
         return !pushed.isObserving
     }
