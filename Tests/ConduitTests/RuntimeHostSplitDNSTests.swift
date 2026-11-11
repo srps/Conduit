@@ -353,6 +353,34 @@ final class RuntimeHostSplitDNSTests: XCTestCase {
         XCTAssertEqual(answer, corpIP)
     }
 
+    /// The restart above cannot tell the admission from the run state: the orchestrator publishes `stopped` and
+    /// `starting` with no suspension between them, so the host's delivery reads `starting` whatever a bind or a
+    /// delay holds. This publishes `stopped` by itself, under the admitted start, and gives the owner its turn.
+    @RuntimeActor func testAStoppedRunStateUnderAnAdmittedStartKeepsDetectionRunningAndTheHeldSet() async throws {
+        let running = try await start(primed: PushedResolverReading(resolvers: [corp()]))
+        await running.report(.connected, live: ["utun6"])
+        await running.push(PushedResolverReading())
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .held)
+        XCTAssertTrue(running.host.orchestrator.dnsForwarderAdmitted)
+
+        running.host.orchestrator.mutateSnapshotForTesting { $0.dnsRunState = .stopped }
+        await running.host.deliveries.drain()
+
+        XCTAssertTrue(running.harness.pushedResolvers.isObserving)
+        XCTAssertEqual(running.events("dns.split_table_changed"), ["detected_domains=1 manual_domains=0 rules=1 reason=pushed"])
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .held)
+
+        running.host.orchestrator.mutateSnapshotForTesting { $0.dnsRunState = .starting }
+        await running.host.deliveries.drain()
+        running.host.orchestrator.mutateSnapshotForTesting { $0.dnsRunState = .running }
+        await running.host.deliveries.drain()
+
+        XCTAssertEqual(running.harness.pushedResolvers.startCount, 1, "the observer was not stopped and started again")
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .held)
+        let answer = try await SplitDNSProbe.resolve("host.corp.example", port: running.port)
+        XCTAssertEqual(answer, corpIP)
+    }
+
     /// The VPN observer reports a verdict only when it changes, across its own stop and start too, so the verdict
     /// the gate holds at a stop is the one the next start has to judge by. Forgetting it would leave the gate at
     /// `.unknown`, which admits every reading, with no report coming to correct it.
