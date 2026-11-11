@@ -57,9 +57,7 @@ package struct SplitDNSTable: Hashable, Sendable {
     package init(manual: [DomainDNSEntry], detected: [SplitDNSRule]) {
         var order: [String] = []
         var servers: [String: [String]] = [:]
-        for entry in manual where entry.enabled {
-            let domain = Self.normalize(entry.domain)
-            guard !domain.isEmpty else { continue }
+        for (domain, entry) in Self.enabled(manual) {
             if servers[domain] == nil { order.append(domain) }
             var list = servers[domain] ?? []
             for server in entry.servers where !list.contains(server) {
@@ -87,6 +85,20 @@ package struct SplitDNSTable: Hashable, Sendable {
             )
         }
         rules = manualRules + detectedOrder.filter { servers[$0] == nil }.compactMap { detectedByDomain[$0] }
+    }
+
+    /// How many rules of `init(manual:detected:)` have an enabled entry of `manual` behind them. A rule's
+    /// `origins` cannot say: when a tunnel pushes every server the entry names, they all count as detected.
+    package static func manualDomainCount(in manual: [DomainDNSEntry]) -> Int {
+        Set(enabled(manual).map(\.domain)).count
+    }
+
+    /// The enabled entries that name a domain, each with that domain normalized, in configuration order.
+    private static func enabled(_ manual: [DomainDNSEntry]) -> [(domain: String, entry: DomainDNSEntry)] {
+        manual.compactMap { entry in
+            let domain = normalize(entry.domain)
+            return entry.enabled && !domain.isEmpty ? (domain, entry) : nil
+        }
     }
 
     /// The rule whose domain is `name` or the longest suffix of `name` on a

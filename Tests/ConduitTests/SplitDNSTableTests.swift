@@ -85,6 +85,19 @@ final class SplitDNSTableTests: XCTestCase {
         ])
     }
 
+    func testManualDomainsAreCountedPerEnabledDomainWhateverTheirServers() {
+        let manual = [
+            DomainDNSEntry(domain: "Corp.Example.", servers: ["192.0.2.53"]),
+            DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.54"]),
+            DomainDNSEntry(domain: "lab.example", servers: []),
+            DomainDNSEntry(domain: "off.example", servers: ["192.0.2.55"], enabled: false),
+            DomainDNSEntry(domain: ".", servers: ["192.0.2.56"]),
+        ]
+
+        XCTAssertEqual(SplitDNSTable.manualDomainCount(in: manual), 2)
+        XCTAssertEqual(SplitDNSTable(manual: manual, detected: []).rules.count, 2, "one rule per counted domain")
+    }
+
     func testManualRulesComeFirstThenDetectedOnlyDomainsInTheGivenOrder() {
         let table = SplitDNSTable(
             manual: [DomainDNSEntry(domain: "lan.example", servers: ["203.0.113.5"])],

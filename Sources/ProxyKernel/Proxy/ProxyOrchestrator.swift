@@ -760,7 +760,7 @@ package final class ProxyOrchestrator {
         }
         guard let table = swapped else { return }
         let detectedDomains = table.rules.count { $0.origins.contains { $0 != .manual } }
-        let manualDomains = table.rules.count { $0.origins.contains(.manual) }
+        let manualDomains = SplitDNSTable.manualDomainCount(in: manual)
         let detail = "detected_domains=\(detectedDomains) manual_domains=\(manualDomains) rules=\(table.rules.count) reason=\(reason)"
         emitEvent(.health, "dns.split_table_changed", detail: detail)
         logStore.log(.notice, "Split-DNS table changed: \(detail)", category: .network)

@@ -81,6 +81,15 @@ final class ProxyOrchestratorSplitDNSTests: XCTestCase {
         XCTAssertEqual(running.orchestrator.snapshot.detectedSplitDNS, .none)
     }
 
+    /// The merge counts a server both sides name as detected, so the rule keeps no manual origin to count.
+    @RuntimeActor func testAManualEntryWhoseServersTheTunnelAlsoPushesStillCountsAsManual() async throws {
+        let running = try await start(entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.53"])])
+
+        running.orchestrator.applyDetectedSplitDNSRules(pushed, display: .none, reason: .pushed)
+
+        XCTAssertEqual(tableEvents(running.orchestrator), ["detected_domains=1 manual_domains=1 rules=1 reason=pushed"])
+    }
+
     @RuntimeActor func testAConfigChangeRebuildsTheTableAndKeepsThePushedRules() async throws {
         let running = try await start(entries: [])
         let orchestrator = running.orchestrator
