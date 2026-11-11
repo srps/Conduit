@@ -348,6 +348,72 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         XCTAssertFalse(warning.contains("the providers were unreachable"), warning)
     }
 
+    /// A proxy that offers only Negotiate raises no challenge, so there is no
+    /// refusal to name. CFNetwork fails the tunnel with its own error, and
+    /// the warning names that instead of calling the providers unreachable.
+    func testTheAllProvidersFailedWarningNamesAProxyThatRefusedTheTunnel() async throws {
+        let proxy = try await ChallengingProxy.start(group: group, offering: ["Negotiate"])
+        self.proxy = proxy
+        var config = ProxyConfig.testFixture()
+        config.upstreams = []
+        config.localHost = "127.0.0.1"
+        config.dohProviders = ["https://192.0.2.10/dns-query"]
+        config.dnsEntries = []
+        let frozen = config
+        let logger = RecordingLogSink(minLevel: .debug)
+        let proxyPort = proxy.port
+        let forwarder = LocalDNSForwarder(
+            group: group, logger: logger, configProvider: { frozen },
+            preferProxyPathForDoH: { true }, localProxyPort: { proxyPort }
+        )
+        self.forwarder = forwarder
+        try await forwarder.start(host: "127.0.0.1", port: 0)
+        for session in forwarder.doHSessions {
+            try await ProxyChallengeCanary.requireRefusal(session)
+        }
+
+        let client = try await DatagramBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
+        let query = DNSWireFormat.buildQuery(domain: "negotiate-only.example", txID: 0x0310, qtype: 1)
+        var buffer = client.allocator.buffer(capacity: query.count)
+        buffer.writeBytes(query)
+        try await client.writeAndFlush(AddressedEnvelope(
+            remoteAddress: try SocketAddress(ipAddress: "127.0.0.1", port: try XCTUnwrap(forwarder.listeningPort)), data: buffer
+        )).get()
+        func warnings() -> [String] {
+            logger.entries().filter { $0.level == .warning && $0.message.contains("DoH provider(s) failed") }.map(\.message)
+        }
+        for _ in 0..<1_400 where warnings().isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try await client.close().get()
+
+        let warning = try XCTUnwrap(warnings().first)
+        XCTAssertTrue(warning.contains("refused the tunnel to a provider, which CFNetwork reports as error 310"), warning)
+        XCTAssertTrue(warning.contains("offers only Negotiate"), warning)
+        XCTAssertFalse(warning.contains("the providers were unreachable"), warning)
+        XCTAssertFalse(warning.contains("refused the challenge"), "no challenge was raised: \(warning)")
+        XCTAssertFalse(proxy.requestHeads().contains { $0.lowercased().contains("proxy-authorization") })
+    }
+
+    func testTheWarningNamesATunnelRefusalAndAPlain407() {
+        let tunnel = DoHFailureSignature(statuses: [], proxyChallengeRefused: false, proxyRefusedTunnel: true)
+        XCTAssertTrue(tunnel.explanation.hasPrefix("a proxy on the route refused the tunnel to a provider"), tunnel.explanation)
+        XCTAssertTrue(tunnel.explanation.contains("and no other route got an HTTP response"), tunnel.explanation)
+        XCTAssertNotEqual(tunnel, DoHFailureSignature(statuses: [], proxyChallengeRefused: false),
+                          "a tunnel refusal starting or ending repeats the warning at once")
+        // A plain-HTTP provider through a proxy: the 407 comes back as the response.
+        let plain = DoHFailureSignature(statuses: [407], proxyChallengeRefused: false).explanation
+        XCTAssertTrue(plain.contains("answered HTTP 407") && plain.contains("HTTP 407 is a proxy on the route asking for authentication"), plain)
+        XCTAssertFalse(DoHFailureSignature(statuses: [403], proxyChallengeRefused: false).explanation.contains("407"))
+
+        var observed = DoHFetchObservations()
+        observed.record(URLError(.timedOut))
+        observed.record(URLError(.cancelled))
+        XCTAssertFalse(observed.proxyRefusedTunnel)
+        observed.record(NSError(domain: kCFErrorDomainCFNetwork as String, code: 310))
+        XCTAssertTrue(observed.proxyRefusedTunnel)
+    }
+
     func testTheWarningStillSaysUnreachableWhenNothingWasRefused() {
         XCTAssertTrue(
             DoHFailureSignature(statuses: [], proxyChallengeRefused: false).explanation
