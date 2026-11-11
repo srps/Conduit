@@ -141,6 +141,7 @@ graph TD
     PMTunnel --> Auth
 
     PMDns --> Kernel
+    PMDns --> Auth
     PMCtl --> Shared
     PMVPN --> Kernel
     PMVPN --> Platform
@@ -178,7 +179,7 @@ graph TD
 | `pm-proxy`             | ✓           | ✓         | ✓        | —           | ✓             | —             | ✓                  | — | —    |
 | `pm-sim`               | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | ✓                  | ✓ | ✓    |
 | `pm-tunnel`            | ✓           | ✓         | —        | —           | —             | —             | —                  | — | —    |
-| `pm-dns`               | ✓           | —         | —        | —           | —             | —             | —                  | — | —    |
+| `pm-dns`               | ✓           | ✓         | —        | —           | —             | —             | —                  | — | —    |
 | `pmctl`                | —           | —         | —        | —           | ✓             | —             | —                  | — | —    |
 | `pm-vpn-check`         | ✓           | —         | —        | ✓           | —             | —             | —                  | — | ✓    |
 | `pm-auth-check`        | ✓           | —         | —        | —           | —             | —             | —                  | — | —    |
