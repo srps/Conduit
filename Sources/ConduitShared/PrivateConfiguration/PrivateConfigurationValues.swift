@@ -235,11 +235,13 @@ package struct PrivateDNSSettings: Sendable, Equatable {
     package var transparentProxyEnabled: Bool
     package var transparentProxyIP: String
     package var transparentProxyPort: Int
+    package var followVPNResolvers: Bool
 
     package init(
         forwarderEnabled: Bool, forwarderPort: Int, dohProviders: [PrivateURLValue],
         entries: [PrivateDNSEntrySettings], interceptRules: [PrivateInterceptRuleSettings],
-        transparentProxyEnabled: Bool, transparentProxyIP: String, transparentProxyPort: Int
+        transparentProxyEnabled: Bool, transparentProxyIP: String, transparentProxyPort: Int,
+        followVPNResolvers: Bool
     ) {
         self.forwarderEnabled = forwarderEnabled
         self.forwarderPort = forwarderPort
@@ -249,6 +251,7 @@ package struct PrivateDNSSettings: Sendable, Equatable {
         self.transparentProxyEnabled = transparentProxyEnabled
         self.transparentProxyIP = transparentProxyIP
         self.transparentProxyPort = transparentProxyPort
+        self.followVPNResolvers = followVPNResolvers
     }
 }
 

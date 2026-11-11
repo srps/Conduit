@@ -299,7 +299,8 @@ enum PrivateConfigBoundaryScenario {
                 dns: PrivateDNSSettings(
                     forwarderEnabled: false, forwarderPort: 5_053,
                     dohProviders: [PrivateURLValue("https://1.1.1.1/dns-query")], entries: [], interceptRules: [],
-                    transparentProxyEnabled: false, transparentProxyIP: "127.44.3.0", transparentProxyPort: 10_443
+                    transparentProxyEnabled: false, transparentProxyIP: "127.44.3.0", transparentProxyPort: 10_443,
+                    followVPNResolvers: true
                 ),
                 tunnels: PrivateTunnelSettings(definitions: [], maxSessions: 128, maxSessionsPerTunnel: 32),
                 health: PrivateHealthSettings(

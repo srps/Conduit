@@ -436,6 +436,7 @@ package struct ProxyConfig: Codable, Equatable {
         case tunnelDefinitions
         case dnsInterceptRules
         case transparentProxyEnabled, transparentProxyIP, transparentProxyPort
+        case dnsFollowVPNResolvers
     }
 
     package init(from decoder: Decoder) throws {
@@ -492,7 +493,8 @@ package struct ProxyConfig: Codable, Equatable {
             interceptRules: rawInterceptRules,
             transparentProxyEnabled: try c.decodeIfPresent(Bool.self, forKey: .transparentProxyEnabled) ?? g.dns.transparentProxyEnabled,
             transparentProxyIP: try c.decodeIfPresent(String.self, forKey: .transparentProxyIP) ?? g.dns.transparentProxyIP,
-            transparentProxyPort: try c.decodeIfPresent(Int.self, forKey: .transparentProxyPort) ?? g.dns.transparentProxyPort
+            transparentProxyPort: try c.decodeIfPresent(Int.self, forKey: .transparentProxyPort) ?? g.dns.transparentProxyPort,
+            followVPNResolvers: try c.decodeIfPresent(Bool.self, forKey: .dnsFollowVPNResolvers) ?? g.dns.followVPNResolvers
         )
 
         let rawDefs = try c.decodeIfPresent([TunnelDefinition].self, forKey: .tunnelDefinitions) ?? g.tunnels.definitions
@@ -577,6 +579,7 @@ package struct ProxyConfig: Codable, Equatable {
         try c.encode(dns.transparentProxyEnabled, forKey: .transparentProxyEnabled)
         try c.encode(dns.transparentProxyIP, forKey: .transparentProxyIP)
         try c.encode(dns.transparentProxyPort, forKey: .transparentProxyPort)
+        try c.encode(dns.followVPNResolvers, forKey: .dnsFollowVPNResolvers)
 
         // tunnels
         try c.encode(tunnels.definitions, forKey: .tunnelDefinitions)

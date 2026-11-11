@@ -171,6 +171,9 @@ package struct DNSSection: Codable, Equatable, Sendable {
     package var transparentProxyEnabled: Bool
     package var transparentProxyIP: String
     package var transparentProxyPort: Int
+    /// Whether split DNS follows the resolvers a connected VPN pushes (decision 0044). Off, nothing is detected
+    /// and the forwarder's table holds the manual `entries` only. On when `config.json` names no value.
+    package var followVPNResolvers: Bool
 
     package init(
         forwarderEnabled: Bool = false,
@@ -180,7 +183,8 @@ package struct DNSSection: Codable, Equatable, Sendable {
         interceptRules: [DNSInterceptRule] = [],
         transparentProxyEnabled: Bool = false,
         transparentProxyIP: String = "127.44.3.0",
-        transparentProxyPort: Int = 10443
+        transparentProxyPort: Int = 10443,
+        followVPNResolvers: Bool = true
     ) {
         self.forwarderEnabled = forwarderEnabled
         self.forwarderPort = forwarderPort
@@ -190,6 +194,7 @@ package struct DNSSection: Codable, Equatable, Sendable {
         self.transparentProxyEnabled = transparentProxyEnabled
         self.transparentProxyIP = transparentProxyIP
         self.transparentProxyPort = transparentProxyPort
+        self.followVPNResolvers = followVPNResolvers
     }
 }
 

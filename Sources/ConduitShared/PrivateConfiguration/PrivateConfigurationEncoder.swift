@@ -522,6 +522,7 @@ extension PrivateJSONEmitter {
             try member("transparentProxyEnabled") { try writeBool(value.transparentProxyEnabled) }
             try member("transparentProxyIP") { try writeString(value.transparentProxyIP) }
             try member("transparentProxyPort") { try writeInt(value.transparentProxyPort) }
+            try member("followVPNResolvers") { try writeBool(value.followVPNResolvers) }
         }
     }
 

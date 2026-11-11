@@ -247,6 +247,7 @@ enum PrivateConfigurationSchema {
         ("transparentProxyEnabled", boolValue),
         ("transparentProxyIP", .string(.transparentProxyIP)),
         ("transparentProxyPort", numberValue),
+        ("followVPNResolvers", boolValue),
     ])
 
     static let dnsEntry = PrivateObjectShape([

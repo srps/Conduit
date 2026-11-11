@@ -124,7 +124,7 @@ enum PrivateEditorMaximumFixture {
                     )
                 },
                 transparentProxyEnabled: false, transparentProxyIP: texts.next(.transparentProxyIP),
-                transparentProxyPort: widestInt
+                transparentProxyPort: widestInt, followVPNResolvers: false
             ),
             tunnels: PrivateTunnelSettings(
                 definitions: (0..<DomainResourceField.tunnelDefinitions.limit).map { index in
