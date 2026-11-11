@@ -427,8 +427,7 @@ private struct DoHTransports: @unchecked Sendable {
     }
 
     /// On VPN, direct HTTPS to public DoH resolvers is often black-holed; try
-    /// the local proxy listener first. No session goes straight to an
-    /// upstream (decision 0045, `DoHSessionFactory.routes`).
+    /// the local proxy listener first.
     func sessions(preferProxyPath: Bool) -> [URLSession] {
         guard let localProxy else { return [direct] }
         return preferProxyPath ? [localProxy, direct] : [direct, localProxy]
@@ -584,8 +583,6 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// keeping the rest of the DoH path lock-free. Session invalidation is
     /// deferred through the handle's use-count (see `DoHTransportsHandle`).
     private let transportsBox: NIOLockedValueBox<DoHTransportsHandle>
-    /// Shared by every generation of DoH sessions, so a reset keeps the
-    /// once-a-minute limit on `auth.proxy_challenge_refused`.
     private let proxyChallengeDelegate: ProxyChallengeRefusingDelegate
     private let responseCache = DNSResponseCache()
 
@@ -611,7 +608,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         self.localProxyPort = localProxyPort
         self.pathSatisfied = pathSatisfied
         self.onMetrics = onMetrics
-        let delegate = ProxyChallengeRefusingDelegate(client: "doh", gate: RuntimeEventRepeatGate()) { event in
+        let delegate = ProxyChallengeRefusingDelegate(client: .doh) { event in
             eventSink?(event)
             logger.log(
                 .warning,

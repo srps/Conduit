@@ -65,7 +65,6 @@ package final class DoHOriginResolver: OriginResolving {
     private let localProxyPort: @Sendable () -> Int?
     private let cache = NIOLockedValueBox<[String: CacheEntry]>([:])
     private let negativeCache = NIOLockedValueBox(NegativeAnswerCache(ttl: 5))
-    /// Shared by every per-lookup session (decision 0045).
     private let proxyChallengeDelegate: ProxyChallengeRefusingDelegate
 
     /// Takes the whole config, not just the provider list: reaching a DoH
@@ -76,7 +75,7 @@ package final class DoHOriginResolver: OriginResolving {
         self.logger = logger
         self.configProvider = configProvider
         self.localProxyPort = localProxyPort
-        self.proxyChallengeDelegate = ProxyChallengeRefusingDelegate(client: "origin_resolver", gate: RuntimeEventRepeatGate()) { event in
+        self.proxyChallengeDelegate = ProxyChallengeRefusingDelegate(client: .originResolver) { event in
             eventSink?(event)
             logger.log(
                 .warning,

@@ -24,13 +24,7 @@ enum DoHSessionFactory {
     /// involves no third party. But direct is also the route that dies first:
     /// under a full-tunnel VPN, outbound 443 to a public resolver is commonly
     /// dropped outright, and on a split-DNS corporate network the provider's
-    /// own hostname may not resolve. Conduit's own listener is what keeps DoH
-    /// working there: it reaches the corporate upstream, the sanctioned way
-    /// out, and applies the upstream's authentication on our behalf.
-    ///
-    /// No route goes straight to an upstream (decision 0045). The upstream
-    /// answers that with 407, and CFNetwork would ask macOS for a proxy
-    /// credential, which prompts the user when the saved one fails.
+    /// own hostname may not resolve.
     ///
     /// Callers race all of these concurrently, so the order is a tiebreak among
     /// simultaneous successes rather than a sequence of fallbacks.
@@ -53,9 +47,6 @@ enum DoHSessionFactory {
     ///   configured machine point at Conduit's own listener — the DoH
     ///   lookup would then be silently proxied through the process trying to
     ///   perform it. `Route(proxy: nil)` means explicitly direct.
-    /// - Important: the `delegate` refuses every proxy-authentication
-    ///   challenge (decision 0045). With no delegate, CFNetwork answers one by
-    ///   asking macOS for a saved proxy credential, and macOS prompts the user.
     static func session(
         for route: Route,
         delegate: ProxyChallengeRefusingDelegate,

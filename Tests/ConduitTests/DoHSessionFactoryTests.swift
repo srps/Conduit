@@ -19,8 +19,6 @@ final class DoHSessionFactoryTests: XCTestCase {
         XCTAssertEqual(localProxyPorts(port: 3128, bound: 3128), [3128])
     }
 
-    /// Decision 0045: a DoH lookup sent straight at the upstream meets its
-    /// 407, which macOS answered with a credential dialog for Conduit.
     func testRoutesAreDirectAndTheListenerNeverTheUpstream() {
         var config = ProxyConfig.testFixture()
         config.localHost = "127.0.0.1"
