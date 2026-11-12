@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import NIOConcurrencyHelpers
 import NIOCore
+import NIOHTTP1
 import NIOPosix
 import XCTest
 @testable import ProxyKernel
@@ -107,9 +108,8 @@ final class CONNECTTargetValidationTests: XCTestCase {
         XCTAssertEqual(upstream.connectHeads(), [], "no forged name reached the upstream")
     }
 
-    /// The HTTP listener's parser already refuses a request line that a CR,
-    /// an LF or a space would split, and the coordinator refuses the rest:
-    /// a tab, a NUL, DEL and a non-ASCII byte.
+    /// The HTTP listener's parser already closes the connection on every one
+    /// of these bytes in a request line, before the handler sees it.
     func testTheHTTPListenerCarriesNoForgedTargetIntoACONNECT() async throws {
         let upstream = try await AuthenticatingUpstream.start(group: group)
         self.upstream = upstream
@@ -135,6 +135,90 @@ final class CONNECTTargetValidationTests: XCTestCase {
         await server.stop()
 
         XCTAssertEqual(upstream.connectHeads(), [], "no forged target reached the upstream")
+    }
+
+    /// A refused target is a local refusal, like a VPN transition during the dial: the client gets a 502, the request fails
+    /// locally, and a PAC `DIRECT` after the proxy neither dials the origin nor reports an upstream failure. The HTTP parser
+    /// closes the connection on these bytes before the handler sees them, so the head is respelled after it.
+    func testTheHTTPHandlerRefusesAMalformedTargetLocallyWhenPACOffersDIRECT() async throws {
+        try await assertHTTPHandlerRefusesAMalformedTargetLocally(strictMode: false)
+    }
+
+    /// In strict mode PAC's `DIRECT` is no fallback, and the refusal is still no upstream failure.
+    func testTheHTTPHandlerRefusesAMalformedTargetLocallyInStrictMode() async throws {
+        try await assertHTTPHandlerRefusesAMalformedTargetLocally(strictMode: true)
+    }
+
+    private func assertHTTPHandlerRefusesAMalformedTargetLocally(strictMode: Bool) async throws {
+        let upstream = try await AuthenticatingUpstream.start(group: group)
+        self.upstream = upstream
+        let accepted = NIOLockedValueBox(0)
+        let origin = try await ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                accepted.withLockedValue { $0 += 1 }
+                return channel.close()
+            }
+            .bind(host: "127.0.0.1", port: 0).get()
+        addTeardownBlock { try await origin.close().get() }
+        let originPort = try XCTUnwrap(origin.localAddress?.port)
+
+        var config = Self.config(upstreamPort: upstream.port)
+        config.pacRoutingEnabled = true
+        config.pacURL = "https://pac.corp.example/proxy.pac"
+        config.strictMode = strictMode
+        let fixed = config
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let sink: @Sendable (RuntimeEvent) -> Void = { event in events.withLockedValue { $0.append(event) } }
+        let engine = PACRoutingEngine(
+            configProvider: { fixed }, resolver: ProxyThenDirectPAC(upstreamPort: upstream.port), refreshInterval: 300, eventSink: sink
+        )
+        try await engine.refresh(force: true)
+        let pool = ConnectionPool(group: group, logger: DiscardingLogSink(), configProvider: { fixed },
+                                  authenticatorProvider: { _ in StubNegotiateAuthenticator() })
+        addTeardownBlock { pool.closeAll(scope: .all) }
+        let coordinator = CONNECTCoordinator(
+            pool: pool, authenticatorProvider: { _ in StubNegotiateAuthenticator() }, logger: DiscardingLogSink(), eventSink: sink
+        )
+        let detector = DirectConnectDetector(group: group, logger: DiscardingLogSink())
+        let outcomes = NIOLockedValueBox<[RequestOutcome]>([])
+        // A non-ASCII byte after the authority: the host and port the handler parses stay the loopback origin's.
+        let malformed = "127.0.0.1:\(originPort)?\u{e9}"
+        let listener = try await ServerBootstrap(group: group)
+            .childChannelInitializer { channel in
+                let handler = HTTPProxyHandler(
+                    pool: pool, connectCoordinator: coordinator, logger: DiscardingLogSink(), configProvider: { fixed },
+                    directModeProvider: { (false, .none) }, directConnectDetector: detector, pacRoutingEngine: engine,
+                    gatewayMode: false, authSource: nil, eventLoopGroup: self.group,
+                    onConnectionOpened: { _ in }, onConnectionClosed: { _ in }, onConnectionActivity: { _ in },
+                    onRequestCompleted: { outcome, _ in outcomes.withLockedValue { $0.append(outcome) } },
+                    eventSink: sink
+                )
+                do {
+                    try channel.pipeline.syncOperations.addHandler(
+                        ByteToMessageHandler(HTTPRequestDecoder(leftOverBytesStrategy: .forwardBytes))
+                    )
+                    try channel.pipeline.syncOperations.addHandler(HTTPResponseEncoder())
+                    try channel.pipeline.syncOperations.addHandler(TargetRespeller(target: malformed))
+                    try channel.pipeline.syncOperations.addHandler(handler)
+                    return channel.eventLoop.makeSucceededVoidFuture()
+                } catch {
+                    return channel.eventLoop.makeFailedFuture(error)
+                }
+            }
+            .bind(host: "127.0.0.1", port: 0).get()
+        addTeardownBlock { try await listener.close().get() }
+        let port = try XCTUnwrap(listener.localAddress?.port)
+
+        let answer = try await rawExchange("CONNECT 127.0.0.1:\(originPort) HTTP/1.1\r\nHost: 127.0.0.1:\(originPort)\r\n\r\n", port: port)
+
+        XCTAssertTrue(answer.hasPrefix("HTTP/1.1 502"), answer.debugDescription)
+        XCTAssertEqual(accepted.withLockedValue { $0 }, 0, "no DIRECT fallback dialled the origin")
+        XCTAssertEqual(upstream.connectHeads(), [], "nothing reached the upstream")
+        XCTAssertEqual(outcomes.withLockedValue { $0 }, [.failed(.local)])
+        let names = events.withLockedValue { $0 }.map(\.event)
+        XCTAssertEqual(names.filter { $0 == "connection.tunnel_target_rejected" }.count, 1, "\(names)")
+        XCTAssertFalse(names.contains("upstream.tunnel_failed"), "\(names)")
     }
 
     // MARK: - Harness
@@ -282,5 +366,28 @@ private final class ByteCollector: ChannelInboundHandler, @unchecked Sendable {
         var buffer = unwrapInboundIn(data)
         let read = buffer.readBytes(length: buffer.readableBytes) ?? []
         bytes.withLockedValue { if $0.count < 4096 { $0.append(contentsOf: read) } }
+    }
+}
+
+/// Answers every URL with `PROXY` the test upstream, then `DIRECT`.
+private struct ProxyThenDirectPAC: PacEvaluator, PacScriptEvaluating {
+    let upstreamPort: Int
+    func fetchPAC(from _: String) async throws -> String { "scripted" }
+    func makeEvaluator(pacScript _: String) throws -> any PacScriptEvaluating { self }
+    func resolveProxyChain(for _: URL) throws -> [String] { ["PROXY 127.0.0.1:\(upstreamPort)", "DIRECT"] }
+    func routeChain(for _: [String]) -> PACChain { PACChain(routes: [.proxy(host: "127.0.0.1", port: upstreamPort), .direct]) }
+}
+
+/// Replaces a decoded request head's target with `target`, which the HTTP parser itself would not have let through.
+private final class TargetRespeller: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = HTTPServerRequestPart
+    typealias InboundOut = HTTPServerRequestPart
+    private let target: String
+    init(target: String) { self.target = target }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        guard case .head(var head) = unwrapInboundIn(data) else { return context.fireChannelRead(data) }
+        head.uri = target
+        context.fireChannelRead(wrapInboundOut(.head(head)))
     }
 }
