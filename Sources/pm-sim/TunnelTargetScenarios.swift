@@ -5,7 +5,7 @@ import ProxyKernel
 
 /// A SOCKS5 client names its target as up to 255 bytes of anything, and the
 /// listener's tunnel writes that target into the CONNECT request line and
-/// `Host` header it sends the upstream, after Conduit's `Proxy-Authorization`.
+/// `Host` header of a request that carries Conduit's `Proxy-Authorization`.
 /// A name with CR LF in it is refused before anything is dialled, with one
 /// `connection.tunnel_target_rejected`; a well-formed name still tunnels.
 enum TunnelTargetScenarios {

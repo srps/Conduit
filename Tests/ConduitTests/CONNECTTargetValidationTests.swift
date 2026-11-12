@@ -7,8 +7,8 @@ import XCTest
 @testable import ProxyKernel
 
 /// A tunnel's target is written into the CONNECT request line and the `Host`
-/// header Conduit sends an upstream, after Conduit's own `Proxy-Authorization`
-/// is attached. A target is bytes a local client chose, so one that could end
+/// header of a request that carries Conduit's own `Proxy-Authorization`.
+/// A target is bytes a local client chose, so one that could end
 /// that line or add a header to it never reaches an upstream, whichever
 /// listener it came through.
 final class CONNECTTargetValidationTests: XCTestCase {

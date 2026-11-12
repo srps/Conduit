@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// The text a tunnel names as its target. `CONNECTCoordinator` writes it into
-/// the CONNECT request line and the `Host` header it sends an upstream, after
+/// the CONNECT request line and the `Host` header of a request that carries
 /// Conduit's own `Proxy-Authorization`, and a local client chose it.
 enum TunnelAuthority {
     /// Whether `text` can be written into that request line as one token:

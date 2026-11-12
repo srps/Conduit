@@ -67,14 +67,17 @@ packaging; 0.6.1 is the latest published release.
 - A local client can no longer add lines to the authenticated CONNECT that
   Conduit sends an upstream. The SOCKS5 listener read a requested name as up
   to 255 bytes of anything and wrote it into the CONNECT request line and its
-  `Host` header, after Conduit's own `Proxy-Authorization`, so a name with a
-  CR and an LF in it added headers to that request. Every tunnel through an
-  upstream now refuses a target that is not one token of visible ASCII (a
-  CR, an LF, a space, a tab, a NUL, another control, DEL or a non-ASCII
-  byte) before anything is dialled, and reports it as
+  `Host` header. The `Host` line comes before Conduit's own
+  `Proxy-Authorization`, so a name with a CR and an LF in it added headers to
+  that authenticated request. Every tunnel through an upstream now refuses a
+  target that is not one token of visible ASCII (a CR, an LF, a space, a
+  tab, a NUL, another control, DEL or a non-ASCII byte) before anything is
+  dialled. The refusal is local: the client gets a failure, with no DIRECT
+  fallback, no retry and no upstream failure reported. It is reported as
   `connection.tunnel_target_rejected`, at most once a minute with a count of
-  the refusals held back. The HTTP listener's parser already refused a CR,
-  an LF or a space in a CONNECT line.
+  the refusals held back, and the target it shows has any userinfo (up to
+  its last `@`) replaced by `<userinfo>@`. The HTTP listener's parser already
+  closed the connection on these bytes in a CONNECT line.
 
 ## 0.6.2
 
