@@ -43,7 +43,8 @@ final class SimHarness {
         upstreamServerFirst: [[UInt8]] = [],
         upstreamChallenge: String = "Negotiate",
         upstreamRelaySetupDelayMilliseconds: Int = 0,
-        authenticatorProvider: @escaping (UpstreamProxy) throws -> ProxyAuthenticator = { _ in MockAuthenticator() }
+        authenticatorProvider: @escaping (UpstreamProxy) throws -> ProxyAuthenticator = { _ in MockAuthenticator() },
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) async throws {
         let origin = FakeOrigin(group: group, behavior: originBehavior)
         self.origin = origin
@@ -108,7 +109,8 @@ final class SimHarness {
             onConnectionOpened: { _ in },
             onConnectionClosed: { _ in },
             onConnectionActivity: { _ in },
-            onRequestCompleted: { _, _ in }
+            onRequestCompleted: { _, _ in },
+            eventSink: eventSink
         )
         self.server = server
         try await server.start()

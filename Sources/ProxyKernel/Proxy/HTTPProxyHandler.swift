@@ -450,7 +450,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         case .authenticationUnavailable, .authenticationRejected,
              .noUpstreamsConfigured, .poolExhausted, .authHandshakeLimitExceeded,
              .bodyTooLargeForReplay, .clientClosedDuringResponse, .vpnTransitionDuringConnect,
-             .connectionTrackingFull, .idleConnectionSilent:
+             .connectionTrackingFull, .idleConnectionSilent, .malformedTunnelTarget:
             return false
         case .invalidResponse, .streamingResponseInterrupted, .upstreamResponseTimedOut:
             return true
@@ -571,9 +571,10 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         }
                         self.onRequestCompleted(.succeeded, tunnel.endpoint)
                     case .failure(let error):
-                        if ConnectionPoolError.isVPNTransitionDuringConnect(error) || ConnectionPoolError.isConnectionTrackingFull(error) {
+                        if ConnectionPoolError.isVPNTransitionDuringConnect(error) || ConnectionPoolError.isConnectionTrackingFull(error)
+                            || error as? ConnectionPoolError == .malformedTunnelTarget {
                             // Reported where it was decided; no DIRECT
-                            // fallback on stale routing, no strict hint.
+                            // fallback, no upstream failure, no strict hint.
                             self.refuseLocally(error, context: ctx, infoID: infoID)
                         } else if hasDirectFallback {
                             self.logger.log(.warning, "CONNECT via upstream failed for \(SensitiveValueSanitizer.observableTarget(head.uri)), falling back to DIRECT (PAC chain includes DIRECT).", category: .proxy)
