@@ -1,13 +1,11 @@
 # 0045: DoH skips the upstream, and Conduit's DoH and PAC sessions never hand a proxy challenge to macOS
 
 - Date: 2026-11-11
-- Decision: proposed
+- Decision: accepted (owner, 2026-11-12, [#311 comment](https://github.com/srps/Conduit/pull/311#issuecomment-6820614637): no direct-to-upstream DoH route, every delegate-visible proxy challenge cancelled, the Negotiate-only case outside the guard, and the DIRECT and listener-down DoH gaps accepted until the upstream route lands)
 - Implementation: implemented
 - Validation: pending
 - Supersedes: none
 - Superseded by: none
-
-The owner approved this decision on 2026-11-11, before the pull request existed. It stays proposed until the owner confirms it on the pull request.
 
 ## Context
 
