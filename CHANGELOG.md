@@ -61,6 +61,9 @@ packaging; 0.6.1 is the latest published release.
   entry, or direct mode, including the brief one after a VPN connect) under a
   full-tunnel VPN that drops direct 443, public names can now fail to resolve
   over DoH until the rules send the providers to an upstream again.
+  `pm-sim dns-doh-upstream-407` and the tests that let a loopback proxy answer
+  407 first check that every session they will use cancels a proxy challenge,
+  and stop with no request sent when one would not.
 
 ## 0.6.2
 
