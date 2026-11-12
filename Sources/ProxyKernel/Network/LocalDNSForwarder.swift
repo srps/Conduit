@@ -338,7 +338,9 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     var doHLocalProxyPort: Int? { core?.doHLocalProxyPort }
 
     /// Every DoH session the running forwarder holds; empty while stopped.
-    var doHSessions: [URLSession] { core?.doHSessions ?? [] }
+    /// Tests and pm-sim run `ProxyChallengeCanary` on these before they let a
+    /// proxy answer 407.
+    package var doHSessions: [URLSession] { core?.doHSessions ?? [] }
 
     package func resetUpstreamTransports(reason: String) {
         guard let core else {

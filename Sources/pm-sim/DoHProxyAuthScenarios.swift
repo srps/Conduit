@@ -9,6 +9,7 @@ import ProxyKernel
 ///
 /// | # | condition                                          | expected                                                  |
 /// |---|----------------------------------------------------|-----------------------------------------------------------|
+/// | G | before either fake can answer 407                  | every DoH session the forwarder holds cancels a proxy challenge; otherwise the scenario stops with no request sent |
 /// | A | a public name, provider over HTTP                  | answered, through the listener                            |
 /// | B | the upstream                                       | sees no request at all                                    |
 /// | C | the listener                                       | saw the lookup                                            |
@@ -26,13 +27,16 @@ enum DoHProxyAuthScenarios {
         let group = MultiThreadedEventLoopGroup.singleton
         let logger = RecordingConsoleLogSink(minLevel: verbose ? .debug : .warning)
 
-        let upstream = ScriptedHTTPProxy(group: group, mode: .challenge)
+        // No fake answers 407 until the gate below has checked the forwarder's
+        // sessions. A regressed guard would hand a 407 to macOS, and the
+        // machine running pm-sim would get the proxy-password dialog.
+        let upstream = ScriptedHTTPProxy(group: group, mode: .hangUp)
         ScenarioCleanup.register { await upstream.stop() }
         try await upstream.start()
         let listener = ScriptedHTTPProxy(group: group, mode: .answer(ip: publicIP))
         ScenarioCleanup.register { await listener.stop() }
         try await listener.start()
-        notes.append("upstream 127.0.0.1:\(upstream.port) answers 407; listener stand-in 127.0.0.1:\(listener.port)")
+        notes.append("upstream 127.0.0.1:\(upstream.port) answers 407 once the gate passes; listener stand-in 127.0.0.1:\(listener.port)")
 
         let providers = NIOLockedValueBox(["http://\(providerHost)/dns-query"])
         var config = ProxyConfig.testFixture()
@@ -58,6 +62,16 @@ enum DoHProxyAuthScenarios {
         try await forwarder.start(host: "127.0.0.1", port: 0)
         let port = forwarder.listeningPort ?? 0
 
+        do {
+            try ProxyChallengeCanary.requireRefusal(forwarder.doHSessions)
+        } catch {
+            notes.append("G gate failed: \(error) upstreamRequests=\(upstream.requestCount) listenerRequests=\(listener.requestCount)")
+            notes.append("FAIL — a DoH session would hand a proxy challenge to macOS; stopped before any proxy answered 407")
+            return gateFailure(name: name, start: start, notes: notes)
+        }
+        notes.append("G gate passed for \(forwarder.doHSessions.count) DoH session(s)")
+        upstream.mode = .challenge
+
         let first = DNSWireFormat.buildQuery(domain: "first-lookup.example", txID: 0x4070, qtype: 1)
         let answer = try await DNSProbe.overUDP(query: first, port: port, timeout: 12)
         let answeredIP = answer.flatMap { DNSWireFormat.firstIPv4Answer(in: $0)?.ip }
@@ -65,11 +79,20 @@ enum DoHProxyAuthScenarios {
         let passA = answeredIP == publicIP
         let passC = listener.requests(naming: "first-lookup") > 0
 
+        do {
+            try ProxyChallengeCanary.requireRefusal(forwarder.doHSessions)
+        } catch {
+            notes.append("G gate failed before the listener's 407: \(error)")
+            return gateFailure(name: name, start: start, notes: notes)
+        }
         listener.mode = .challenge
         providers.withLockedValue { $0 = ["https://\(providerHost)/dns-query"] }
         let second = DNSWireFormat.buildQuery(domain: "second-lookup.example", txID: 0x4071, qtype: 1)
         _ = try await DNSProbe.overUDP(query: second, port: port, timeout: 12)
-        let refusals = events.withLockedValue { $0 }.filter { $0.event == "auth.proxy_challenge_refused" }
+        // The gate's own refusals name the canary's proxy, not a loopback fake.
+        let refusals = events.withLockedValue { $0 }.filter {
+            $0.event == "auth.proxy_challenge_refused" && !($0.detail ?? "").contains("proxy=\(ProxyChallengeCanary.proxyHost):")
+        }
         notes.append("D refusals=\(refusals.map { $0.detail ?? "" })")
         let passD = refusals.count == 1
             && (refusals.first?.detail ?? "").hasPrefix("client=doh proxy=127.0.0.1:\(listener.port) ")
@@ -96,6 +119,7 @@ enum DoHProxyAuthScenarios {
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
             assertions: [
+                .init("every DoH session cancels a proxy challenge before a proxy answers 407", true),
                 .init("a public name is answered through the listener", passA),
                 .init("no DoH request reaches the upstream directly", passB),
                 .init("the listener carries the lookup", passC),
@@ -105,12 +129,28 @@ enum DoHProxyAuthScenarios {
             notes: notes
         )
     }
+
+    private static func gateFailure(name: String, start: Date, notes: [String]) -> ScenarioResult {
+        ScenarioResult(
+            name: name,
+            clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0, clientsClosedEarly: 0,
+            totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(start),
+            aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: [.init("every DoH session cancels a proxy challenge before a proxy answers 407", false)],
+            notes: notes
+        )
+    }
 }
 
 final class ScriptedHTTPProxy: @unchecked Sendable {
     enum Mode: Sendable {
         case answer(ip: String)
         case challenge
+        /// Records the request and closes without an answer.
+        case hangUp
     }
 
     private let group: EventLoopGroup
@@ -176,8 +216,12 @@ private final class ScriptedHTTPProxyHandler: ChannelInboundHandler, @unchecked 
         let head = String(decoding: request.readBytes(length: request.readableBytes) ?? [], as: UTF8.self)
         heads.withLockedValue { if $0.count < 256 { $0.append(head) } }
 
+        let channel = context.channel
         let response: String
         switch mode.withLockedValue({ $0 }) {
+        case .hangUp:
+            channel.close(promise: nil)
+            return
         case .answer(let ip):
             let body = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"\#(ip)"}]}"#
             response = "HTTP/1.1 200 OK\r\nContent-Type: application/dns-json\r\n" +
@@ -188,7 +232,6 @@ private final class ScriptedHTTPProxyHandler: ChannelInboundHandler, @unchecked 
                 "Proxy-Authenticate: Basic realm=\"corp.example\"\r\n" +
                 "Content-Length: 0\r\nConnection: close\r\n\r\n"
         }
-        let channel = context.channel
         var buffer = channel.allocator.buffer(capacity: response.utf8.count)
         buffer.writeString(response)
         context.writeAndFlush(wrapOutboundOut(buffer)).whenComplete { _ in
