@@ -30,6 +30,12 @@ package enum ProxyChallengeCanary {
 
     /// The methods URLSession hands to a session-level challenge handler when
     /// the delegate has one, and to the task-level handler otherwise.
+    ///
+    /// This models only the session's own delegate. A delegate set on a task
+    /// (`task.delegate`, `data(for:delegate:)`) can answer a challenge in the
+    /// session delegate's place, and the canary cannot see it, because it
+    /// probes sessions before any task exists. Conduit's DoH and PAC requests
+    /// set none.
     private static let connectionLevelMethods: Set<String> = [
         NSURLAuthenticationMethodNTLM,
         NSURLAuthenticationMethodNegotiate,
@@ -82,6 +88,11 @@ package enum ProxyChallengeCanary {
 
     /// Throws unless every session in `sessions`, and there is at least one,
     /// has a delegate that cancels a proxy challenge of every scheme.
+    ///
+    /// It drives the real delegate, so each call adds to its `refusalCount`
+    /// and emits a real `auth.proxy_challenge_refused` for `proxyHost`. Call
+    /// it only while no lookup on those sessions is in flight, or the
+    /// forwarder blames that lookup's failure on the canary's refusals.
     package static func requireRefusal(_ sessions: [URLSession]) throws {
         guard !sessions.isEmpty else {
             throw NotGuarded(description: "there was no session to check; no request was sent")
