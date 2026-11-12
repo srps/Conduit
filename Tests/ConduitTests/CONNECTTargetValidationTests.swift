@@ -46,6 +46,30 @@ final class CONNECTTargetValidationTests: XCTestCase {
             XCTAssertTrue(TunnelAuthority.isWritable(target), target)
         }
         XCTAssertEqual(TunnelAuthority.printable("a b=c\r\nd"), "a_b_c__d")
+        XCTAssertEqual(TunnelAuthority.printable("[alice:s3cr3t@host\r\n]:443"), "<userinfo>@host__]:443")
+        XCTAssertEqual(TunnelAuthority.printable("a@b:p@ss@host:443"), "<userinfo>@host:443")
+    }
+
+    /// A SOCKS5 name is any 255 bytes, so a client can send credentials in it. They reach neither the event nor the log line.
+    func testARejectedTargetsUserinfoReachesNeitherTheEventNorTheLog() async throws {
+        let lines = NIOLockedValueBox<[String]>([])
+        let (coordinator, events) = try await startCoordinator(logger: LineRecorder(lines: lines))
+
+        do {
+            _ = try await coordinator.connectUpstreamTunnel(target: "[alice:s3cr3t@host\r\n]:443").get()
+            XCTFail("a forged target was tunnelled")
+        } catch {
+            XCTAssertEqual(error as? ConnectionPoolError, .malformedTunnelTarget)
+        }
+
+        let details = events.withLockedValue { $0 }.filter { $0.event == "connection.tunnel_target_rejected" }.map { $0.detail ?? "" }
+        XCTAssertEqual(details, ["target=<userinfo>@host__]:443 suppressed=0"])
+        let logged = lines.withLockedValue { $0 }
+        XCTAssertEqual(logged.filter { $0.contains("connection.tunnel_target_rejected") }.count, 1, "\(logged)")
+        for text in details + logged {
+            XCTAssertFalse(text.contains("s3cr3t"), text)
+            XCTAssertFalse(text.contains("alice"), text)
+        }
     }
 
     /// Every path that writes a CONNECT line goes through the coordinator.
@@ -234,7 +258,8 @@ final class CONNECTTargetValidationTests: XCTestCase {
     }
 
     private func startCoordinator(
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        logger: any LogSink = DiscardingLogSink()
     ) async throws -> (CONNECTCoordinator, NIOLockedValueBox<[RuntimeEvent]>) {
         let upstream = try await AuthenticatingUpstream.start(group: group)
         self.upstream = upstream
@@ -244,7 +269,7 @@ final class CONNECTTargetValidationTests: XCTestCase {
         addTeardownBlock { pool.closeAll(scope: .all) }
         let events = NIOLockedValueBox<[RuntimeEvent]>([])
         let coordinator = CONNECTCoordinator(
-            pool: pool, authenticatorProvider: { _ in StubNegotiateAuthenticator() }, logger: DiscardingLogSink(),
+            pool: pool, authenticatorProvider: { _ in StubNegotiateAuthenticator() }, logger: logger,
             eventSink: { event in events.withLockedValue { $0.append(event) } },
             targetRejectionGate: RuntimeEventRepeatGate(now: now)
         )
@@ -366,6 +391,14 @@ private final class ByteCollector: ChannelInboundHandler, @unchecked Sendable {
         var buffer = unwrapInboundIn(data)
         let read = buffer.readBytes(length: buffer.readableBytes) ?? []
         bytes.withLockedValue { if $0.count < 4096 { $0.append(contentsOf: read) } }
+    }
+}
+
+private struct LineRecorder: LogSink {
+    let lines: NIOLockedValueBox<[String]>
+    var minLevel: LogLevel { .debug }
+    func logImpl(_: LogLevel, _ message: String, category _: LogCategory) {
+        lines.withLockedValue { if $0.count < 64 { $0.append(message) } }
     }
 }
 

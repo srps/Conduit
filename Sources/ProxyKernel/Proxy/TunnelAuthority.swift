@@ -14,16 +14,18 @@ enum TunnelAuthority {
         !text.isEmpty && text.utf8.allSatisfy { (0x21...0x7E).contains($0) }
     }
 
-    /// `text` as one printable token for an event or a log line: every byte
-    /// other than ASCII letters, digits, `.`, `-`, `_`, `:`, `[` and `]`
-    /// becomes `_`, so no `=` or space can forge a field, and text over 48
-    /// bytes is cut. With its `target=` key it then stays under the 65
-    /// characters at which `SensitiveValueSanitizer` replaces a run with
-    /// `<redacted-token>`.
+    /// `text` as one printable token for an event or a log line. Everything
+    /// up to its last `@` may be a client's credentials, so it is shown as
+    /// `<userinfo>@`. In the rest, every byte other than ASCII letters,
+    /// digits, `.`, `-`, `_`, `:`, `[` and `]` becomes `_`, so no `=` or
+    /// space can forge a field, and text over 48 bytes is cut. With its
+    /// `target=` key no run of it then reaches the 65 characters at which
+    /// `SensitiveValueSanitizer` replaces a run with `<redacted-token>`.
     static func printable(_ text: String) -> String {
         let limit = 48
-        let shown = text.utf8.prefix(limit).map { isHostByte($0) ? Character(UnicodeScalar($0)) : "_" }
-        return String(shown) + (text.utf8.count > limit ? "..." : "")
+        let host = text.utf8.lastIndex(of: UInt8(ascii: "@")).map { text.utf8[text.utf8.index(after: $0)...] } ?? text.utf8[...]
+        let shown = host.prefix(limit).map { isHostByte($0) ? Character(UnicodeScalar($0)) : "_" }
+        return (host.count < text.utf8.count ? "<userinfo>@" : "") + String(shown) + (host.count > limit ? "..." : "")
     }
 
     private static func isHostByte(_ byte: UInt8) -> Bool {
