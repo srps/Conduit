@@ -13,6 +13,8 @@ import XCTest
 /// lets a loopback proxy answer 407 to a real request, which is only safe
 /// while the guard holds, so each of those calls `ProxyChallengeCanary` on
 /// the session it is about to use and sends nothing if the guard is gone.
+/// A PAC fetch builds its session itself, so those tests run the canary from
+/// `downloadWillResume`, on that session, before its request is sent.
 final class ProxyChallengeRefusalTests: XCTestCase {
     private let group = MultiThreadedEventLoopGroup.singleton
     private var proxy: ChallengingProxy?
@@ -38,7 +40,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
             let session = DoHSessionFactory.session(for: route, delegate: delegate)
             defer { session.invalidateAndCancel() }
             XCTAssertTrue(session.delegate === delegate, "\(String(describing: route.proxy))")
-            try await ProxyChallengeCanary.requireRefusal(session)
+            try ProxyChallengeCanary.requireRefusal(session)
         }
     }
 
@@ -56,15 +58,25 @@ final class ProxyChallengeRefusalTests: XCTestCase {
 
         let sessions = forwarder.doHSessions
         XCTAssertEqual(sessions.count, 2, "direct and the client listener")
-        for session in sessions {
-            try await ProxyChallengeCanary.requireRefusal(session)
-        }
+        try ProxyChallengeCanary.requireRefusal(sessions)
     }
 
-    func testThePACDownloadDelegateCancelsAProxyChallengeOfEveryScheme() async throws {
-        let carrier = URLSession(configuration: .ephemeral)
-        defer { carrier.invalidateAndCancel() }
-        try await ProxyChallengeCanary.requireRefusal(carrier, delegate: CFPACEvaluator.makeDownloadDelegateForTesting())
+    /// Checked on the session the PAC download builds for itself, stopped
+    /// before its request is sent.
+    func testThePACDownloadSessionCancelsAProxyChallengeOfEveryScheme() async throws {
+        let checked = NIOLockedValueBox(0)
+        let evaluator = CFPACEvaluator(downloadWillResume: { session in
+            XCTAssertNotNil(session.delegate)
+            try ProxyChallengeCanary.requireRefusal(session)
+            checked.withLockedValue { $0 += 1 }
+            throw StopBeforeSending()
+        })
+
+        do {
+            _ = try await evaluator.fetchPAC(from: "https://192.0.2.10/proxy.pac")
+            XCTFail("the hook stops the fetch")
+        } catch is StopBeforeSending {}
+        XCTAssertEqual(checked.withLockedValue { $0 }, 1)
     }
 
     /// The canary has to be able to fail: a session with no delegate is the
@@ -72,10 +84,36 @@ final class ProxyChallengeRefusalTests: XCTestCase {
     func testTheCanaryRejectsASessionWithNoGuard() async throws {
         let unguarded = URLSession(configuration: .ephemeral)
         defer { unguarded.invalidateAndCancel() }
-        do {
-            try await ProxyChallengeCanary.requireRefusal(unguarded)
-            XCTFail("a session with no delegate passed the canary")
-        } catch is ProxyChallengeCanary.NotGuarded {}
+        XCTAssertThrowsError(try ProxyChallengeCanary.requireRefusal(unguarded)) { error in
+            XCTAssertTrue(error is ProxyChallengeCanary.NotGuarded, "\(error)")
+        }
+        XCTAssertThrowsError(try ProxyChallengeCanary.requireRefusal([URLSession]())) { error in
+            XCTAssertTrue(error is ProxyChallengeCanary.NotGuarded, "nothing checked is not a pass: \(error)")
+        }
+    }
+
+    /// URLSession gives NTLM and Negotiate to a session-level handler when the
+    /// delegate has one, whatever its task-level handler says. The canary asks
+    /// the handler URLSession would ask.
+    func testTheCanaryRejectsASessionLevelHandlerThatPassesProxyChallengesOn() async throws {
+        let delegate = SessionLevelDefaultHandling()
+        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+
+        XCTAssertThrowsError(try ProxyChallengeCanary.requireRefusal(session)) { error in
+            XCTAssertTrue(error is ProxyChallengeCanary.NotGuarded, "\(error)")
+        }
+        for (method, expected) in [
+            (NSURLAuthenticationMethodNTLM, URLSession.AuthChallengeDisposition.performDefaultHandling),
+            (NSURLAuthenticationMethodNegotiate, .performDefaultHandling),
+            (NSURLAuthenticationMethodHTTPBasic, .cancelAuthenticationChallenge),
+            (NSURLAuthenticationMethodHTTPDigest, .cancelAuthenticationChallenge),
+        ] {
+            let answer = ProxyChallengeCanary.disposition(
+                of: delegate, in: session, for: ProxyChallengeCanary.proxyChallenge(method: method)
+            )
+            XCTAssertEqual(answer, expected, method)
+        }
     }
 
     func testEachSchemeIsReportedUnderItsOwnName() async throws {
@@ -87,7 +125,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
             let session = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil), delegate: delegate)
             defer { session.invalidateAndCancel() }
 
-            let answer = await ProxyChallengeCanary.disposition(
+            let answer = ProxyChallengeCanary.disposition(
                 of: delegate, in: session, for: ProxyChallengeCanary.proxyChallenge(method: scheme.method)
             )
 
@@ -104,17 +142,30 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         let delegate = ProxyChallengeRefusingDelegate(client: .doh) { event in events.withLockedValue { $0.append(event) } }
         let session = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil), delegate: delegate)
         defer { session.invalidateAndCancel() }
-        let pac = CFPACEvaluator.makeDownloadDelegateForTesting()
+        let methods = [NSURLAuthenticationMethodServerTrust, NSURLAuthenticationMethodHTTPBasic, NSURLAuthenticationMethodNegotiate]
 
-        for method in [NSURLAuthenticationMethodServerTrust, NSURLAuthenticationMethodHTTPBasic, NSURLAuthenticationMethodNegotiate] {
-            let challenge = ProxyChallengeCanary.serverChallenge(method: method)
-            let doh = await ProxyChallengeCanary.disposition(of: delegate, in: session, for: challenge)
+        for method in methods {
+            let doh = ProxyChallengeCanary.disposition(of: delegate, in: session, for: ProxyChallengeCanary.serverChallenge(method: method))
             XCTAssertEqual(doh, .performDefaultHandling, method)
-            let download = await ProxyChallengeCanary.disposition(of: pac, in: session, for: challenge)
-            XCTAssertEqual(download, .performDefaultHandling, "PAC: \(method)")
         }
         XCTAssertEqual(events.withLockedValue { $0 }.count, 0)
         XCTAssertEqual(delegate.refusalCount, 0)
+
+        let pacAnswers = NIOLockedValueBox<[URLSession.AuthChallengeDisposition?]>([])
+        let evaluator = CFPACEvaluator(downloadWillResume: { download in
+            for method in methods {
+                let answer = ProxyChallengeCanary.disposition(
+                    of: download.delegate, in: download, for: ProxyChallengeCanary.serverChallenge(method: method)
+                )
+                pacAnswers.withLockedValue { $0.append(answer) }
+            }
+            throw StopBeforeSending()
+        })
+        do {
+            _ = try await evaluator.fetchPAC(from: "https://192.0.2.10/proxy.pac")
+            XCTFail("the hook stops the fetch")
+        } catch is StopBeforeSending {}
+        XCTAssertEqual(pacAnswers.withLockedValue { $0 }, Array(repeating: .performDefaultHandling, count: methods.count), "PAC")
     }
 
     // MARK: - A real 407, sent only past the canary
@@ -131,7 +182,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         }
         let session = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: ("127.0.0.1", proxy.port)), delegate: delegate)
         defer { session.invalidateAndCancel() }
-        try await ProxyChallengeCanary.requireRefusal(session)
+        try ProxyChallengeCanary.requireRefusal(session)
 
         for name in ["a.example", "b.example"] {
             let url = URL(string: "https://192.0.2.10/dns-query?name=\(name)&type=A")!
@@ -171,7 +222,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
             }
             let session = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: ("127.0.0.1", proxy.port)), delegate: delegate)
             defer { session.invalidateAndCancel() }
-            try await ProxyChallengeCanary.requireRefusal(session)
+            try ProxyChallengeCanary.requireRefusal(session)
 
             do {
                 let (_, response) = try await session.data(from: URL(string: "https://192.0.2.10/dns-query?name=\(offer.name).example&type=A")!)
@@ -205,7 +256,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         }
         let session = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: ("127.0.0.1", proxy.port)), delegate: delegate)
         defer { session.invalidateAndCancel() }
-        try await ProxyChallengeCanary.requireRefusal(session)
+        try ProxyChallengeCanary.requireRefusal(session)
 
         do {
             let (_, response) = try await session.data(from: URL(string: "https://192.0.2.10/dns-query?name=negotiate.example&type=A")!)
@@ -234,7 +285,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         let delegate = ProxyChallengeRefusingDelegate(client: .doh) { event in events.withLockedValue { $0.append(event) } }
         let session = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil), delegate: delegate)
         defer { session.invalidateAndCancel() }
-        try await ProxyChallengeCanary.requireRefusal(session)
+        try ProxyChallengeCanary.requireRefusal(session)
         let canaryRefusals = delegate.refusalCount
 
         let port = try XCTUnwrap(origin.localAddress?.port)
@@ -250,14 +301,15 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         self.proxy = proxy
         let carrier = Self.carrier(through: proxy)
         defer { carrier.invalidateAndCancel() }
-        try await ProxyChallengeCanary.requireRefusal(carrier, delegate: CFPACEvaluator.makeDownloadDelegateForTesting())
+        let canary = CanaryRuns()
 
         do {
-            let script = try await CFPACEvaluator(session: carrier).fetchPAC(from: "https://192.0.2.10/proxy.pac")
+            let script = try await canary.evaluator(session: carrier).fetchPAC(from: "https://192.0.2.10/proxy.pac")
             XCTFail("a 407 must not become a script, got \(script.utf8.count) bytes")
         } catch let PACResolverError.fetchFailed(message) {
             XCTAssertTrue(message.hasPrefix("PAC fetch refused a proxy-authentication challenge (proxy=127.0.0.1:\(proxy.port) method="), message)
         }
+        XCTAssertEqual(canary.count, 1, "the canary checked the session the fetch used")
         XCTAssertFalse(proxy.requestHeads().contains { $0.lowercased().contains("proxy-authorization") })
     }
 
@@ -267,14 +319,14 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         self.proxy = proxy
         let carrier = Self.carrier(through: proxy)
         defer { carrier.invalidateAndCancel() }
-        try await ProxyChallengeCanary.requireRefusal(carrier, delegate: CFPACEvaluator.makeDownloadDelegateForTesting())
+        let canary = CanaryRuns()
         var config = ProxyConfig.testFixture()
         config.pacURL = "https://192.0.2.10/proxy.pac"
         config.pacRoutingEnabled = true
         let frozen = config
         let events = RuntimeEventLog(capacity: 16)
         let engine = PACRoutingEngine(
-            configProvider: { frozen }, resolver: CFPACEvaluator(session: carrier),
+            configProvider: { frozen }, resolver: canary.evaluator(session: carrier),
             eventSink: { events.append($0) }
         )
 
@@ -292,6 +344,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
             detail.contains("PAC fetch refused a proxy-authentication challenge (proxy=127.0.0.1:\(proxy.port) method=ntlm)"),
             detail
         )
+        XCTAssertEqual(canary.count, 1, "the canary checked the session the refresh used")
         XCTAssertFalse(proxy.requestHeads().contains { $0.lowercased().contains("proxy-authorization") })
     }
 
@@ -314,10 +367,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         )
         self.forwarder = forwarder
         try await forwarder.start(host: "127.0.0.1", port: 0)
-        XCTAssertFalse(forwarder.doHSessions.isEmpty)
-        for session in forwarder.doHSessions {
-            try await ProxyChallengeCanary.requireRefusal(session)
-        }
+        try ProxyChallengeCanary.requireRefusal(forwarder.doHSessions)
 
         let client = try await DatagramBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
         let query = DNSWireFormat.buildQuery(domain: "refused.example", txID: 0x0407, qtype: 1)
@@ -368,6 +418,40 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         events.withLockedValue { $0 }.filter {
             $0.event == "auth.proxy_challenge_refused" && ($0.detail ?? "").contains("proxy=127.0.0.1:\(proxy.port) ")
         }
+    }
+}
+
+private struct StopBeforeSending: Error {}
+
+/// Builds a PAC evaluator whose every HTTPS download runs the canary on its
+/// own session before the request is sent, and counts the runs.
+private final class CanaryRuns: Sendable {
+    private let runs = NIOLockedValueBox(0)
+    var count: Int { runs.withLockedValue { $0 } }
+
+    func evaluator(session: URLSession) -> CFPACEvaluator {
+        CFPACEvaluator(session: session, downloadWillResume: { [runs] download in
+            try ProxyChallengeCanary.requireRefusal(download)
+            runs.withLockedValue { $0 += 1 }
+        })
+    }
+}
+
+/// Cancels a proxy challenge at the task level but passes the ones URLSession
+/// sends to the session level on to CFNetwork.
+private final class SessionLevelDefaultHandling: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(
+        _ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        completionHandler(.performDefaultHandling, nil)
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        completionHandler(.cancelAuthenticationChallenge, nil)
     }
 }
 
