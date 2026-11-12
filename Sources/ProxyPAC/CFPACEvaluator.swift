@@ -325,16 +325,24 @@ private func rawEndpoint(from dict: CFDictionary) -> String? {
 package final class CFPACEvaluator: PacEvaluator, @unchecked Sendable {
     private let session: URLSession
     private let insecureFetcher: @Sendable (URL) async throws -> String
+    private let downloadWillResume: (@Sendable (URLSession) throws -> Void)?
 
     /// The SwiftUI app injects a curl-backed fetcher for legacy plaintext PAC
     /// URLs. Headless daemons get the throwing default (the PAC target
     /// cannot shell out to curl).
+    ///
+    /// `downloadWillResume` gets each HTTPS download's own session after it is
+    /// built and before its request is sent; a throw ends the fetch with that
+    /// error and sends nothing. Tests run `ProxyChallengeCanary` there, on the
+    /// session the fetch really uses, before they let a proxy answer 407.
     package init(
         session: URLSession = CFPACEvaluator.directSession,
-        insecureFetcher: (@Sendable (URL) async throws -> String)? = nil
+        insecureFetcher: (@Sendable (URL) async throws -> String)? = nil,
+        downloadWillResume: (@Sendable (URLSession) throws -> Void)? = nil
     ) {
         self.session = session
         self.insecureFetcher = insecureFetcher ?? Self.defaultInsecureFetcher
+        self.downloadWillResume = downloadWillResume
     }
 
     /// `URLSession.shared` honours the system proxy settings — which, while
@@ -399,7 +407,10 @@ package final class CFPACEvaluator: PacEvaluator, @unchecked Sendable {
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
-                download.start(url: url, configuration: session.configuration, continuation: continuation)
+                download.start(
+                    url: url, configuration: session.configuration,
+                    willResume: downloadWillResume, continuation: continuation
+                )
             }
         } onCancel: {
             download.cancel()
@@ -520,18 +531,34 @@ private final class PACBoundedDownload: NSObject, URLSessionDataDelegate, @unche
     private var data = Data()
     private var continuation: CheckedContinuation<String, Error>?
     private var session: URLSession?
+    private var task: URLSessionTask?
 
     func start(url: URL, configuration: URLSessionConfiguration,
+               willResume: (@Sendable (URLSession) throws -> Void)?,
                continuation: CheckedContinuation<String, Error>) {
-        let cancelled = lock.withLock {
-            guard !completed else { return true }
+        let created = lock.withLock { () -> (URLSession, URLSessionDataTask)? in
+            guard !completed else { return nil }
             self.continuation = continuation
             let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+            let task = session.dataTask(with: url)
             self.session = session
-            session.dataTask(with: url).resume()
-            return false
+            self.task = task
+            return (session, task)
         }
-        if cancelled { continuation.resume(throwing: CancellationError()) }
+        guard let (session, task) = created else {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        // Outside the lock: the hook calls this delegate's challenge handler.
+        do {
+            try willResume?(session)
+        } catch {
+            finish(.failure(error))
+            return
+        }
+        lock.withLock {
+            if !completed { task.resume() }
+        }
     }
 
     func cancel() { finish(.failure(CancellationError())) }
@@ -543,6 +570,7 @@ private final class PACBoundedDownload: NSObject, URLSessionDataDelegate, @unche
             let resources = (continuation, session)
             continuation = nil
             session = nil
+            task = nil
             data = Data()
             return resources
         }
@@ -586,6 +614,25 @@ private final class PACBoundedDownload: NSObject, URLSessionDataDelegate, @unche
             let script = lock.withLock { String(decoding: data, as: UTF8.self) }
             finish(.success(script))
         }
+    }
+
+    // Decision 0045: CFNetwork's default handling would ask macOS for a saved
+    // proxy credential and prompt the user.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard challenge.protectionSpace.isProxy() else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        // `ProxyChallengeCanary` probes with a task of its own; only this
+        // download's task ends the download.
+        if lock.withLock({ task === self.task }) {
+            finish(.failure(PACResolverError.fetchFailed(
+                "PAC fetch refused a proxy-authentication challenge (\(ProxyChallengeRefusal.describe(challenge))). Conduit never asks macOS for proxy credentials."
+            )))
+        }
+        completionHandler(.cancelAuthenticationChallenge, nil)
     }
 
     // Preserve HTTPS redirects while refusing credential-bearing URLs and

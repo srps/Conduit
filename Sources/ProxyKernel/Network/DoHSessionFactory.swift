@@ -24,18 +24,12 @@ enum DoHSessionFactory {
     /// involves no third party. But direct is also the route that dies first:
     /// under a full-tunnel VPN, outbound 443 to a public resolver is commonly
     /// dropped outright, and on a split-DNS corporate network the provider's
-    /// own hostname may not resolve. The proxied routes are what keep DoH
-    /// working there — the corporate upstream because it is the sanctioned way
-    /// out, and Conduit's own listener because it applies the upstream's
-    /// authentication on our behalf.
+    /// own hostname may not resolve.
     ///
     /// Callers race all of these concurrently, so the order is a tiebreak among
     /// simultaneous successes rather than a sequence of fallbacks.
     static func routes(for config: ProxyConfig, localProxyPort: Int?) -> [Route] {
         var routes = [Route(proxy: nil)]
-        if let upstream = config.enabledUpstreams.first {
-            routes.append(Route(proxy: (upstream.host, upstream.port)))
-        }
         if let local = localProxyRoute(config: config, boundPort: localProxyPort) {
             routes.append(local)
         }
@@ -53,14 +47,18 @@ enum DoHSessionFactory {
     ///   configured machine point at Conduit's own listener — the DoH
     ///   lookup would then be silently proxied through the process trying to
     ///   perform it. `Route(proxy: nil)` means explicitly direct.
-    static func session(for route: Route, timeout: TimeInterval = requestTimeout) -> URLSession {
+    static func session(
+        for route: Route,
+        delegate: ProxyChallengeRefusingDelegate,
+        timeout: TimeInterval = requestTimeout
+    ) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = timeout
         configuration.timeoutIntervalForResource = timeout * 2
         configuration.connectionProxyDictionary = route.proxy.map {
             proxyDictionary(host: $0.host, port: $0.port)
         } ?? [:]
-        return URLSession(configuration: configuration)
+        return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }
 
     static func proxyDictionary(host: String, port: Int) -> [String: Any] {

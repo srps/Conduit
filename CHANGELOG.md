@@ -50,6 +50,20 @@ packaging; 0.6.1 is the latest published release.
   stand-in answer for a split-DNS name now carries a 5 s TTL, so macOS and
   browsers drop it soon after the VPN is up and the corporate answer takes
   over.
+- The first full-tunnel VPN connect no longer makes macOS ask for the proxy
+  password on Conduit's behalf (decision 0045). DoH lookups went straight to
+  the upstream proxy as well as through Conduit's listener. The upstream
+  answered 407, and macOS tried its saved proxy credential and then showed the
+  dialog. DoH now goes direct or through the listener only. Conduit's DoH and
+  PAC sessions refuse a proxy-authentication challenge instead of handing it
+  to macOS, and DoH reports it as `auth.proxy_challenge_refused`. When the
+  routing rules send the DoH providers direct (a PAC DIRECT answer, a bypass
+  entry, or direct mode, including the brief one after a VPN connect) under a
+  full-tunnel VPN that drops direct 443, public names can now fail to resolve
+  over DoH until the rules send the providers to an upstream again.
+  `pm-sim dns-doh-upstream-407` and the tests that let a loopback proxy answer
+  407 first check that every session they will use cancels a proxy challenge,
+  and stop with no request sent when one would not.
 
 ## 0.6.2
 

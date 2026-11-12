@@ -1378,7 +1378,8 @@ package final class ProxyOrchestrator {
     private lazy var originResolver: any OriginResolving = DoHOriginResolver(
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
-        localProxyPort: { [server = localProxyServer] in server.listeningPort }
+        localProxyPort: { [server = localProxyServer] in server.listeningPort },
+        eventSink: { [eventLog] event in eventLog.append(event) }
     )
 
     private lazy var transparentProxy = TransparentTCPProxy(

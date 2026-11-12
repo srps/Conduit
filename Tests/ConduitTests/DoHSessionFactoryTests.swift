@@ -18,4 +18,15 @@ final class DoHSessionFactoryTests: XCTestCase {
         XCTAssertEqual(localProxyPorts(port: 3128, bound: nil), [3128], "a fixed port with no listener keeps its configured route")
         XCTAssertEqual(localProxyPorts(port: 3128, bound: 3128), [3128])
     }
+
+    func testRoutesAreDirectAndTheListenerNeverTheUpstream() {
+        var config = ProxyConfig.testFixture()
+        config.localHost = "127.0.0.1"
+        config.localPort = 3128
+        XCTAssertFalse(config.enabledUpstreams.isEmpty)
+
+        let routes = DoHSessionFactory.routes(for: config, localProxyPort: 3128)
+
+        XCTAssertEqual(routes.map { $0.proxy.map { "\($0.host):\($0.port)" } ?? "direct" }, ["direct", "127.0.0.1:3128"])
+    }
 }

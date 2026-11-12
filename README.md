@@ -107,7 +107,7 @@ Every routing, auth, failover, health, and config decision is a typed event. The
 - Response cache with LRU eviction, TTLs from the smallest record TTL, NXDOMAIN negative caching, and a 2,048-entry limit
 - Internal domains (configurable) go through corporate DNS servers first
 - External domains fall back to configurable DoH providers. The defaults are Cloudflare, Quad9, and Google.
-- Connection cascade for DoH. For each provider in order, it tries a direct connection, then the upstream corporate proxy, then the local proxy.
+- Two routes for DoH. Each lookup races a direct connection and Conduit's own listener, which follows the routing rules and authenticates to the upstream itself. DoH never asks macOS for proxy credentials.
 - DNS intercept rules with wildcard patterns, such as `*.cursor.sh`, that return a synthetic loopback IP for transparent proxying
 - Optional system DNS management. It sets macOS DNS to 127.0.0.1 on all connected interfaces, so every app uses the forwarder, including Cursor and other Electron apps that call `getaddrinfo`. A native Swift UDP relay on port 53 runs inside the privileged helper. A DNS pipeline liveness probe runs every 30 seconds and recovers the pipeline when it fails.
 - VPN-aware DNS reconciliation. When interfaces appear or disappear on VPN connect or disconnect, new interfaces are redirected to the forwarder and stale entries are pruned from saved state.

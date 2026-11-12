@@ -65,14 +65,24 @@ package final class DoHOriginResolver: OriginResolving {
     private let localProxyPort: @Sendable () -> Int?
     private let cache = NIOLockedValueBox<[String: CacheEntry]>([:])
     private let negativeCache = NIOLockedValueBox(NegativeAnswerCache(ttl: 5))
+    private let proxyChallengeDelegate: ProxyChallengeRefusingDelegate
 
     /// Takes the whole config, not just the provider list: reaching a DoH
     /// provider needs the proxy routes too (see `DoHSessionFactory.routes`).
     package init(logger: any LogSink, configProvider: @escaping @Sendable () -> ProxyConfig,
-                 localProxyPort: @escaping @Sendable () -> Int? = { nil }) {
+                 localProxyPort: @escaping @Sendable () -> Int? = { nil },
+                 eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil) {
         self.logger = logger
         self.configProvider = configProvider
         self.localProxyPort = localProxyPort
+        self.proxyChallengeDelegate = ProxyChallengeRefusingDelegate(client: .originResolver) { event in
+            eventSink?(event)
+            logger.log(
+                .warning,
+                "Origin resolver: refused a proxy-authentication challenge on a DoH lookup (\(event.detail ?? "")). Conduit never asks macOS for proxy credentials.",
+                category: .network
+            )
+        }
     }
 
     package func resolveOrigin(host: String, port: Int, on eventLoop: EventLoop) -> EventLoopFuture<SocketAddress> {
@@ -165,8 +175,9 @@ package final class DoHOriginResolver: OriginResolving {
     /// `DoHSessionFactory.routes` rather than dialling directly. This resolver
     /// runs on exactly the networks where a direct dial to a public resolver is
     /// dropped: under a full-tunnel VPN, direct 443 to a DoH endpoint times out
-    /// while the same request through the corporate proxy succeeds. Direct-only
-    /// meant the transparent proxy's direct path silently black-holed there.
+    /// while the same request through Conduit's listener, and from there the
+    /// corporate proxy, succeeds. Direct-only meant the transparent proxy's
+    /// direct path silently black-holed there.
     /// Same reasoning as `DNSResolutionCore.resolveViaDoH`.
     private func lookupA(host: String, config: ProxyConfig) async -> (ip: String, ttl: TimeInterval)? {
         let providers = config.dohProviders.isEmpty
@@ -175,12 +186,13 @@ package final class DoHOriginResolver: OriginResolving {
         let routes = DoHSessionFactory.routes(for: config, localProxyPort: localProxyPort())
         let encoded = host.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? host
         let query = DNSWireFormat.buildQuery(domain: host, qtype: 1)
+        let delegate = proxyChallengeDelegate
 
         return await withTaskGroup(of: (ip: String, ttl: TimeInterval)?.self) { group in
             for provider in providers {
                 for route in routes {
-                    group.addTask { await Self.fetchJSON(url: "\(provider)?name=\(encoded)&type=A", route: route) }
-                    group.addTask { await Self.fetchWire(provider: provider, query: query, route: route) }
+                    group.addTask { await Self.fetchJSON(url: "\(provider)?name=\(encoded)&type=A", route: route, delegate: delegate) }
+                    group.addTask { await Self.fetchWire(provider: provider, query: query, route: route, delegate: delegate) }
                 }
             }
             for await result in group {
@@ -193,11 +205,11 @@ package final class DoHOriginResolver: OriginResolving {
         }
     }
 
-    private static func fetchJSON(url: String, route: DoHSessionFactory.Route) async -> (ip: String, ttl: TimeInterval)? {
+    private static func fetchJSON(url: String, route: DoHSessionFactory.Route, delegate: ProxyChallengeRefusingDelegate) async -> (ip: String, ttl: TimeInterval)? {
         guard let url = URL(string: url) else { return nil }
         // A short-lived session per request. See the type doc: nothing to reset
         // on wake, and no invalidate-while-in-flight hazard.
-        let session = DoHSessionFactory.session(for: route)
+        let session = DoHSessionFactory.session(for: route, delegate: delegate)
         defer { session.finishTasksAndInvalidate() }
 
         var request = URLRequest(url: url)
@@ -224,9 +236,9 @@ package final class DoHOriginResolver: OriginResolving {
     }
 
     /// RFC 8484 wire format (`POST application/dns-message`).
-    private static func fetchWire(provider: String, query: [UInt8], route: DoHSessionFactory.Route) async -> (ip: String, ttl: TimeInterval)? {
+    private static func fetchWire(provider: String, query: [UInt8], route: DoHSessionFactory.Route, delegate: ProxyChallengeRefusingDelegate) async -> (ip: String, ttl: TimeInterval)? {
         guard let url = URL(string: provider) else { return nil }
-        let session = DoHSessionFactory.session(for: route)
+        let session = DoHSessionFactory.session(for: route, delegate: delegate)
         defer { session.finishTasksAndInvalidate() }
 
         var request = URLRequest(url: url)
