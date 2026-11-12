@@ -53,6 +53,9 @@ final class FakeUpstreamProxy: @unchecked Sendable {
     /// Authenticated CONNECT attempts, including policy/upstream refusals.
     private let connectAttemptCountBox = NIOLockedValueBox(0)
     var connectAttemptCount: Int { connectAttemptCountBox.withLockedValue { $0 } }
+    /// Request heads read, whether answered with a 407, a tunnel or a refusal.
+    private let requestHeadCountBox = NIOLockedValueBox(0)
+    var requestHeadCount: Int { requestHeadCountBox.withLockedValue { $0 } }
 
     /// When set, an authenticated CONNECT is answered with this status and
     /// no tunnel, the way a proxy refuses by policy (403) or cannot reach
@@ -108,6 +111,7 @@ final class FakeUpstreamProxy: @unchecked Sendable {
                 self?.trackChild(channel)
                 let connectCountBox = self?.connectCountBox
                 let connectAttemptCountBox = self?.connectAttemptCountBox
+                let requestHeadCountBox = self?.requestHeadCountBox
                 let floodMetricsBox = self?.floodMetricsBox
                 return channel.pipeline.addHandler(
                     FakeUpstreamSession(
@@ -119,6 +123,7 @@ final class FakeUpstreamProxy: @unchecked Sendable {
                         challenge: challenge,
                         onConnect: { connectCountBox?.withLockedValue { $0 += 1 } },
                         onConnectAttempt: { connectAttemptCountBox?.withLockedValue { $0 += 1 } },
+                        onRequestHead: { requestHeadCountBox?.withLockedValue { $0 += 1 } },
                         floodMetricsBox: floodMetricsBox,
                         originRelaySetupDelayMilliseconds: originRelaySetupDelayMilliseconds,
                         connectRefusal: { connectRefusalBox.withLockedValue { $0 } }
@@ -167,6 +172,7 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
     private let challenge: String
     private let onConnect: @Sendable () -> Void
     private let onConnectAttempt: @Sendable () -> Void
+    private let onRequestHead: @Sendable () -> Void
     private let floodMetricsBox: NIOLockedValueBox<FloodRelayMetrics>?
     private let originRelaySetupDelayMilliseconds: Int
     private let connectRefusal: @Sendable () -> Int?
@@ -183,6 +189,7 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
         challenge: String = "Negotiate",
         onConnect: @escaping @Sendable () -> Void = {},
         onConnectAttempt: @escaping @Sendable () -> Void = {},
+        onRequestHead: @escaping @Sendable () -> Void = {},
         floodMetricsBox: NIOLockedValueBox<FloodRelayMetrics>? = nil,
         originRelaySetupDelayMilliseconds: Int,
         connectRefusal: @escaping @Sendable () -> Int? = { nil }
@@ -196,6 +203,7 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
         self.plainHTTPResponse = plainHTTPResponse
         self.onConnect = onConnect
         self.onConnectAttempt = onConnectAttempt
+        self.onRequestHead = onRequestHead
         self.floodMetricsBox = floodMetricsBox
         self.originRelaySetupDelayMilliseconds = originRelaySetupDelayMilliseconds
         self.phase = requireAuth ? .awaitingFirstConnect : .awaitingAuthedConnect
@@ -215,6 +223,7 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
             return
         }
 
+        onRequestHead()
         let requestLine = str.split(separator: "\r\n").first.map(String.init) ?? ""
         let method = requestLine.split(separator: " ").first.map(String.init) ?? ""
         accumulated.clear()
