@@ -77,7 +77,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         guard let suppressed = targetRejectionGate.admit(host: "", reason: "connection.tunnel_target_rejected") else { return }
         let event = RuntimeEvent(
             kind: .connection, event: "connection.tunnel_target_rejected",
-            detail: "target=\(TunnelAuthority.printable(SensitiveValueSanitizer.observableTarget(target))) suppressed=\(suppressed)"
+            detail: "target=\(TunnelAuthority.printable(target)) suppressed=\(suppressed)"
         )
         eventSink?(event)
         logger.log(.warning, "\(event.event) \(event.detail ?? ""): not one visible-ASCII token; no upstream was dialled.", category: .proxy)

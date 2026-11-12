@@ -48,27 +48,34 @@ final class CONNECTTargetValidationTests: XCTestCase {
         XCTAssertEqual(TunnelAuthority.printable("a b=c\r\nd"), "a_b_c__d")
         XCTAssertEqual(TunnelAuthority.printable("[alice:s3cr3t@host\r\n]:443"), "<userinfo>@host__]:443")
         XCTAssertEqual(TunnelAuthority.printable("a@b:p@ss@host:443"), "<userinfo>@host:443")
+        // The query and fragment redaction must not remove the `@` first.
+        XCTAssertEqual(TunnelAuthority.printable("[alice:s3cr3t?rest@host\r\n]:443"), "<userinfo>@host__]:443")
+        XCTAssertEqual(TunnelAuthority.printable("[alice:s3cr3t#rest@host\r\n]:443"), "<userinfo>@host__]:443")
+        XCTAssertEqual(TunnelAuthority.printable("host:443?q=s3cr3t"), "host:443__redacted_")
     }
 
     /// A SOCKS5 name is any 255 bytes, so a client can send credentials in it. They reach neither the event nor the log line.
     func testARejectedTargetsUserinfoReachesNeitherTheEventNorTheLog() async throws {
-        let lines = NIOLockedValueBox<[String]>([])
-        let (coordinator, events) = try await startCoordinator(logger: LineRecorder(lines: lines))
+        // A `?` or `#` before the `@` must not hide the userinfo from its redaction.
+        for target in ["[alice:s3cr3t@host\r\n]:443", "[alice:s3cr3t?rest@host\r\n]:443", "[alice:s3cr3t#rest@host\r\n]:443"] {
+            let lines = NIOLockedValueBox<[String]>([])
+            let (coordinator, events) = try await startCoordinator(logger: LineRecorder(lines: lines))
 
-        do {
-            _ = try await coordinator.connectUpstreamTunnel(target: "[alice:s3cr3t@host\r\n]:443").get()
-            XCTFail("a forged target was tunnelled")
-        } catch {
-            XCTAssertEqual(error as? ConnectionPoolError, .malformedTunnelTarget)
-        }
+            do {
+                _ = try await coordinator.connectUpstreamTunnel(target: target).get()
+                XCTFail("a forged target was tunnelled: \(target.debugDescription)")
+            } catch {
+                XCTAssertEqual(error as? ConnectionPoolError, .malformedTunnelTarget)
+            }
 
-        let details = events.withLockedValue { $0 }.filter { $0.event == "connection.tunnel_target_rejected" }.map { $0.detail ?? "" }
-        XCTAssertEqual(details, ["target=<userinfo>@host__]:443 suppressed=0"])
-        let logged = lines.withLockedValue { $0 }
-        XCTAssertEqual(logged.filter { $0.contains("connection.tunnel_target_rejected") }.count, 1, "\(logged)")
-        for text in details + logged {
-            XCTAssertFalse(text.contains("s3cr3t"), text)
-            XCTAssertFalse(text.contains("alice"), text)
+            let details = events.withLockedValue { $0 }.filter { $0.event == "connection.tunnel_target_rejected" }.map { $0.detail ?? "" }
+            XCTAssertEqual(details, ["target=<userinfo>@host__]:443 suppressed=0"], target.debugDescription)
+            let logged = lines.withLockedValue { $0 }
+            XCTAssertEqual(logged.filter { $0.contains("connection.tunnel_target_rejected") }.count, 1, "\(logged)")
+            for text in details + logged {
+                XCTAssertFalse(text.contains("s3cr3t"), text)
+                XCTAssertFalse(text.contains("alice"), text)
+            }
         }
     }
 
