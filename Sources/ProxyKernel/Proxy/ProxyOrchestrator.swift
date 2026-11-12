@@ -1338,8 +1338,9 @@ package final class ProxyOrchestrator {
 
     private let tunnelAuthHandshakeLimiter = AuthHandshakeLimiter()
 
-    /// Shared by the tunnels and the transparent proxy. Internal so a test can see that a tunnel start leaves its connections alone.
-    lazy var tunnelConnectionPool = ConnectionPool(
+    /// Shared by the tunnels and the transparent proxy. Package so a test can see that a tunnel start leaves its connections alone, and
+    /// pm-sim that a VPN recovery closes its breakers.
+    package lazy var tunnelConnectionPool = ConnectionPool(
         group: MultiThreadedEventLoopGroup.singleton,
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
@@ -2288,6 +2289,13 @@ package final class ProxyOrchestrator {
         emitEvent(.health, "dns.transports_reset", detail: "source=\(source)")
     }
 
+    /// Closes the breakers and drops the silences of every pool that dials an upstream. What they recorded was on the path the VPN just
+    /// replaced, and a pool left out keeps passing over an upstream that has recovered.
+    private func resetUpstreamCircuitsAfterFlap() {
+        localProxyServer.resetCircuitsAfterFlap()
+        tunnelConnectionPool.resetCircuitsAfterFlap()
+    }
+
     /// Ends the current flap and returns its monotonic duration in seconds, or 0 when no flap start was recorded.
     private func takeFlapDuration() -> TimeInterval {
         defer { flapStartedAt = nil }
@@ -2305,7 +2313,7 @@ package final class ProxyOrchestrator {
         // or the address-only pass, run from here, since the monitor's own
         // `.connected` will now find nothing changed.
         resumeStrandedSweeps()
-        localProxyServer.resetCircuitsAfterFlap()
+        resetUpstreamCircuitsAfterFlap()
         setDirectMode(deriveDirectModeCause(probeSummary: summary))
         resumeConnectivityMonitoring(summary: summary)
         mutateSnapshot {
@@ -2411,7 +2419,17 @@ package final class ProxyOrchestrator {
 
         // Reactions are skipped while the proxy listener is stopped — there's
         // nothing to react WITH. The UI snapshot still mirrors the state above.
-        guard isProxyActive else { return }
+        // Port tunnels and the transparent proxy outlive a proxy-only Stop,
+        // so a recovery still closes their pool's breakers.
+        guard isProxyActive else {
+            switch (previous, state) {
+            case (.reasserting, .connected), (.disconnected, .connected):
+                tunnelConnectionPool.resetCircuitsAfterFlap()
+            default:
+                break
+            }
+            return
+        }
 
         switch state {
 
@@ -2459,10 +2477,10 @@ package final class ProxyOrchestrator {
             // clients must not see old breaker holds or utun-pinned DoH pools.
             switch previous {
             case .reasserting:
-                localProxyServer.resetCircuitsAfterFlap()
+                resetUpstreamCircuitsAfterFlap()
                 resetDNSTransportsForRecovery(source: "vpn_flap_recovered")
             case .disconnected:
-                localProxyServer.resetCircuitsAfterFlap()
+                resetUpstreamCircuitsAfterFlap()
                 resetDNSTransportsForRecovery(source: "vpn_reconnected")
             case .unknown, .connected:
                 if snapshot.dnsRunState == .running {

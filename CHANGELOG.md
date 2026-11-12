@@ -78,6 +78,17 @@ packaging; 0.6.1 is the latest published release.
   the refusals held back, and the target it shows has any userinfo (up to
   its last `@`) replaced by `<userinfo>@`. The HTTP listener's parser already
   closed the connection on these bytes in a CONNECT line.
+- Port tunnels and the transparent proxy use an upstream again as soon as the
+  VPN comes back. A flap recovery, a reconnect after an outage and a wake
+  recovery closed the circuit breakers of the client listener's upstream pool
+  only. The pool that port tunnels and the transparent proxy share kept the
+  breakers opened on the path the VPN had replaced, so their traffic stayed off
+  an upstream that had recovered until the open interval ran out. A flap
+  recovery and a reconnect now close that pool's breakers too, also when a
+  proxy-only Stop has left port tunnels running. A wake that ends a stale flap
+  closes them while the client listener runs. With the listener stopped, a wake
+  leaves the VPN state alone, and the VPN monitor's own report of the recovery
+  closes them.
 
 ## 0.6.2
 
