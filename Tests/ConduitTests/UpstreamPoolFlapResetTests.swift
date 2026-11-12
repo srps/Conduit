@@ -53,11 +53,69 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
         await orchestrator.stopProxy()
     }
 
+    /// A proxy-only Stop leaves port tunnels serving, so their pool recovers with the VPN whether or not the listener runs.
+    @RuntimeActor func testAFlapRecoveryWithOnlyTunnelsRunningClosesTheTunnelPoolsBreakers() async throws {
+        let orchestrator = try await startTunnelsOnly()
+        await orchestrator.handleVPNStateChange(.connected)
+        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+
+        await orchestrator.handleVPNStateChange(.reasserting)
+        await orchestrator.handleVPNStateChange(.connected)
+
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .stopped, "the listener stayed stopped")
+        XCTAssertEqual(orchestrator.tunnelConnectionPool.upstreamStatuses().map(\.circuitState), [.closed, .closed])
+        await orchestrator.stopTunnels()
+    }
+
+    @RuntimeActor func testAReconnectWithOnlyTunnelsRunningClosesTheTunnelPoolsBreakers() async throws {
+        let orchestrator = try await startTunnelsOnly()
+        await orchestrator.handleVPNStateChange(.connected)
+        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+
+        await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
+        await orchestrator.handleVPNStateChange(.connected)
+
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .stopped, "the listener stayed stopped")
+        XCTAssertEqual(orchestrator.tunnelConnectionPool.upstreamStatuses().map(\.circuitState), [.closed, .closed])
+        await orchestrator.stopTunnels()
+    }
+
+    /// Going into a flap or an outage is not a recovery: the breakers it opened stay open.
+    @RuntimeActor func testLosingTheVPNWithOnlyTunnelsRunningLeavesTheTunnelPoolsBreakersOpen() async throws {
+        let orchestrator = try await startTunnelsOnly()
+        await orchestrator.handleVPNStateChange(.connected)
+        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+
+        await orchestrator.handleVPNStateChange(.reasserting)
+        await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost))
+
+        XCTAssertEqual(orchestrator.tunnelConnectionPool.upstreamStatuses().map(\.circuitState), [.open, .open])
+        await orchestrator.stopTunnels()
+    }
+
     // MARK: - Harness
 
     /// A running proxy with two enabled upstreams, each a loopback listener
     /// that answers a Negotiate 407, which the probe counts as a reachable proxy.
     @RuntimeActor private func startOrchestrator() async throws -> ProxyOrchestrator {
+        let orchestrator = try await makeOrchestrator()
+        try await orchestrator.startProxy()
+        return orchestrator
+    }
+
+    /// The same upstreams with one port tunnel serving and the client listener never started.
+    @RuntimeActor private func startTunnelsOnly() async throws -> ProxyOrchestrator {
+        let orchestrator = try await makeOrchestrator()
+        orchestrator.config.tunnels.definitions = [
+            TunnelDefinition(localPort: 0, remoteHost: "db.corp.example", remotePort: 5432, proxied: false, label: "DB")
+        ]
+        await orchestrator.startTunnels()
+        XCTAssertEqual(orchestrator.snapshot.tunnelsRunState, .running, "precondition: the tunnel serves")
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .stopped, "precondition: the listener is stopped")
+        return orchestrator
+    }
+
+    @RuntimeActor private func makeOrchestrator() async throws -> ProxyOrchestrator {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         // The tests open breakers with back-to-back failures.
@@ -75,9 +133,7 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
                 UpstreamProxy(name: name, host: "127.0.0.1", port: try XCTUnwrap(upstream.localAddress?.port), priority: index)
             )
         }
-        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
-        try await orchestrator.startProxy()
-        return orchestrator
+        return ProxyOrchestrator(config: config, logger: DiscardingLogSink())
     }
 
     @RuntimeActor private func openEveryBreaker(of pool: ConnectionPool, in orchestrator: ProxyOrchestrator) {

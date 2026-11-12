@@ -2419,7 +2419,17 @@ package final class ProxyOrchestrator {
 
         // Reactions are skipped while the proxy listener is stopped — there's
         // nothing to react WITH. The UI snapshot still mirrors the state above.
-        guard isProxyActive else { return }
+        // Port tunnels and the transparent proxy outlive a proxy-only Stop,
+        // so a recovery still closes their pool's breakers.
+        guard isProxyActive else {
+            switch (previous, state) {
+            case (.reasserting, .connected), (.disconnected, .connected):
+                tunnelConnectionPool.resetCircuitsAfterFlap()
+            default:
+                break
+            }
+            return
+        }
 
         switch state {
 
