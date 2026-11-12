@@ -64,6 +64,17 @@ packaging; 0.6.1 is the latest published release.
   `pm-sim dns-doh-upstream-407` and the tests that let a loopback proxy answer
   407 first check that every session they will use cancels a proxy challenge,
   and stop with no request sent when one would not.
+- Port tunnels and the transparent proxy use an upstream again as soon as the
+  VPN comes back. A flap recovery, a reconnect after an outage and a wake
+  recovery closed the circuit breakers of the client listener's upstream pool
+  only. The pool that port tunnels and the transparent proxy share kept the
+  breakers opened on the path the VPN had replaced, so their traffic stayed off
+  an upstream that had recovered until the open interval ran out. A flap
+  recovery and a reconnect now close that pool's breakers too, also when a
+  proxy-only Stop has left port tunnels running. A wake that ends a stale flap
+  closes them while the client listener runs. With the listener stopped, a wake
+  leaves the VPN state alone, and the VPN monitor's own report of the recovery
+  closes them.
 
 ## 0.6.2
 

@@ -43,6 +43,14 @@ enum VPNFlapScenarios {
         await harness.orchestrator.handleVPNStateChange(.connected)
         let cutoff = Date()
 
+        // Port tunnels and the transparent proxy dial through their own pool, whose breakers the flap must close as well.
+        let tunnelPool = harness.orchestrator.tunnelConnectionPool
+        for proxy in harness.orchestrator.config.enabledUpstreams {
+            for _ in 0..<harness.orchestrator.config.circuitFailureThreshold { tunnelPool.recordDedicatedTunnelFailure(for: proxy) }
+        }
+        let tunnelBreakersOpened = tunnelPool.upstreamStatuses().map(\.circuitState) == [.open]
+        notes.append("tunnel pool breakers before flap=\(tunnelPool.upstreamStatuses().map(\.circuitState))")
+
         // Open a CONNECT tunnel and let it idle.
         let client = FakeClient(
             id: 0,
@@ -62,6 +70,10 @@ enum VPNFlapScenarios {
         // Give the orchestrator a moment to settle.
         try await Task.sleep(for: .milliseconds(100))
 
+        let tunnelBreakersAfter = tunnelPool.upstreamStatuses().map(\.circuitState)
+        notes.append("tunnel pool breakers after flap=\(tunnelBreakersAfter)")
+        let tunnelBreakersClosed = tunnelBreakersAfter == [.closed]
+
         // Verify the snapshot exited direct mode.
         let causeNow = harness.orchestrator.snapshot.directModeCause
         notes.append("post-flap directModeCause=\(causeNow)")
@@ -79,7 +91,7 @@ enum VPNFlapScenarios {
 
         await client.close()
 
-        let pass = recoveredCount == 1 && tunnelAlive && !causeNow.isDirect
+        let pass = recoveredCount == 1 && tunnelAlive && !causeNow.isDirect && tunnelBreakersOpened && tunnelBreakersClosed
         notes.append(pass ? "PASS" : "FAIL")
         return ScenarioResult(
             name: name,
@@ -96,6 +108,8 @@ enum VPNFlapScenarios {
                 .init("one recovery event", recoveredCount == 1),
                 .init("established tunnel survived", tunnelAlive && metrics.connectEstablishedAt != nil),
                 .init("left direct mode", !causeNow.isDirect),
+                .init("tunnel pool breakers opened before the flap", tunnelBreakersOpened),
+                .init("flap recovery closed the tunnel pool's breakers", tunnelBreakersClosed),
             ],
             notes: notes
         )
@@ -452,6 +466,8 @@ final class VPNFlapHarness {
         config.proxy.inboundConnectionWarnThreshold = 128
         config.routing.pacRoutingEnabled = false
         config.auth.mode = .systemNegotiated
+        // 6.1 opens breakers with back-to-back failures.
+        config.health.circuitBreakerWindowSeconds = 0
         config.upstreams = [
             UpstreamProxy(name: "FlapHarnessUpstream", host: "127.0.0.1", port: upstream.port, priority: 0)
         ]
