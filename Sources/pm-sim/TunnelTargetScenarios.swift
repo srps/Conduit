@@ -45,7 +45,7 @@ enum TunnelTargetScenarios {
                 .init("the CR LF target got a SOCKS failure reply", forged != nil && forged != 0x00),
                 .init("the CR LF target never reached the upstream", headsAfterForged == 0),
                 .init("one connection.tunnel_target_rejected", rejected.count == 1),
-                .init("the event names the target as one token", detail == "target=[a.corp.example__X-Injected:_1]:443 suppressed=0"),
+                .init("the event shows only the bracketed target's length", detail == "target_bytes=\("[a.corp.example\r\nX-Injected: 1]:443".utf8.count) suppressed=0"),
                 .init("a well-formed target still tunnels", wellFormed == 0x00 && tunnelsAfterWellFormed == 1),
             ],
             notes: [

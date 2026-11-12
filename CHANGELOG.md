@@ -75,8 +75,8 @@ packaging; 0.6.1 is the latest published release.
   dialled. The refusal is local: the client gets a failure, with no DIRECT
   fallback, no retry and no upstream failure reported. It is reported as
   `connection.tunnel_target_rejected`, at most once a minute with a count of
-  the refusals held back, and the target it shows has any userinfo (up to
-  its last `@`) replaced by `<userinfo>@`. The HTTP listener's parser already
+  the refusals held back. It gives the target's length but none of its text,
+  which may hold credentials or line breaks. The HTTP listener's parser already
   closed the connection on these bytes in a CONNECT line.
 - Port tunnels and the transparent proxy use an upstream again as soon as the
   VPN comes back. A flap recovery, a reconnect after an outage and a wake

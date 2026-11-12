@@ -45,19 +45,13 @@ final class CONNECTTargetValidationTests: XCTestCase {
         for target in ["user@a.corp.example:443", "a.corp.example:443?sig=s#f", "a.corp.example/path:443"] {
             XCTAssertTrue(TunnelAuthority.isWritable(target), target)
         }
-        XCTAssertEqual(TunnelAuthority.printable("a b=c\r\nd"), "a_b_c__d")
-        XCTAssertEqual(TunnelAuthority.printable("[alice:s3cr3t@host\r\n]:443"), "<userinfo>@host__]:443")
-        XCTAssertEqual(TunnelAuthority.printable("a@b:p@ss@host:443"), "<userinfo>@host:443")
-        // The query and fragment redaction must not remove the `@` first.
-        XCTAssertEqual(TunnelAuthority.printable("[alice:s3cr3t?rest@host\r\n]:443"), "<userinfo>@host__]:443")
-        XCTAssertEqual(TunnelAuthority.printable("[alice:s3cr3t#rest@host\r\n]:443"), "<userinfo>@host__]:443")
-        XCTAssertEqual(TunnelAuthority.printable("host:443?q=s3cr3t"), "host:443__redacted_")
     }
 
     /// A SOCKS5 name is any 255 bytes, so a client can send credentials in it. They reach neither the event nor the log line.
     func testARejectedTargetsUserinfoReachesNeitherTheEventNorTheLog() async throws {
-        // A `?` or `#` before the `@` must not hide the userinfo from its redaction.
-        for target in ["[alice:s3cr3t@host\r\n]:443", "[alice:s3cr3t?rest@host\r\n]:443", "[alice:s3cr3t#rest@host\r\n]:443"] {
+        // Credentials before or after a `?`, `#` or `@`: the report shows none of the target.
+        for target in ["[alice:s3cr3t@host\r\n]:443", "[alice:s3cr3t?rest@host\r\n]:443", "host?token=alice@s3cr3t\r\n:443",
+                       "host#alice@s3cr3t\r\n:443"] {
             let lines = NIOLockedValueBox<[String]>([])
             let (coordinator, events) = try await startCoordinator(logger: LineRecorder(lines: lines))
 
@@ -69,7 +63,7 @@ final class CONNECTTargetValidationTests: XCTestCase {
             }
 
             let details = events.withLockedValue { $0 }.filter { $0.event == "connection.tunnel_target_rejected" }.map { $0.detail ?? "" }
-            XCTAssertEqual(details, ["target=<userinfo>@host__]:443 suppressed=0"], target.debugDescription)
+            XCTAssertEqual(details, ["target_bytes=\(target.utf8.count) suppressed=0"], target.debugDescription)
             let logged = lines.withLockedValue { $0 }
             XCTAssertEqual(logged.filter { $0.contains("connection.tunnel_target_rejected") }.count, 1, "\(logged)")
             for text in details + logged {
@@ -96,7 +90,7 @@ final class CONNECTTargetValidationTests: XCTestCase {
         XCTAssertEqual(upstream?.connectHeads(), [], "nothing was dialled for a malformed target")
         // A local client chooses how often to send one, so the event is limited to one a minute for every target together.
         let rejected = { events.withLockedValue { $0 }.filter { $0.event == "connection.tunnel_target_rejected" }.map { $0.detail ?? "" } }
-        XCTAssertEqual(rejected(), ["target=a.corp.example__X-Injected:_1:443 suppressed=0"])
+        XCTAssertEqual(rejected(), ["target_bytes=\(Self.forgedHosts[0].utf8.count + 4) suppressed=0"])
         clock.withLockedValue { $0 += 60 }
         do {
             _ = try await coordinator.connectUpstreamTunnel(target: "a.corp.example\r\nX-Injected: 2:443").get()
@@ -104,7 +98,7 @@ final class CONNECTTargetValidationTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? ConnectionPoolError, .malformedTunnelTarget)
         }
-        XCTAssertEqual(rejected().last, "target=a.corp.example__X-Injected:_2:443 suppressed=\(Self.forgedHosts.count - 1)")
+        XCTAssertEqual(rejected().last, "target_bytes=\("a.corp.example\r\nX-Injected: 2:443".utf8.count) suppressed=\(Self.forgedHosts.count - 1)")
 
         let tunnel = try await coordinator.connectUpstreamTunnel(target: "under_score.corp.example:443").get()
         tunnel.channel.close(promise: nil)

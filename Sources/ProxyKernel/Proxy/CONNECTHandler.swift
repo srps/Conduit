@@ -72,12 +72,13 @@ package final class CONNECTCoordinator: @unchecked Sendable {
     }
 
     /// One shared key: the target is whatever a local client sent, so a key per target would let a client that names a
-    /// new one each time report on every request.
+    /// new one each time report on every request. For the same reason the report shows only the target's length: no
+    /// redaction of text a client chose can promise to hide the credentials or the line breaks it put there.
     private func reportRejectedTarget(_ target: String) {
         guard let suppressed = targetRejectionGate.admit(host: "", reason: "connection.tunnel_target_rejected") else { return }
         let event = RuntimeEvent(
             kind: .connection, event: "connection.tunnel_target_rejected",
-            detail: "target=\(TunnelAuthority.printable(target)) suppressed=\(suppressed)"
+            detail: "target_bytes=\(target.utf8.count) suppressed=\(suppressed)"
         )
         eventSink?(event)
         logger.log(.warning, "\(event.event) \(event.detail ?? ""): not one visible-ASCII token; no upstream was dialled.", category: .proxy)
