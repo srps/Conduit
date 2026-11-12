@@ -201,12 +201,11 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         XCTAssertEqual(recorded.count, 1, "reported once a minute per proxy and scheme: \(recorded)")
         XCTAssertEqual(recorded.first?.kind, .auth)
         XCTAssertEqual(recorded.first?.detail, "client=doh proxy=127.0.0.1:\(proxy.port) method=ntlm suppressed=0",
-                       "of Negotiate, NTLM and Basic, CFNetwork hands the delegate NTLM")
+                       "of NTLM and Basic, CFNetwork hands the delegate NTLM")
     }
 
     /// One scheme offered at a time, so the scheme CFNetwork raises is the
-    /// one under test. Negotiate has its own test below: CFNetwork raises no
-    /// challenge for it.
+    /// one under test. Negotiate has its own opt-in tests below.
     func testEachSchemeOfferedAloneIsCancelledAndReportedByName() async throws {
         let offers: [(name: String, header: String)] = [
             ("ntlm", "NTLM"),
@@ -242,12 +241,52 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         }
     }
 
+    // MARK: - Negotiate, only when asked
+
+    /// For a Negotiate offer, CFNetwork can try the user's Kerberos ticket by
+    /// itself, before the delegate sees any challenge. On a domain-joined
+    /// Mac that can ask the corporate KDC for a ticket for the loopback proxy,
+    /// so these tests run only with `CONDUIT_TEST_NEGOTIATE=1`.
+    private static func requireNegotiateOptIn() throws {
+        guard ProcessInfo.processInfo.environment["CONDUIT_TEST_NEGOTIATE"] == "1" else {
+            throw XCTSkip("offers Negotiate to a real request, so CFNetwork may ask this machine's KDC for a service ticket; "
+                + "set CONDUIT_TEST_NEGOTIATE=1 on a machine with no corporate Kerberos ticket to run it")
+        }
+    }
+
+    /// When a proxy offers Negotiate beside NTLM and Basic, CFNetwork hands
+    /// the delegate NTLM.
+    func testANegotiateOfferBesideNTLMHandsTheDelegateNTLM() async throws {
+        try Self.requireNegotiateOptIn()
+        let proxy = try await ChallengingProxy.start(group: group, offering: ["Negotiate", "NTLM", "Basic realm=\"corp.example\""])
+        self.proxy = proxy
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let delegate = ProxyChallengeRefusingDelegate(client: .doh) { event in
+            events.withLockedValue { $0.append(event) }
+        }
+        let session = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: ("127.0.0.1", proxy.port)), delegate: delegate)
+        defer { session.invalidateAndCancel() }
+        try ProxyChallengeCanary.requireRefusal(session)
+
+        do {
+            let (_, response) = try await session.data(from: URL(string: "https://192.0.2.10/dns-query?name=mixed.example&type=A")!)
+            XCTFail("got \(String(describing: (response as? HTTPURLResponse)?.statusCode))")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .cancelled, "the challenge ends the task")
+        }
+
+        XCTAssertEqual(Self.refusals(in: events, from: proxy).map(\.detail),
+                       ["client=doh proxy=127.0.0.1:\(proxy.port) method=ntlm suppressed=0"])
+        XCTAssertFalse(proxy.requestHeads().contains { $0.lowercased().contains("proxy-authorization") })
+    }
+
     /// A proxy that offers only Negotiate never reaches the delegate.
     /// CFNetwork tries the user's Kerberos ticket by itself, with no password
     /// to ask for, and fails the task when it has no ticket for the proxy.
     /// This pins what was measured on macOS 26, so a change in CFNetwork that
     /// starts raising the challenge, or answering it, shows up here.
     func testANegotiateOnlyProxyRaisesNoChallengeAndGetsNoCredential() async throws {
+        try Self.requireNegotiateOptIn()
         let proxy = try await ChallengingProxy.start(group: group, offering: ["Negotiate"])
         self.proxy = proxy
         let events = NIOLockedValueBox<[RuntimeEvent]>([])
@@ -487,7 +526,7 @@ private final class ChallengingProxy: @unchecked Sendable {
 
     static func start(
         group: EventLoopGroup,
-        offering schemes: [String] = ["Negotiate", "NTLM", "Basic realm=\"corp.example\""]
+        offering schemes: [String] = ["NTLM", "Basic realm=\"corp.example\""]
     ) async throws -> ChallengingProxy {
         let heads = NIOLockedValueBox<[String]>([])
         let challenge = schemes.map { "Proxy-Authenticate: \($0)\r\n" }.joined()

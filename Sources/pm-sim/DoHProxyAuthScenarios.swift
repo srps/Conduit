@@ -228,7 +228,7 @@ private final class ScriptedHTTPProxyHandler: ChannelInboundHandler, @unchecked 
                 "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
         case .challenge:
             response = "HTTP/1.1 407 Proxy Authentication Required\r\n" +
-                "Proxy-Authenticate: Negotiate\r\nProxy-Authenticate: NTLM\r\n" +
+                "Proxy-Authenticate: NTLM\r\n" +
                 "Proxy-Authenticate: Basic realm=\"corp.example\"\r\n" +
                 "Content-Length: 0\r\nConnection: close\r\n\r\n"
         }
