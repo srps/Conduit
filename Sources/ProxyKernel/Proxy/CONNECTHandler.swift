@@ -22,6 +22,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let tunnelFailureReporter: TunnelFailureReporter
     private let directModeProvider: @Sendable () -> DirectModeCause
+    private let targetRejectionGate: RuntimeEventRepeatGate
 
     package init(
         pool: ConnectionPool,
@@ -32,8 +33,10 @@ package final class CONNECTCoordinator: @unchecked Sendable {
             AuthHandshakeLimiter.Limits(total: 512, perSource: 128)
         },
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
-        directModeProvider: @escaping @Sendable () -> DirectModeCause = { .none }
+        directModeProvider: @escaping @Sendable () -> DirectModeCause = { .none },
+        targetRejectionGate: RuntimeEventRepeatGate = RuntimeEventRepeatGate()
     ) {
+        self.targetRejectionGate = targetRejectionGate
         self.pool = pool
         self.authenticatorProvider = authenticatorProvider
         self.logger = logger
@@ -56,11 +59,28 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         authSource: String? = nil,
         proxyChain: [UpstreamProxy] = []
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
+        // Every path that tunnels through an upstream comes through here, and `target` is written into an authenticated request.
+        guard TunnelAuthority.isWritable(target) else {
+            reportRejectedTarget(target)
+            return pool.eventLoop.makeFailedFuture(ConnectionPoolError.malformedTunnelTarget)
+        }
         if !proxyChain.isEmpty {
             return attemptTunnel(target: target, authSource: authSource, proxyChain: proxyChain, index: 0)
         }
         let maxRetries = pool.enabledUpstreamCount
         return attemptTunnel(target: target, authSource: authSource, attempt: 1, maxRetries: maxRetries)
+    }
+
+    /// One shared key: the target is whatever a local client sent, so a key per target would let a client that names a
+    /// new one each time report on every request.
+    private func reportRejectedTarget(_ target: String) {
+        guard let suppressed = targetRejectionGate.admit(host: "", reason: "connection.tunnel_target_rejected") else { return }
+        let event = RuntimeEvent(
+            kind: .connection, event: "connection.tunnel_target_rejected",
+            detail: "target=\(TunnelAuthority.printable(SensitiveValueSanitizer.observableTarget(target))) suppressed=\(suppressed)"
+        )
+        eventSink?(event)
+        logger.log(.warning, "\(event.event) \(event.detail ?? ""): not one visible-ASCII token; no upstream was dialled.", category: .proxy)
     }
 
     private func attemptTunnel(

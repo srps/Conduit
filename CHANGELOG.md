@@ -64,6 +64,17 @@ packaging; 0.6.1 is the latest published release.
   `pm-sim dns-doh-upstream-407` and the tests that let a loopback proxy answer
   407 first check that every session they will use cancels a proxy challenge,
   and stop with no request sent when one would not.
+- A local client can no longer add lines to the authenticated CONNECT that
+  Conduit sends an upstream. The SOCKS5 listener read a requested name as up
+  to 255 bytes of anything and wrote it into the CONNECT request line and its
+  `Host` header, after Conduit's own `Proxy-Authorization`, so a name with a
+  CR and an LF in it added headers to that request. Every tunnel through an
+  upstream now refuses a target that is not one token of visible ASCII (a
+  CR, an LF, a space, a tab, a NUL, another control, DEL or a non-ASCII
+  byte) before anything is dialled, and reports it as
+  `connection.tunnel_target_rejected`, at most once a minute with a count of
+  the refusals held back. The HTTP listener's parser already refused a CR,
+  an LF or a space in a CONNECT line.
 
 ## 0.6.2
 
