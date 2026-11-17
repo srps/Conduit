@@ -16,7 +16,7 @@
 
 ## Decision
 
-- **Measure from the last good reading.** The timer records the time `L` of its last good reading and that a failure followed it. On recovery at `now`, a tunnel that counted at `L`, is still named by an interface key, and no longer counts is treated as lost at `L`. Its debounce ends at `L + minVisible`. The session counts as connected until at least `min(now, L + minVisible)`, and grace ends `grace` after that. A debounce or grace already running at `L` keeps its own deadline, which may be later, for example when the windows were shortened in Settings during that debounce. With no other tunnel counting, a gap longer than `minVisible + grace` reports `.disconnected(.networkLost)` at once. A shorter gap leaves the rest of the window: with `L = 0`, the default windows of 1 s and 5 s, and recovery at 5.5 s, the session reports `.reasserting` until 6 s. This is option (b) of the design's decision 7.
+- **Measure from the last good reading.** The timer records the time `L` of its last good reading and that a failure followed it. A loss seen at recovery is dated at `L`. The verdict at recovery time `now` is the one the timer gives at `now` if the recovery snapshot had been read at `L` instead, with no reading in between. Every existing rule then applies unchanged: a debounce or grace already running at `L` keeps its deadline, grace follows a debounce that ends during the gap, and windows changed in Settings during a running phase do not move it. Example: a single tunnel counted at `L = 0`, the default windows are 1 s and 5 s, and it has no address at recovery. Recovery at 5.5 s reports `.reasserting` until 6 s, and recovery at 7 s reports `.disconnected(.networkLost)` at once. This is option (b) of the design's decision 7.
 - **Captures stay on the machine that recorded them.** They are never committed. Tests get small hand-written fixtures derived from them, with nothing specific to a machine or network.
 
 ## Alternatives
@@ -33,9 +33,9 @@
 
 ## Invariants and verification
 
-- After a blind gap longer than `minVisible + grace` and past every deadline already running at `L`, when the only tunnel that counted before the gap is still named by an interface key and has no address, the first good reading reports `.disconnected(.networkLost)`. If its interface keys are gone, it reports `.disconnected(.userInitiated)`, as for any removal. If another tunnel counts, it reports `.connected`. U3 adds these to the exhaustive model check and a pm-sim scenario.
+- The verdict at a recovery reading equals the timer's verdict at the same instant for the same history with that snapshot read at `L` instead. U3 adds this as a property of the exhaustive model check, beside cases for the example above, a removed interface (`.disconnected(.userInitiated)`), and another tunnel still counting (`.connected`), and a pm-sim scenario.
 - No file under `Tests/` or `Sources/` holds a raw capture. Review checks fixtures for machine-specific values.
-- Disproved if the model check finds a gap ordering where a recovery reading reports `.connected` or `.reasserting` after both `L + minVisible + grace` and every debounce or grace deadline running at `L` have passed, with no tunnel counting.
+- Disproved if the model check finds a gap ordering where the two verdicts differ.
 
 ## Implementation evidence
 
