@@ -21,10 +21,10 @@ The bounds that protected Conduit all hold something that grows over time, or so
 The rule also asked for caps on values that hold neither. Each of these is a full reading of local state, written by trusted processes, that the next reading replaces:
 
 - #305 asks for a cap on the pushed-resolver reading. Its own impact section says nothing accumulates and memory is bounded by what the store holds.
-- Decision 6 of [the level-triggered VPN detection design](../design-vpn-detection-level-triggered.md) proposed a 64-tunnel cap on `TunnelSnapshot`. A reading over it would fail, so a Mac that stays over it would be blind for good, to guard memory that was never at risk. If `.unknown` withholds split DNS (the design's decision 2), that Mac would also never get split DNS.
-- The 16-domain cap of [0044](0044-split-dns-follows-vpn-pushed-resolvers.md) on each pushed resolver is below what the owner wants to support. Raising it, which is not done yet, needs a separate limit on the status data. That limit is a real one, from the 64 KiB reply frame of [0030](0030-ordinary-runtime-reply-frame-cap.md).
+- Decision 6 of [the level-triggered VPN detection design](../design-vpn-detection-level-triggered.md) proposed a 64-tunnel cap on `TunnelSnapshot`. A reading over it would fail, so a Mac that stays over it would be blind for good, to guard memory the store already bounds. If `.unknown` withholds split DNS (the design's decision 2), that Mac would also never get split DNS.
+- The cap of [0044](0044-split-dns-follows-vpn-pushed-resolvers.md) at 16 detected domains across the whole table is below what the owner wants to support. Raising it, which is not done yet, needs a separate limit on the status data. That limit is a real one, from the 64 KiB reply frame of [0030](0030-ordinary-runtime-reply-frame-cap.md).
 
-A cap on such a value adds a failure mode and protects nothing. A truncated reading can drop the entry that matters, such as the tunnel that carries the VPN. A refused reading leaves Conduit blind while the source is healthy.
+A cap on such a value buys little. The OS hands Conduit a copy of the whole store before `parse` sees it, so a cap limits only what Conduit keeps after parsing and the work downstream, and the store already bounds both. In exchange the cap adds a failure mode. A truncated reading can drop the entry that matters, such as the tunnel that carries the VPN. A refused reading leaves Conduit blind while the source is healthy.
 
 The owner asked to revisit the rule and to support providers properly instead of limiting them where no limit is needed.
 
@@ -32,7 +32,7 @@ Observed: on 2026-11-17 a process running as the user (uid 501) tried to write `
 
 ## Decision
 
-- **Bound what grows.** A collection, queue, cache, buffer or timer that grows over time, or whose size comes from input Conduit does not trust, has a fixed capacity in config. The bound says what happens at the limit (reject, evict or spill) and emits a `RuntimeEvent` when it applies. Adding one still needs the owner's approval.
+- **Bound what grows.** A collection, queue, cache, buffer or timer that grows over time, or whose size comes from input Conduit does not trust, has a fixed capacity, in config or a named constant with its reason. The bound says what happens at the limit (reject, evict or spill) and emits a `RuntimeEvent` when it applies. Adding one still needs the owner's approval.
 - **Validate what a trusted local source replaces.** A value rebuilt whole on each read of a trusted local source needs no cap. The example is a reading of the SCDynamicStore. Its size is the source's size, and the next read replaces it. It is validated at its boundary (STYLE rule 4), and malformed entries are rejected with an event.
 - **Transport and display limits are separate.** A frame cap, a message size or a row count in Settings applies where that limit is, to what crosses it, and never to the data underneath.
 - **Untrusted means outside the machine or outside the trust boundary.** Network peers, clients of the local listeners, PAC and DoH servers, upstream responses and files a user process can write are untrusted. Root-owned system state is trusted. Configuration files are user-writable, so configuration keeps the resource ceilings of [0021](0021-bounded-configuration-at-all-boundaries.md), such as 32 upstreams and 128 tunnels, whatever else validation checks.
@@ -49,11 +49,11 @@ Observed: on 2026-11-17 a process running as the user (uid 501) tried to write `
 - Decision 6 of the VPN detection design is settled as no cap. `TunnelSnapshot` carries every tunnel the store names.
 - #305 no longer needs a cap on the pushed-resolver reading itself. The flap hold keeps its cap, and the outputs keep their limits wherever a transport or the helper sets one.
 - Reviews ask two questions of a new collection: does it grow, and who controls its size. A no to both needs validation, not a cap.
-- Trusting the store is a policy, not a protection. A process that can write `State:` keys can fabricate tunnel addresses and so choose the VPN verdict, and an oversized reading costs Conduit memory and CPU in proportion. A cap would not stop either: a writer that can fake one tunnel's address can fake the verdict within any limit. Such a process can already change the machine's routing and DNS directly.
+- Trusting the store is a policy, not a protection. A process allowed to write the tunnel keys can fabricate tunnel addresses and so choose the VPN verdict, and an oversized reading costs Conduit memory and CPU in proportion. A cap would not stop the first: a writer that can fake one tunnel's address can fake the verdict within any limit. A root writer can also change the machine's routing and DNS directly. A publisher entitled only to some keys can affect only what those keys say.
 
 ## Invariants and verification
 
-- Every collection that grows over time or takes its size from untrusted input keeps a configured bound with an event at the limit. The bounds listed in Context stay as they are.
+- Every collection that grows over time or takes its size from untrusted input keeps a fixed bound. A new bound emits an event at its limit. Existing bounds stay. Some of them, such as `RuntimeEventLog` and `RuntimeEventRepeatGate`, are named constants that evict silently, and they get an event when they are next changed.
 - A snapshot of a trusted local source is never truncated. A malformed entry in it is rejected with an event.
 - Disproved if an uncapped snapshot is shown to grow without a matching growth in the source, or if a `State:` key is shown writable without root or an entitlement.
 

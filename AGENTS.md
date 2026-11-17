@@ -51,7 +51,7 @@ Executables:
 
 - A new dependency in `Package.swift`. Today there are two: `apple/swift-nio`, and `sparkle-project/Sparkle`, which only `ConduitUpdater` may link.
 - Widening `package` access to `public`, or exposing a concrete type across a target boundary where a protocol exists.
-- An unbounded collection, queue, cache or timer: one that grows over time, or whose size comes from input Conduit does not trust. Every one has a fixed capacity in config and an event at the limit; see `RuntimeEventLog`, `maxConnections` and `inboundConnectionMaxLimit`. A value that each read of a trusted local source replaces whole, such as an SCDynamicStore reading, is validated at its boundary instead of capped (decision 0046).
+- An unbounded collection, queue, cache or timer: one that grows over time, or whose size comes from input Conduit does not trust. Every one has a fixed capacity, in config or a named constant, and says what happens at the limit; see `RuntimeEventLog`, `maxConnections` and `inboundConnectionMaxLimit`. A value that each read of a trusted local source replaces whole, such as an SCDynamicStore reading, is validated at its boundary instead of capped (decision 0046).
 - A new `TODO`, `FIXME` or `XXX`. File an issue instead.
 
 ### Always
