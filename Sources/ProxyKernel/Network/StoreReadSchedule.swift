@@ -55,8 +55,9 @@ package struct StoreReadSchedule: Equatable, Sendable {
 
     /// Seconds between audit reads while healthy, or nil for none.
     package let audit: TimeInterval?
-    /// Consecutive failed attempts since the last good reading.
-    package private(set) var failedAttempts = 0
+    /// Consecutive failed attempts since the last good reading. The setter
+    /// is internal only so a test can start a run near saturation.
+    package internal(set) var failedAttempts = 0
 
     package init(audit: TimeInterval?) {
         precondition(audit.map { $0 > 0 } ?? true, "an audit interval is positive")

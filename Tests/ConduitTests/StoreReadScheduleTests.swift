@@ -56,6 +56,16 @@ final class StoreReadScheduleTests: XCTestCase {
         XCTAssertEqual(events, 7, "attempts 1, 2, 4 … 64; the hour holds 124 attempts")
     }
 
+    func testTheFailureCountSaturatesInsteadOfOverflowing() {
+        var schedule = StoreReadSchedule(audit: nil)
+        schedule.failedAttempts = .max - 1
+
+        XCTAssertEqual(schedule.failed(at: 0), .init(attempt: .max, reports: false, due: 30))
+        XCTAssertEqual(schedule.failed(at: 30), .init(attempt: .max, reports: false, due: 60), "the count stays at its ceiling")
+        XCTAssertEqual(schedule.succeeded(at: 60), .init(recoveredAfter: .max, due: nil))
+        XCTAssertEqual(schedule.failedAttempts, 0)
+    }
+
     func testLeewayIsATenthOfTheDelay() {
         XCTAssertEqual(StoreReadSchedule.leeway(for: 30), 3, accuracy: 1e-9)
         XCTAssertEqual(StoreReadSchedule.leeway(for: 1), 0.1, accuracy: 1e-9)
