@@ -48,10 +48,16 @@ package struct TunnelSnapshot: Hashable, Sendable {
 
     /// One per interface, in name order.
     package let tunnels: [Tunnel]
+    /// Store keys the reading would have used that held a value of the wrong
+    /// type, in key order. Each reads as absent, or its `Addresses` as none,
+    /// so a monitor reports them rather than let a tunnel read as down with no
+    /// trace.
+    package let malformedKeys: [String]
 
-    package init(tunnels: [Tunnel] = []) {
+    package init(tunnels: [Tunnel] = [], malformedKeys: [String] = []) {
         assert(Set(tunnels.map(\.interface)).count == tunnels.count, "one entry per interface")
         self.tunnels = tunnels.sorted { $0.interface < $1.interface }
+        self.malformedKeys = malformedKeys.sorted()
     }
 }
 
