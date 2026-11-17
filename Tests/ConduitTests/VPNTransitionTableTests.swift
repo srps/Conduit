@@ -438,6 +438,77 @@ final class VPNTransitionTableTests: XCTestCase {
                        "(baseline=\(baselineCount), after-3-repeats=\(afterCount))")
     }
 
+    // MARK: - A blind reading (.unknown mid-session)
+
+    /// A store read that fails mid-flap reports `.unknown`, then the recovery reports `.connected`. The recovery ends the flap
+    /// that started before the gap: it is counted, with the duration from the flap's start, and reported as recovered.
+    @RuntimeActor func testAFlapRecoveredAfterABlindReadingIsCountedFromTheFlapsStart() async throws {
+        let clock = SteppableFlapClock()
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.upstreams = []
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink(), flapClock: clock.flapClock)
+        try await orchestrator.startProxy()
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
+
+        await orchestrator.handleVPNStateChange(.connected)
+        await orchestrator.handleVPNStateChange(.reasserting)
+        clock.step(wall: 2, elapsed: .seconds(2))
+        await orchestrator.handleVPNStateChange(.unknown)
+        XCTAssertEqual(orchestrator.snapshot.vpnState, .unknown, "the snapshot shows the blind reading")
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, .transientNetworkChange, "a blind reading holds the flap's routing")
+        clock.step(wall: 1, elapsed: .seconds(1))
+        let connectsBefore = orchestrator.eventLog.events.filter { $0.event == "vpn.connected" }.count
+        await orchestrator.handleVPNStateChange(.connected)
+
+        let metrics = orchestrator.snapshot.runtimeStatus.metrics
+        XCTAssertEqual(metrics.vpnFlapCount, 1)
+        XCTAssertEqual(metrics.vpnFlapTotalDuration, 3, "the flap is measured from its start, across the blind reading")
+        XCTAssertEqual(orchestrator.eventLog.events.filter { $0.event == "vpn.flap.recovered" }.compactMap(\.detail),
+                       ["duration=3000ms streamsPreserved=0"])
+        XCTAssertEqual(orchestrator.eventLog.events.filter { $0.event == "vpn.connected" }.count, connectsBefore,
+                       "the recovery is a flap's, not a cold start's")
+    }
+
+    /// A blind reading between two `.connected` reports is not a reconnect: the VPN never went anywhere this runtime saw.
+    @RuntimeActor func testABlindReadingBetweenTwoConnectedReportsIsNotAReconnect() async throws {
+        let orchestrator = makeOrchestrator()
+        try await orchestrator.startProxy()
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
+        await orchestrator.handleVPNStateChange(.connected)
+        let cause = orchestrator.snapshot.directModeCause
+        let cutoff = Date()
+
+        await orchestrator.handleVPNStateChange(.unknown)
+        XCTAssertEqual(orchestrator.snapshot.vpnState, .unknown)
+        await orchestrator.handleVPNStateChange(.connected)
+
+        XCTAssertEqual(orchestrator.snapshot.vpnState, .connected)
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, cause)
+        let fired = orchestrator.eventLog.events.filter { $0.timestamp >= cutoff }.map(\.event)
+        for name in ["vpn.reconnecting", "vpn.connected", "pac.routes_invalidated", "dns.transports_reset"] {
+            XCTAssertFalse(fired.contains(name), "\(name) after a blind reading: \(fired)")
+        }
+    }
+
+    /// A blind reading after a disconnect, then `.connected`, is the reconnect: the VPN came back from the outage.
+    @RuntimeActor func testAReconnectAfterABlindReadingIsAReconnect() async throws {
+        let orchestrator = makeOrchestrator()
+        try await orchestrator.startProxy()
+        defer { Task { @RuntimeActor in await orchestrator.stopProxy() } }
+        await orchestrator.handleVPNStateChange(.connected)
+        await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
+        await orchestrator.handleVPNStateChange(.unknown)
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, .vpnDisconnected, "a blind reading holds the outage's routing")
+        let cutoff = Date()
+
+        await orchestrator.handleVPNStateChange(.connected)
+
+        let fired = orchestrator.eventLog.events.filter { $0.timestamp >= cutoff }
+        XCTAssertNotNil(fired.first { $0.event == "vpn.connected" })
+        XCTAssertEqual(fired.first { $0.event == "dns.transports_reset" }?.detail, "source=vpn_reconnected")
+    }
+
     // MARK: - Cause derivation priority (VPN signal > probe)
 
     @RuntimeActor func testVPNDisconnectedOverridesProbeDerivedCause() async throws {

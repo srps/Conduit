@@ -305,6 +305,53 @@ final class VPNTunnelMigrationTests: XCTestCase {
         })
     }
 
+    /// A blind reading between two `.connected` reports is not a connect: the recovery runs no fresh sweep, which would judge every
+    /// route, only the one address-only pass a recovery runs after the first re-sweep delay.
+    @RuntimeActor func testABlindReadingBetweenTwoConnectedReportsRunsOnlyTheAddressPass() async throws {
+        let orchestrator = orchestrator()
+        try await orchestrator.startProxy()
+        try await connectAndSettle(orchestrator)
+        let settled = migrations(orchestrator.eventLog.events).count
+        let oldAddress = try await tracked(orchestrator, local: "10.20.30.40")
+        let routeMoved = try await tracked(orchestrator, local: "10.20.30.41")
+
+        await orchestrator.handleVPNStateChange(.unknown)
+        gone.withLockedValue { _ = $0.insert("10.20.30.40") }
+        moved.withLockedValue { _ = $0.insert("10.20.30.41") }
+        await orchestrator.handleVPNStateChange(.connected)
+        try await until { self.delays.held == self.resweep }
+        await drain(oldAddress, routeMoved)
+        XCTAssertTrue(oldAddress.isActive, "the recovery waits before judging addresses")
+        XCTAssertEqual(delays.release(), resweep)
+        try await until({
+            self.migrations(orchestrator.eventLog.events).count > settled
+        }, else: "\(migrations(orchestrator.eventLog.events))")
+        await drain(oldAddress, routeMoved)
+        XCTAssertFalse(oldAddress.isActive)
+        XCTAssertTrue(routeMoved.isActive, "a blind reading judges no route")
+        XCTAssertEqual(Array(migrations(orchestrator.eventLog.events).dropFirst(settled)),
+                       ["transition=blind_recovered phase=addresses pass=1 upstream_closed=0 direct_closed=1 unchecked=0"])
+    }
+
+    /// The tunnel carrying a connected VPN changed while the store was unreadable: the recovery sweeps it as a tunnel change.
+    @RuntimeActor func testATunnelChangeAcrossABlindReadingSweeps() async throws {
+        let orchestrator = orchestrator()
+        try await orchestrator.startProxy()
+        await orchestrator.handleVPNStateChange(.connected, interfaceName: "utun4")
+        try await until { self.delays.held == self.resweep }
+        let onOldTunnel = try await tracked(orchestrator, local: "10.20.30.40")
+        gone.withLockedValue { _ = $0.insert("10.20.30.40") }
+
+        await orchestrator.handleVPNStateChange(.unknown)
+        XCTAssertNil(orchestrator.snapshot.vpnInterfaceName)
+        await orchestrator.handleVPNStateChange(.connected, interfaceName: "utun5")
+        try await until { !onOldTunnel.isActive }
+        XCTAssertEqual(orchestrator.snapshot.vpnInterfaceName, "utun5")
+        XCTAssertTrue(migrations(orchestrator.eventLog.events).contains {
+            $0.hasPrefix("transition=tunnel_changed phase=paths pass=0 ") && $0.contains(" direct_closed=1 ")
+        }, "\(migrations(orchestrator.eventLog.events))")
+    }
+
     /// A flap that a wake recovers, not a monitor report, still runs the
     /// recovery's sweep: the monitor's later `.connected` changes nothing.
     @RuntimeActor func testAWakeRecoveryRunsTheHeldSweep() async throws {
