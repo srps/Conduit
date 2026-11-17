@@ -228,6 +228,40 @@ final class VPNStatusMonitorTests: XCTestCase {
         XCTAssertNil(clock.pendingSleep, "no wake-up armed for the stopped session")
     }
 
+    /// The review's second ordering on #317: the host's `onChange` was running for the old session when another
+    /// thread stopped the monitor. A stop that returns before that callback does lets it submit the stale `.connected`
+    /// after teardown.
+    func testAStopWaitsOutTheCallbackInFlightSoNothingOfItsSessionLandsAfterIt() {
+        let monitor = VPNStatusMonitor(store: store, clock: clock.clock)
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let stopReturned = LockedFlag()
+        let landedAfterStop = LockedFlag()
+        monitor.setOnChange { _ in
+            entered.signal()
+            _ = release.wait(timeout: .now() + 5)
+            if stopReturned.value { landedAfterStop.set() }
+        }
+        connect()
+        monitor.start()
+        XCTAssertEqual(entered.wait(timeout: .now() + 5), .success, "the first .connected is being delivered")
+
+        let stopped = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            monitor.stop()
+            stopReturned.set()
+            stopped.signal()
+        }
+        // A stop that does not wait returns at once. One that waits cannot return until the callback is released, so
+        // this bound only ever expires on the passing path; nothing is timed.
+        let returnedWhileHeld = stopped.wait(timeout: .now() + 0.5) == .success
+        release.signal()
+        if !returnedWhileHeld { XCTAssertEqual(stopped.wait(timeout: .now() + 5), .success, "the stop returns once the callback has") }
+
+        XCTAssertFalse(returnedWhileHeld, "stop returned while a callback of its session was still running")
+        XCTAssertFalse(landedAfterStop.value, "a callback of the stopped session landed after stop returned")
+    }
+
     /// A consumer may stop the monitor from a callback on the monitor's queue. The stop returns at once, and the
     /// delivery that called it publishes nothing after it: here the event comes first and the state is dropped.
     func testAStopFromInsideACallbackReturnsAndPublishesNothingAfterIt() {
@@ -286,6 +320,13 @@ final class VPNStatusMonitorTests: XCTestCase {
         XCTAssertEqual("\(detached.event) \(detached.detail ?? "")", "vpn.store_released_uncancelled outcome=detached")
         XCTAssertEqual("\(refused.event) \(refused.detail ?? "")", "vpn.store_released_uncancelled outcome=store_unsubscribe code=1003")
     }
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var raised = false
+    var value: Bool { lock.withLock { raised } }
+    func set() { lock.withLock { raised = true } }
 }
 
 private final class Counter: @unchecked Sendable {
