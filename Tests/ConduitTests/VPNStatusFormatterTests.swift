@@ -22,7 +22,7 @@ final class VPNStatusFormatterTests: XCTestCase {
                        "Disconnected (network lost)")
         XCTAssertEqual(VPNStatusFormatter.label(for: .disconnected(reason: .unknown)),
                        "Disconnected")
-        XCTAssertEqual(VPNStatusFormatter.label(for: .unknown), "Not detected")
+        XCTAssertEqual(VPNStatusFormatter.label(for: .unknown), "Unknown")
     }
 
     func testLabelNamesTheInterfaceOnlyWhenConnected() {

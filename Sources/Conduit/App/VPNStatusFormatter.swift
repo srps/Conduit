@@ -46,7 +46,8 @@ enum VPNStatusFormatter {
         case .disconnected(.unknown):
             return "Disconnected"
         case .unknown:
-            return "Not detected"
+            // Before the first reading, or while the store cannot be read: the VPN may be up.
+            return "Unknown"
         }
     }
 
