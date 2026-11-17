@@ -87,11 +87,23 @@ package struct PushedResolverReading: Hashable, Sendable {
     package var rejections: [PushedResolverRejection]
     /// Set when the store could not be created, subscribed to or read; `resolvers` is then empty.
     package var failure: Failure?
+    /// The run of failed attempts in a row this reading extends or ends (decision 0048). With a `failure`, how
+    /// many have failed, this one included. Without one, how many failed before this reading succeeded: 0 when
+    /// the reading before it succeeded too.
+    package var failedAttempts: Int
 
-    package init(resolvers: [PushedResolver] = [], rejections: [PushedResolverRejection] = [], failure: Failure? = nil) {
+    /// `failedAttempts` defaults to 1 for a failed reading and 0 for a good one.
+    package init(
+        resolvers: [PushedResolver] = [],
+        rejections: [PushedResolverRejection] = [],
+        failure: Failure? = nil,
+        failedAttempts: Int? = nil
+    ) {
+        precondition(failure == nil || (failedAttempts ?? 1) >= 1, "a failed reading is an attempt")
         self.resolvers = resolvers
         self.rejections = rejections
         self.failure = failure
+        self.failedAttempts = failedAttempts ?? (failure == nil ? 0 : 1)
     }
 }
 

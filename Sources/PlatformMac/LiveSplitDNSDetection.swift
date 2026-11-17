@@ -24,8 +24,21 @@ package final class LiveSplitDNSDetection: @unchecked Sendable {
         package let set: DetectedSet?
         /// The rejections in `LiveSplitDNSPolicy.ignored` now that were not in it at the last take.
         package let ignored: Set<PushedResolverRejection>
-        /// The newest failure a reading carried that the reading before it did not.
-        package let failure: PushedResolverReading.Failure?
+        /// What the readings since the last take said about the store, in arrival order: the newest failure
+        /// that differed from the reading before it, and the newest recovery, at most one of each.
+        package let store: [StoreEvent]
+    }
+
+    /// A change in whether the observer can read the store (decision 0048).
+    package enum StoreEvent: Hashable, Sendable {
+        /// A reading failed at this step, on this attempt in a row.
+        case failed(PushedResolverReading.Failure, attempt: Int)
+        /// A reading succeeded after this many failed attempts.
+        case recovered(attempts: Int)
+
+        var isFailure: Bool {
+            if case .failed = self { true } else { false }
+        }
     }
 
     private struct State {
@@ -33,10 +46,10 @@ package final class LiveSplitDNSDetection: @unchecked Sendable {
         var gate = SplitDNSVPNGate()
         var liveInterfaces: Set<String> = []
         var policy: LiveSplitDNSPolicy
-        var lastFailure: PushedResolverReading.Failure?
+        var lastFailure: StoreEvent?
         var unappliedSet: DetectedSet?
         var reportedIgnored: Set<PushedResolverRejection> = []
-        var unreportedFailure: PushedResolverReading.Failure?
+        var unreportedStore: [StoreEvent] = []
     }
 
     private let lock = NSLock()
@@ -51,8 +64,8 @@ package final class LiveSplitDNSDetection: @unchecked Sendable {
         lock.withLock { state.running = true }
     }
 
-    /// Drops the last reading and the held set, and leaves the empty set for the owner to apply. A failure the
-    /// owner has not taken stays for that take, so one that arrived just before the stop is still reported. A
+    /// Drops the last reading and the held set, and leaves the empty set for the owner to apply. A store event the
+    /// owner has not taken stays for that take, so a failure that arrived just before the stop is still reported. A
     /// reading that arrives after this is dropped: the next start reads the store again. The VPN verdict stays,
     /// because the VPN observer reports only a change and so never repeats it.
     package func stop() {
@@ -69,8 +82,13 @@ package final class LiveSplitDNSDetection: @unchecked Sendable {
     package func receive(_ reading: PushedResolverReading) {
         lock.withLock {
             guard state.running else { return }
-            if let failure = reading.failure, failure != state.lastFailure { state.unreportedFailure = failure }
-            state.lastFailure = reading.failure
+            let failure = reading.failure.map { StoreEvent.failed($0, attempt: reading.failedAttempts) }
+            if let failure, failure != state.lastFailure {
+                queue(failure)
+            } else if failure == nil, reading.failedAttempts > 0 {
+                queue(.recovered(attempts: reading.failedAttempts))
+            }
+            state.lastFailure = failure
             update(reading: reading, reason: reading.failure == nil ? .pushed : .detectionFailed)
         }
     }
@@ -96,12 +114,18 @@ package final class LiveSplitDNSDetection: @unchecked Sendable {
     package func take() -> Pending? {
         lock.withLock {
             let ignored = state.policy.ignored.subtracting(state.reportedIgnored)
-            let pending = Pending(set: state.unappliedSet, ignored: ignored, failure: state.unreportedFailure)
+            let pending = Pending(set: state.unappliedSet, ignored: ignored, store: state.unreportedStore)
             state.reportedIgnored = state.policy.ignored
             state.unappliedSet = nil
-            state.unreportedFailure = nil
-            return pending.set == nil && ignored.isEmpty && pending.failure == nil ? nil : pending
+            state.unreportedStore = []
+            return pending.set == nil && ignored.isEmpty && pending.store.isEmpty ? nil : pending
         }
+    }
+
+    /// Keeps the newest event of each kind, in arrival order. Call with the lock held.
+    private func queue(_ event: StoreEvent) {
+        state.unreportedStore.removeAll { $0.isFailure == event.isFailure }
+        state.unreportedStore.append(event)
     }
 
     /// Call with the lock held.

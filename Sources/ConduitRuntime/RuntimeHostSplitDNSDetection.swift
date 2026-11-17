@@ -33,11 +33,21 @@ extension RuntimeHost {
     /// readings passed through and left is not reported. Idempotent: with nothing pending it does nothing.
     func applyPendingSplitDNSDetection() {
         guard let pending = splitDNSDetection.take() else { return }
-        if let failure = pending.failure {
-            record(
-                RuntimeEvent(kind: .health, event: "dns.split_detection_failed", detail: "reason=\(failure.rawValue)"),
-                level: .warning
-            )
+        for change in pending.store {
+            switch change {
+            case .failed(let failure, let attempt):
+                record(
+                    RuntimeEvent(
+                        kind: .health, event: "dns.split_detection_failed", detail: "reason=\(failure.rawValue) attempt=\(attempt)"
+                    ),
+                    level: .warning
+                )
+            case .recovered(let attempts):
+                record(
+                    RuntimeEvent(kind: .health, event: "dns.split_detection_recovered", detail: "attempts=\(attempts)"),
+                    level: .notice
+                )
+            }
         }
         reportIgnoredResolvers(pending.ignored)
         guard let set = pending.set else { return }

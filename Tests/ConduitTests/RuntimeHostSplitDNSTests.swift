@@ -249,8 +249,22 @@ final class RuntimeHostSplitDNSTests: XCTestCase {
         await running.push(PushedResolverReading(failure: .storeSubscribe))
         await running.push(PushedResolverReading(rejections: [], failure: .storeSubscribe))
 
-        XCTAssertEqual(running.events("dns.split_detection_failed"), ["reason=store_subscribe"])
+        XCTAssertEqual(running.events("dns.split_detection_failed"), ["reason=store_subscribe attempt=1"])
         XCTAssertEqual(running.events("dns.split_table_changed"), [], "the host runs on manual entries alone")
+    }
+
+    @RuntimeActor func testEachReportedRetryIsAnEventAndTheGoodReadingAfterThemIsARecovery() async throws {
+        let running = try await start(primed: PushedResolverReading(failure: .storeCreate))
+        await running.report(.connected, live: ["utun6"])
+        await running.push(PushedResolverReading(failure: .storeSubscribe, failedAttempts: 2))
+        await running.push(PushedResolverReading(resolvers: [corp()], failedAttempts: 2))
+        await running.push(PushedResolverReading(resolvers: [corp()]))
+
+        XCTAssertEqual(running.events("dns.split_detection_failed"), [
+            "reason=store_create attempt=1", "reason=store_subscribe attempt=2",
+        ])
+        XCTAssertEqual(running.events("dns.split_detection_recovered"), ["attempts=2"], "once, on the reading that ended the run")
+        XCTAssertEqual(running.events("dns.split_detected"), ["interface=utun6 domains=corp.example servers=1 outcome=applied"])
     }
 
     // MARK: - Readings that outrun the owner
@@ -303,7 +317,7 @@ final class RuntimeHostSplitDNSTests: XCTestCase {
 
         await running.push(PushedResolverReading(failure: .storeRead))
 
-        XCTAssertEqual(running.events("dns.split_detection_failed"), ["reason=store_read"])
+        XCTAssertEqual(running.events("dns.split_detection_failed"), ["reason=store_read attempt=1"])
         XCTAssertEqual(running.events("dns.split_table_changed").last, "detected_domains=0 manual_domains=1 rules=1 reason=detection_failed")
         XCTAssertEqual(running.events("dns.split_detected").last, "interface=utun6 domains=corp.example servers=1 outcome=cleared")
         XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS, .init(state: .inUse, rows: []))
@@ -394,7 +408,7 @@ final class RuntimeHostSplitDNSTests: XCTestCase {
         XCTAssertFalse(running.harness.pushedResolvers.isObserving)
         let reported = running.host.orchestrator.eventLog.events.suffix(3).map { "\($0.event) \($0.detail ?? "")" }
         XCTAssertEqual(reported, [
-            "dns.split_detection_failed reason=store_read",
+            "dns.split_detection_failed reason=store_read attempt=1",
             "dns.split_detected interface=utun6 domains=corp.example servers=1 outcome=cleared",
             "dns.split_table_changed detected_domains=0 manual_domains=0 rules=0 reason=detection_off",
         ])

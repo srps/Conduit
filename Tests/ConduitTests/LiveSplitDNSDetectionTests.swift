@@ -67,7 +67,7 @@ final class LiveSplitDNSDetectionTests: XCTestCase {
 
         detection.receive(PushedResolverReading(failure: .storeRead))
         let failed = detection.take()
-        XCTAssertEqual(failed?.failure, .storeRead)
+        XCTAssertEqual(failed?.store, [.failed(.storeRead, attempt: 1)])
         XCTAssertEqual(failed?.set, .init(rules: [], display: .init(state: .inUse, rows: []), reason: .detectionFailed))
 
         detection.report(gate: gate(.connected), liveInterfaces: ["utun6"])
@@ -75,7 +75,7 @@ final class LiveSplitDNSDetectionTests: XCTestCase {
 
         detection.receive(PushedResolverReading(resolvers: [corp]))
         let restored = detection.take()
-        XCTAssertNil(restored?.failure)
+        XCTAssertEqual(restored?.store, [])
         XCTAssertEqual(restored?.set?.display, DetectedSplitDNSDisplay(state: .inUse, rows: [corpRow]))
         XCTAssertEqual(restored?.set?.reason, .pushed)
     }
@@ -85,13 +85,33 @@ final class LiveSplitDNSDetectionTests: XCTestCase {
 
         detection.receive(PushedResolverReading(failure: .storeSubscribe))
         detection.receive(PushedResolverReading(failure: .storeSubscribe))
-        XCTAssertEqual(detection.take()?.failure, .storeSubscribe)
+        XCTAssertEqual(detection.take()?.store, [.failed(.storeSubscribe, attempt: 1)])
         detection.receive(PushedResolverReading(failure: .storeSubscribe))
         XCTAssertNil(detection.take())
 
         detection.receive(PushedResolverReading())
         detection.receive(PushedResolverReading(failure: .storeSubscribe))
-        XCTAssertEqual(detection.take()?.failure, .storeSubscribe, "it came back after a reading without it")
+        XCTAssertEqual(detection.take()?.store, [.failed(.storeSubscribe, attempt: 1)], "it came back after a reading without it")
+    }
+
+    func testEachRetryAttemptIsPendingAndARecoveryFollowsInArrivalOrder() {
+        let detection = connected()
+
+        detection.receive(PushedResolverReading(failure: .storeCreate))
+        XCTAssertEqual(detection.take()?.store, [.failed(.storeCreate, attempt: 1)])
+        detection.receive(PushedResolverReading(failure: .storeCreate, failedAttempts: 2))
+        detection.receive(PushedResolverReading(resolvers: [corp], failedAttempts: 2))
+        XCTAssertEqual(detection.take()?.store, [.failed(.storeCreate, attempt: 2), .recovered(attempts: 2)])
+
+        detection.receive(PushedResolverReading(resolvers: [corp]))
+        XCTAssertNil(detection.take(), "a good reading after a good one ends no run")
+
+        detection.receive(PushedResolverReading(resolvers: [corp], failedAttempts: 1))
+        detection.receive(PushedResolverReading(failure: .storeRead))
+        XCTAssertEqual(
+            detection.take()?.store, [.recovered(attempts: 1), .failed(.storeRead, attempt: 1)],
+            "a recovery and a new failure in one burst keep their order"
+        )
     }
 
     func testAFailureInsideABurstIsStillReported() {
@@ -101,7 +121,7 @@ final class LiveSplitDNSDetectionTests: XCTestCase {
         detection.receive(PushedResolverReading(resolvers: [corp]))
 
         let pending = detection.take()
-        XCTAssertEqual(pending?.failure, .storeRead)
+        XCTAssertEqual(pending?.store, [.failed(.storeRead, attempt: 1)])
         XCTAssertEqual(pending?.set?.display.state, .inUse)
     }
 
@@ -135,13 +155,13 @@ final class LiveSplitDNSDetectionTests: XCTestCase {
         detection.stop()
 
         let pending = detection.take()
-        XCTAssertEqual(pending?.failure, .storeRead)
+        XCTAssertEqual(pending?.store, [.failed(.storeRead, attempt: 1)])
         XCTAssertEqual(pending?.set, .init(rules: [], display: .none, reason: .detectionOff))
         XCTAssertNil(detection.take(), "it is reported once")
 
         detection.start()
         detection.receive(PushedResolverReading(failure: .storeRead))
-        XCTAssertEqual(detection.take()?.failure, .storeRead, "the next start reports its own failure")
+        XCTAssertEqual(detection.take()?.store, [.failed(.storeRead, attempt: 1)], "the next start reports its own failure")
     }
 
     func testAVerdictTakenWhileStoppedJudgesTheNextStartsFirstReading() {
