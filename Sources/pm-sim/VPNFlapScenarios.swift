@@ -204,9 +204,9 @@ enum VPNFlapScenarios {
         await orchestrator.handleVPNStateChange(.connected)
 
         // Phase 6 scenarios drive the disconnect-with-reason states directly.
-        // The grace-window timer behavior itself is exercised by VPNStateFuser
-        // unit tests; here we just verify the orchestrator's reaction to the
-        // post-grace verdict.
+        // The grace window itself is `VPNFlapTimer`'s, covered by its tests
+        // and model check; here we just verify the orchestrator's reaction to
+        // the post-grace verdict.
         await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost))
 
         let causeAfterDisconnect = orchestrator.snapshot.directModeCause
@@ -278,120 +278,6 @@ enum VPNFlapScenarios {
             assertions: [.init("user disconnect is immediate and emits one event", pass)],
             notes: notes
         )
-    }
-
-    // MARK: - 6.5 vpnRapidFlapBurst
-
-    /// Phase 6 (revised): demonstrate that the fuser's min-visible-flap
-    /// debounce absorbs sub-window flaps silently. Drive a VPNStateFuser
-    /// through 6 down/up cycles where each Link-inactive period is shorter
-    /// than minVisibleSeconds. Assert that ZERO `.reasserting` or
-    /// `.disconnected` decisions are emitted — the fused state stays at
-    /// `.connected` throughout because each blip recovers before its
-    /// debounce timer would commit the flap.
-    ///
-    /// This is the natural outcome of the revised Phase 6 design: bursts of
-    /// brief flaps don't need an "exactly one event pair" exception because
-    /// they emit no events at all.
-    @RuntimeActor
-    static func vpnRapidFlapBurst(verbose: Bool) async throws -> ScenarioResult {
-        let name = "vpnRapidFlapBurst"
-        let start = Date()
-        var notes: [String] = []
-        _ = verbose  // pm-sim convention; fuser has no logging
-
-        // Drive the fuser directly with synthetic raw observations. The
-        // monitor wrapper exists in production to translate SCDynamicStore
-        // events into these calls; here we skip it to keep the scenario
-        // hermetic and fast.
-        var fuser = VPNStateFuser()
-
-        // Initial connect.
-        let initial = fuser.applyObservation(
-            interfaceName: "utun0",
-            observation: UtunRawObservation(ipv4Present: true,
-                                             hasIPv4Address: true,
-                                             ipv6Present: true)
-        )
-        notes.append("initial: \(decisionLabel(initial))")
-
-        // Track the decisions emitted across the burst. With min-visible
-        // debounce, every Link-inactive that recovers before the timer
-        // expires should yield .startMinVisibleTimer (which the production
-        // monitor would then cancel). The recovery should yield .noChange.
-        var decisionsSeenCount = 0
-        var startTimerCount = 0
-        var emitCount = 0
-        var noChangeCount = 0
-
-        for _ in 0..<6 {
-            // IPv4 disappears — this asks the monitor to start a timer.
-            // (Pre-fix this scenario simulated /Link inactive; macOS doesn't
-            // publish /Link for utun, so the real-world flap signal is the
-            // VPN-pushed IPv4 momentarily disappearing while the IPv6
-            // link-local stays put. See VPNStatusMonitor doc.)
-            let down = fuser.applyObservation(
-                interfaceName: "utun0",
-                observation: UtunRawObservation(ipv4Present: false,
-                                                 hasIPv4Address: false,
-                                                 ipv6Present: true)
-            )
-            decisionsSeenCount += 1
-            switch down {
-            case .startMinVisibleTimer: startTimerCount += 1
-            case .emit, .emitAndStartGrace: emitCount += 1
-            case .noChange: noChangeCount += 1
-            }
-
-            // IPv4 re-appears before the (uncalled) min-visible timer fires.
-            // Production would cancel the pending timer here and applyObservation
-            // returns .noChange (silent recovery).
-            let up = fuser.applyObservation(
-                interfaceName: "utun0",
-                observation: UtunRawObservation(ipv4Present: true,
-                                                 hasIPv4Address: true,
-                                                 ipv6Present: true)
-            )
-            decisionsSeenCount += 1
-            switch up {
-            case .noChange: noChangeCount += 1
-            case .emit, .emitAndStartGrace, .startMinVisibleTimer: emitCount += 1
-            }
-
-            // Real elapsed time: keep the burst short to demonstrate "1.5 s of flaps".
-            try await Task.sleep(for: .milliseconds(250))
-        }
-
-        notes.append("totalDecisions=\(decisionsSeenCount)")
-        notes.append("startMinVisibleTimer (monitor would arm; we never expire)=\(startTimerCount)")
-        notes.append("emit-shaped decisions=\(emitCount)")
-        notes.append("noChange decisions=\(noChangeCount)")
-
-        // Pass conditions: every down emitted .startMinVisibleTimer (6) and every
-        // up emitted .noChange (6, intermediate silent recoveries). Zero emits.
-        let pass = startTimerCount == 6 && noChangeCount == 6 && emitCount == 0
-        notes.append(pass ? "PASS — sub-window flaps absorbed silently by fuser debounce"
-                          : "FAIL — fuser emitted state transitions when it should have been silent")
-        return ScenarioResult(
-            name: name,
-            clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0, clientsClosedEarly: 0,
-            totalBytes: 0,
-            durationSeconds: Date().timeIntervalSince(start),
-            aggregateMBps: 0,
-            minBytes: 0, maxBytes: 0, medianBytes: 0,
-            earliestClose: nil, latestClose: nil,
-            assertions: [.init("six rapid flaps absorbed without state emissions", pass)],
-            notes: notes
-        )
-    }
-
-    private static func decisionLabel(_ d: VPNStateFuser.Decision) -> String {
-        switch d {
-        case .noChange: return "noChange"
-        case .emit(let s): return "emit(\(s))"
-        case .emitAndStartGrace(let s, let then): return "emitAndStartGrace(\(s), then: \(then))"
-        case .startMinVisibleTimer(let iface): return "startMinVisibleTimer(\(iface))"
-        }
     }
 
     // MARK: - Helpers

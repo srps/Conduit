@@ -37,7 +37,7 @@ package struct ProxyMetrics: Codable, Equatable {
 
     /// Phase 7 — VPN flap telemetry. All four counters increment only on
     /// "super-min-visible" flaps (i.e. those that survive the
-    /// `vpnFlapMinVisibleSeconds` debounce in `VPNStateFuser`). Sub-window
+    /// `vpnFlapMinVisibleSeconds` debounce in `VPNFlapTimer`). Sub-window
     /// blips never reach the orchestrator and are deliberately invisible
     /// here too — that matches the user's mental model of "the flap I
     /// noticed", not "every utun jitter the kernel saw".

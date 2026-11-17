@@ -468,11 +468,11 @@ final class VPNTransitionTableTests: XCTestCase {
 
     // MARK: - Phase 6 (revised): orchestrator no longer coalesces
     //
-    // Rapid-flap coalescing moved to VPNStateFuser via the min-visible
+    // Rapid-flap coalescing moved to the VPN monitor's VPNFlapTimer via the min-visible
     // debounce (vpnFlapMinVisibleSeconds). Sub-window flaps never reach the
     // orchestrator; every .reasserting we see here is a real (super-min-visible)
-    // flap event. Coalesce-specific orchestrator tests deleted; the fuser-level
-    // tests in VPNStateFuserTests cover the new behavior.
+    // flap event. Coalesce-specific orchestrator tests deleted; VPNFlapTimerTests
+    // and its model check cover the debounce.
 
     // MARK: - Phase 7: VPN flap telemetry counters
 
@@ -522,7 +522,7 @@ final class VPNTransitionTableTests: XCTestCase {
 
     /// `.disconnected` transitions (user-initiated or networkLost) must NOT
     /// increment the flap counters — they're outage events, not flaps. The
-    /// fuser-level debounce already absorbs blips silently; flap metrics
+    /// flap timer's debounce already absorbs blips silently; flap metrics
     /// represent only successful recovery from the .reasserting state.
     @RuntimeActor func testDisconnectedTransitionDoesNotIncrementFlapMetrics() async throws {
         let orchestrator = makeOrchestrator()
@@ -542,7 +542,7 @@ final class VPNTransitionTableTests: XCTestCase {
     }
 
     /// Multiple successive flaps each contribute an increment. Sub-window
-    /// blips never reach the orchestrator (they're absorbed by VPNStateFuser),
+    /// blips never reach the orchestrator (VPNFlapTimer absorbs them),
     /// so every transition we see here is a real flap and counts.
     @RuntimeActor func testMultipleFlapsAccumulateCounters() async throws {
         let orchestrator = makeOrchestrator()
