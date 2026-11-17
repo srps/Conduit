@@ -16,7 +16,7 @@
 
 ## Decision
 
-- **Measure from the last good reading.** The timer records the time `L` of its last good reading and that a failure followed it. A loss seen at recovery is dated at `L`. The verdict at recovery time `now` is the one the timer gives at `now` if the recovery snapshot had been read at `L` and read again at `now`, with no reading in between. Every existing rule then applies unchanged: a debounce or grace already running at `L` keeps its deadline, grace follows a debounce that ends during the gap, and windows changed in Settings during a running phase do not move it. Example: a single tunnel counted at `L = 0`, the default windows are 1 s and 5 s, and it has no address at recovery. Recovery at 5.5 s reports `.reasserting` until 6 s, and recovery at 7 s reports `.disconnected(.networkLost)` at once. This is option (b) of the design's decision 7.
+- **Measure from the last good reading.** The timer records the time `L` of its last good reading and that a failure followed it. A loss seen at recovery is dated at `L`. The verdict at recovery time `now` is the one the timer gives at `now` if the recovery snapshot had been read at `L` and read again at `now`, with no reading in between. The reading at `L` uses the flap windows that were in force at `L`, so a Settings change during the gap cannot lengthen or shorten a loss dated before it. Every existing rule then applies unchanged: a debounce or grace already running at `L` keeps its deadline, grace follows a debounce that ends during the gap, and windows changed in Settings during a running phase do not move it. Example: a single tunnel counted at `L = 0`, the default windows are 1 s and 5 s, and it has no address at recovery. Recovery at 5.5 s reports `.reasserting` until 6 s, and recovery at 7 s reports `.disconnected(.networkLost)` at once. This is option (b) of the design's decision 7.
 - **Captures stay on the machine that recorded them.** They are never committed. Tests get small hand-written fixtures derived from them, with nothing specific to a machine or network.
 
 ## Alternatives
@@ -28,12 +28,12 @@
 
 - A brief real flap that overlaps a blind gap gets less grace than one the session watched, and can report `.disconnected(.networkLost)` until the next reading with the address back. That errs toward installing nothing off VPN.
 - A lost notification is not a known gap, so this decision does not cover it. The audit read of the design's decision 4 does.
-- The timer's memory gains one instant and one flag. "A failed reading leaves the memory untouched" becomes "a failed reading records only that it failed". The model check's oracle and its blindness property change with it.
+- The timer's memory gains one instant, one flag and the flap windows in force at that instant. "A failed reading leaves the memory untouched" becomes "a failed reading records only that it failed". The model check's oracle and its blindness property change with it.
 - Questions that need a capture, such as whether a service key outlives a utun's interface keys, are answered by reading the capture locally and writing the finding into a fixture by hand.
 
 ## Invariants and verification
 
-- The verdict at a recovery reading equals the timer's verdict at the same instant for the same history with that snapshot read at `L` and again at the recovery instant. U3 adds this as a property of the exhaustive model check, beside cases for the example above, a removed interface (`.disconnected(.userInitiated)`), and another tunnel still counting (`.connected`), and a pm-sim scenario.
+- The verdict at a recovery reading equals the timer's verdict at the same instant for the same history with that snapshot read at `L` with the windows in force at `L`, and again at the recovery instant. U3 adds this as a property of the exhaustive model check, including Settings changes during the gap, beside cases for the example above, a removed interface (`.disconnected(.userInitiated)`), and another tunnel still counting (`.connected`), and a pm-sim scenario.
 - No file under `Tests/` or `Sources/` holds a raw capture. Review checks fixtures for machine-specific values.
 - Disproved if the model check finds a gap ordering where the two verdicts differ.
 
