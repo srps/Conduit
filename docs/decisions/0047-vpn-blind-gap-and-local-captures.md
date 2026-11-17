@@ -2,7 +2,7 @@
 
 - Date: 2026-11-17
 - Decision: accepted (owner, 2026-11-17, [#315 comment](https://github.com/srps/Conduit/pull/315#issuecomment-6945669351): blind gap judged as the recovery snapshot read at the last good reading with the windows in force then; captures stay local)
-- Implementation: planned
+- Implementation: implemented
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -39,7 +39,13 @@
 
 ## Implementation evidence
 
-None yet. U3 implements the blind-gap rule.
+- [`VPNFlapTimer.swift`](../../Sources/ProxyKernel/Network/VPNFlapTimer.swift) records the time and windows of its last good reading and whether a failure followed it. The first good reading after a failure is settled at `L` and again at the recovery instant, both with the windows recorded at `L`. A failed reading records only that it failed.
+- [`VPNFlapTimerTests`](../../Tests/ConduitTests/VPNFlapTimerTests.swift) cover the example (recovery at 5.5 s is `.reasserting` until 6 s, at 7 s `.disconnected(.networkLost)`), a removed interface (`.disconnected(.userInitiated)`), another tunnel still counting (`.connected`), windows widened during the gap, and a phase that starts after the recovery under the new windows.
+- [`VPNFlapTimerModelCheckTests`](../../Tests/ConduitTests/VPNFlapTimerModelCheckTests.swift) check the equivalence at every recovery of every ordering, exhaustively to depth 4 and seeded to depth 24. Each state also ends a blind gap after 0.4, 2 and 10 s under a window other than its own, so Settings changes during the gap are covered. The oracle enters the recovery snapshot at `L` and at the recovery instant.
+- pm-sim `vpn-blind-gap-disconnect` ([`VPNDetectionScenarios.swift`](../../Sources/pm-sim/VPNDetectionScenarios.swift)) runs `VPNStatusMonitor` over a fake store whose reads fail as the tunnel loses its address: the recovery 7 s after the last good reading reports `.disconnected(.networkLost)` at once.
+- No capture is under `Tests/` or `Sources/`; the fixtures are hand-written with RFC 5737 addresses.
+
+Does not prove: that macOS ever leaves the store unreadable while a tunnel changes. The failures are injected.
 
 ## Open questions
 

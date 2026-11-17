@@ -294,7 +294,7 @@ Side-effect-free network logic. Everything macOS-specific (`VPNStatusMonitor`, `
 - **`UpstreamProber.swift`** + **`DirectConnectDetector.swift`** — the two probing surfaces. `UpstreamProber` tests reachability to each configured upstream proxy (initial ready-check + periodic re-probe); `DirectConnectDetector` probes and caches whether hosts are directly reachable for PAC + no-proxy routing decisions.
 - **`HealthChecker.swift`** — periodic HEAD-through-the-pool liveness probe; drives `AutoRecovery` on failure.
 - **`AutoRecovery.swift`** — the progressive recovery ladder when health checks fail: (1) close stalled connections → (2) re-authenticate (reset pool auth state) → (3) switch to next upstream → (4) restart the local proxy server. `LocalProxyServer` conforms to `RecoverableProxyService` to expose these operations.
-- **`VPNObservedState.swift`** + **`VPNStateFuser.swift`** — the value-type and pure-logic state machine that fuses `VPNStatusObserving` events into transitions the orchestrator reacts to. `UtunRawObservation` is the raw event shape. `FakeVPNStatusObserver` in tests/`pm-sim` drives it without real `SCDynamicStore`.
+- **`VPNObservedState.swift`**, **`TunnelSnapshot.swift`**, **`VPNFlapTimer.swift`** and **`StoreReadSchedule.swift`** — the verdict the orchestrator reacts to, a whole reading of the store's tunnel keys, the pure timer that turns readings and the clock into a verdict, and the retry and audit schedule of a store reader ([`design-vpn-detection-level-triggered.md`](./design-vpn-detection-level-triggered.md)). `FakeVPNStatusObserver` in tests/`pm-sim` drives the orchestrator without real `SCDynamicStore`.
 
 ### Security (kernel side)
 
@@ -476,7 +476,7 @@ Coverage includes:
 - DNS forwarder (wire format, resolution, cache, intercept rules)
 - `SystemDNSManager` lifecycle (apply / clear / reconcile / crash recovery)
 - Config serialization + additive-field migration
-- `VPNDNSDetector` and `VPNStateFuser` fusion logic
+- `VPNDNSDetector` and `VPNFlapTimer`
 - Security (`ClientIPFilter`, `MetadataBlocklist`, body buffering, SNI parser edge cases)
 - Protocol detection (MongoDB, TLS, PostgreSQL, MySQL, Redis, AMQP, HTTP/2)
 - Protocol tunnels (proxied + direct, startup result reporting, session-limit enforcement, gateway-mode loopback policy)
@@ -526,7 +526,7 @@ The module split is complete. The CFNetwork PAC evaluator and `SecretBytes` ship
 - [`docs/design-split-followups.md`](./design-split-followups.md) — sketches for the security, daemon-first, and OSS-prep follow-ups with sequencing and explicit non-goals.
 - [`docs/design-tunnel-dns-override.md`](./design-tunnel-dns-override.md) — `TunnelDNSResponder` + `TunnelResolverManager` design.
 - [`docs/design-dns-intercept-transparent-proxy.md`](./design-dns-intercept-transparent-proxy.md) — DNS intercept + transparent TCP proxy design.
-- [`docs/design-vpn-flap-resilience.md`](./design-vpn-flap-resilience.md) — `VPNStatusObserving` + `VPNStateFuser` design. Precedent for the side-effect-behind-protocol pattern.
+- [`docs/design-vpn-flap-resilience.md`](./design-vpn-flap-resilience.md) — `VPNStatusObserving` design and the original fuser, since replaced by [level-triggered detection](./design-vpn-detection-level-triggered.md). Precedent for the side-effect-behind-protocol pattern.
 - [`docs/auth-architecture.md`](./auth-architecture.md) — the `ProxyAuth` module's NTLM / Kerberos / Negotiate handshake details.
 - [`docs/STYLE.md`](./STYLE.md) — engineering discipline: bounded everything, structured events first, side-effects behind protocols, deterministic where possible.
 - [`AGENTS.md`](../AGENTS.md) — import-fence statement, side-effects-behind-protocols rule, toolchain / test commands.
