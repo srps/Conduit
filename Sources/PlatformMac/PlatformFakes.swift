@@ -1045,13 +1045,14 @@ package final class FakeStoreObserverClock: @unchecked Sendable {
     /// The sleep pending now, if any.
     package var pendingSleep: Sleep? { condition.withLock { pending?.sleep } }
 
-    /// Waits up to `timeout` seconds for a sleep to be pending and returns it.
-    package func awaitSleep(timeout: TimeInterval = 5) -> Sleep? {
+    /// Waits up to `timeout` seconds for a pending sleep that `matching`
+    /// accepts, and returns it.
+    package func awaitSleep(timeout: TimeInterval = 5, matching: (Sleep) -> Bool = { _ in true }) -> Sleep? {
         let limit = Date(timeIntervalSinceNow: timeout)
         condition.lock()
         defer { condition.unlock() }
-        while pending == nil, condition.wait(until: limit) {}
-        return pending?.sleep
+        while !(pending.map { matching($0.sleep) } ?? false), condition.wait(until: limit) {}
+        return pending.map(\.sleep).flatMap { matching($0) ? $0 : nil }
     }
 
     /// Waits up to `timeout` seconds for no sleep to be pending. False when
@@ -1259,8 +1260,12 @@ package final class FakeTunnelStore: TunnelStoreReading, @unchecked Sendable {
     private var failsSubscribe: TunnelReading.Failure?
     private var failsCancel: TunnelReading.Failure?
     private var trapsOnRelease = true
+    private var reads = 0
 
     package init() {}
+
+    /// `read()` calls so far, failed ones included.
+    package var readCount: Int { lock.withLock { reads } }
 
     package var notifications: Notifications {
         get { lock.withLock { mode } }
@@ -1351,6 +1356,7 @@ package final class FakeTunnelStore: TunnelStoreReading, @unchecked Sendable {
 
     package func read() -> TunnelReading {
         lock.withLock {
+            reads += 1
             if let failsRead { return .failed(failsRead) }
             return .snapshot(TunnelSnapshot.parse(store: keys))
         }

@@ -13,6 +13,11 @@ package protocol VPNStatusObserving: AnyObject, Sendable {
     /// isolation context (`@RuntimeActor` for orchestrator integration).
     func setOnChange(_ onChange: @Sendable @escaping (VPNObservedState) -> Void)
 
+    /// Set by the host before `start()`: where the observer reports how it
+    /// read, such as a store it could not read, with the level to log it at.
+    /// Any queue.
+    func setOnEvent(_ onEvent: @Sendable @escaping (RuntimeEvent, LogLevel) -> Void)
+
     /// Begin observing. Idempotent — calling twice without an intervening
     /// `stop()` is a no-op.
     func start()
@@ -34,6 +39,8 @@ package protocol VPNStatusObserving: AnyObject, Sendable {
 }
 
 extension VPNStatusObserving {
+    /// An observer with nothing of its own to report.
+    package func setOnEvent(_ onEvent: @Sendable @escaping (RuntimeEvent, LogLevel) -> Void) {}
     package var connectedInterfaceName: String? { nil }
     package var liveInterfaceNames: [String] { [] }
 }

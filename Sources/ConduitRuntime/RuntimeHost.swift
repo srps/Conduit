@@ -615,6 +615,11 @@ package final class RuntimeHost {
                 )
             }
         }
+        // How the monitor read the store: the event into the orchestrator's log, the line derived from it.
+        self.vpnStatusMonitor.setOnEvent { [diagnosticsEventLog, logger] event, level in
+            diagnosticsEventLog.append(event)
+            logger.log(level, "VPN: \(event.event) \(event.detail ?? "")", category: .system)
+        }
         // Each reading is folded into the policy here, in arrival order, because skipping one changes what a flap
         // holds. Only the hop to the owner coalesces: it applies the newest set, which is whole.
         self.pushedResolverObserver.setOnChange { [weak self, deliveries, splitDNSDetection, pushedResolverUpdates] reading in
