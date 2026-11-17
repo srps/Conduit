@@ -42,7 +42,9 @@ package protocol PushedResolverObserving: AnyObject, Sendable {
 /// Threading follows `VPNStatusMonitor`: the store dispatches on
 /// `monitorQueue`, the schedule and `lastDelivered` are touched only there,
 /// and `onChange` runs there. Each `start` opens a generation; a store
-/// callback or a wake-up from an earlier one does nothing.
+/// callback or a wake-up from an earlier one does nothing. A delivery and
+/// `stop` pass through one `ObserverStopBarrier`, so once `stop` returns no
+/// reading of the stopped generation reaches `onChange`.
 package final class PushedResolverMonitor: PushedResolverObserving, @unchecked Sendable {
     /// The store calls that can fail. A test replaces one to fail it.
     package struct Calls: Sendable {
@@ -65,6 +67,7 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
     private let monitorQueue = DispatchQueue(label: "io.github.srps.Conduit.PushedResolverMonitor")
     private let onChangeBox = NIOLockedValueBox<(@Sendable (PushedResolverReading) -> Void)?>(nil)
     private let lifecycleBox = NIOLockedValueBox<LifecycleState>(.init())
+    private let barrier = ObserverStopBarrier()
     private let calls: Calls
     private let clock: StoreObserverClock
     /// Touched only on `monitorQueue`; reset by each generation's first attempt.
@@ -128,15 +131,17 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
     }
 
     package func stop() {
-        let teardown = lifecycleBox.withLockedValue { state -> (SCDynamicStore?, Task<Void, Never>?) in
-            guard state.started else { return (nil, nil) }
-            defer {
-                state.started = false
-                state.generation &+= 1
-                state.store = nil
-                state.wake = nil
+        let teardown = barrier.stop {
+            lifecycleBox.withLockedValue { state -> (SCDynamicStore?, Task<Void, Never>?) in
+                guard state.started else { return (nil, nil) }
+                defer {
+                    state.started = false
+                    state.generation &+= 1
+                    state.store = nil
+                    state.wake = nil
+                }
+                return (state.store, state.wake)
             }
-            return (state.store, state.wake)
         }
         teardown.1?.cancel()
         guard let store = teardown.0 else { return }
@@ -287,11 +292,14 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
         attempt(generation)
     }
 
-    /// Runs on `monitorQueue`.
+    /// Runs on `monitorQueue`. Nothing follows the callback, so a stop made
+    /// inside it ends the delivery there.
     private func deliver(_ reading: PushedResolverReading, _ generation: UInt64) {
-        guard isCurrent(generation), reading != lastDelivered else { return }
-        lastDelivered = reading
-        onChangeBox.withLockedValue { $0 }?(reading)
+        barrier.deliver {
+            guard isCurrent(generation), reading != lastDelivered else { return }
+            lastDelivered = reading
+            onChangeBox.withLockedValue { $0 }?(reading)
+        }
     }
 
     /// What a store session's callback reaches: the monitor, held weakly so

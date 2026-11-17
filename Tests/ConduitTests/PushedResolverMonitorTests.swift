@@ -324,6 +324,55 @@ final class PushedResolverMonitorTests: XCTestCase {
         XCTAssertEqual(store.creates, 2)
     }
 
+    // MARK: - Stop is a barrier for deliveries
+
+    /// The review's ordering on #316: a reading of the old session passed its check and was on its way to the consumer
+    /// when the host stopped detection. A stop that returns before that delivery lands lets it reach the restarted policy.
+    func testAStopWaitsOutTheDeliveryInFlightSoNothingOfItsSessionLandsAfterIt() {
+        let store = ScriptedPushedResolverStore(keys: Self.fullTunnelStore)
+        let monitor = PushedResolverMonitor(calls: store.calls, clock: FakeStoreObserverClock().clock)
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let stopReturned = LockedFlag()
+        let landedAfterStop = LockedFlag()
+        monitor.setOnChange { _ in
+            entered.signal()
+            _ = release.wait(timeout: .now() + 5)
+            if stopReturned.value { landedAfterStop.set() }
+        }
+        monitor.start()
+        XCTAssertEqual(entered.wait(timeout: .now() + 5), .success, "the first reading is being delivered")
+
+        let stopped = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            monitor.stop()
+            stopReturned.set()
+            stopped.signal()
+        }
+        // A stop that does not wait returns at once. One that waits cannot return until the delivery is released, so
+        // this bound only ever expires on the passing path; nothing is timed.
+        let returnedWhileHeld = stopped.wait(timeout: .now() + 0.5) == .success
+        release.signal()
+        if !returnedWhileHeld { XCTAssertEqual(stopped.wait(timeout: .now() + 5), .success, "the stop returns once the delivery has") }
+
+        XCTAssertFalse(returnedWhileHeld, "stop returned while a delivery of its session was still running")
+        XCTAssertFalse(landedAfterStop.value, "a delivery of the stopped session landed after stop returned")
+    }
+
+    /// A consumer may stop the monitor from its own callback, on the monitor's queue: the stop returns at once, and
+    /// the next start is a fresh session.
+    func testAStopFromInsideTheCallbackReturnsAndEndsTheSession() {
+        let store = ScriptedPushedResolverStore(keys: Self.fullTunnelStore)
+        let monitor = PushedResolverMonitor(calls: store.calls, clock: FakeStoreObserverClock().clock)
+        let received = ReadingRecorder(monitor) { [weak monitor] in monitor?.stop() }
+        monitor.start()
+
+        XCTAssertEqual(received.await(1).count, 1)
+        monitor.start()
+        XCTAssertEqual(received.await(2).count, 2, "the stop from the callback ended the session, so this start opened one")
+        XCTAssertEqual(store.creates, 2)
+    }
+
     func testAFailedSubscriptionDoesNotKeepTheMonitorAlive() {
         weak var released: PushedResolverMonitor?
         let clock = FakeStoreObserverClock()
@@ -348,12 +397,14 @@ private final class ReadingRecorder: @unchecked Sendable {
     private let condition = NSCondition()
     private var readings: [PushedResolverReading] = []
 
-    init(_ monitor: PushedResolverMonitor) {
+    /// `then` runs after each reading is recorded, on the monitor's queue.
+    init(_ monitor: PushedResolverMonitor, then: @escaping @Sendable () -> Void = {}) {
         monitor.setOnChange { [self] reading in
             condition.withLock {
                 readings.append(reading)
                 condition.broadcast()
             }
+            then()
         }
     }
 
@@ -365,6 +416,13 @@ private final class ReadingRecorder: @unchecked Sendable {
         while readings.count < count, condition.wait(until: limit) {}
         return readings
     }
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var raised = false
+    var value: Bool { lock.withLock { raised } }
+    func set() { lock.withLock { raised = true } }
 }
 
 private final class LockedReadings: @unchecked Sendable {
