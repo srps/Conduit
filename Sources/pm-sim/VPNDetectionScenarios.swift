@@ -27,6 +27,7 @@ enum VPNDetectionScenarios {
     static func blindGapDisconnect() async throws -> ScenarioResult {
         try await run(name: "vpn-blind-gap-disconnect") { stage, check in
             check("the first reading is connected", try await stage.shows(.connected))
+            check("the host reported the connect", try await stage.reported("vpn.connected", count: 1))
             check("connected installs the entry file", stage.entryFile)
 
             stage.store.readFailure = .init(.storeRead, code: 1001)
@@ -47,6 +48,7 @@ enum VPNDetectionScenarios {
                 "7 s after the last good reading the loss is a disconnect at once (0047)",
                 try await stage.shows(.disconnected(.networkLost))
             )
+            check("the host reported the loss", try await stage.reported("vpn.disconnected.lost", count: 1))
             check("the disconnect leaves no entry file, written once", !stage.entryFile && stage.applies == 1)
         } verify: { events, check in
             check("the attempts 1 and 2 and the recovery were reported", storeEvents(events) == [
@@ -63,6 +65,7 @@ enum VPNDetectionScenarios {
     static func auditCorrectsDroppedNotification() async throws -> ScenarioResult {
         try await run(name: "vpn-audit-corrects-dropped-notification") { stage, check in
             check("the first reading is connected", try await stage.shows(.connected))
+            check("the host reported the connect", try await stage.reported("vpn.connected", count: 1))
             check("connected installs the entry file", stage.entryFile)
             check("a healthy session waits 60 s for its audit", try await stage.wake()?.seconds == 60)
 
@@ -74,6 +77,7 @@ enum VPNDetectionScenarios {
 
             stage.clock.fire()
             check("the audit reads the removal", try await stage.shows(.disconnected(.userInitiated)))
+            check("the host reported the removal", try await stage.reported("vpn.disconnected.user", count: 1))
             check("the disconnect removes the entry file", !stage.entryFile)
             check("the next audit is armed", try await stage.wake()?.seconds == 60)
         } verify: { events, check in
@@ -86,6 +90,7 @@ enum VPNDetectionScenarios {
     static func rapidFlapBurst() async throws -> ScenarioResult {
         try await run(name: "vpn-rapid-flap-burst") { stage, check in
             check("the first reading is connected", try await stage.shows(.connected))
+            check("the host reported the connect", try await stage.reported("vpn.connected", count: 1))
             var debounces = 0
             for _ in 0..<6 {
                 stage.store.setInterface("utun6", ipv4: nil, ipv6: ["fe80::1"])
@@ -109,6 +114,7 @@ enum VPNDetectionScenarios {
     static func blindFlapRecovery() async throws -> ScenarioResult {
         try await run(name: "vpn-blind-flap-recovery") { stage, check in
             check("the first reading is connected", try await stage.shows(.connected))
+            check("the host reported the connect", try await stage.reported("vpn.connected", count: 1))
             stage.store.setInterface("utun6", ipv4: nil, ipv6: ["fe80::1"])
             check("the loss arms its debounce", try await stage.wake(matching: { $0.seconds == 1 }) != nil)
             stage.clock.fire()
@@ -123,6 +129,7 @@ enum VPNDetectionScenarios {
             stage.store.readFailure = nil
             stage.store.setInterface("utun6", ipv4: ["192.0.2.10"], ipv6: ["fe80::2"])
             check("the tunnel back shows as connected", try await stage.shows(.connected))
+            check("the host reported the flap's recovery", try await stage.reported("vpn.flap.recovered", count: 1))
             check("the recovery puts the entry file back", stage.entryFile && stage.applies == 2)
             check("the host counts one flap", try await stage.snapshot().vpnFlap.count.rawValue == 1)
         } verify: { events, check in
@@ -157,16 +164,20 @@ enum VPNDetectionScenarios {
         let control: any RuntimeClient
         let store: FakeTunnelStore
         let clock: FakeStoreObserverClock
+        private let host: RuntimeHost
+        private let eventsFile: URL
         private let machine: FakeMachine
         private let queue: DispatchQueue
 
         fileprivate init(
-            control: any RuntimeClient, store: FakeTunnelStore, clock: FakeStoreObserverClock, machine: FakeMachine,
-            queue: DispatchQueue
+            control: any RuntimeClient, store: FakeTunnelStore, clock: FakeStoreObserverClock, host: RuntimeHost,
+            eventsFile: URL, machine: FakeMachine, queue: DispatchQueue
         ) {
             self.control = control
             self.store = store
             self.clock = clock
+            self.host = host
+            self.eventsFile = eventsFile
             self.machine = machine
             self.queue = queue
         }
@@ -184,6 +195,22 @@ enum VPNDetectionScenarios {
         func shows(_ state: ControlVPNState) async throws -> Bool {
             for _ in 0..<1000 {
                 if try await snapshot().vpnState == state { return true }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            return false
+        }
+
+        /// Whether the host's events file comes to hold `count` events named `name`, within ten seconds. The host publishes a
+        /// VPN state before the probe its reaction awaits, and reports the reaction after it, so a scenario that saw the state
+        /// waits here before it checks what the reaction counted or stops the host.
+        func reported(_ name: String, count: Int) async throws -> Bool {
+            for _ in 0..<1000 {
+                let flush = await host.flushEvents()
+                guard flush.allConfirmed else { throw ScenarioExecutionError(message: "events flush unconfirmed: \(flush)") }
+                let events = try String(contentsOf: eventsFile, encoding: .utf8).split(separator: "\n").map {
+                    try CanonicalJSON.decoder().decode(RuntimeEvent.self, from: Data($0.utf8))
+                }
+                if events.filter({ $0.event == name }).count >= count { return true }
                 try await Task.sleep(for: .milliseconds(10))
             }
             return false
@@ -284,7 +311,8 @@ enum VPNDetectionScenarios {
             let clients = try host.makeInMemoryControlClient(
                 limits: try SplitDNSFollowsVPNScenarios.controlLimits(), clientFrameLimits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
             )
-            try await body(Stage(control: clients.control, store: store, clock: clock, machine: machine, queue: queue), check)
+            try await body(Stage(control: clients.control, store: store, clock: clock, host: host,
+                                 eventsFile: environment.eventsFile, machine: machine, queue: queue), check)
         } catch {
             notes.append("failed: \(error)")
             check("the scenario ran to its end", false)
