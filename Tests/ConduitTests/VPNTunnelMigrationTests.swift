@@ -374,6 +374,46 @@ final class VPNTunnelMigrationTests: XCTestCase {
         XCTAssertFalse(oldAddress.isActive)
     }
 
+    /// A wake that finds the upstream reachable while the monitor cannot read the store mid-flap does not know the flap ended:
+    /// the tunnel may still be down. It recovers nothing, and the monitor's next good reading decides.
+    @RuntimeActor func testAWakeWhileTheMonitorIsBlindMidFlapRecoversNothing() async throws {
+        let orchestrator = orchestrator()
+        try await orchestrator.startProxy()
+        await orchestrator.handleVPNStateChange(.connected)
+        try await until { self.delays.held == self.resweep }
+        let routeMoved = try await tracked(orchestrator, local: "10.20.30.41")
+        moved.withLockedValue { _ = $0.insert("10.20.30.41") }
+        await orchestrator.handleVPNStateChange(.reasserting)
+        await orchestrator.handleVPNStateChange(.unknown)
+        let started = delays.started
+        let swept = migrations(orchestrator.eventLog.events).count
+
+        await orchestrator.handleSystemWake()
+
+        XCTAssertEqual(orchestrator.snapshot.vpnState, .unknown)
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, .transientNetworkChange, "the flap's routing holds")
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.metrics.vpnFlapCount, 0)
+        XCTAssertFalse(orchestrator.eventLog.events.contains { $0.event == "vpn.flap.recovered" })
+
+        await orchestrator.handleVPNStateChange(.connected)
+        try await until { self.delays.held == self.resweep }
+        XCTAssertEqual(delays.started, started + 1, "only the monitor's recovery resumed the held sweeps")
+        XCTAssertEqual(migrations(orchestrator.eventLog.events).count, swept)
+        await drain(routeMoved)
+        XCTAssertTrue(routeMoved.isActive)
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.metrics.vpnFlapCount, 1)
+        let recoveries = orchestrator.eventLog.events.filter { $0.event == "vpn.flap.recovered" }.compactMap(\.detail)
+        XCTAssertEqual(recoveries.count, 1, "\(recoveries)")
+        XCTAssertFalse(recoveries.contains { $0.hasSuffix("source=system_wake") }, "the monitor's reading recovered the flap")
+        XCTAssertEqual(orchestrator.eventLog.events.filter { $0.event == "vpn.flap.start" }.count, 1)
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, DirectModeCause.none)
+        XCTAssertEqual(delays.release(), resweep)
+        try await until({
+            self.migrations(orchestrator.eventLog.events).last
+                == "transition=connected phase=paths pass=1 upstream_closed=0 direct_closed=1 unchecked=0"
+        }, else: "\(migrations(orchestrator.eventLog.events))")
+    }
+
     /// The first report after startup is a real transition: `unknown →
     /// connected` sweeps like any other (#160).
     @RuntimeActor func testTheFirstConnectedReportSweeps() async throws {
@@ -415,6 +455,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
         private let state = NIOLockedValueBox(State())
 
         var held: Duration? { state.withLockedValue { $0.held?.delay } }
+        var started: Int { state.withLockedValue { $0.started } }
         /// Delays cancelled while held, or started by a cancelled sweep.
         var cancelled: Int { state.withLockedValue { $0.cancelled } }
         var overused: Bool { state.withLockedValue { $0.overused } }

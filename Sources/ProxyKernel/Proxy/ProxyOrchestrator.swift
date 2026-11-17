@@ -2232,7 +2232,9 @@ package final class ProxyOrchestrator {
         guard let summary = await refreshConnectivityMode(), isProxyActive else { return }
         let cause = snapshot.directModeCause
         if cause.isDirect {
-            if cause == .transientNetworkChange, summary.hasReachableUpstream {
+            // While the monitor cannot read the store, a reachable upstream does not say the tunnel is back: the monitor's next
+            // good reading, due within its retry schedule, decides the flap.
+            if cause == .transientNetworkChange, summary.hasReachableUpstream, !vpn.blind {
                 recoverStaleReassertingAfterWake(summary: summary)
                 return
             }
@@ -2366,8 +2368,9 @@ package final class ProxyOrchestrator {
     ///   only the pending sweeps wait. Every transition above is judged
     ///   against the last definite verdict, never `.unknown` (`VPNVerdict`),
     ///   so `.reasserting → .unknown → .connected` is a flap recovery, and
-    ///   the same verdict after a blind reading resumes the held sweeps and
-    ///   does nothing else.
+    ///   the same verdict after a blind reading does nothing else but resume
+    ///   the held sweeps, except `.reasserting`, which keeps holding them.
+    ///   A wake recovers no flap while the monitor is blind.
     ///
     /// `interfaceName` is the utun the observer says carries a `.connected`
     /// verdict; it is stored for display and ignored for any other state.

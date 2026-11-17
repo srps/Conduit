@@ -77,8 +77,9 @@ struct VPNVerdict: Equatable, Sendable {
     }
 
     /// A flap the orchestrator ended itself (a wake that found the upstream reachable): the VPN is connected again, on a tunnel
-    /// the monitor will name. A blind monitor stays blind.
+    /// the monitor will name. Only while the monitor can read the store: a blind monitor's next good reading decides the flap.
     mutating func recoverFlap() {
+        assert(!blind, "a wake recovers no flap the monitor cannot see")
         definite = .connected
         tunnel = nil
     }
