@@ -320,7 +320,7 @@ enum SplitDNSFollowsVPNScenarios {
         case .failure(let failure): throw ScenarioExecutionError(message: "state root refused: \(failure)")
         }
 
-        let upstream = try await ClosingUpstream()
+        let upstream = try await ClosingUpstream.open()
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.localPACEnabled = false
@@ -420,7 +420,6 @@ enum SplitDNSFollowsVPNScenarios {
             notes.append("shutdown not confirmed: scratch kept at \(scratch.path)")
         }
         notes.append("tunnel server saw \(corp.total) queries")
-        do { try await upstream.stop() } catch { notes.append("the owned upstream did not close: \(error)") }
         notes.append("the owned upstream accepted \(upstream.accepted) connections")
         let passed = assertions.filter(\.passed).count
         return ScenarioResult(

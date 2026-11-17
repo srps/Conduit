@@ -107,15 +107,23 @@ daemon and app compositions name `.system`, the orchestrator's own `UpstreamProb
 actual-host pm-sim scenarios inject `SimulatedUpstreams.unreachable`, so a routing verdict
 dials nothing. The health loop is not injected: it runs the real health check through the
 real connection pool. Each actual-host scenario (VPN detection, split DNS follows VPN, host
-effects) therefore configures a `ClosingUpstream` it starts and stops: a loopback listener
-on an ephemeral port that closes each connection it accepts, which the health check reports
-as unreachable, as the refused port did before. The same port is the host-effects tunnel's
-remote and its audit fixture's origin. Evidence (2026-11-17, local): under a `sandbox-exec`
+effects) therefore configures a `ClosingUpstream` it owns: a loopback listener on an
+ephemeral port that closes each connection it accepts, which the health check reports as
+unreachable, as the refused port did before. Opening it registers its close with the
+scenario's cleanup, so the runner closes it after the scenario returns or throws, except when
+the host-effects scenario pins a host whose shutdown is unconfirmed: that listener stays open
+for the rest of the process, so the pinned host can reach only an owned service. The same
+port is the host-effects tunnel's remote and its audit fixture's origin. Evidence (2026-11-17, local): under a `sandbox-exec`
 profile that kills the process on any outbound connection to a non-loopback address or to
 `127.0.0.1:9`, all nine scenarios passed every assertion in three runs, and the owned
 upstream accepted 2 to 7 connections per run. The same nine at `03fdcf9f`, before the
 fixture, were killed every time, and passed with only non-loopback dials forbidden, so the
-port-9 dial was the only one. The XCTest host helpers still name `.system` and dial
+port-9 dial was the only one. With a failure injected by a temporary local change (a throw
+before the configuration save, before `RuntimeHost.open` and after the run's body in VPN
+detection and split DNS, and before the save in host effects), each owned port refused a
+loopback connect once the runner's cleanup had drained (errno 61). With the registration
+removed, the same port still accepted. With the host-effects shutdown forced unconfirmed, the
+listener stayed open on purpose. The XCTest host helpers still name `.system` and dial
 `127.0.0.1:9` ([#318](https://github.com/srps/Conduit/issues/318)).
 
 ## Open questions

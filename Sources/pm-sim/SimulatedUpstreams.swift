@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import Foundation
 import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
@@ -14,16 +15,25 @@ enum SimulatedUpstreams {
 
 /// The upstream an actual-host scenario owns: a loopback listener on an ephemeral port that closes every connection it
 /// accepts, so each exchange fails the way an unreachable upstream does. It counts what it accepted, which is the
-/// evidence that the host's dials reached it and nothing else.
+/// evidence that the host's dials reached it and nothing else. `open()` registers its close with the scenario's
+/// cleanup as it binds, so every way out of the scenario closes it, a throw included, unless a pinned host keeps it.
 final class ClosingUpstream: @unchecked Sendable {
     let port: Int
     private let channel: Channel
     private let acceptedBox: NIOLockedValueBox<Int>
+    private let keptOpen = NIOLockedValueBox(false)
 
     var accepted: Int { acceptedBox.withLockedValue { $0 } }
     var proxy: UpstreamProxy { UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: port, priority: 0) }
 
-    init() async throws {
+    @RuntimeActor
+    static func open() async throws -> ClosingUpstream {
+        let upstream = try await ClosingUpstream()
+        ScenarioCleanup.register { await upstream.closeUnlessKept() }
+        return upstream
+    }
+
+    private init() async throws {
         let accepted = NIOLockedValueBox(0)
         let channel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .childChannelInitializer { child in
@@ -41,7 +51,18 @@ final class ClosingUpstream: @unchecked Sendable {
         acceptedBox = accepted
     }
 
-    func stop() async throws {
-        try await channel.close().get()
+    /// Leaves the listener open for the rest of the process, for a host whose shutdown was not confirmed: whatever
+    /// that host still dials reaches this listener and nothing else.
+    func keepOpenForPinnedHost() {
+        keptOpen.withLockedValue { $0 = true }
+    }
+
+    private func closeUnlessKept() async {
+        guard !keptOpen.withLockedValue({ $0 }) else { return }
+        do {
+            try await channel.close().get()
+        } catch {
+            FileHandle.standardError.write(Data("pm-sim: the owned upstream on port \(port) did not close: \(error)\n".utf8))
+        }
     }
 }

@@ -62,7 +62,7 @@ enum RuntimeHostEffectsScenario {
 
             // The held listener makes the host's bind on this port fail, the way a contended port does.
             let held = try HeldLoopbackListener()
-            let upstream = try await ClosingUpstream()
+            let upstream = try await ClosingUpstream.open()
             var config = GenericDefaults.shared.makeConfig()
             config.localPort = held.port
             config.dnsForwarderEnabled = false
@@ -163,7 +163,6 @@ enum RuntimeHostEffectsScenario {
             if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
                 && captured.quiesced && modules.quiesced && woken.quiesced && audited.quiesced && flagged.quiesced
                 && declined.quiesced {
-                do { try await upstream.stop() } catch { notes.append("the owned upstream did not close: \(error)") }
                 notes.append("the owned upstream accepted \(upstream.accepted) connections")
                 releaseRoot(&session, environment: environment, scratch: scratch, releaseFailures: releaseFailures,
                             assertions: &assertions, notes: &notes)
@@ -173,6 +172,7 @@ enum RuntimeHostEffectsScenario {
                 // The latest exercise's host first, as each one runs only after the one before it quiesced.
                 let exercises = [declined, flagged, audited, woken, modules, captured, respelling, source, lifecycle, workflow, shutdown]
                 unconfirmedHost = exercises.lazy.compactMap(\.pinnedHost).first
+                upstream.keepOpenForPinnedHost()
                 assertions.append(.init("the shutdown is confirmed", false))
                 notes.append("shutdown not confirmed: host pinned until process exit; root and scratch kept at \(scratch.path)")
             }

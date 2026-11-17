@@ -256,7 +256,7 @@ enum VPNDetectionScenarios {
         case .failure(let failure): throw ScenarioExecutionError(message: "state root refused: \(failure)")
         }
 
-        let upstream = try await ClosingUpstream()
+        let upstream = try await ClosingUpstream.open()
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.localPACEnabled = false
@@ -331,7 +331,6 @@ enum VPNDetectionScenarios {
         let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
         let flush = await host.flushEvents()
         check("the host settles and flushes", settled == .settled && flush.allConfirmed)
-        do { try await upstream.stop() } catch { notes.append("the owned upstream did not close: \(error)") }
         notes.append("the owned upstream accepted \(upstream.accepted) connections")
         do {
             let events = try String(contentsOf: environment.eventsFile, encoding: .utf8).split(separator: "\n").map {
