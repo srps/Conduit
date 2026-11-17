@@ -61,6 +61,7 @@ enum PMSim {
               vpn-rapid-flap-burst    six losses under the debounce, each recovered before its deadline, report nothing
               vpn-blind-gap-disconnect an unreadable store withholds the entry files; the recovery past both windows is a disconnect at once (0047, 0048)
               vpn-audit-corrects-dropped-notification  a dropped store notification is corrected by the 60 s audit (0048)
+              vpn-blind-flap-recovery a failed read mid-flap withholds the entry files; the recovery after it is a flap recovery, not a connect
               transparent-direct      intercepted SNI client relays direct on VPN-down, upstream otherwise
               relay-reassert-after-stop  a stop while the relay reassert probe is out is not followed by a fresh relay start (#199)
               vpn-reconnect-routing   intercepted client uses upstream while reconnect probe is held
@@ -268,6 +269,7 @@ enum PMSim {
         "vpn-rapid-flap-burst",
         "vpn-blind-gap-disconnect",
         "vpn-audit-corrects-dropped-notification",
+        "vpn-blind-flap-recovery",
         "transparent-direct",
         "relay-reassert-after-stop",
         "vpn-reconnect-routing",
@@ -434,11 +436,13 @@ enum PMSim {
         case "vpn-user-disconnect":
             return [try await VPNFlapScenarios.vpnUserDisconnectFastPath(verbose: verbose)]
         case "vpn-rapid-flap-burst":
-            return [try VPNDetectionScenarios.rapidFlapBurst()]
+            return [try await VPNDetectionScenarios.rapidFlapBurst()]
         case "vpn-blind-gap-disconnect":
-            return [try VPNDetectionScenarios.blindGapDisconnect()]
+            return [try await VPNDetectionScenarios.blindGapDisconnect()]
         case "vpn-audit-corrects-dropped-notification":
-            return [try VPNDetectionScenarios.auditCorrectsDroppedNotification()]
+            return [try await VPNDetectionScenarios.auditCorrectsDroppedNotification()]
+        case "vpn-blind-flap-recovery":
+            return [try await VPNDetectionScenarios.blindFlapRecovery()]
         case "vpn-reconnect-routing":
             return [try await TransparentProxyScenarios.vpnReconnectRouting(verbose: verbose)]
         case "vpn-reconnect-reprobe":

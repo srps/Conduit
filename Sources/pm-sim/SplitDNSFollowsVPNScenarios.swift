@@ -436,7 +436,8 @@ enum SplitDNSFollowsVPNScenarios {
         return !pushed.isObserving
     }
 
-    private static func controlLimits() throws -> RuntimeServiceLimits {
+    /// Control limits for a scenario that reads the host through one in-memory client.
+    static func controlLimits() throws -> RuntimeServiceLimits {
         try RuntimeServiceLimits(
             maxRequestBytes: 4096, maxReplyBytes: 64 * 1024,
             aliasCapacityPerPartition: 8, aliasByteCapacityPerPartition: 1 << 20,
@@ -453,8 +454,8 @@ enum SplitDNSFollowsVPNScenarios {
     }
 }
 
-/// No scenario here authenticates, so a token request is a fault.
-private final class NoGSS: GSSTokenProvider {
+/// For a scenario that never authenticates, so a token request is a fault.
+final class NoGSS: GSSTokenProvider {
     func generateToken(host: String, inputToken: Data?) throws -> Data? {
         throw ScenarioExecutionError(message: "unplanned GSS token request for \(host)")
     }

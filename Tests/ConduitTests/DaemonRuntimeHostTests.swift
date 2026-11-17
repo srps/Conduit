@@ -2446,6 +2446,46 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertLessThanOrEqual(host.orchestrator.eventLog.events.filter { $0.event == "platform.settings_observed" }.count, 2)
     }
 
+    // MARK: - A blind VPN reading (decision 0048)
+
+    /// A store read that fails mid-flap reaches the host as `.unknown` between the flap and its recovery. The host withholds the entry
+    /// file while blind and puts it back with the recovery, and the recovery is the flap's: the tunnel pool's breakers, opened on the
+    /// path the flap replaced, close, and the flap is reported recovered.
+    @RuntimeActor func testAFlapRecoveredAfterABlindReadingClosesTheBreakersAndRestoresTheEntryFile() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        // Back-to-back failures open a breaker.
+        config.circuitBreakerWindowSeconds = 0
+        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.53"])]
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageDNSResolvers: true))
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.deliveries.drain()
+        XCTAssertEqual(host.orchestrator.snapshot.vpnState, .connected, "precondition: the primed report landed")
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "precondition: connected installs the entry file")
+        let pool = host.orchestrator.tunnelConnectionPool
+        for _ in 0..<config.circuitFailureThreshold { pool.recordDedicatedTunnelFailure(for: config.upstreams[0]) }
+        XCTAssertEqual(pool.upstreamStatuses().map(\.circuitState), [.open], "precondition: the breaker is open")
+
+        harness.vpn.emit(.reasserting)
+        harness.vpn.emit(.unknown)
+        await host.deliveries.drain()
+        XCTAssertEqual(host.orchestrator.snapshot.vpnState, .unknown)
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "a blind reading withholds the entry file")
+        XCTAssertEqual(pool.upstreamStatuses().map(\.circuitState), [.open], "a blind reading is no recovery")
+
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        XCTAssertEqual(pool.upstreamStatuses().map(\.circuitState), [.closed])
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "the recovery puts the entry file back")
+        let events = host.orchestrator.eventLog.events.map(\.event)
+        XCTAssertEqual(events.filter { $0 == "vpn.flap.recovered" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "vpn.connected" }.count, 1, "only the first connect is one: \(events)")
+    }
+
     // MARK: - System wake (twin of `AppState.handleSystemWake`)
 
     /// How many times the kernel's wake path ran: it records one DNS transport reset for each, before it awaits anything.
