@@ -8,9 +8,9 @@ import ProxyKernel
 
 /// The level-triggered VPN monitor (unit U3, decisions 0047 and 0048) inside the actual `RuntimeHost` (decision 0033),
 /// over a scratch root. The monitor is the production `VPNStatusMonitor` over `FakeTunnelStore` and a held clock; every
-/// other machine effect is a fake, the privilege client and the resolver directory are `FakeMachine`'s, and the upstream
-/// probe answers without dialing (`SimulatedUpstreams`). Time moves only
-/// when a scenario fires the one wake-up the monitor holds, so the retries, deadlines and audits are counted, not timed.
+/// other machine effect is a fake, the privilege client and the resolver directory are `FakeMachine`'s, the upstream
+/// probe answers without dialing (`SimulatedUpstreams`), and the health loop dials the run's own `ClosingUpstream`. Time
+/// moves only when a scenario fires the one wake-up the monitor holds, so the retries, deadlines and audits are counted, not timed.
 /// The host is read through what a client sees: its control snapshot, the resolver files and its events file.
 ///
 /// - `vpn-blind-gap-disconnect`: the store becomes unreadable as the tunnel loses its address. While blind the host
@@ -256,12 +256,13 @@ enum VPNDetectionScenarios {
         case .failure(let failure): throw ScenarioExecutionError(message: "state root refused: \(failure)")
         }
 
+        let upstream = try await ClosingUpstream()
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.localPACEnabled = false
         config.pacRoutingEnabled = false
         config.dnsForwarderEnabled = false
-        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.upstreams = [upstream.proxy]
         config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.53"])]
         try ProxyConfigPersistence.save(config, in: environment)
         try PlatformConfigPersistence.save(PlatformIntegrationConfig(manageDNSResolvers: true), in: environment)
@@ -330,6 +331,8 @@ enum VPNDetectionScenarios {
         let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
         let flush = await host.flushEvents()
         check("the host settles and flushes", settled == .settled && flush.allConfirmed)
+        do { try await upstream.stop() } catch { notes.append("the owned upstream did not close: \(error)") }
+        notes.append("the owned upstream accepted \(upstream.accepted) connections")
         do {
             let events = try String(contentsOf: environment.eventsFile, encoding: .utf8).split(separator: "\n").map {
                 try CanonicalJSON.decoder().decode(RuntimeEvent.self, from: Data($0.utf8))

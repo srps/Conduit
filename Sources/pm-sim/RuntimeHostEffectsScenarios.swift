@@ -62,12 +62,13 @@ enum RuntimeHostEffectsScenario {
 
             // The held listener makes the host's bind on this port fail, the way a contended port does.
             let held = try HeldLoopbackListener()
+            let upstream = try await ClosingUpstream()
             var config = GenericDefaults.shared.makeConfig()
             config.localPort = held.port
             config.dnsForwarderEnabled = false
             config.localPACEnabled = false
             config.pacRoutingEnabled = false
-            config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+            config.upstreams = [upstream.proxy]
             try ProxyConfigPersistence.save(config, in: environment)
             try PlatformConfigPersistence.save(
                 PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true), in: environment
@@ -83,7 +84,8 @@ enum RuntimeHostEffectsScenario {
                 gss: RefusingGSSProvider(),
                 helper: FakeHelperLifecycle(),
                 secrets: InMemorySecretStore(),
-                dns: FakeDNSProbe()
+                dns: FakeDNSProbe(),
+                upstream: upstream
             )
             let shutdown = await exercise(
                 session: session!, environment: environment, held: held, fakes: fakes, home: home
@@ -161,6 +163,8 @@ enum RuntimeHostEffectsScenario {
             if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
                 && captured.quiesced && modules.quiesced && woken.quiesced && audited.quiesced && flagged.quiesced
                 && declined.quiesced {
+                do { try await upstream.stop() } catch { notes.append("the owned upstream did not close: \(error)") }
+                notes.append("the owned upstream accepted \(upstream.accepted) connections")
                 releaseRoot(&session, environment: environment, scratch: scratch, releaseFailures: releaseFailures,
                             assertions: &assertions, notes: &notes)
             } else {
@@ -371,7 +375,7 @@ enum RuntimeHostEffectsScenario {
         config.localPACEnabled = false
         config.pacRoutingEnabled = true
         config.pacURL = "http://pac.example.test/held.pac"
-        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.upstreams = [fakes.upstream.proxy]
         let host: RuntimeHost
         do {
             // A fixed port, as production runs: the system proxy names the configured port, so the check below can compare against it.
@@ -482,7 +486,7 @@ enum RuntimeHostEffectsScenario {
         config.localPACEnabled = false
         config.pacRoutingEnabled = true
         config.pacURL = "http://pac.example.test/captured.pac"
-        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.upstreams = [fakes.upstream.proxy]
         let host: RuntimeHost
         do {
             let reserved = try HeldLoopbackListener()
@@ -587,9 +591,9 @@ enum RuntimeHostEffectsScenario {
         config.dnsForwarderPort = 0
         config.localPACEnabled = false
         config.pacRoutingEnabled = false
-        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.upstreams = [fakes.upstream.proxy]
         // One loopback tunnel on an ephemeral port, for the saved tunnels Start through the framed client.
-        config.tunnelDefinitions = [TunnelDefinition(localPort: 0, remoteHost: "127.0.0.1", remotePort: 9)]
+        config.tunnelDefinitions = [TunnelDefinition(localPort: 0, remoteHost: "127.0.0.1", remotePort: fakes.upstream.port)]
         let host: RuntimeHost
         // The earlier hosts' events share the owned file, so only the events after this count are this host's.
         let earlier: Int
@@ -1044,7 +1048,7 @@ enum RuntimeHostEffectsScenario {
         config.localPACEnabled = false
         config.pacRoutingEnabled = true
         config.pacURL = composed
-        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.upstreams = [fakes.upstream.proxy]
         let host: RuntimeHost
         do {
             let reserved = try HeldLoopbackListener()
@@ -1116,7 +1120,7 @@ enum RuntimeHostEffectsScenario {
         config.dnsForwarderEnabled = false
         config.localPACEnabled = false
         config.pacRoutingEnabled = false
-        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.upstreams = [fakes.upstream.proxy]
         let host: RuntimeHost
         // The earlier hosts' events share the owned file, so only the events after this count are this host's.
         let earlier: Int
@@ -1218,7 +1222,7 @@ enum RuntimeHostEffectsScenario {
         config.dnsForwarderPort = 0
         config.localPACEnabled = false
         config.pacRoutingEnabled = false
-        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.upstreams = [fakes.upstream.proxy]
         let host: RuntimeHost
         // The earlier hosts' events share the owned file, so only the records after this count are this host's.
         let earlier: Int
@@ -1318,13 +1322,13 @@ enum RuntimeHostEffectsScenario {
         let crashedPort = 47113
         let slow = Fakes(machine: fakes.machine, probe: fakes.probe, loopback: FakeLoopbackPortProbe(timingOut: [crashedPort]),
                          pac: fakes.pac, gss: fakes.gss, helper: fakes.helper, secrets: fakes.secrets,
-                         dns: FakeDNSProbe(timingOut: [53]))
+                         dns: FakeDNSProbe(timingOut: [53]), upstream: fakes.upstream)
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
         config.localPACEnabled = false
         config.pacRoutingEnabled = false
-        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.upstreams = [fakes.upstream.proxy]
         let journal = PlatformStateJournal(fileURL: environment.platformStateFile)
         let host: RuntimeHost
         let earlier: Int
@@ -1410,7 +1414,7 @@ enum RuntimeHostEffectsScenario {
         config.dnsForwarderEnabled = false
         config.localPACEnabled = false
         config.pacRoutingEnabled = false
-        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.upstreams = [fakes.upstream.proxy]
         config.logging.auditLogEnabled = true
         let auditFile = environment.configDirectory.appendingPathComponent("audit.ndjson")
         let path = FakeNetworkPathObserver()
@@ -1441,7 +1445,7 @@ enum RuntimeHostEffectsScenario {
         var quiesced = false
         // The origin: without auth, the fake upstream answers any plain GET with a complete 200. Every path stops it after the host.
         let origin = FakeUpstreamProxy(
-            group: MultiThreadedEventLoopGroup.singleton, originHost: "127.0.0.1", originPort: 9, requireAuth: false
+            group: MultiThreadedEventLoopGroup.singleton, originHost: "127.0.0.1", originPort: fakes.upstream.port, requireAuth: false
         )
         do {
             try await origin.start()
@@ -1644,7 +1648,7 @@ enum RuntimeHostEffectsScenario {
         config.dnsForwarderEnabled = false
         config.localPACEnabled = false
         config.pacRoutingEnabled = false
-        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.upstreams = [fakes.upstream.proxy]
         config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
         let host: RuntimeHost
         // The earlier hosts' events share the owned file, so only the events after this count are this host's.
@@ -1948,6 +1952,9 @@ enum RuntimeHostEffectsScenario {
         let helper: FakeHelperLifecycle
         let secrets: InMemorySecretStore
         let dns: FakeDNSProbe
+        /// The one upstream every exercise configures. It stays open while a host is pinned, so that host can reach
+        /// nothing else.
+        let upstream: ClosingUpstream
     }
 
     /// What one exercise established. `quiesced` means `stopRuntime` returned and `flushEvents` reported all

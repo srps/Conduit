@@ -104,8 +104,19 @@ facade and adds no store/lease exposure or public test hook.
 The upstream connectivity probe behind each routing verdict is a mandatory effect too
 ([`RuntimeConnectivityProbe`](../../Sources/ConduitRuntime/RuntimeHostEffects.swift)). The
 daemon and app compositions name `.system`, the orchestrator's own `UpstreamProber`; the
-actual-host pm-sim scenarios inject `SimulatedUpstreams.unreachable`, so none dials the
-unowned `127.0.0.1:9` their configuration names. The XCTest host helpers still name `.system`.
+actual-host pm-sim scenarios inject `SimulatedUpstreams.unreachable`, so a routing verdict
+dials nothing. The health loop is not injected: it runs the real health check through the
+real connection pool. Each actual-host scenario (VPN detection, split DNS follows VPN, host
+effects) therefore configures a `ClosingUpstream` it starts and stops: a loopback listener
+on an ephemeral port that closes each connection it accepts, which the health check reports
+as unreachable, as the refused port did before. The same port is the host-effects tunnel's
+remote and its audit fixture's origin. Evidence (2026-11-17, local): under a `sandbox-exec`
+profile that kills the process on any outbound connection to a non-loopback address or to
+`127.0.0.1:9`, all nine scenarios passed every assertion in three runs, and the owned
+upstream accepted 2 to 7 connections per run. The same nine at `03fdcf9f`, before the
+fixture, were killed every time, and passed with only non-loopback dials forbidden, so the
+port-9 dial was the only one. The XCTest host helpers still name `.system` and dial
+`127.0.0.1:9` ([#318](https://github.com/srps/Conduit/issues/318)).
 
 ## Open questions
 
