@@ -364,10 +364,15 @@ final class PushedResolverMonitorTests: XCTestCase {
     func testAStopFromInsideTheCallbackReturnsAndEndsTheSession() {
         let store = ScriptedPushedResolverStore(keys: Self.fullTunnelStore)
         let monitor = PushedResolverMonitor(calls: store.calls, clock: FakeStoreObserverClock().clock)
-        let received = ReadingRecorder(monitor) { [weak monitor] in monitor?.stop() }
+        let stopped = DispatchSemaphore(value: 0)
+        let received = ReadingRecorder(monitor) { [weak monitor] in
+            monitor?.stop()
+            stopped.signal()
+        }
         monitor.start()
 
         XCTAssertEqual(received.await(1).count, 1)
+        XCTAssertEqual(stopped.wait(timeout: .now() + 5), .success, "the stop from the callback returned")
         monitor.start()
         XCTAssertEqual(received.await(2).count, 2, "the stop from the callback ended the session, so this start opened one")
         XCTAssertEqual(store.creates, 2)
