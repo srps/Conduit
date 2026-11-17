@@ -2,7 +2,7 @@
 
 - Date: 2026-11-17
 - Decision: proposed
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -54,7 +54,15 @@ The owner chose the retry schedule on 2026-11-17, after options for decisions 2 
 
 ## Implementation evidence
 
-None yet.
+The schedule and the pushed-resolver observer are implemented; the VPN monitor's parts wait for design unit U3.
+
+- [`StoreReadSchedule.swift`](../../Sources/ProxyKernel/Network/StoreReadSchedule.swift) is the pure schedule: the delays, the cap, the reset on the first good reading, the reported attempts, the optional audit and the 10% leeway, with the constants in one place. [`StoreReadScheduleTests`](../../Tests/ConduitTests/StoreReadScheduleTests.swift) cover the sequence, the cap, the reset, the audit and the reported attempts.
+- [`PushedResolverMonitor.swift`](../../Sources/PlatformMac/PushedResolverMonitor.swift) retries a failed create, subscribe or read on the schedule, on a new session after a create or subscribe failure. It holds one wake-up on [`StoreObserverClock`](../../Sources/PlatformMac/StoreObserverClock.swift), cancelled by a stop or a good reading, and each `start` opens a generation that a late callback or wake-up is checked against. It has no audit. The host emits `dns.split_detection_failed reason= attempt=` at the reported attempts and `dns.split_detection_recovered attempts=` on the first good reading after them ([`RuntimeHostSplitDNSDetection.swift`](../../Sources/ConduitRuntime/RuntimeHostSplitDNSDetection.swift), [`LiveSplitDNSDetection.swift`](../../Sources/PlatformMac/LiveSplitDNSDetection.swift)). This fixes #304.
+- [`PushedResolverMonitorTests`](../../Tests/ConduitTests/PushedResolverMonitorTests.swift) fail a create, a subscribe or a read N times over a scripted store and a held clock, and check the delays, the new sessions, the reported readings and the recovery; a stop during a pending retry cancels it. [`RuntimeHostSplitDNSTests`](../../Tests/ConduitTests/RuntimeHostSplitDNSTests.swift) and [`LiveSplitDNSDetectionTests`](../../Tests/ConduitTests/LiveSplitDNSDetectionTests.swift) cover the events. pm-sim `dns-split-detection-retries` ([`SplitDNSFollowsVPNScenarios.swift`](../../Sources/pm-sim/SplitDNSFollowsVPNScenarios.swift)) runs the real monitor in the actual host through a create failure and a subscribe failure to a reading that puts the tunnel's server in use.
+
+Does not prove: that a real `SCDynamicStoreCreate` or subscription that failed succeeds on a later session. The tests fail the calls themselves; that a failure is transient is the record's assumption.
+
+Left for U3: the VPN monitor's retry, its 60 s audit and its single wake-up at the earliest of the flap deadline, the retry and the audit; `SplitDNSVPNGate` withholding on `.unknown`; a new timer for each `start`; and the pm-sim scenarios for a blind gap over a disconnect and a dropped notification.
 
 ## Open questions
 
