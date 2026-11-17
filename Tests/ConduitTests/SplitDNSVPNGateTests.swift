@@ -12,7 +12,7 @@ final class SplitDNSVPNGateTests: XCTestCase {
 
     func testEntriesWantedPerState() {
         var gate = SplitDNSVPNGate()
-        XCTAssertTrue(gate.entriesWanted, "bootstrap .unknown keeps files: wrongly keeping is self-correcting")
+        XCTAssertFalse(gate.entriesWanted, "an unread or unreadable store withholds files (decision 0048)")
 
         _ = gate.update(.connected)
         XCTAssertTrue(gate.entriesWanted)
@@ -29,12 +29,14 @@ final class SplitDNSVPNGateTests: XCTestCase {
     func testUpdateReportsOnlyWantedStateFlips() {
         var gate = SplitDNSVPNGate()
 
-        XCTAssertFalse(gate.update(.connected), "unknown → connected: files already wanted, nothing to do")
+        XCTAssertTrue(gate.update(.connected), "unknown → connected: apply files")
         XCTAssertFalse(gate.update(.reasserting), "flap starts: files stay, no action")
         XCTAssertTrue(gate.update(.disconnected(reason: .networkLost)), "flap settles down: remove files")
         XCTAssertFalse(gate.update(.disconnected(reason: .userInitiated)), "still down: no repeat removal")
         XCTAssertTrue(gate.update(.connected), "reconnected: apply files")
         XCTAssertFalse(gate.update(.connected), "duplicate state report: no repeat apply")
+        XCTAssertTrue(gate.update(.unknown), "store unreadable: remove files")
+        XCTAssertFalse(gate.update(.disconnected(reason: .unknown)), "still withheld: no repeat removal")
     }
 
     // MARK: - Side effects

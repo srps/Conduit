@@ -296,7 +296,8 @@ final class AppStateActivationParityTests: XCTestCase {
         await startProxy(state, harness)
         await harness.settle("the Start's write was refused") { !self.hostEvents(harness, "platform.split_dns_failed").isEmpty }
         XCTAssertNil(harness.machine.resolverFile(for: "corp.example"))
-        XCTAssertTrue(hostEvents(harness, "platform.split_dns_failed").first?.contains("operation=apply source=start attempt=1") == true)
+        // The write follows the observer's first report: entry files wait for a `.connected` verdict (decision 0048).
+        XCTAssertTrue(hostEvents(harness, "platform.split_dns_failed").first?.contains("operation=apply source=vpn_transition attempt=1") == true)
 
         harness.machine.privilege.failingDomains = []
         harness.helper.status = .installed
@@ -777,12 +778,15 @@ final class AppStateActivationParityTests: XCTestCase {
     }
 
     /// Decision 0037's strict capture, reached from the app (disclosed: the old app's DNS toggle never stopped a proxy Start). A DNS Start
-    /// whose commit saves the forwarder on while the proxy Start is applying its surfaces (held at its resolver write) replaces the input
+    /// whose commit saves the forwarder on while the proxy Start is applying its surfaces (held at its environment write) replaces the input
     /// that Start captured: the host holds the Start (`config.workflow.held reason=input_replaced`) and clears what it brought up. Nothing
     /// retries it, no login-item repair follows it, the app says why, DNS runs, and the next explicit Start comes up on the saved pair.
     func testADNSStartCommittedWhileAProxyStartAppliesHoldsThatStartAndSaysWhy() async throws {
         let (harness, state) = try await ready(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true, manageDNSResolvers: true))
-        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.applyDNS.rawValue }
+        // Held at its environment write: its entry file waits for the VPN report, which `.unknown` withholds (decision 0048).
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/bin/launchctl" && arguments.first == "setenv"
+        }
         state.toggleProxy()
         let held = await harness.hold.waitUntilReached(within: .seconds(5))
         XCTAssertTrue(held, "the proxy Start is applying its surfaces")

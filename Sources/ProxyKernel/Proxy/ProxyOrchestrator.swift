@@ -235,8 +235,10 @@ package struct ProxyOrchestratorSnapshot: Sendable, Equatable, Codable {
 package enum DetectedSplitDNSChangeReason: String, Hashable, Sendable {
     /// A pushed-resolver reading.
     case pushed
-    /// A VPN report of `.connected` or `.unknown`.
+    /// A VPN report of `.connected`.
     case vpnConnected = "vpn_connected"
+    /// A VPN report of `.unknown`, so the host pushed no rules.
+    case vpnUnknown = "vpn_unknown"
     /// A VPN report of `.disconnected`.
     case vpnDisconnected = "vpn_disconnected"
     /// A VPN report of `.reasserting`.
@@ -1183,7 +1185,7 @@ package final class ProxyOrchestrator {
     /// leave the reasserting state (either by recovery or by the grace window
     /// expiring into `.disconnected`).
     ///
-    /// Phase 6 (revised): rapid-flap coalescing moved to the fuser
+    /// Phase 6 (revised): rapid-flap coalescing moved to the VPN monitor
     /// (`vpnFlapMinVisibleSeconds` debounce). The orchestrator no longer
     /// tracks `lastFlapRecoveredAt` / `reassertingSuppressed` — sub-window
     /// flaps simply don't reach this layer.
@@ -2436,7 +2438,7 @@ package final class ProxyOrchestrator {
         case .reasserting:
             // Phase 6 (revised): if we reach .reasserting at all, the underlying
             // utun has been inactive for >= vpnFlapMinVisibleSeconds — sub-window
-            // blips never get here (the fuser absorbs them silently). So no
+            // blips never get here (the monitor's flap timer absorbs them). So no
             // coalesce/suppression logic at this layer.
 
             // Silent grace window. Active streams stay alive — that's the whole
@@ -2500,7 +2502,7 @@ package final class ProxyOrchestrator {
             switch previous {
             case .reasserting:
                 // Phase 6 (revised): every .reasserting -> .connected we see
-                // here is a real (super-min-visible) flap recovery; the fuser
+                // here is a real (super-min-visible) flap recovery; the flap timer
                 // already absorbed sub-window blips. No suppression needed.
                 let recoveredAt = flapClock.wallNow()
                 let durationSeconds = takeFlapDuration()
@@ -2509,7 +2511,7 @@ package final class ProxyOrchestrator {
                 guard let summary = await refreshConnectivityMode() else { return }
                 resumeConnectivityMonitoring(summary: summary)
                 // Phase 7: telemetry update. Only super-min-visible flaps reach
-                // this branch (the fuser absorbs sub-window blips), so every
+                // this branch (the flap timer absorbs sub-window blips), so every
                 // increment here corresponds to a user-visible flap event —
                 // matching the strip's "Flaps N" / "Preserved N" semantics.
                 mutateSnapshot {

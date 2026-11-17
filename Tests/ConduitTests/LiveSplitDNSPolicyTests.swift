@@ -47,7 +47,7 @@ final class LiveSplitDNSPolicyTests: XCTestCase {
     }
 
     func testAFailedReadingHoldsNothingUnderAnyVerdict() {
-        for state in [VPNObservedState.connected, .reasserting, .unknown] {
+        for state in [VPNObservedState.connected, .reasserting] {
             var policy = policy()
             _ = policy.update(gate: gate(state), reading: reading(corp))
 
@@ -98,12 +98,14 @@ final class LiveSplitDNSPolicyTests: XCTestCase {
         }
     }
 
-    func testUnknownAppliesTheReadingLikeConnected() {
+    func testUnknownWithholdsAndTheNextConnectedFiltersWhatWasHeld() {
         var policy = policy()
-        XCTAssertTrue(policy.update(gate: SplitDNSVPNGate(), liveInterfaces: [], reading: reading(corp)))
-        XCTAssertEqual(policy.detectedInUse, [corp])
+        _ = policy.update(gate: SplitDNSVPNGate(), liveInterfaces: [], reading: reading(corp))
+        XCTAssertEqual(policy.detectedInUse, [], "nothing is in use while the VPN is unknown (decision 0048)")
         _ = policy.update(gate: SplitDNSVPNGate(), liveInterfaces: [], reading: reading())
-        XCTAssertEqual(policy.detectedInUse, [corp], "no interface filter under .unknown")
+        XCTAssertTrue(policy.update(gate: gate(.connected), liveInterfaces: ["utun6"], reading: policy.lastReading))
+        XCTAssertEqual(policy.detectedInUse, [corp], "the held resolver is in use once its tunnel is live")
+        XCTAssertEqual(policy.display.state, .held)
     }
 
     func testAReadingBeforeOrAfterTheConnectedVerdictEndsTheSame() {

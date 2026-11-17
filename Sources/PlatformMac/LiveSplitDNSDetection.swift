@@ -102,7 +102,8 @@ package final class LiveSplitDNSDetection: @unchecked Sendable {
             state.liveInterfaces = liveInterfaces
             guard state.running else { return }
             let reason: DetectedSplitDNSChangeReason = switch gate.lastVPNState {
-            case .connected, .unknown: .vpnConnected
+            case .connected: .vpnConnected
+            case .unknown: .vpnUnknown
             case .disconnected: .vpnDisconnected
             case .reasserting: .flapHeld
             }

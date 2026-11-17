@@ -1636,6 +1636,8 @@ enum RuntimeHostEffectsScenario {
         let machine = fakes.machine
         let held = HeldSetenv()
         let vpn = FakeVPNStatusObserver()
+        // The tunnel is up at the start: entry files wait for a `.connected` report (decision 0048).
+        vpn.primedState = .connected
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderEnabled = false
@@ -1667,6 +1669,8 @@ enum RuntimeHostEffectsScenario {
         var quiesced = false
         do {
             try await host.startRuntime()
+            // The primed report lands in its own delivery after the start.
+            for _ in 0..<500 where machine.resolverFile(for: "corp.example") == nil { try await Task.sleep(for: .milliseconds(10)) }
             check("the flag host starts with the system proxy, the entry file and no environment",
                   machine.service("Wi-Fi").routesThroughAProxy && machine.launchdEnvironment.isEmpty
                       && machine.resolverFile(for: "corp.example") != nil)
@@ -1805,7 +1809,9 @@ enum RuntimeHostEffectsScenario {
         let removalsBefore = machine.privilege.commands(matching: .removeDNS).count
         let commandsBefore = machine.privilege.commands.count
         vpn.emit(.disconnected(reason: .userInitiated))
-        witness.snapshotAnswered = try await client.readSnapshot(deadline: deadline).proxyState == .running
+        // The drop sends a proxy that was on the tunnel into its reconnect probe, so the answer is any state of a bound listener.
+        witness.snapshotAnswered = [.running, .degraded, .recovering]
+            .contains(try await client.readSnapshot(deadline: deadline).proxyState)
         let stop = try await submit(.stop(.proxy))
         witness.stopAdmitted = stop != nil
         witness.listenerBoundWhileHeld = stop != nil && host.status().bindings.proxyPort != nil

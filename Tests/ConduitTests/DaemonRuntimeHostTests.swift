@@ -1617,7 +1617,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let stateSession: StateRootSession
         let environment: RuntimeEnvironment
         let machine: FakeMachine
-        let vpn = FakeVPNStatusObserver()
+        /// Primed `.connected`, as `AppStateHarness.vpn`: entry files are withheld while the VPN state is `.unknown` (decision 0048).
+        let vpn: FakeVPNStatusObserver = {
+            let vpn = FakeVPNStatusObserver()
+            vpn.primedState = .connected
+            return vpn
+        }()
         let locationObserver = FakeNetworkLocationObserver()
         let pathObserver = FakeNetworkPathObserver()
         /// The system wake source the host observes from open until its quit.
@@ -2189,6 +2194,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let host = try await harness.makeHost()
         await host.awaitLaunchRecovery()
         try await host.startRuntime()
+        await host.deliveries.drain()  // the primed `.connected` report
         let vpnBefore = host.orchestrator.snapshot.vpnState
         locations.edit { $0.activeLocationID = NetworkLocationFixture.office }
         harness.locationObserver.emit(NetworkLocationFixture.office)
@@ -2638,6 +2644,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     @RuntimeActor func testStopRemovesAResolverFileTheSwitchNoLongerNamesWhenTheHostWroteIt() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
         try await host.startRuntime()
+        await host.deliveries.drain()  // the primed `.connected` report
         XCTAssertEqual(harness.machine.resolverFile(for: "corp.example"), "nameserver 10.0.0.53")
         XCTAssertTrue(harness.journal.hasRecords(for: .resolverFile), "the file is recorded as ours")
 
@@ -2655,6 +2662,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     @RuntimeActor func testStopRemovesAResolverFileTheSwitchNoLongerNamesWhenTheJournalOwnsIt() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
         try await host.startRuntime()
+        await host.deliveries.drain()  // the primed `.connected` report
 
         harness.machine.privilege.failingDomains = ["corp.example"]
         try await harness.flip(PlatformIntegrationConfig(manageDNSResolvers: false), on: host)
@@ -4453,6 +4461,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let host = try await harness.makeHost()
         await host.awaitLaunchRecovery()
         try await host.startRuntime()
+        await host.deliveries.drain()  // the primed `.connected` report
         XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"))
         // The Stop's removal of the entry file is refused, so the repair is still pending at the next start.
         harness.machine.privilege.failingDomains = ["corp.example"]
@@ -4489,6 +4498,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.awaitLaunchRecovery()
         harness.machine.privilege.failingDomains = ["corp.example"]
         try await host.startRuntime()
+        await host.deliveries.drain()  // the primed `.connected` report
         XCTAssertEqual(host.splitDNSRepair.pending?.operation, .apply, "the start's write was refused")
         harness.machine.privilege.failingDomains = []
         let before = entryFileCommands().count

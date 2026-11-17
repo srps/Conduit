@@ -23,23 +23,19 @@ package struct SplitDNSVPNGate: Sendable {
 
     package init() {}
 
-    /// Entry files are withheld only when the VPN is *definitively* down.
-    /// `.unknown` (monitor hasn't primed yet) and `.reasserting` (flap grace
-    /// window) keep them: wrongly removing files during a flap churns
-    /// resolver state, while wrongly keeping them is self-correcting — the
-    /// fuser settles to `.disconnected` within the grace window and the
-    /// transition handler removes them then.
-    ///
-    /// That self-correction depends on the monitor eventually reaching a
-    /// verdict, which it does *only* because `primeInitialState` reports an
-    /// empty utun sweep as `.disconnected` via `markNoTunnelsPresent`. Without
-    /// that, launching with the VPN already down parked the state in
-    /// `.unknown` forever — no utun ever transitioned, so nothing emitted —
-    /// and these files stayed installed against unreachable servers. If you
-    /// weaken the priming path, this `.unknown` default becomes fail-deadly.
+    /// Entry files are wanted under `.connected` and `.reasserting`, the
+    /// verdicts that a tunnel is up or flapping inside its grace window.
+    /// `.disconnected` withholds them, and so does `.unknown`: a monitor that
+    /// has not read the store yet, or cannot, does not know the tunnel is up,
+    /// and the cost of a file against an unreachable server is the bootstrap
+    /// deadlock above (design decision 2, decision 0048). The monitor retries
+    /// a store it cannot read, and its first good reading reports the verdict
+    /// that puts them back.
     package var entriesWanted: Bool {
-        if case .disconnected = lastVPNState { return false }
-        return true
+        switch lastVPNState {
+        case .connected, .reasserting: true
+        case .disconnected, .unknown: false
+        }
     }
 
     /// Records a new VPN state. Returns `true` when the wanted-state

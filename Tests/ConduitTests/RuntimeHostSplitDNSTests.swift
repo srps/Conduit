@@ -97,7 +97,7 @@ final class RuntimeHostSplitDNSTests: XCTestCase {
 
         await running.report(.connected, live: ["utun6"])
 
-        XCTAssertEqual(running.events("dns.split_table_changed"), ["detected_domains=1 manual_domains=0 rules=1 reason=pushed"])
+        XCTAssertEqual(running.events("dns.split_table_changed"), ["detected_domains=1 manual_domains=0 rules=1 reason=vpn_connected"])
         XCTAssertEqual(running.events("dns.split_detected"), ["interface=utun6 domains=corp.example servers=1 outcome=applied"])
         let row = DetectedSplitDNSDisplay.Row(interface: "utun6", domains: ["corp.example"], servers: ["192.0.2.53"])
         XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS, .init(state: .inUse, rows: [row]))
@@ -381,7 +381,7 @@ final class RuntimeHostSplitDNSTests: XCTestCase {
         await running.host.deliveries.drain()
 
         XCTAssertTrue(running.harness.pushedResolvers.isObserving)
-        XCTAssertEqual(running.events("dns.split_table_changed"), ["detected_domains=1 manual_domains=0 rules=1 reason=pushed"])
+        XCTAssertEqual(running.events("dns.split_table_changed"), ["detected_domains=1 manual_domains=0 rules=1 reason=vpn_connected"])
         XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .held)
 
         running.host.orchestrator.mutateSnapshotForTesting { $0.dnsRunState = .starting }

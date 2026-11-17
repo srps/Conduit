@@ -77,6 +77,8 @@ final class ConfigSaveGateTests: XCTestCase {
         var config = ProxyConfig.testFixture()
         config.localPort = 0
         harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        // No VPN report: these saves manage no entry file, and a `.connected` report's reconnect probe would move the run state.
+        harness.vpn.primedState = nil
         if let stateFiles { harness.stateFiles = stateFiles }
         let state = await harness.ready()
         if running {
