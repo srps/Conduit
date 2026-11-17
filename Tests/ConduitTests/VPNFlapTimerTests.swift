@@ -275,19 +275,68 @@ final class VPNFlapTimerTests: XCTestCase {
         XCTAssertEqual(timer, memory)
     }
 
-    func testAFailedReadingIsUnknownAndCostsNoMemory() {
+    func testAFailedReadingIsUnknownAndRecordsOnlyThatItFailed() {
         _ = at(0, ["utun6": .addressed])
         _ = at(10, ["utun6": .addressless])
-        let memory = timer
 
         let failure = TunnelReading.Failure(.storeRead, code: 1001)
         let blind = timer.reconcile(.failed(failure), now: 10.5, window: window)
+        let memory = timer
 
         XCTAssertEqual(blind.phase, .blind(failure))
         XCTAssertEqual(blind.state, .unknown)
         XCTAssertNil(blind.deadline)
-        XCTAssertEqual(timer, memory)
+        XCTAssertEqual(timer.lastGoodReading, 10)
+        XCTAssertTrue(timer.failedSinceLastGoodReading)
+        _ = timer.reconcile(.failed(failure), now: 10.7, window: window)
+        XCTAssertEqual(timer, memory, "a second failure records nothing more")
         XCTAssertEqual(at(11, ["utun6": .addressless]).state, .reasserting, "the flap carried on by the clock")
+        XCTAssertFalse(timer.failedSinceLastGoodReading)
+    }
+
+    // MARK: - A blind gap (decision 0047)
+
+    /// One tunnel counted at L = 0 and has no address at recovery.
+    private func recover(at now: TimeInterval, _ tunnels: [String: Keys], window: VPNFlapWindow? = nil) -> VPNDetection {
+        _ = at(0, ["utun6": .addressed])
+        _ = timer.reconcile(.failed(.init(.storeRead, code: 1001)), now: 0.5, window: self.window)
+        return timer.reconcile(reading(tunnels), now: now, window: window ?? self.window)
+    }
+
+    func testALossSeenAtRecoveryIsDatedAtTheLastGoodReading() {
+        let early = recover(at: 5.5, ["utun6": .addressless])
+        XCTAssertEqual(early.state, .reasserting)
+        XCTAssertEqual(early.deadline, 6, "grace ran from the debounce end at 1 s, not from the recovery")
+    }
+
+    func testARecoveryPastBothWindowsIsANetworkLossAtOnce() {
+        let late = recover(at: 7, ["utun6": .addressless])
+        XCTAssertEqual(late.state, .disconnected(reason: .networkLost))
+        XCTAssertEqual(late.live, ["utun6"])
+    }
+
+    func testARemovedInterfaceAtRecoveryIsAUserDisconnect() {
+        XCTAssertEqual(recover(at: 3, [:]).state, .disconnected(reason: .userInitiated))
+    }
+
+    func testAnotherTunnelStillCountingAtRecoveryIsConnected() {
+        let detection = recover(at: 7, ["utun6": .addressless, "utun7": .addressed])
+        XCTAssertEqual(detection.state, .connected)
+        XCTAssertEqual(detection.carrying, ["utun7"])
+        XCTAssertEqual(detection.live, ["utun6", "utun7"])
+    }
+
+    func testWindowsChangedDuringTheGapDoNotMoveALossDatedBeforeIt() {
+        let wide = VPNFlapWindow(minVisible: 30, grace: 3600)
+        XCTAssertEqual(recover(at: 7, ["utun6": .addressless], window: wide).state, .disconnected(reason: .networkLost),
+                       "the windows in force at L judge the loss")
+    }
+
+    func testAPhaseThatStartsAfterTheRecoveryUsesTheCurrentWindows() {
+        let wide = VPNFlapWindow(minVisible: 3, grace: 15)
+        XCTAssertEqual(recover(at: 7, ["utun6": .addressed], window: wide).state, .connected)
+        let lost = timer.reconcile(reading(["utun6": .addressless]), now: 8, window: wide)
+        XCTAssertEqual(lost.deadline, 11, "a debounce that starts after the recovery is 3 s")
     }
 
     func testANewSessionRemembersNothingOfTheLast() {

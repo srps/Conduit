@@ -53,9 +53,10 @@ package struct VPNDetection: Equatable, Sendable {
 }
 
 /// The only memory VPN detection keeps between readings: when each lost
-/// tunnel's debounce ends, when the state was last connected, and when the
-/// grace window ends. One value lives for one observation session; a new
-/// session starts from `init()`.
+/// tunnel's debounce ends, when the state was last connected, when the grace
+/// window ends, and the last good reading with whether one failed since. One
+/// value lives for one observation session; a new session starts from
+/// `init()`.
 ///
 /// `reconcile` takes a whole reading and the current time and returns the
 /// verdict. Repeating a call changes nothing, and a missed reading is made
@@ -66,7 +67,19 @@ package struct VPNDetection: Equatable, Sendable {
 /// debounce ended. A later `window` reaches only phases that have not
 /// started, so while the store stays as it is the phase only moves forward:
 /// debouncing, reasserting, down.
+///
+/// A blind gap is measured from the last good reading (decision 0047). The
+/// first good reading after a failed one at `now` gives the verdict the timer
+/// would give had that snapshot been read at the last good reading `L` and
+/// again at `now`, both with the windows in force at `L`. A loss it sees is
+/// therefore dated at `L`, and a Settings change during the gap cannot
+/// lengthen or shorten it.
 package struct VPNFlapTimer: Equatable, Sendable {
+    private struct GoodReading: Equatable, Sendable {
+        let at: TimeInterval
+        let window: VPNFlapWindow
+    }
+
     /// Tunnels that stopped counting while observed and are still in the
     /// store, with the end of each one's debounce. No larger than the
     /// snapshot: an interface the store drops leaves here too.
@@ -82,8 +95,18 @@ package struct VPNFlapTimer: Equatable, Sendable {
     /// connected state over with a tunnel left to recover, and kept until a
     /// tunnel counts again or none is left.
     private var graceEnd: TimeInterval?
+    /// The last reading that succeeded, and the windows it was handed.
+    private var lastGood: GoodReading?
+    /// A reading failed after `lastGood`.
+    private var failedSinceLastGood = false
 
     package init() {}
+
+    /// When the last good reading was taken, nil before the first.
+    package var lastGoodReading: TimeInterval? { lastGood?.at }
+
+    /// A reading failed after the last good one.
+    package var failedSinceLastGoodReading: Bool { failedSinceLastGood }
 
     /// `now` is a monotonic clock in seconds; only differences matter.
     /// `window` is read for a phase that starts in this call and for no
@@ -94,16 +117,25 @@ package struct VPNFlapTimer: Equatable, Sendable {
         window: VPNFlapWindow,
         up: VPNUpPredicate = .anyIPv4Tunnel
     ) -> VPNDetection {
-        let snapshot: TunnelSnapshot
         switch reading {
         case .failed(let failure):
-            // Memory is left alone: the next reading that succeeds is judged
-            // against the clock as if this one had not been attempted.
+            // Only the failure is recorded: the next good reading dates what
+            // it sees from the last good one.
+            failedSinceLastGood = lastGood != nil
             return VPNDetection(phase: .blind(failure), carrying: [], live: [], deadline: nil)
-        case .snapshot(let read):
-            snapshot = read
+        case .snapshot(let snapshot):
+            defer { lastGood = GoodReading(at: now, window: window) }
+            guard failedSinceLastGood, let lastGood else { return settle(snapshot, now: now, window: window, up: up) }
+            failedSinceLastGood = false
+            _ = settle(snapshot, now: lastGood.at, window: lastGood.window, up: up)
+            return settle(snapshot, now: now, window: lastGood.window, up: up)
         }
+    }
 
+    /// One good reading, with nothing failed since the last.
+    private mutating func settle(
+        _ snapshot: TunnelSnapshot, now: TimeInterval, window: VPNFlapWindow, up: VPNUpPredicate
+    ) -> VPNDetection {
         // Up to this reading the state was what the last one left: connected
         // until now if a tunnel counted, else until the last debounce ended.
         if !counted.isEmpty {

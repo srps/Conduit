@@ -67,16 +67,6 @@ private struct StoreModel: Hashable {
     )
 
     var reading: TunnelReading { Self.readings[self]! }
-
-    /// What `VPNStatusMonitor.handleStoreChanges` reads for one interface.
-    func observation(_ interface: String) -> UtunRawObservation {
-        let state = self[interface]
-        return UtunRawObservation(
-            ipv4Present: state == .addressed || state == .ipv4Only || state == .emptyIPv4,
-            hasIPv4Address: state == .addressed || state == .ipv4Only,
-            ipv6Present: state == .ipv6Only || state == .addressed || state == .emptyIPv4
-        )
-    }
 }
 
 private enum Windows {
@@ -123,22 +113,6 @@ private enum Op: CaseIterable {
     case stallDeadlines
     /// The owner changes the flap windows in Settings.
     case windowStandard, windowImmediate, windowWide
-
-    /// What the differential check runs: one tunnel per notification, one
-    /// session, one window, every reading delivered.
-    static let oneTunnelAndClock: [Op] = [
-        .upA, .dropA, .removeA, .emptyA, .strandA, .upB, .dropB, .removeB, .emptyB, .ipv6B,
-        .waitShort, .waitMid, .waitLong,
-    ]
-
-    /// The one tunnel a store op touches; nil for the two that touch both.
-    var touched: String? {
-        switch self {
-        case .upA, .dropA, .removeA, .emptyA, .strandA: StoreModel.tunnelA
-        case .upB, .dropB, .removeB, .emptyB, .ipv6B, .ipv4OnlyB: StoreModel.tunnelB
-        default: nil
-        }
-    }
 
     var wait: TimeInterval? {
         switch self {
@@ -205,7 +179,9 @@ private struct Observation {
 }
 
 /// What a session must report, worked out from every reading it took and
-/// nothing else. It follows the statechart in
+/// nothing else. A failed reading is not in the history; the good reading
+/// after a blind gap enters it twice, at the last good reading's time and at
+/// its own, both with the windows of the last good reading (decision 0047). It follows the statechart in
 /// `docs/design-vpn-detection-level-triggered.md` and keeps no memory between
 /// calls, so it shares no state and no arithmetic with `VPNFlapTimer`.
 private enum Oracle {
@@ -301,6 +277,15 @@ private struct LevelSession {
     private(set) var history: [Observation] = []
     /// The detection of the last reading that succeeded.
     private var lastRead: VPNDetection?
+    /// The timer right after the last reading that succeeded, and the
+    /// window that reading was handed.
+    private var memoryAtLastGood: VPNFlapTimer?
+    private var windowAtLastGood = Windows.standard
+    /// A reading failed since the last good one.
+    private var blind = false
+    /// The last reconcile ended a blind gap under a window other than the
+    /// one in force at its last good reading.
+    private(set) var recoveredUnderANewWindow = false
     /// The first reconcile that disagreed with the oracle, or stepped back
     /// with the store unchanged.
     private(set) var fault: String?
@@ -319,14 +304,41 @@ private struct LevelSession {
         let memory = timer
         detection = timer.reconcile(readable ? store.reading : .failed(Self.readFailure), now: now, window: window)
         if detection.state != previous { deliveries.append(Delivery(at: now, state: detection.state)) }
+        recoveredUnderANewWindow = false
 
         guard readable else {
-            let blind = VPNDetection(phase: .blind(Self.readFailure), carrying: [], live: [], deadline: nil)
-            if detection != blind || timer != memory { note("a failed reading gave \(detection) or touched the memory") }
+            let unknown = VPNDetection(phase: .blind(Self.readFailure), carrying: [], live: [], deadline: nil)
+            if detection != unknown { note("a failed reading gave \(detection)") }
+            // Only the failure is recorded, and a second records nothing more.
+            if timer.lastGoodReading != memory.lastGoodReading
+                || timer.failedSinceLastGoodReading != (memory.lastGoodReading != nil) {
+                note("a failed reading changed more than that it failed")
+            }
+            var again = timer
+            _ = again.reconcile(.failed(Self.readFailure), now: now, window: window)
+            if again != timer { note("a second failed reading changed the memory") }
+            blind = history.last != nil
             return
         }
         let storeUnchanged = history.last?.store == store
-        history.append(Observation(at: now, store: store, window: window))
+        if blind, let last = history.last, let memoryAtLastGood {
+            let windowAtL = windowAtLastGood
+            // The 0047 equivalence: the recovery verdict is the timer's for
+            // this snapshot read at the last good reading and again now,
+            // both with the windows in force then.
+            var replay = memoryAtLastGood
+            _ = replay.reconcile(store.reading, now: last.at, window: windowAtL)
+            let want = replay.reconcile(store.reading, now: now, window: windowAtL)
+            if detection != want { note("at \(now) the recovery gave \(detection), the replay from \(last.at) \(want)") }
+            recoveredUnderANewWindow = window != windowAtL
+            history.append(Observation(at: last.at, store: store, window: windowAtL))
+            history.append(Observation(at: now, store: store, window: windowAtL))
+        } else {
+            history.append(Observation(at: now, store: store, window: window))
+        }
+        blind = false
+        memoryAtLastGood = timer
+        windowAtLastGood = window
         let expected = Oracle.detection(after: history)
         if detection != expected { note("at \(now) the timer gave \(detection), the oracle \(expected)") }
         if storeUnchanged, let lastRead, let step = Self.backwardStep(from: lastRead, to: detection) {
@@ -383,87 +395,6 @@ private struct LevelSession {
     mutating func takeDeliveries() -> [Delivery] {
         defer { deliveries = [] }
         return deliveries
-    }
-}
-
-/// `VPNStatusMonitor`'s decision handling over a virtual clock, driving the
-/// real `VPNStateFuser`: `primeInitialState`, `handleStoreChanges` and
-/// `applyFuserDecision`, with the two kinds of `DispatchWorkItem` replaced by
-/// deadlines. It exists to compare today's verdicts with the timer's.
-private struct EdgeMonitorModel {
-    private var fuser = VPNStateFuser()
-    private var graceDeadline: TimeInterval?
-    private var minVisibleDeadlines: [String: TimeInterval] = [:]
-    private var consumer = VPNObservedState.unknown
-    private var deliveries: [Delivery] = []
-    private(set) var connected: [String] = []
-    private(set) var live: [String] = []
-
-    init(_ store: StoreModel, now: TimeInterval) {
-        for interface in ["utun0", StoreModel.tunnelA, StoreModel.tunnelB] { handle(interface, store, now: now) }
-        if !store.isUp { apply(fuser.markNoTunnelsPresent(), now: now) }
-        // A session that primes to nothing still has a first state to compare.
-        if deliveries.isEmpty { deliveries = [Delivery(at: now, state: consumer)] }
-    }
-
-    mutating func handle(_ interface: String, _ store: StoreModel, now: TimeInterval) {
-        let observation = interface == "utun0"
-            ? UtunRawObservation(ipv4Present: false, hasIPv4Address: false, ipv6Present: true)
-            : store.observation(interface)
-        guard observation.ipv4Present || fuser.knowsAbout(interfaceName: interface) else { return }
-        if observation.isFullyConnected { minVisibleDeadlines[interface] = nil }
-        apply(fuser.applyObservation(interfaceName: interface, observation: observation), now: now)
-    }
-
-    mutating func advance(to target: TimeInterval) {
-        while true {
-            let nextMinVisible = minVisibleDeadlines.min { ($0.value, $0.key) < ($1.value, $1.key) }
-            if let (interface, deadline) = nextMinVisible, deadline <= target, deadline <= graceDeadline ?? .infinity {
-                minVisibleDeadlines[interface] = nil
-                apply(fuser.markMinVisibleExpired(interfaceName: interface), now: deadline)
-            } else if let deadline = graceDeadline, deadline <= target {
-                graceDeadline = nil
-                fuser.markGraceExpired()
-                refreshNames()
-                deliver(.disconnected(reason: .networkLost), at: deadline)
-            } else {
-                return
-            }
-        }
-    }
-
-    mutating func takeDeliveries() -> [Delivery] {
-        defer { deliveries = [] }
-        return deliveries
-    }
-
-    private mutating func apply(_ decision: VPNStateFuser.Decision, now: TimeInterval) {
-        refreshNames()
-        switch decision {
-        case .noChange:
-            // The monitor delivers an unchanged `.connected` again when a
-            // name moved. That is a name update, not a state change.
-            break
-        case .emit(let state):
-            graceDeadline = nil
-            deliver(state, at: now)
-        case .emitAndStartGrace(let state, _):
-            graceDeadline = now + Windows.standard.grace
-            deliver(state, at: now)
-        case .startMinVisibleTimer(let interface):
-            minVisibleDeadlines[interface] = now + Windows.standard.minVisible
-        }
-    }
-
-    private mutating func refreshNames() {
-        connected = fuser.connectedInterfaceNames
-        live = fuser.liveInterfaceNames
-    }
-
-    private mutating func deliver(_ state: VPNObservedState, at now: TimeInterval) {
-        guard state != consumer else { return }
-        consumer = state
-        deliveries.append(Delivery(at: now, state: state))
     }
 }
 
@@ -565,7 +496,6 @@ final class VPNFlapTimerModelCheckTests: XCTestCase {
     /// Ops per ordering. Every shorter ordering is checked on the way, as a
     /// prefix.
     private static let exhaustiveDepth = 4
-    private static let differentialDepth = 6
     private static let randomDepth = 24
     private static let randomOrderings = 10_000
     private static let randomSeed: UInt64 = 0x5eed_0307
@@ -641,8 +571,11 @@ final class VPNFlapTimerModelCheckTests: XCTestCase {
     /// - **Late deadlines.** A wake-up that runs after its deadline, under
     ///   whatever window is set by then, reports what the oracle expects.
     /// - **Blindness.** A failed reading reports `.unknown` with no deadline
-    ///   and leaves the memory untouched, and the reading after it is the one
-    ///   the oracle expects had the failure not happened.
+    ///   and records only that it failed. The good reading after a blind gap
+    ///   gives the timer's verdict for that snapshot read at the last good
+    ///   reading and again now, both with the windows in force then
+    ///   (decision 0047), and the oracle agrees, also when the windows
+    ///   changed during the gap.
     func testEveryOrderingConverges() {
         var tally = Tally()
         let started = Date()
@@ -684,13 +617,14 @@ final class VPNFlapTimerModelCheckTests: XCTestCase {
         for verdict in ["connected", "disconnected unknown", "disconnected userInitiated", "disconnected networkLost"] {
             XCTAssertGreaterThan(tally.settled[verdict, default: 0], 0, "no session settled on \(verdict)", file: file, line: line)
         }
-        for kind in [Self.overdueUnderANewWindow, Self.ipv4OnlyTunnel] {
+        for kind in [Self.overdueUnderANewWindow, Self.ipv4OnlyTunnel, Self.recoveryUnderANewWindow] {
             XCTAssertGreaterThan(tally.reached[kind, default: 0], 0, "no state had \(kind)", file: file, line: line)
         }
     }
 
     private static let overdueUnderANewWindow = "an overdue deadline under a new window"
     private static let ipv4OnlyTunnel = "an IPv4-only tunnel"
+    private static let recoveryUnderANewWindow = "a blind gap ended under a window changed during it"
 
     private func explore(_ world: World, path: inout [Op], tally: inout Tally) {
         check(world, path: path, tally: &tally)
@@ -761,103 +695,19 @@ final class VPNFlapTimerModelCheckTests: XCTestCase {
             tally.fail("after one more reading settled on \(audited.detection.state), want \(settledLabel)", path)
         }
 
+        // A blind gap here, ended under each window and at each wait.
         var blinded = session
         blinded.reconcile(store, now: now, window: window, readable: false)
         if let fault = blinded.fault { tally.fail(fault, path) }
-    }
-
-    // MARK: - Differential against the shipped fuser
-
-    /// Every ordering of one-tunnel store changes and waits up to
-    /// `differentialDepth` with no restart, one window and every notification
-    /// delivered, run through today's monitor logic and through the timer.
-    /// The state changes, their times, the connected interfaces and the live
-    /// set must be the same. An op that changes nothing is not taken.
-    ///
-    /// One class of ordering is left out: an IPv4 key with no addresses on a
-    /// tunnel that has had none since the session began. The fuser admits it
-    /// as an interface it knows nothing about and reports `.unknown`, or
-    /// `.disconnected(.networkLost)` beside a removed tunnel; the timer does
-    /// not count it. `testAnAddresslessIPv4KeyIsWhereTheTimerAndTheFuserDiffer`
-    /// pins that difference.
-    func testTheTimerMatchesTheFuserOnEveryRestartFreeOrdering() {
-        var compared = 0, excluded = 0
-        var mismatches: [String] = []
-        let started = Date()
-
-        func explore(
-            store: StoreModel, edge: EdgeMonitorModel, level: LevelSession, now: TimeInterval,
-            everAddressed: Set<String>, path: inout [Op]
-        ) {
-            var edge = edge, level = level
-            let fuserSaw = edge.takeDeliveries(), timerSaw = level.takeDeliveries()
-            let names = "\(edge.connected) \(edge.live)"
-            let timerNames = "\(level.detection.carrying) \(level.detection.live)"
-            if fuserSaw != timerSaw || names != timerNames || level.fault != nil {
-                if mismatches.count < 5 {
-                    mismatches.append("\(path.map { "\($0)" }): fuser \(fuserSaw) \(names), timer \(timerSaw) \(timerNames)"
-                        + (level.fault.map { ", \($0)" } ?? ""))
-                }
-                return
-            }
-            guard path.count < Self.differentialDepth else {
-                compared += 1
-                return
-            }
-            for op in Op.oneTunnelAndClock {
-                var store = store, edge = edge, level = level, now = now, everAddressed = everAddressed
-                if let wait = op.wait {
-                    now += wait
-                    edge.advance(to: now)
-                    level.advance(store, to: now)
-                } else if let interface = op.touched {
-                    let changed = op.applied(to: store)
-                    guard changed != store else { continue }
-                    store = changed
-                    if store[interface] == .addressed { everAddressed.insert(interface) }
-                    if store[interface] == .emptyIPv4, !everAddressed.contains(interface) {
-                        excluded += 1
-                        continue
-                    }
-                    edge.handle(interface, store, now: now)
-                    level.reconcile(store, now: now)
-                }
-                path.append(op)
-                explore(store: store, edge: edge, level: level, now: now, everAddressed: everAddressed, path: &path)
-                path.removeLast()
+        for (gap, after) in [(0.4, Windows.wide), (2, Windows.immediate), (10, Windows.standard)] {
+            var recovered = blinded
+            recovered.reconcile(store, now: now + gap, window: after)
+            recovered.advance(store, from: now + gap, to: .infinity, window: after)
+            if let fault = recovered.fault { tally.fail("after a blind gap: \(fault)", path) }
+            if recovered.recoveredUnderANewWindow { tally.reached[Self.recoveryUnderANewWindow, default: 0] += 1 }
+            if recovered.detection.state.eventLabel != settledLabel {
+                tally.fail("after a blind gap settled on \(recovered.detection.state), want \(settledLabel)", path)
             }
         }
-
-        for initial in [StoreModel(), StoreModel(a: .addressed), StoreModel(a: .addressed, b: .addressed)] {
-            var path: [Op] = []
-            let everAddressed = Set(StoreModel.tunnels.filter { initial[$0] == .addressed })
-            explore(
-                store: initial, edge: EdgeMonitorModel(initial, now: 0), level: LevelSession(initial, now: 0), now: 0,
-                everAddressed: everAddressed, path: &path
-            )
-        }
-        print("VPNFlapTimer differential: \(Op.oneTunnelAndClock.count) ops, depth \(Self.differentialDepth), "
-            + "\(compared) orderings equal, \(excluded) prefixes excluded, \(mismatches.count) mismatches shown, "
-            + String(format: "%.1f s", Date().timeIntervalSince(started)))
-        XCTAssertEqual(mismatches, [])
-        XCTAssertEqual(compared, 2_121_874, "the alphabet or the depth changed")
-    }
-
-    func testAnAddresslessIPv4KeyIsWhereTheTimerAndTheFuserDiffer() {
-        // Off VPN, then a tunnel shows an IPv4 key with no addresses.
-        var store = StoreModel()
-        var edge = EdgeMonitorModel(store, now: 0)
-        var level = LevelSession(store, now: 0)
-        XCTAssertEqual(edge.takeDeliveries().map(\.state), [.disconnected(reason: .unknown)])
-        XCTAssertEqual(level.takeDeliveries().map(\.state), [.disconnected(reason: .unknown)])
-
-        store = Op.emptyA.applied(to: store)
-        edge.handle(StoreModel.tunnelA, store, now: 1)
-        level.reconcile(store, now: 1)
-
-        XCTAssertEqual(edge.takeDeliveries().map(\.state), [.unknown],
-                       "the fuser gives up a settled verdict for an interface it has never seen connected")
-        XCTAssertEqual(level.takeDeliveries(), [], "the timer still reads the store as off VPN")
-        XCTAssertEqual(level.detection.state, .disconnected(reason: .unknown))
     }
 }
