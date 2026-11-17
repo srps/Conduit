@@ -70,3 +70,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0044](0044-split-dns-follows-vpn-pushed-resolvers.md) | Split DNS follows the resolvers a connected VPN pushes | accepted | partial | pending |
 | [0045](0045-doh-never-asks-macos-for-proxy-credentials.md) | DoH skips the upstream, and Conduit's DoH and PAC sessions never hand a proxy challenge to macOS | accepted | implemented | pending |
 | [0046](0046-bound-what-grows.md) | Bound what grows, validate what a trusted local source replaces | proposed | implemented | none |
+| [0047](0047-vpn-blind-gap-and-local-captures.md) | A blind gap is measured from the last good VPN reading, and store captures stay local | proposed | planned | none |
