@@ -104,6 +104,7 @@ enum PMSim {
               dns-split-follows-vpn   DNS: the actual host asks the server a connected VPN pushed, and stops on disconnect, with no forwarder restart (0044)
               dns-split-flap-holds    DNS: a VPN flap with the DNS key withdrawn keeps the pushed server answering; a disconnect stops it (0044)
               dns-split-detection-failed DNS: a pushed-resolver store that cannot be read drops the detected set; the next reading restores it (0044)
+              dns-split-detection-retries DNS: a pushed-resolver store that cannot be created or subscribed to is retried on the read schedule until it reads (0048, #304)
               observable-target-redaction  Query/fragment privacy across observations
               private-config-boundary  Private configuration frame: cap, read schedules, redaction and refusals
               private-editor-codec  Private editor read and reply: correlation, admission, observation, reply cap and kinds
@@ -308,6 +309,7 @@ enum PMSim {
         "dns-split-follows-vpn",
         "dns-split-flap-holds",
         "dns-split-detection-failed",
+        "dns-split-detection-retries",
         "observable-target-redaction",
         "private-config-boundary",
         "private-editor-codec",
@@ -519,6 +521,8 @@ enum PMSim {
             return [try await SplitDNSFollowsVPNScenarios.flapHolds()]
         case "dns-split-detection-failed":
             return [try await SplitDNSFollowsVPNScenarios.detectionFailed()]
+        case "dns-split-detection-retries":
+            return [try await SplitDNSFollowsVPNScenarios.detectionRetries()]
         case "observable-target-redaction":
             return [try await ObservableTargetScenarios.redaction()]
         case "private-config-boundary":

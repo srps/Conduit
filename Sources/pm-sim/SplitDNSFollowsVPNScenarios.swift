@@ -9,8 +9,8 @@ import PlatformMac
 import ProxyAuth
 import ProxyKernel
 
-/// `pm-sim dns-split-follows-vpn`, `pm-sim dns-split-flap-holds` and `pm-sim dns-split-detection-failed`
-/// (decision 0044): split DNS follows the resolvers a connected VPN pushes, through the actual `RuntimeHost` over a
+/// `pm-sim dns-split-follows-vpn`, `pm-sim dns-split-flap-holds`, `pm-sim dns-split-detection-failed` (decision
+/// 0044) and `pm-sim dns-split-detection-retries` (decision 0048, #304): split DNS follows the resolvers a connected VPN pushes, through the actual `RuntimeHost` over a
 /// scratch root.
 ///
 /// The machine is fakes throughout: a fake VPN observer, a fake pushed-resolver observer, a loopback UDP server
@@ -145,7 +145,7 @@ enum SplitDNSFollowsVPNScenarios {
             check("the tunnel's server answers again", try await stage.resolve(internalName) == corpIP)
         } verify: { events, _, check in
             let failures = events.filter { $0.event == "dns.split_detection_failed" }.compactMap(\.detail)
-            check("the failure was reported once", failures == ["reason=store_read"])
+            check("the failure was reported once", failures == ["reason=store_read attempt=1"])
             let swaps = events.filter { $0.event == "dns.split_table_changed" }.compactMap(\.detail)
             check("the table was swapped on the push, the failure, the recovery and the stop", swaps == [
                 "detected_domains=1 manual_domains=0 rules=1 reason=pushed",
@@ -160,6 +160,59 @@ enum SplitDNSFollowsVPNScenarios {
                 "outcome=applied", "outcome=cleared", "outcome=applied", "outcome=cleared",
             ])
         }
+    }
+
+    /// A store that cannot be created, then cannot be subscribed to, is tried again on the read schedule, each time
+    /// on a new session, and the third session's reading puts the tunnel's server in use (#304). The real
+    /// `PushedResolverMonitor` runs over a scripted store and a held clock, so the retries are counted, not timed.
+    @RuntimeActor
+    static func detectionRetries() async throws -> ScenarioResult {
+        let store = ScriptedPushedResolverStore(keys: [
+            "State:/Network/Service/com.cisco.anyconnect/DNS": [
+                "SupplementalMatchDomains": ["corp.example"], "ServerAddresses": ["192.0.2.53"],
+            ] as [String: Any],
+            "State:/Network/Service/com.cisco.anyconnect/IPv4": ["InterfaceName": "utun6", "Addresses": ["192.0.2.200"]],
+        ], createFailures: 1, subscribeFailures: 1)
+        let clock = FakeStoreObserverClock()
+        let monitor = PushedResolverMonitor(calls: store.calls, clock: clock.clock)
+        return try await run(name: "dns-split-detection-retries", observer: monitor) { stage, check in
+            try await stage.report(.connected, live: ["utun6"])
+            check("while the store cannot be read nothing is in use", try await stage.settles { $0.rows.isEmpty })
+            check("off the detected set the name resolves publicly", try await stage.resolve(internalName) == publicIP)
+
+            var delays: [TimeInterval] = []
+            for _ in 0..<2 {
+                guard let sleep = try await pendingSleep(clock) else { break }
+                delays.append(sleep.seconds)
+                clock.fire()
+            }
+            check("the retries waited 1 s and then 2 s", delays == [1, 2])
+            check("the third session's reading puts the set in use", try await stage.settles { $0.state == .inUse && $0.rows.count == 1 })
+            check("the tunnel's server answers", try await stage.resolve(internalName) == corpIP)
+            check("each attempt built a new session", store.creates == 3)
+            check("a healthy session leaves no retry pending", clock.pendingSleep == nil && clock.overlappingSleeps == 0)
+        } verify: { events, _, check in
+            let failures = events.filter { $0.event == "dns.split_detection_failed" }.compactMap(\.detail)
+            check("each failed attempt was reported with its step and number", failures == [
+                "reason=store_create attempt=1", "reason=store_subscribe attempt=2",
+            ])
+            let recoveries = events.filter { $0.event == "dns.split_detection_recovered" }.compactMap(\.detail)
+            check("the recovery was reported once with the attempts it ended", recoveries == ["attempts=2"])
+            let reasons = events.filter { $0.event == "dns.split_table_changed" }.compactMap(\.detail).map {
+                $0.split(separator: " ").last.map(String.init) ?? ""
+            }
+            check("the table was swapped on the recovered reading and the stop", reasons == ["reason=pushed", "reason=detection_off"])
+        }
+    }
+
+    /// The wake-up the monitor has armed, once it has armed one, within ten seconds.
+    @RuntimeActor
+    private static func pendingSleep(_ clock: FakeStoreObserverClock) async throws -> FakeStoreObserverClock.Sleep? {
+        for _ in 0..<1000 {
+            if let sleep = clock.pendingSleep { return sleep }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return nil
     }
 
     // MARK: - Harness
@@ -236,6 +289,7 @@ enum SplitDNSFollowsVPNScenarios {
     @RuntimeActor
     private static func run(
         name: String,
+        observer: PushedResolverMonitor? = nil,
         _ body: @RuntimeActor (Stage, (String, Bool) -> Void) async throws -> Void,
         verify: ([RuntimeEvent], ProxyConfig, (String, Bool) -> Void) -> Void
     ) async throws -> ScenarioResult {
@@ -305,7 +359,7 @@ enum SplitDNSFollowsVPNScenarios {
                 networkLocation: FakeNetworkLocationObserver(),
                 networkLocationStoreFactory: { _ in nil },
                 vpnStatusMonitor: { _, _ in vpn },
-                pushedResolvers: pushed,
+                pushedResolvers: observer ?? pushed,
                 wake: FakeSystemWakeObserver(),
                 homeDirectory: home,
                 resolverDirectory: machine.resolverDirectory.path,
@@ -319,7 +373,7 @@ enum SplitDNSFollowsVPNScenarios {
             let clients = try host.makeInMemoryControlClient(
                 limits: try controlLimits(), clientFrameLimits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
             )
-            check("the pushed-resolver observer runs beside the forwarder", pushed.isObserving)
+            if observer == nil { check("the pushed-resolver observer runs beside the forwarder", pushed.isObserving) }
             try await body(Stage(host: host, control: clients.control, vpn: vpn, pushed: pushed, corp: corp), check)
         } catch {
             notes.append("failed: \(error)")
@@ -327,12 +381,12 @@ enum SplitDNSFollowsVPNScenarios {
         }
 
         await host.stopRuntime()
-        do {
+        if observer == nil { do {
             check("stopping the runtime stops the pushed-resolver observer", try await stopped(pushed))
         } catch {
             notes.append("the wait for the observer to stop ended early: \(error)")
             check("stopping the runtime stops the pushed-resolver observer", false)
-        }
+        } }
         let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
         let flush = await host.flushEvents()
         check("the host settles and flushes", settled == .settled && flush.allConfirmed)
