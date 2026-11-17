@@ -1132,7 +1132,7 @@ package final class ProxyOrchestrator {
 
     /// The verdict every VPN reaction is classified against; `snapshot.vpnState` shows what the monitor last said. Kept across a
     /// stop and a monitor restart: the breakers, held sweeps and PAC answers it describes outlive both.
-    private var vpn = VPNVerdict()
+    private var vpn = VPNReactionHistory()
 
     /// Probes started, and the latest-started one that committed. Probes
     /// overlap (a VPN handler, the retry timer, the error-rate alarm); one
@@ -2366,7 +2366,7 @@ package final class ProxyOrchestrator {
     ///   Close the DIRECT tunnels dialed while it was down (#148).
     /// * `* → .unknown` → the monitor cannot read the store. Routing holds;
     ///   only the pending sweeps wait. Every transition above is judged
-    ///   against the last definite verdict, never `.unknown` (`VPNVerdict`),
+    ///   against the last definite verdict, never `.unknown` (`VPNReactionHistory`),
     ///   so `.reasserting → .unknown → .connected` is a flap recovery, and
     ///   the same verdict after a blind reading does nothing else but resume
     ///   the held sweeps, except `.reasserting`, which keeps holding them.
@@ -2390,7 +2390,7 @@ package final class ProxyOrchestrator {
             // The newer state that was applied runs its own sweeps.
             return
         }
-        let previous: VPNVerdict.Definite?
+        let previous: VPNReactionHistory.Definite?
         switch vpn.record(state, tunnel: interfaceName) {
         case nil:
             return
@@ -3261,7 +3261,7 @@ package final class ProxyOrchestrator {
     ///                           | otherwise assume off-VPN/direct startup
     ///
     /// A blind reading (`.unknown` mid-session) leaves the last definite
-    /// verdict in place, so routing holds through it (`VPNVerdict`).
+    /// verdict in place, so routing holds through it (`VPNReactionHistory`).
     ///
     /// This avoids needing two parallel cause-priority systems. Call sites
     /// (`refreshConnectivityMode`, post-recovery reprobes in

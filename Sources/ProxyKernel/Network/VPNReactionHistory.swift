@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-/// The VPN verdict `ProxyOrchestrator` reacts to.
+/// The VPN verdicts `ProxyOrchestrator` has reacted to: the last definite one, and whether the monitor is blind now.
 ///
 /// The monitor reports `.unknown` only while it cannot read the store
 /// (decision 0048). That report says nothing about the tunnel, so it is kept
@@ -9,7 +9,7 @@
 /// or connect seen through a blind reading is still that flap, outage or
 /// connect. `definite == nil` is the cold start: no definite verdict yet in
 /// this runtime.
-struct VPNVerdict: Equatable, Sendable {
+struct VPNReactionHistory: Equatable, Sendable {
     /// A verdict that says something about the tunnel.
     enum Definite: Equatable, Sendable {
         case connected
