@@ -1,7 +1,7 @@
 # 0046: Bound what grows, validate what a trusted local source replaces
 
 - Date: 2026-11-17
-- Decision: proposed
+- Decision: accepted (owner, 2026-11-17, [#315 comment](https://github.com/srps/Conduit/pull/315#issuecomment-6945669351): bound what grows, validate what a trusted local source replaces)
 - Implementation: implemented
 - Validation: none
 - Supersedes: none

@@ -1,7 +1,7 @@
 # 0047: A blind gap is measured from the last good VPN reading, and store captures stay local
 
 - Date: 2026-11-17
-- Decision: proposed
+- Decision: accepted (owner, 2026-11-17, [#315 comment](https://github.com/srps/Conduit/pull/315#issuecomment-6945669351): blind gap judged as the recovery snapshot read at the last good reading with the windows in force then; captures stay local)
 - Implementation: planned
 - Validation: none
 - Supersedes: none
