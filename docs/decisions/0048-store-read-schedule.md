@@ -1,7 +1,7 @@
 # 0048: Retry a failed store reading with backoff, audit a healthy one every 60 s, and withhold split DNS while blind
 
 - Date: 2026-11-17
-- Decision: proposed
+- Decision: accepted (owner, 2026-11-17, #316)
 - Implementation: partial
 - Validation: none
 - Supersedes: none
