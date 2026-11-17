@@ -192,6 +192,70 @@ final class VPNStatusMonitorTests: XCTestCase {
         XCTAssertNil(clock.fire())
     }
 
+    // MARK: - Stop is a barrier for deliveries
+
+    /// The review's ordering on #317: a reconcile passed its entry check and was reading the window when the host
+    /// stopped the monitor. Released after the stop, it publishes nothing: an obsolete `.connected` would turn the
+    /// host's retained gate to wanted after its teardown.
+    func testAReconcileOvertakenByAStopPublishesNothing() {
+        let queue = DispatchQueue(label: "VPNStatusMonitorTests.held")
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let windowReads = Counter()
+        let monitor = VPNStatusMonitor(
+            graceSecondsProvider: {
+                if windowReads.next() == 1 {
+                    entered.signal()
+                    _ = release.wait(timeout: .now() + 5)
+                }
+                return 5
+            },
+            store: store, clock: clock.clock, queue: queue
+        )
+        let seen = Seen(monitor)
+        connect()
+        monitor.start()
+        XCTAssertEqual(entered.wait(timeout: .now() + 5), .success, "the first reconcile is reading the window")
+
+        monitor.stop()
+        release.signal()
+        queue.sync {}
+
+        XCTAssertEqual(seen.states(0), [], "no state of the stopped session after stop returned")
+        XCTAssertEqual(seen.events(0), [])
+        XCTAssertNil(monitor.connectedInterfaceName)
+        XCTAssertEqual(monitor.liveInterfaceNames, [])
+        XCTAssertNil(clock.pendingSleep, "no wake-up armed for the stopped session")
+    }
+
+    /// A consumer may stop the monitor from a callback on the monitor's queue. The stop returns at once, and the
+    /// delivery that called it publishes nothing after it: here the event comes first and the state is dropped.
+    func testAStopFromInsideACallbackReturnsAndPublishesNothingAfterIt() {
+        let queue = DispatchQueue(label: "VPNStatusMonitorTests.reentrant")
+        let monitor = VPNStatusMonitor(store: store, clock: clock.clock, queue: queue)
+        let seen = Seen(monitor)
+        let events = Counter()
+        monitor.setOnEvent { [weak monitor] _, _ in
+            _ = events.next()
+            monitor?.stop()
+        }
+        store.readFailure = .init(.storeRead, code: 1001)
+        monitor.start()
+        queue.sync {}
+
+        XCTAssertEqual(events.value, 1, "vpn.store_failed was emitted")
+        XCTAssertEqual(seen.states(0), [], "the .unknown after it belonged to the stopped session")
+        XCTAssertEqual(store.subscriptionCount, 0)
+
+        store.readFailure = nil
+        connect()
+        monitor.setOnChange { [weak monitor] _ in monitor?.stop() }
+        monitor.start()
+        queue.sync {}
+        XCTAssertEqual(store.subscriptionCount, 0, "a stop from onChange returned and ended the session")
+        XCTAssertEqual(monitor.connectedInterfaceName, "utun6", "the names were published before the callback")
+    }
+
     // MARK: - Reports
 
     func testAMalformedTunnelKeyIsReportedOnceWhileItStays() {
@@ -222,6 +286,13 @@ final class VPNStatusMonitorTests: XCTestCase {
         XCTAssertEqual("\(detached.event) \(detached.detail ?? "")", "vpn.store_released_uncancelled outcome=detached")
         XCTAssertEqual("\(refused.event) \(refused.detail ?? "")", "vpn.store_released_uncancelled outcome=store_unsubscribe code=1003")
     }
+}
+
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func next() -> Int { lock.withLock { count += 1; return count } }
 }
 
 /// What a monitor delivered and emitted, waited for with a bound.

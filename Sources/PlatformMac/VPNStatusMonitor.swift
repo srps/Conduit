@@ -26,7 +26,10 @@ import ProxyKernel
 ///
 /// Threading: store callbacks and wake-ups run on `monitorQueue`, which owns
 /// the session; `onChange` and `onEvent` run there. The names a consumer
-/// reads inside `onChange` are set before it is called.
+/// reads inside `onChange` are set before it is called. A reconcile reads the
+/// providers and decides outside `barrier`, then publishes inside it, the
+/// session, the events, the names and `onChange`; `stop` enters the same
+/// barrier, so once it returns nothing of the stopped session is published.
 package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
     private let monitorQueue: DispatchQueue
     private let store: any TunnelStoreReading
@@ -38,6 +41,7 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
     private let onChangeBox = NIOLockedValueBox<(@Sendable (VPNObservedState) -> Void)?>(nil)
     private let onEventBox = NIOLockedValueBox<(@Sendable (RuntimeEvent, LogLevel) -> Void)?>(nil)
     private let lifecycleBox = NIOLockedValueBox<LifecycleState>(.init())
+    private let barrier = ObserverStopBarrier()
     private let namesBox = NIOLockedValueBox<(connected: String?, live: [String])>((nil, []))
     /// Touched only on `monitorQueue`.
     private var session: Session?
@@ -118,15 +122,17 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
     }
 
     package func stop() {
-        let teardown = lifecycleBox.withLockedValue { state -> ((any TunnelStoreSubscription)?, Task<Void, Never>?) in
-            guard state.started else { return (nil, nil) }
-            defer {
-                state.started = false
-                state.generation &+= 1
-                state.subscription = nil
-                state.wake = nil
+        let teardown = barrier.stop {
+            lifecycleBox.withLockedValue { state -> ((any TunnelStoreSubscription)?, Task<Void, Never>?) in
+                guard state.started else { return (nil, nil) }
+                defer {
+                    state.started = false
+                    state.generation &+= 1
+                    state.subscription = nil
+                    state.wake = nil
+                }
+                return (state.subscription, state.wake)
             }
-            return (state.subscription, state.wake)
         }
         teardown.1?.cancel()
         if let subscription = teardown.0 { reportCancel(subscription.cancel()) }
@@ -195,32 +201,35 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
         reconcile(store.read(), generation)
     }
 
-    /// Runs on `monitorQueue`.
+    /// Runs on `monitorQueue`. The generation is checked again inside the
+    /// barrier and before each callback, so a stop made meanwhile, or by one
+    /// of these callbacks, ends the delivery there.
     private func reconcile(_ reading: TunnelReading, _ generation: UInt64) {
         guard isCurrent(generation), var session, session.generation == generation else { return }
         let now = clock.now()
         let window = VPNFlapWindow(minVisible: minVisibleSecondsProvider(), grace: graceSecondsProvider())
         let detection = session.timer.reconcile(reading, now: now, window: window, up: up)
 
+        var events: [(RuntimeEvent, LogLevel)] = []
         let readDue: TimeInterval?
         switch reading {
         case .failed(let failure):
             let retry = session.schedule.failed(at: now)
             if retry.reports {
-                emit(RuntimeEvent(
+                events.append((RuntimeEvent(
                     kind: .health, event: "vpn.store_failed",
                     detail: "reason=\(failure.step.rawValue) code=\(failure.code) attempt=\(retry.attempt)"
-                ), .warning)
+                ), .warning))
             }
             readDue = retry.due
         case .snapshot(let snapshot):
             let healthy = session.schedule.succeeded(at: now)
             if let attempts = healthy.recoveredAfter {
-                emit(RuntimeEvent(kind: .health, event: "vpn.store_recovered", detail: "attempts=\(attempts)"), .notice)
+                events.append((RuntimeEvent(kind: .health, event: "vpn.store_recovered", detail: "attempts=\(attempts)"), .notice))
             }
             let malformed = Set(snapshot.malformedKeys)
             for key in malformed.subtracting(session.malformed).sorted() {
-                emit(RuntimeEvent(kind: .health, event: "vpn.store_key_malformed", detail: "key=\(key)"), .warning)
+                events.append((RuntimeEvent(kind: .health, event: "vpn.store_key_malformed", detail: "key=\(key)"), .warning))
             }
             session.malformed = malformed
             readDue = healthy.due
@@ -228,21 +237,29 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
 
         let deliver = detection.state != session.delivered
         session.delivered = detection.state
-        self.session = session
-        if let due = [readDue, detection.deadline].compactMap({ $0 }).min() {
-            arm(after: max(0, due - now), generation)
+        let decided = session
+        barrier.deliver {
+            guard isCurrent(generation) else { return }
+            self.session = decided
+            if let due = [readDue, detection.deadline].compactMap({ $0 }).min() {
+                arm(after: max(0, due - now), generation)
+            }
+            for (event, level) in events {
+                guard isCurrent(generation) else { return }
+                emit(event, level)
+            }
+            guard isCurrent(generation) else { return }
+            let namesMoved = namesBox.withLockedValue { names -> Bool in
+                defer { names = (detection.carrying.first, detection.live) }
+                return names.connected != detection.carrying.first || names.live != detection.live
+            }
+            // An unchanged `.connected` is delivered again when the tunnel
+            // carrying it or the live set moved, so the hosts pick up the new
+            // names; the orchestrator treats it as a name update, not a
+            // transition.
+            guard deliver || (namesMoved && detection.state == .connected) else { return }
+            onChangeBox.withLockedValue { $0 }?(detection.state)
         }
-
-        let namesMoved = namesBox.withLockedValue { names -> Bool in
-            defer { names = (detection.carrying.first, detection.live) }
-            return names.connected != detection.carrying.first || names.live != detection.live
-        }
-        // An unchanged `.connected` is delivered again when the tunnel
-        // carrying it or the live set moved, so the hosts pick up the new
-        // names; the orchestrator treats it as a name update, not a
-        // transition.
-        guard deliver || (namesMoved && detection.state == .connected) else { return }
-        onChangeBox.withLockedValue { $0 }?(detection.state)
     }
 
     /// Replaces the pending wake-up with one `delay` seconds out, allowed to
