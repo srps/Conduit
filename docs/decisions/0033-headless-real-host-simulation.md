@@ -101,6 +101,12 @@ supersession, using mandatory state-file and loopback-probe effects. The shared
 held-PAC fake is consumed by tests and pm-sim. This retains the scoped production
 facade and adds no store/lease exposure or public test hook.
 
+The upstream connectivity probe behind each routing verdict is a mandatory effect too
+([`RuntimeConnectivityProbe`](../../Sources/ConduitRuntime/RuntimeHostEffects.swift)). The
+daemon and app compositions name `.system`, the orchestrator's own `UpstreamProber`; the
+actual-host pm-sim scenarios inject `SimulatedUpstreams.unreachable`, so none dials the
+unowned `127.0.0.1:9` their configuration names. The XCTest host helpers still name `.system`.
+
 ## Open questions
 
 None for this scoped change. Private editor reply sizing and remaining service

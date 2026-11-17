@@ -78,6 +78,7 @@ private func makeHostEffects(
         kerberosTicketRecovery: FakeKerberosTicketRecovery(),
         gss: gss,
         pacEvaluator: pacEvaluator,
+        connectivityProbe: .system,
         portHolderProbe: FakeListenerPortHolderProbe(),
         loopbackPortProbe: loopbackPortProbe.liveness(port:),
         commandRunner: commandRunner,

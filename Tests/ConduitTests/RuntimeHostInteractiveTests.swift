@@ -147,6 +147,7 @@ final class InteractiveHostHarness {
                     kerberosTicketRecovery: FakeKerberosTicketRecovery(),
                     gss: .injected { RefusingGSS() },
                     pacEvaluator: pacEvaluator,
+                    connectivityProbe: .system,
                     portHolderProbe: FakeListenerPortHolderProbe(),
                     loopbackPortProbe: FakeLoopbackPortProbe().liveness(port:),
                     commandRunner: { launchPath, arguments in

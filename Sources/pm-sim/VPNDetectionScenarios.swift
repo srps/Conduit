@@ -8,7 +8,8 @@ import ProxyKernel
 
 /// The level-triggered VPN monitor (unit U3, decisions 0047 and 0048) inside the actual `RuntimeHost` (decision 0033),
 /// over a scratch root. The monitor is the production `VPNStatusMonitor` over `FakeTunnelStore` and a held clock; every
-/// other machine effect is a fake, the privilege client and the resolver directory are `FakeMachine`'s. Time moves only
+/// other machine effect is a fake, the privilege client and the resolver directory are `FakeMachine`'s, and the upstream
+/// probe answers without dialing (`SimulatedUpstreams`). Time moves only
 /// when a scenario fires the one wake-up the monitor holds, so the retries, deadlines and audits are counted, not timed.
 /// The host is read through what a client sees: its control snapshot, the resolver files and its events file.
 ///
@@ -255,6 +256,7 @@ enum VPNDetectionScenarios {
                 kerberosTicketRecovery: FakeKerberosTicketRecovery(),
                 gss: .injected { NoGSS() },
                 pacEvaluator: FakePacEvaluator(),
+                connectivityProbe: .injected(SimulatedUpstreams.unreachable),
                 portHolderProbe: FakeListenerPortHolderProbe(),
                 loopbackPortProbe: FakeLoopbackPortProbe().liveness(port:),
                 commandRunner: { try machine.run($0, $1) },

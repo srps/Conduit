@@ -539,6 +539,7 @@ enum DevLaunch {
                 kerberosTicketRecovery: FakeKerberosTicketRecovery(),
                 gss: .injected { DevRefusingGSS() },
                 pacEvaluator: pac,
+                connectivityProbe: .system,
                 portHolderProbe: FakeListenerPortHolderProbe(),
                 loopbackPortProbe: FakeLoopbackPortProbe().liveness(port:),
                 commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },

@@ -203,6 +203,7 @@ enum RuntimeHostEffectsScenario {
             kerberosTicketRecovery: FakeKerberosTicketRecovery(),
             gss: .injected { fakes.gss },
             pacEvaluator: pac ?? fakes.pac,
+            connectivityProbe: .injected(SimulatedUpstreams.unreachable),
             portHolderProbe: fakes.probe,
             loopbackPortProbe: fakes.loopback.liveness(port:),
             commandRunner: { launchPath, arguments in

@@ -350,6 +350,7 @@ enum SplitDNSFollowsVPNScenarios {
                 kerberosTicketRecovery: FakeKerberosTicketRecovery(),
                 gss: .injected { NoGSS() },
                 pacEvaluator: FakePacEvaluator(),
+                connectivityProbe: .injected(SimulatedUpstreams.unreachable),
                 portHolderProbe: FakeListenerPortHolderProbe(),
                 loopbackPortProbe: FakeLoopbackPortProbe().liveness(port:),
                 commandRunner: { try machine.run($0, $1) },

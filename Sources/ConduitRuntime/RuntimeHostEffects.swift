@@ -23,6 +23,23 @@ package enum RuntimeGSSSource: Sendable {
     }
 }
 
+/// How a host probes its upstreams before it commits a routing verdict (direct mode or upstream).
+///
+/// `.system` leaves `ProxyOrchestrator` to build `UpstreamProber`, which connects to each configured upstream over its own
+/// log store. Production uses it. `.injected` answers for a test or simulator, so no upstream is dialed.
+package enum RuntimeConnectivityProbe: Sendable {
+    case system
+    case injected(@Sendable ([UpstreamProxy]) async -> UpstreamProbeSummary)
+
+    /// The probe `ProxyOrchestrator` takes. `nil` keeps its own prober.
+    var override: (@Sendable ([UpstreamProxy]) async -> UpstreamProbeSummary)? {
+        switch self {
+        case .system: nil
+        case .injected(let probe): probe
+        }
+    }
+}
+
 /// The privilege adapters one run uses: the base client every privileged side effect goes through, and the
 /// helper status source for split-DNS retries. `helperStatus` `nil` observes nothing, so a run never reaches a
 /// helper it was not given.
@@ -66,6 +83,8 @@ package struct RuntimeHostEffects: Sendable {
     package let gss: RuntimeGSSSource
     /// PAC fetch and evaluation (CFNetwork in production).
     package let pacEvaluator: any PacEvaluator
+    /// The upstream probe behind each routing verdict.
+    package let connectivityProbe: RuntimeConnectivityProbe
     /// Names the process holding a port that failed to bind (`libproc` in production).
     package let portHolderProbe: any ListenerPortHolderProbing
     /// Whether a listener serves a loopback port. The system proxy's stale-listener check asks it at launch recovery and before a restore;
@@ -105,6 +124,7 @@ package struct RuntimeHostEffects: Sendable {
         kerberosTicketRecovery: any KerberosTicketRecovering,
         gss: RuntimeGSSSource,
         pacEvaluator: any PacEvaluator,
+        connectivityProbe: RuntimeConnectivityProbe,
         portHolderProbe: any ListenerPortHolderProbing,
         loopbackPortProbe: @escaping @Sendable (Int) -> LoopbackLiveness,
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult,
@@ -125,6 +145,7 @@ package struct RuntimeHostEffects: Sendable {
         self.kerberosTicketRecovery = kerberosTicketRecovery
         self.gss = gss
         self.pacEvaluator = pacEvaluator
+        self.connectivityProbe = connectivityProbe
         self.portHolderProbe = portHolderProbe
         self.loopbackPortProbe = loopbackPortProbe
         self.commandRunner = commandRunner

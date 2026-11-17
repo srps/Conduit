@@ -120,6 +120,7 @@ final class AppStateHarness {
                 kerberosTicketRecovery: FakeKerberosTicketRecovery(),
                 gss: .injected { HarnessRefusingGSS() },
                 pacEvaluator: pacEvaluator,
+                connectivityProbe: .system,
                 portHolderProbe: FakeListenerPortHolderProbe(),
                 loopbackPortProbe: loopbackPortProbe.liveness(port:),
                 commandRunner: { launchPath, arguments in

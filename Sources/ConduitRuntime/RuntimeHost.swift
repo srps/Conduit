@@ -539,6 +539,7 @@ package final class RuntimeHost {
             eventLog: diagnosticsEventLog,
             resolverManager: tunnelResolverManager,
             portHolderProbe: effects.portHolderProbe,
+            connectivityProbe: effects.connectivityProbe.override,
             dnsForwarderTuning: dnsForwarderTuning
         )
         self.orchestrator = orchestrator
