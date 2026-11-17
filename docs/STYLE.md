@@ -12,7 +12,7 @@ Conduit is a **menu-bar tool people rely on every working day**. It authenticate
 
 That product shape imposes a discipline:
 
-- **Unbounded anything is a bug.** A leaky cache or queue over 30 days of daily use manifests as "why did my Mac fan spin up?"
+- **Unbounded growth is a bug.** A leaky cache or queue over 30 days of daily use manifests as "why did my Mac fan spin up?"
 - **Silent failures are user-hostile.** If the proxy quietly falls through to DIRECT, the user trusts a broken tool.
 - **System side effects are dangerous.** Mutating `/etc/resolver`, DNS, proxy settings, or login items in the wrong state leaves the machine wedged.
 - **Credentials are radioactive.** A leaked `Proxy-Authorization` header is a corporate-security incident.
@@ -29,9 +29,13 @@ STYLE encodes the habits that keep those failure modes out.
 
 ## Principles
 
-### 1. Bound everything
+### 1. Bound what grows
 
-Every pool, queue, cache, and buffer has a **fixed capacity defined in config**. The runtime runs for weeks without memory growth. Unbounded growth is a bug.
+Every pool, queue, cache, and buffer that **grows over time, or whose size comes from input Conduit does not trust**, has a **fixed capacity**, defined in config or as a named constant with its reason. The bound says what happens at the limit (reject, evict or spill) and emits a `RuntimeEvent` when it applies. The runtime runs for weeks without memory growth. Unbounded growth is a bug.
+
+**Validate, don't cap, what a trusted local source replaces.** A value rebuilt whole on each read of a trusted local source, such as an SCDynamicStore reading, takes its size from the source, and the next read replaces it. Validate it at the boundary (rule 4). This trades a little memory for availability: a cap would limit only what Conduit keeps after parsing, which the source already bounds, and it adds a failure, because a truncated reading can drop the entry that matters and a refused one leaves Conduit blind while the source is healthy. Network peers, local listener clients, PAC and DoH servers, upstream responses and user-writable files are untrusted. Root-owned system state is trusted. Configuration files are user-writable and keep their resource ceilings, and anything that keeps entries from earlier reads grows and keeps its cap. See [decision 0046](decisions/0046-bound-what-grows.md).
+
+**Transport and display limits are separate.** A frame cap or a Settings row count applies where that limit is, to what crosses it, not to the data underneath.
 
 **Already applied:**
 
@@ -44,7 +48,7 @@ Every pool, queue, cache, and buffer has a **fixed capacity defined in config**.
 
 **Still needed (pending audit):** PAC evaluation queue bound, pending-auth handshake bound per source IP, any new collection introduced post-audit.
 
-**Rule of thumb:** if you write `var x: [T] = []` and `append` to it in a loop that reads from the network, a timer, or another unbounded source, you need a cap.
+**Rule of thumb:** if you write `var x: [T] = []` and `append` to it in a loop that reads from the network, a timer, or another unbounded source, you need a cap. If the collection is rebuilt from scratch on each read of a trusted local source, validate it instead.
 
 ### 2. Assert invariants, not just happy paths
 
@@ -183,7 +187,7 @@ STYLE is TIGER_STYLE minus the parts that are over-engineering for a desktop pro
 
 | TIGER_STYLE rule | STYLE position |
 |---|---|
-| Bounded everything | ✅ Adopted (rule 1). |
+| Bounded everything | 🟡 Narrowed to what grows or takes its size from untrusted input (rule 1, decision 0046). |
 | Assert invariants | ✅ Adopted (rule 2). |
 | Zero dependencies | ⛔ Rejected. We ship on SwiftNIO + Apple frameworks. That's fine. |
 | 70-line function limit | 🟡 Relaxed to 100 (rule 5). |
@@ -197,7 +201,7 @@ STYLE is TIGER_STYLE minus the parts that are over-engineering for a desktop pro
 
 For reviewers (human or AI). When reviewing a PR, walk this list:
 
-- [ ] **Bounds.** Every new collection/cache/queue/buffer has a cap from config or a `precondition`-backed invariant. (Rule 1)
+- [ ] **Bounds.** Every new collection/cache/queue/buffer that grows over time or takes its size from untrusted input has a cap from config or a `precondition`-backed invariant, and an event at the limit. A snapshot of a trusted local source is validated instead. (Rule 1)
 - [ ] **Invariants.** Mutations assert post-conditions. Crashes are `precondition` with context; user errors `throws`. (Rule 2)
 - [ ] **Events first.** Every routing / auth / failover / health / config decision emits a `RuntimeEvent`. Log lines derive from events. (Rule 3)
 - [ ] **Boundary validation.** New external input is validated at the module boundary, not defensively inside Core. (Rule 4)
