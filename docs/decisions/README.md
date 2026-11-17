@@ -71,3 +71,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0045](0045-doh-never-asks-macos-for-proxy-credentials.md) | DoH skips the upstream, and Conduit's DoH and PAC sessions never hand a proxy challenge to macOS | accepted | implemented | pending |
 | [0046](0046-bound-what-grows.md) | Bound what grows, validate what a trusted local source replaces | accepted | implemented | none |
 | [0047](0047-vpn-blind-gap-and-local-captures.md) | A blind gap is measured from the last good VPN reading, and store captures stay local | accepted | planned | none |
+| [0048](0048-store-read-schedule.md) | Retry a failed store reading with backoff, audit a healthy one every 60 s, and withhold split DNS while blind | proposed | planned | none |
