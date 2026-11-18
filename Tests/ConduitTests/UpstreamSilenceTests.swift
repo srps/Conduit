@@ -8,7 +8,8 @@ import XCTest
 @testable import ProxyAuth
 @testable import ProxyKernel
 
-private final class ScriptedUpstream: @unchecked Sendable {
+/// A loopback upstream proxy that answers each request line as `script` says.
+final class ScriptedUpstream: @unchecked Sendable {
     enum Answer { case ok, status(Int), silent }
 
     private let script: @Sendable (_ connection: Int, _ requestLine: String) -> Answer
