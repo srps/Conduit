@@ -3,7 +3,8 @@
 
     python3 formal/vpn-detection/check.py            # the checks CI runs
     python3 formal/vpn-detection/check.py --mutants  # also show each property catching its bug
-    python3 formal/vpn-detection/check.py --only safety
+    python3 formal/vpn-detection/check.py --only safety-core
+    python3 formal/vpn-detection/check.py --full     # the helper-outage checks at their larger bounds
 
 Fetches the pinned tla2tools.jar from the TLA+ GitHub releases into
 formal/.tools/, verifies its SHA-256, and needs Java 11 or later. TLC output
@@ -30,7 +31,8 @@ TLA_URL = f"https://github.com/tlaplus/tlaplus/releases/download/v{TLA_VERSION}/
 TLA_SHA256 = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
 
 SAFETY = ["TypeOK", "NoEntryFilesOffVPN", "GateFollowsLastPublished", "NothingPublishedAfterStop",
-          "WakeRecoversOnlyWhenSeeing", "SweepsNotHeldWhenDefinite"]
+          "WakeRecoversOnlyWhenSeeing", "SweepsNotHeldWhenDefinite", "OrchestratorAfterEntryFiles",
+          "OrchestratorFollowsLastPublished"]
 LIVENESS = ["NoStuckUnknown", "FilesFollowVPN", "VPNReconnects"]
 
 # The bounds: how much the environment may do in one behaviour. Every check runs two Starts,
@@ -48,8 +50,9 @@ LIVENESS_BOUNDS = BASE
 
 
 class Check:
-    def __init__(self, name, bounds, invariants=(), properties=(), expect=None, note=""):
+    def __init__(self, name, bounds, invariants=(), properties=(), expect=None, note="", full=None):
         self.name, self.bounds = name, bounds
+        self.full = full or bounds  # the bounds `--full` runs
         self.invariants, self.properties = list(invariants), list(properties)
         self.expect = expect  # None: must pass; otherwise the property that must break
         self.note = note
@@ -68,13 +71,16 @@ class Check:
 CHECKS = [
     Check("safety-core", CORE, invariants=SAFETY),
     Check("safety-lost-notification", LOST_NOTIFICATION, invariants=SAFETY),
-    Check("safety-helper-outage", HELPER, invariants=SAFETY),
+    # The outcomes of operations queued around a helper outage, recorded in any order, are the
+    # costliest interleavings: one Start here takes 30 s, two take 6 minutes (`--full`).
+    Check("safety-helper-outage", dict(HELPER, MaxStarts=1), invariants=SAFETY, full=HELPER),
     Check("safety-orchestrator", ORCHESTRATOR, invariants=SAFETY),
     Check("liveness", LIVENESS_BOUNDS, invariants=["TypeOK"], properties=LIVENESS),
     Check("liveness-lost-notification", LOST_NOTIFICATION, invariants=["TypeOK"], properties=LIVENESS),
-    # One Start: the property here is that the repair retry puts the files right, which a
-    # restart does not change; with two Starts TLC's liveness pass takes over five minutes.
-    Check("liveness-helper-outage", dict(HELPER, MaxStarts=1), invariants=["TypeOK"], properties=LIVENESS),
+    # One Start and no store outage: the property here is that the repair retry puts the files
+    # right, which neither changes. 8 s; with the store outage, 9 minutes (`--full`).
+    Check("liveness-helper-outage", dict(HELPER, MaxStarts=1, MaxStoreBreaks=0), invariants=["TypeOK"],
+          properties=LIVENESS, full=dict(HELPER, MaxStarts=1)),
     Check("known-gap-u4", BASE, invariants=["ApplyOnlyFromCurrentSession"],
           expect="ApplyOnlyFromCurrentSession",
           note="A Start writes entry files from the verdict the last session left (design U4)."),
@@ -112,7 +118,7 @@ MUTANTS = [
     Mutant("b3-failure-before-stop-dropped",
            "RuntimeHost.handleVPNStateChange: `guard networkPathObserving else { return }`, so a report "
            "that lands after the observers stopped is dropped (the 179b477f shape)",
-           [("HostTakesReports == TRUE", "HostTakesReports == host.phase = \"running\"")],
+           [("HostTakesReports == TRUE", "HostTakesReports == Observing")],
            "GateFollowsLastPublished"),
     Mutant("c-unknown-keeps-files",
            "SplitDNSVPNGate.entriesWanted: `.unknown` returns true (before 0048, c9df90bb)",
@@ -133,17 +139,36 @@ MUTANTS = [
            "VPNReconnects"),
     Mutant("order-unchecked",
            "RuntimeHost.handleVPNStateChange: the gate takes every report, without splitDNSGateOrder.admit (#155)",
-           [("GateDropsOlder == TRUE", "GateDropsOlder == FALSE")],
+           [("GateAdmitsAt(r, applied) == r.seq > applied", "GateAdmitsAt(r, applied) == TRUE")],
            "GateFollowsLastPublished"),
     Mutant("wake-recovers-blind",
            "ProxyOrchestrator.handleSystemWake: `!vpn.blind` dropped from the recovery guard",
            [("WakeSeesStore == ~orch.blind", "WakeSeesStore == TRUE")],
            "WakeRecoversOnlyWhenSeeing", bounds=ORCHESTRATOR),
     Mutant("blinded-keeps-sweeps",
-           "VPNReactionHistory.record: the same definite verdict after a blind reading returns nil, "
-           "not .confirmed(afterBlind:), so the held sweeps never resume",
-           [("!.sweeps = IF v # \"reasserting\" THEN \"running\" ELSE o.sweeps]", "!.sweeps = o.sweeps]")],
+           "VPNReactionHistory.record: `wasBlind ||` dropped from the confirmed guard, so the same definite "
+           "verdict after a blind reading returns nil and the held sweeps never resume",
+           [("ConfirmsAfterBlind(o) == o.blind", "ConfirmsAfterBlind(o) == FALSE")],
            "SweepsNotHeldWhenDefinite", bounds=ORCHESTRATOR),
+    Mutant("repair-takes-stale-outcome",
+           "SplitDNSEntryFileRepair.record: the `startedAt < generation` guard removed, so an older success "
+           "recorded after a newer failure forgets the failure",
+           [("RecordKeeps(o) == ~(o.place < repair.generation)", "RecordKeeps(o) == TRUE")],
+           "NoEntryFilesOffVPN", bounds=HELPER),
+    Mutant("started-after-observers",
+           "RuntimeHost.applyProxySurfaces: `runtimeStarted = true` moved after startObservers, so a report "
+           "landing while the DNS and tunnel members start acts as for a stopped proxy",
+           [("StartedAtSurfaces == TRUE", "StartedAtSurfaces == FALSE")],
+           "FilesFollowVPN"),
+    Mutant("orchestrator-before-files",
+           "RuntimeHost.handleVPNStateChange: orchestrator.handleVPNStateChange called before "
+           "`await reconcileEntryFiles`",
+           [("OrchestratorAfterFiles == TRUE", "OrchestratorAfterFiles == FALSE")],
+           "OrchestratorAfterEntryFiles", bounds=ORCHESTRATOR),
+    Mutant("orchestrator-order-unchecked",
+           "ProxyOrchestrator.handleVPNStateChange: the `vpnObservations.admit` check removed (#155)",
+           [("OrchAdmits(r) == r.seq > orch.seq", "OrchAdmits(r) == TRUE")],
+           "OrchestratorFollowsLastPublished", bounds=ORCHESTRATOR),
 ]
 
 
@@ -216,6 +241,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mutants", action="store_true", help="also run every historical-bug mutant")
     parser.add_argument("--only", help="run only the named check or mutant")
+    parser.add_argument("--full", action="store_true", help="run the checks at their larger bounds")
     args = parser.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
 
@@ -226,6 +252,8 @@ def main():
     for check in CHECKS:
         if args.only and args.only != check.name:
             continue
+        if args.full:
+            check.bounds = check.full
         output, code, elapsed, work = run_tlc(jar, check.name, spec, check.config())
         got = outcome(output, code)
         if got is None:
