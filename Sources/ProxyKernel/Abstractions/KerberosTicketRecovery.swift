@@ -21,11 +21,7 @@ package struct KerberosTicketRecoveryReply: Codable, Sendable {
 
     package static func isValidHost(_ host: String) -> Bool {
         guard !host.isEmpty, host.utf8.count <= DomainNameSyntax.maxLength else { return false }
-        let literal = host.hasPrefix("[") && host.hasSuffix("]") ? String(host.dropFirst().dropLast()) : host
-        if IPAddressSyntax.isLiteral(literal) { return true }
-        // Validate a rooted DNS name without changing the SPN we pass to GSS.
-        let domain = host.hasSuffix(".") ? String(host.dropLast()) : host
-        do { try DomainNameSyntax.validate(domain); return true }
-        catch { return false }
+        if host.hasPrefix("[") && host.hasSuffix("]") { return IPAddressSyntax.isLiteral(String(host.dropFirst().dropLast())) }
+        return HostSyntax.isHost(host)
     }
 }
