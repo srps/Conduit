@@ -119,6 +119,36 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         XCTAssertEqual(breaker.state, .closed)
     }
 
+    func testASuccessClearsTheWindowAnchorSoTheNextBurstIsGatedAfresh() {
+        var breaker = UpstreamCircuitBreaker()
+        let start = Date()
+        for _ in 0..<4 {
+            _ = breaker.recordFailure(now: start, threshold: 5, windowSeconds: 10, baseOpenInterval: 30, maxOpenInterval: 300)
+        }
+        _ = breaker.recordSuccess(latencyMS: 100)
+        XCTAssertNil(breaker.firstFailureAt)
+
+        let later = start.addingTimeInterval(20)
+        for _ in 0..<5 {
+            _ = breaker.recordFailure(now: later, threshold: 5, windowSeconds: 10, baseOpenInterval: 30, maxOpenInterval: 300)
+        }
+        XCTAssertEqual(breaker.state, .closed, "the burst after the success anchors its own window")
+    }
+
+    func testAResetClearsTheWindowAnchorSoTheNextBurstIsGatedAfresh() {
+        var breaker = UpstreamCircuitBreaker()
+        let start = Date()
+        _ = breaker.recordFailure(now: start, threshold: 5, windowSeconds: 10, baseOpenInterval: 30, maxOpenInterval: 300)
+        _ = breaker.reset(reason: .vpnFlapRecovered, baseOpenInterval: 30)
+        XCTAssertNil(breaker.firstFailureAt)
+
+        let later = start.addingTimeInterval(20)
+        for _ in 0..<5 {
+            _ = breaker.recordFailure(now: later, threshold: 5, windowSeconds: 10, baseOpenInterval: 30, maxOpenInterval: 300)
+        }
+        XCTAssertEqual(breaker.state, .closed, "the burst after the reset anchors its own window")
+    }
+
     // MARK: - Open → HalfOpen transition
 
     func testOpenStaysOpenBeforeBackoffElapses() {

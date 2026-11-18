@@ -2468,7 +2468,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(host.orchestrator.snapshot.vpnState, .connected, "precondition: the primed report landed")
         XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "precondition: connected installs the entry file")
         let pool = host.orchestrator.tunnelConnectionPool
-        for _ in 0..<config.circuitFailureThreshold { pool.recordDedicatedTunnelFailure(for: config.upstreams[0]) }
+        await pool.failTunnels(through: config.upstreams[0], count: config.circuitFailureThreshold)
         XCTAssertEqual(pool.upstreamStatuses().map(\.circuitState), [.open], "precondition: the breaker is open")
 
         harness.vpn.emit(.reasserting)

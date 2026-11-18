@@ -45,10 +45,8 @@ enum VPNFlapScenarios {
 
         // Port tunnels and the transparent proxy dial through their own pool, whose breakers the flap must close as well.
         let tunnelPool = harness.orchestrator.tunnelConnectionPool
-        for proxy in harness.orchestrator.config.enabledUpstreams {
-            for _ in 0..<harness.orchestrator.config.circuitFailureThreshold { tunnelPool.recordDedicatedTunnelFailure(for: proxy) }
-        }
-        let tunnelBreakersOpened = tunnelPool.upstreamStatuses().map(\.circuitState) == [.open]
+        let refusalsCounted = await harness.refuseTunnelPoolCONNECTs()
+        let tunnelBreakersOpened = refusalsCounted && tunnelPool.upstreamStatuses().map(\.circuitState) == [.open]
         notes.append("tunnel pool breakers before flap=\(tunnelPool.upstreamStatuses().map(\.circuitState))")
 
         // Open a CONNECT tunnel and let it idle.
@@ -371,6 +369,29 @@ final class VPNFlapHarness {
         try await orchestrator.startProxy()
 
         return VPNFlapHarness(orchestrator: orchestrator, logger: logger, origin: origin, upstream: upstream)
+    }
+
+    /// The upstream refuses threshold CONNECTs through the tunnel pool with a 502, so each breaker opens the way
+    /// traffic opens it; then it serves again. True when every refusal failed at the upstream.
+    func refuseTunnelPoolCONNECTs() async -> Bool {
+        let coordinator = CONNECTCoordinator(
+            pool: orchestrator.tunnelConnectionPool, authenticatorProvider: { _ in MockAuthenticator() }, logger: logger
+        )
+        upstream.connectRefusalStatus = 502
+        defer { upstream.connectRefusalStatus = nil }
+        var counted = true
+        for proxy in orchestrator.config.enabledUpstreams {
+            for _ in 0..<orchestrator.config.circuitFailureThreshold {
+                do {
+                    let established = try await coordinator.connectUpstreamTunnel(target: "refused.example:443", proxyChain: [proxy]).get()
+                    established.channel.close(mode: .all, promise: nil)
+                    counted = false
+                } catch {
+                    counted = counted && !ConnectionPoolError.isLocalNonUpstreamFailure(error)
+                }
+            }
+        }
+        return counted
     }
 
     func stop() async {

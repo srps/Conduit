@@ -781,78 +781,40 @@ final class ConnectionPoolTests: XCTestCase {
         }
     }
 
-    @MainActor func testCircuitBreakerOpensAfterThresholdAndClosesOnSuccess() {
-        let logger = DiscardingLogSink()
-        // Phase 5: this test exercises the threshold-trip semantic in isolation.
-        // The default 10s time-window guard would prevent a synchronous burst
-        // of 5 failures from tripping the breaker (intentionally — that's the
-        // whole point of Phase 5). Set circuitBreakerWindowSeconds = 0 to
-        // disable the guard and restore legacy burst-trip behavior; the
-        // sync-burst-no-trip semantic is covered separately by
-        // CircuitBreakerWindowTests.
+    /// Threshold refusals open the breaker; the next request probes the upstream, and its answer closes the
+    /// breaker and reports the exchange's latency. The EWMA arithmetic is `UpstreamCircuitBreakerTests`'.
+    func testCircuitBreakerOpensAfterThresholdAndClosesOnSuccess() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let upstream = ScriptedUpstream { _, line in line.hasPrefix("CONNECT ") ? .status(502) : .ok }
+        try await upstream.start(group: group)
         var config = ProxyConfig.testFixture()
+        // Back-to-back refusals trip; the burst guard is `CircuitBreakerWindowTests`'.
         config.circuitBreakerWindowSeconds = 0
-        let group = MultiThreadedEventLoopGroup.singleton
-        let pool = ConnectionPool(
-            group: group,
-            logger: logger,
-            configProvider: { config },
-            authenticatorProvider: { _ in
-                NTLMAuthenticator(credentials: ProxyCredentials(
-                    username: config.username,
-                    domain: config.domain,
-                    workstation: config.workstation,
-                    ntHash: SecretBytes.repeating(0x22, count: 16)
-                ))
-            }
-        )
-        defer { pool.closeAll() }
+        config.upstreams = [UpstreamProxy(name: "scripted", host: "127.0.0.1", port: upstream.port, priority: 0)]
+        let pool = ConnectionPool(group: group, logger: DiscardingLogSink(), configProvider: { [config] in config },
+                                  authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") })
+        let proxy = config.upstreams[0]
 
-        let proxy = config.enabledUpstreams[0]
-        for _ in 0..<5 {
-            pool.recordDedicatedTunnelFailure(for: proxy)
-        }
-
+        await pool.failTunnels(through: proxy, count: config.circuitFailureThreshold)
         let opened = pool.upstreamStatuses().first { $0.id == proxy.id }
         XCTAssertEqual(opened?.circuitState, .open)
         XCTAssertNotNil(opened?.openUntil)
+        XCTAssertNil(opened?.ewmaLatencyMS, "no exchange has succeeded yet")
 
-        pool.recordDedicatedTunnelSuccess(for: proxy, latencyMS: 120)
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://probe.test/")
+        head.headers.add(name: "Host", value: "probe.test")
+        let answered = try await pool.exchange(head: head, body: nil).get()
+        XCTAssertEqual(answered.head.status, .ok)
 
         let closed = pool.upstreamStatuses().first { $0.id == proxy.id }
         XCTAssertEqual(closed?.circuitState, .closed)
         XCTAssertEqual(closed?.consecutiveFailures, 0)
-        XCTAssertEqual(closed?.ewmaLatencyMS, 120)
+        XCTAssertNotNil(closed?.ewmaLatencyMS, "the probe's answer is a latency sample")
         XCTAssertNil(closed?.openUntil)
-    }
 
-    @MainActor func testUpstreamStatusesTrackEWMA() {
-        let logger = DiscardingLogSink()
-        let config = ProxyConfig.testFixture()
-        let group = MultiThreadedEventLoopGroup.singleton
-        let pool = ConnectionPool(
-            group: group,
-            logger: logger,
-            configProvider: { config },
-            authenticatorProvider: { _ in
-                NTLMAuthenticator(credentials: ProxyCredentials(
-                    username: config.username,
-                    domain: config.domain,
-                    workstation: config.workstation,
-                    ntHash: SecretBytes.repeating(0x22, count: 16)
-                ))
-            }
-        )
-        defer { pool.closeAll() }
-
-        let proxy = config.enabledUpstreams[0]
-        pool.recordDedicatedTunnelSuccess(for: proxy, latencyMS: 100)
-        pool.recordDedicatedTunnelSuccess(for: proxy, latencyMS: 200)
-
-        let status = pool.upstreamStatuses().first { $0.id == proxy.id }
-        XCTAssertEqual(status?.circuitState, .closed)
-        XCTAssertNotNil(status?.ewmaLatencyMS)
-        XCTAssertEqual(status?.ewmaLatencyMS ?? 0, 130, accuracy: 0.001)
+        pool.closeAll()
+        try await upstream.stop()
+        try await group.shutdownGracefully()
     }
 
     // MARK: - Helper

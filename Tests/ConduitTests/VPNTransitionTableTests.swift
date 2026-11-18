@@ -2,6 +2,7 @@
 import Foundation
 import NIOConcurrencyHelpers
 import NIOCore
+import NIOHTTP1
 import NIOPosix
 import XCTest
 import ConduitShared
@@ -1002,44 +1003,29 @@ final class DirectModeReprobeIntervalTests: XCTestCase {
 /// while preserving each one's EWMA latency.
 final class ResetCircuitsAfterFlapTests: XCTestCase {
 
-    func testResetCircuitsClosesOpenBreakerAndPreservesEWMA() {
-        let logger = DiscardingLogSink()
+    func testResetCircuitsClosesOpenBreakerAndPreservesEWMA() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { try? group.syncShutdownGracefully() }
-
-        // Phase 5: disable the time-window guard so the test can synchronously
-        // trip the breaker via 5 back-to-back failures. The reset behavior
-        // tested here is independent of the trip mechanism.
+        let upstream = ScriptedUpstream { _, line in line.hasPrefix("CONNECT ") ? .status(502) : .ok }
+        try await upstream.start(group: group)
+        // Back-to-back refusals trip the breaker; the reset tested here is independent of the trip mechanism.
         var config = ProxyConfig.testFixture()
         config.circuitBreakerWindowSeconds = 0
-        let pool = ConnectionPool(
-            group: group,
-            logger: logger,
-            configProvider: { config },
-            authenticatorProvider: { _ in
-                NTLMAuthenticator(credentials: ProxyCredentials(
-                    username: config.username,
-                    domain: config.domain,
-                    workstation: config.workstation,
-                    ntHash: SecretBytes.repeating(0x22, count: 16)
-                ))
-            }
-        )
-        defer { pool.closeAll() }
+        config.upstreams = [UpstreamProxy(name: "scripted", host: "127.0.0.1", port: upstream.port, priority: 0)]
+        let pool = ConnectionPool(group: group, logger: DiscardingLogSink(), configProvider: { [config] in config },
+                                  authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") })
+        let proxy = config.upstreams[0]
 
-        let proxy = config.enabledUpstreams[0]
-
-        // Establish a latency baseline so EWMA is non-nil.
-        pool.recordDedicatedTunnelSuccess(for: proxy, latencyMS: 200)
+        // A served request is the latency baseline, so EWMA is non-nil.
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://baseline.test/")
+        head.headers.add(name: "Host", value: "baseline.test")
+        _ = try await pool.exchange(head: head, body: nil).get()
         let beforeEWMA = pool.upstreamStatuses().first { $0.id == proxy.id }?.ewmaLatencyMS
         XCTAssertNotNil(beforeEWMA)
 
-        // Trip the breaker via 5 consecutive failures.
-        for _ in 0..<5 { pool.recordDedicatedTunnelFailure(for: proxy) }
+        await pool.failTunnels(through: proxy, count: config.circuitFailureThreshold)
         let opened = pool.upstreamStatuses().first { $0.id == proxy.id }
         XCTAssertEqual(opened?.circuitState, .open, "Pre-condition: circuit is open after threshold failures")
 
-        // The fix.
         pool.resetCircuitsAfterFlap()
 
         let after = pool.upstreamStatuses().first { $0.id == proxy.id }
@@ -1049,5 +1035,9 @@ final class ResetCircuitsAfterFlapTests: XCTestCase {
         XCTAssertNil(after?.openUntil)
         XCTAssertEqual(after?.ewmaLatencyMS, beforeEWMA,
                        "EWMA latency MUST be preserved (the upstream itself didn't change)")
+
+        pool.closeAll()
+        try await upstream.stop()
+        try await group.shutdownGracefully()
     }
 }

@@ -593,14 +593,6 @@ package final class ConnectionPool: @unchecked Sendable {
         )
     }
 
-    package func recordDedicatedTunnelSuccess(for proxy: UpstreamProxy, latencyMS: Int) {
-        recordSuccess(for: proxy, latencyMS: latencyMS)
-    }
-
-    package func recordDedicatedTunnelFailure(for proxy: UpstreamProxy) {
-        recordFailure(for: proxy)
-    }
-
     package func removeDedicatedTunnel(_ connection: PooledUpstreamConnection) {
         lock.withLockVoid {
             removeConnectionLocked(id: connection.id)
@@ -1480,19 +1472,6 @@ package final class ConnectionPool: @unchecked Sendable {
         logger.log(.notice, "Upstream \(proxy.name) answered nothing for \(origins.count) origins (\(origins.joined(separator: ", "))); counting the silence as a failure.", category: .network)
         if let transition = counted.transition {
             emitTransition(transition, for: proxy)
-        }
-    }
-
-    /// A failure outside any attempt: a caller driving the breaker directly.
-    private func recordFailure(for proxy: UpstreamProxy) {
-        let config = configProvider()
-        let thresholds = breakerThresholds(from: config)
-        let emittedTransition: UpstreamCircuitBreaker.Transition? = lock.withLock {
-            syncUpstreamStatesLocked(with: config.enabledUpstreams)
-            return recordFailureLocked(for: proxy, thresholds: thresholds)
-        }
-        if let emittedTransition {
-            emitTransition(emittedTransition, for: proxy)
         }
     }
 
