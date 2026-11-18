@@ -145,6 +145,8 @@ jobs:
     # a change to a covered file or to the model, and the nightly run, check
     # the full tier (check.py --full).
     runs-on: ubuntu-24.04
+    # About 20 minutes for the default tier and 60 to 80 for the full tier on
+    # a 4-core runner (44 minutes with 4 TLC workers on a 12-core laptop).
     timeout-minutes: 120
 
     steps:
