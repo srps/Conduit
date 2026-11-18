@@ -7,19 +7,12 @@ import NIOPosix
 import ProxyKernel
 
 /// A half-open probe that ends without a verdict hands its slot back, and a CONNECT whose dial is refused is the
-/// probe's failure (#279), through the real pool, CONNECT coordinator and exchange handlers over loopback.
-///
-/// Every upstream is tripped first, so selection forces the longest-open one half-open at once and no backoff
-/// elapses: the open interval is far longer than the scenario. The first part holds the only authentication
-/// handshake permit, so the probe of the longest-open upstream fails locally without reaching it; the next
-/// requests must probe that upstream again, and it serves them. The second part probes an upstream on a port
-/// nothing listens on with a CONNECT: the refused dial reopens its breaker, and the next CONNECT probes it again.
-/// The scenario dials only the listeners it starts and one port it closed itself.
+/// probe's failure (#279), through the real pool, CONNECT coordinator and exchange handlers over loopback. It dials
+/// only the listeners it starts and one port it closed itself.
 enum ProbeLeaseScenarios {
     private static let name = "half-open-probe-lease"
     private static let authLimits = AuthHandshakeLimiter.Limits(total: 1, perSource: 1)
 
-    /// Answers each plain request with a 200 and each CONNECT with a 502, and counts the plain requests.
     private final class AnsweringUpstream: @unchecked Sendable {
         private let plainRequests = NIOLockedValueBox(0)
         private var channel: Channel?
@@ -69,7 +62,6 @@ enum ProbeLeaseScenarios {
         }
     }
 
-    /// One pool and coordinator over `upstreams`, sharing one handshake limiter, and the events they emit.
     private struct Fixture {
         let pool: ConnectionPool
         let coordinator: CONNECTCoordinator
@@ -130,7 +122,6 @@ enum ProbeLeaseScenarios {
             }
         }
 
-        /// Opens the named breaker with a 502 to a CONNECT forced through it.
         func tripWithCONNECT(_ name: String) async throws {
             guard let proxy = upstream(name) else { throw ScenarioExecutionError(message: "no upstream \(name)") }
             let error = await connect("trip.test:443", through: [proxy])

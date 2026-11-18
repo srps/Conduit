@@ -9,9 +9,8 @@ import XCTest
 @testable import ProxyAuth
 @testable import ProxyKernel
 
-/// The half-open probe slot belongs to the attempt that took it, and every ending of that attempt hands it
-/// back (#279). Each test trips every upstream, so selection forces the longest-open one half-open at once and
-/// no backoff has to elapse: the open interval is far longer than any test.
+/// #279. Every upstream is tripped with a long open interval, so selection forces the longest-open one
+/// half-open at once and no test waits on a backoff.
 final class HalfOpenProbeLeaseTests: XCTestCase {
     private var group: MultiThreadedEventLoopGroup!
     private var upstreams: [ScriptedUpstream] = []
@@ -40,12 +39,10 @@ final class HalfOpenProbeLeaseTests: XCTestCase {
         return upstream
     }
 
-    /// Answers every request, and every CONNECT with a 502 so a forced CONNECT trips it.
     private func startAnsweringUpstream() async throws -> ScriptedUpstream {
         try await startUpstream { _, line in line.hasPrefix("CONNECT ") ? .status(502) : .ok }
     }
 
-    /// A port nothing listens on, so every dial to it is refused.
     private func refusingPort() async throws -> Int {
         let closed = try await startUpstream { _, _ in .ok }
         let port = closed.port
@@ -104,7 +101,6 @@ final class HalfOpenProbeLeaseTests: XCTestCase {
         pool.upstreamStatuses().first { $0.name == name }?.circuitState
     }
 
-    /// Holds the limiter's only handshake permit, so the next unauthenticated exchange or CONNECT fails locally.
     private func holdTheOnlyHandshakePermit() -> AuthHandshakePermit {
         guard case .success(let permit) = limiter.acquire(source: nil, limits: Self.authLimits) else {
             fatalError("the limiter starts empty")
@@ -158,7 +154,6 @@ final class HalfOpenProbeLeaseTests: XCTestCase {
         XCTAssertEqual(status, 200, message, file: file, line: line)
     }
 
-    /// After a probe on `first` ended without a verdict, the next requests probe `first` again, and it serves them.
     private func assertProbedAgainAndServes(
         _ pool: ConnectionPool, first: ScriptedUpstream, file: StaticString = #filePath, line: UInt = #line
     ) async {

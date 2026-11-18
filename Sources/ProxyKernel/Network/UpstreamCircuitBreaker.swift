@@ -46,12 +46,10 @@ import Foundation
 ///   * Failures recorded while the breaker is already `.open` do nothing
 ///     (return `nil`). The breaker is already saying "don't use this
 ///     upstream"; redundant failure signal is noise.
-///   * The half-open probe slot is a `HalfOpenProbe` the claim hands to one
-///     attempt, never a flag (#279). A verdict from any exchange
-///     (`recordSuccess`, `recordFailure`) or a `reset` clears it; otherwise
-///     only `endProbe` with that same probe frees it, so an exchange that
-///     does not hold the slot cannot free it, and an attempt that ends
-///     without a verdict hands it back.
+///   * The half-open probe slot is held by the `HalfOpenProbe` that
+///     `claimProbe` or `forceHalfOpen` returned. `recordSuccess`,
+///     `recordFailure` and `reset` clear it; otherwise only `endProbe` with
+///     that probe frees it.
 package struct UpstreamCircuitBreaker: Sendable, Equatable {
 
     // MARK: - Observable state
@@ -129,7 +127,7 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         case manualOverride
     }
 
-    /// The half-open probe slot, held by the one attempt whose selection claimed it.
+    /// Identifies the holder of the half-open probe slot.
     package struct HalfOpenProbe: Hashable, Sendable {
         private let id = UUID()
     }
@@ -276,9 +274,8 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         return ProbeClaim(probe: claimed, transition: .halfOpened(elapsedSeconds: elapsed))
     }
 
-    /// The attempt that holds `ended` is over. Frees the slot and returns `true` only if `ended` still holds it,
-    /// that is, if the attempt ended without a verdict; a verdict, a reset or a later claim has already moved on,
-    /// and then nothing changes.
+    /// Frees the slot and returns `true` if `ended` still holds it; after a verdict or `reset` has cleared it,
+    /// returns `false` and changes nothing.
     package mutating func endProbe(_ ended: HalfOpenProbe) -> Bool {
         guard probe == ended else { return false }
         probe = nil
