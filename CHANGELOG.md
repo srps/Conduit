@@ -7,8 +7,27 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
-The fixes below come after 0.6.2. The 0.6.2 notes further down are prepared for
-packaging; 0.6.1 is the latest published release.
+## 0.7.0
+
+This release makes Conduit's VPN on/off verdict, and the split DNS that depends
+on it, follow what macOS reports even after a missed change notification, a
+failed reading or a Stop and Start. Split DNS now follows the resolvers a
+connected VPN pushes. The release also stops DoH from raising the macOS
+proxy-password dialog on the first full-tunnel VPN connect, keeps an upstream
+in failover after a half-open probe that ended without a verdict, and refuses
+SOCKS5 names and tunnel targets that could add lines to an authenticated
+CONNECT or to `proxy.log`. Helper protocol v5 is unchanged. The schema-two
+settings files keep their format: `config.json` gains an optional
+`dnsFollowVPNResolvers` key, which 0.6.2 skips as an unknown key. The
+platform-state journal keeps its format, so 0.6.2 can still read the files
+this version writes. The legacy v1 control protocol is unchanged, and the v2
+runtime snapshot only gains the optional `detectedSplitDNS` field.
+
+No helper update is needed. The helper's own code and its protocol did not
+change, and Settings → General shows a 0.6.2 helper as "Installed and running". A helper
+built from this release refuses one more input than the 0.6.2 helper, a DNS
+server address with a NUL byte in it, and the app already refuses that address
+before it asks the helper.
 
 ### Added
 
@@ -16,14 +35,45 @@ packaging; 0.6.1 is the latest published release.
   decision 0044). While a tunnel is up, the DNS forwarder asks the servers the
   tunnel pushed for the domains it pushed them for, ahead of any manual entry
   for the same domain, and stops when the tunnel goes down. A VPN flap keeps
-  the last set in use. A dynamic store that cannot be read drops it: after a
-  failed read, until the next read that succeeds; after a store that could not
-  be created or subscribed to, until the DNS forwarder is next stopped and
-  started or `dnsFollowVPNResolvers` is turned off and on. No forwarder restart and no configuration write is
-  involved, and manual entries work as before. `dnsFollowVPNResolvers: false`
-  in `config.json` turns it off; a Settings control follows. New events:
+  the last set in use. While the VPN status is Unknown, the set is withheld. A
+  dynamic store that cannot be read, created or subscribed to drops the set
+  until a reading succeeds. Conduit tries again after 1, 2, 4, 8 and 16 s, then
+  every 30 s (decision 0048, #304). No forwarder restart and no configuration
+  write is involved, and manual entries work as before. `dnsFollowVPNResolvers: false` in
+  `config.json` turns it off; Settings has no control for it yet. New events:
   `dns.split_table_changed`, `dns.split_detected`,
-  `dns.split_resolver_ignored`, `dns.split_detection_failed`.
+  `dns.split_resolver_ignored`, `dns.split_detection_failed`,
+  `dns.split_detection_recovered`.
+
+### Changed
+
+- VPN detection reads the whole VPN state from the dynamic store every time
+  something prompts it, instead of applying each change notification on its
+  own (decisions 0047 and 0048; #300, #303, #202). A change notification that
+  never arrives no longer leaves the VPN status wrong until the next change:
+  while readings succeed, Conduit also reads the store every 60 s, so the
+  status corrects itself within about a minute. When the store cannot be
+  read, the VPN status shows "Unknown" (it used to show "Not detected").
+  Conduit then tries again after 1, 2, 4, 8 and 16 s, then every 30 s, and
+  reports it as `vpn.store_failed` and, once a reading succeeds,
+  `vpn.store_recovered`.
+- While the VPN status is Unknown, Conduit installs and keeps no
+  `/etc/resolver` entry file (decision 0048). A VPN that dropped while the
+  store could not be read can no longer leave entry files that point at
+  servers only the tunnel reaches. As a result, Start no longer writes the
+  entry files itself: they follow the VPN monitor's first reading, a moment
+  after Start.
+- A tunnel lost while the store could not be read is dated from the last good
+  reading (decision 0047). After a gap longer than the flap windows (Min
+  Visible Flap and Flap Grace Window, 1 s and 5 s by default), the first good
+  reading reports the disconnect at once, instead of a few seconds of
+  "connected". A flap seen across a failed reading gets the same reaction it
+  would have had without the failure. Each Start begins with no memory of an
+  earlier flap, and a tunnel that went away while Conduit was stopped is no
+  longer reported as connected after Start (#303).
+- A VPN flap that went stale across a sleep now ends with the first reading
+  after the wake, and that reading closes the tunnel pool's circuit breakers
+  (the monitor half of #314).
 
 ### Fixed
 
@@ -102,6 +152,53 @@ packaging; 0.6.1 is the latest published release.
   closes them while the client listener runs. With the listener stopped, a wake
   leaves the VPN state alone, and the VPN monitor's own report of the recovery
   closes them.
+- A Start after a full Stop no longer restores `/etc/resolver` entry files from
+  the VPN state seen before the Stop (#324). If the VPN went down while
+  Conduit was stopped, the entry files came back at Start and pointed at
+  servers only the tunnel reaches. Every lookup under their domains then
+  failed, the VPN gateway's own name included, until the VPN monitor's first
+  reading. A Stop that leaves nothing running (the last of the proxy, DNS
+  and port tunnel switches turned off, or Quit) now also forgets the VPN
+  state, so the next Start behaves like a first launch:
+  entry files and detected resolvers wait for the monitor's first reading,
+  and none are written if the VPN is gone. A Stop of the proxy alone, which
+  leaves DNS or port tunnels running, keeps the VPN monitor and its state,
+  and the next proxy Start writes the entry files at once. At a full Stop,
+  the detected set's withdrawal is now
+  `dns.split_table_changed reason=vpn_observer_stopped`; it was
+  `reason=detection_off`.
+- An upstream no longer drops out of failover after a half-open probe that
+  ended without a verdict (#279). A probe that ended in a local failure (pool
+  exhausted, the authentication handshake limit, a VPN-transition sweep), or
+  a CONNECT whose dial failed, kept the probe slot. Conduit then passed over
+  that upstream whenever another one could be selected, until a restart or a
+  VPN flap. Each request now owns the probe slot it takes and gives it back
+  when it ends; a probe given back without a verdict emits
+  `upstream.probe_released` with `ending=`. A CONNECT dial that is refused or
+  times out now counts against the upstream's circuit breaker, as a failed
+  request already did.
+- A failure or silence from a request that started before a VPN flap recovery
+  no longer reopens a circuit breaker that the recovery closed
+  (`upstream.stale_failure_dropped`).
+- A streamed response, such as a long download or an event stream, ends its
+  upstream's half-open probe when the response head arrives, not when the
+  stream ends, so the upstream is no longer passed over for the length of
+  the stream.
+- A CONNECT dial that lands after its tunnel's owner has been released, as
+  when the proxy stops or a listener is rebuilt mid-dial, is closed and frees
+  its pool slot (`connection.tunnel_abandoned`). Before, the connection stayed
+  open and counted against the pool.
+
+### Development
+
+- `pm-vpn-check --pushed-dns` prints the resolvers and domains a connected VPN
+  pushes, masked (#299).
+- `pm-vpn-check --snapshot` and `--watch` print masked readings of the VPN
+  keys in the dynamic store, to record what a VPN client writes as it
+  connects, flaps and disconnects (#308). Captures stay on the machine that
+  recorded them (decision 0047).
+- A TLA+ model of VPN detection, from the dynamic store to the `/etc/resolver`
+  entry files, runs in CI (`formal/vpn-detection/`, #321).
 
 ## 0.6.2
 
