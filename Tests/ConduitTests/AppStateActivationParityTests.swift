@@ -688,7 +688,8 @@ final class AppStateActivationParityTests: XCTestCase {
         try harness.machine.strandResolverFile(for: "corp.example", contents: "nameserver 10.0.0.53")
         XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy), "the residue is unrecorded")
         state.toggleProxy()
-        await harness.settle("the failed Start cleared the leftovers") {
+        // The listener retries its bind for about 9 s before the Start fails, longer than the default wait.
+        await harness.settle("the failed Start cleared the leftovers", timeoutMilliseconds: 20_000) {
             !harness.machine.service("Wi-Fi").routesThroughAProxy && harness.machine.launchdEnvironment["HTTP_PROXY"] == nil
                 && harness.machine.resolverFile(for: "corp.example") == nil
         }

@@ -236,66 +236,198 @@ final class PushedResolverMonitorTests: XCTestCase {
         XCTAssertFalse(fake.isObserving)
     }
 
-    func testAFailedNotificationKeySubscriptionReportsStoreSubscribeAndARestartInstalls() {
-        let failsOnce = FailsOnce()
-        let monitor = PushedResolverMonitor(setNotificationKeys: { store, keys in
-            failsOnce.attempt() && SCDynamicStoreSetNotificationKeys(store, nil, keys)
-        })
-        assertFailedSubscriptionThenCleanRestart(monitor)
+    // MARK: - The read schedule (decision 0048, #304)
+
+    func testACreateThatFailsTwiceIsRetriedOnTheScheduleAndTheThirdSessionDelivers() {
+        let store = ScriptedPushedResolverStore(keys: Self.fullTunnelStore, createFailures: 2)
+        let clock = FakeStoreObserverClock()
+        let monitor = PushedResolverMonitor(calls: store.calls, clock: clock.clock)
+        let received = ReadingRecorder(monitor)
+        defer { monitor.stop() }
+        monitor.start()
+
+        XCTAssertEqual(received.await(1).last, PushedResolverReading(failure: .storeCreate, failedAttempts: 1))
+        XCTAssertEqual(clock.awaitSleep(), .init(seconds: 1, tolerance: 0.1))
+        clock.fire()
+        XCTAssertEqual(received.await(2).last, PushedResolverReading(failure: .storeCreate, failedAttempts: 2))
+        XCTAssertEqual(clock.awaitSleep(), .init(seconds: 2, tolerance: 0.2))
+        clock.fire()
+
+        var good = PushedResolverReading.parse(store: Self.fullTunnelStore)
+        good.failedAttempts = 2
+        XCTAssertEqual(received.await(3).last, good, "the third session reads, and the reading ends a run of two")
+        XCTAssertTrue(clock.awaitNoSleep(), "a healthy pushed-resolver session has no audit")
+        XCTAssertEqual(store.creates, 3)
+        XCTAssertEqual(clock.overlappingSleeps, 0)
     }
 
-    func testAFailedDispatchQueueSubscriptionReportsStoreSubscribeAndARestartInstalls() {
-        let failsOnce = FailsOnce()
-        let monitor = PushedResolverMonitor(setDispatchQueue: { store, queue in
-            (queue == nil || failsOnce.attempt()) && SCDynamicStoreSetDispatchQueue(store, queue)
-        })
-        assertFailedSubscriptionThenCleanRestart(monitor)
+    func testASubscribeThatFailsThreeTimesIsRetriedOnNewSessionsAndOnlyReportedAttemptsAreDelivered() {
+        let store = ScriptedPushedResolverStore(keys: Self.fullTunnelStore, subscribeFailures: 3)
+        let clock = FakeStoreObserverClock()
+        let monitor = PushedResolverMonitor(calls: store.calls, clock: clock.clock)
+        let received = ReadingRecorder(monitor)
+        defer { monitor.stop() }
+        monitor.start()
+
+        var sleeps: [TimeInterval] = []
+        for _ in 0..<3 {
+            sleeps += [clock.awaitSleep()?.seconds ?? -1]
+            clock.fire()
+        }
+        var good = PushedResolverReading.parse(store: Self.fullTunnelStore)
+        good.failedAttempts = 3
+        XCTAssertEqual(received.await(3), [
+            PushedResolverReading(failure: .storeSubscribe, failedAttempts: 1),
+            PushedResolverReading(failure: .storeSubscribe, failedAttempts: 2),
+            good,
+        ], "attempt 3 is not reported")
+        XCTAssertEqual(sleeps, [1, 2, 4])
+        XCTAssertEqual(store.creates, 4, "each retry builds a new session")
+        XCTAssertTrue(clock.awaitNoSleep())
+    }
+
+    func testAFailedReadIsRetriedOnTheSameSession() {
+        let store = ScriptedPushedResolverStore(keys: Self.fullTunnelStore, readFailures: 1)
+        let clock = FakeStoreObserverClock()
+        let monitor = PushedResolverMonitor(calls: store.calls, clock: clock.clock)
+        let received = ReadingRecorder(monitor)
+        defer { monitor.stop() }
+        monitor.start()
+
+        XCTAssertEqual(received.await(1), [PushedResolverReading(failure: .storeRead, failedAttempts: 1)])
+        XCTAssertEqual(clock.awaitSleep()?.seconds, 1)
+        clock.fire()
+        XCTAssertEqual(received.await(2).last?.failedAttempts, 1)
+        XCTAssertNil(received.await(2).last?.failure)
+        XCTAssertEqual(store.creates, 1)
+    }
+
+    func testAStopDuringAPendingRetryCancelsItAndTheNextStartBeginsAFreshSchedule() {
+        let store = ScriptedPushedResolverStore(keys: Self.fullTunnelStore, createFailures: 1)
+        let clock = FakeStoreObserverClock()
+        let monitor = PushedResolverMonitor(calls: store.calls, clock: clock.clock)
+        let received = ReadingRecorder(monitor)
+        defer { monitor.stop() }
+        monitor.start()
+        XCTAssertEqual(received.await(1).count, 1)
+        XCTAssertNotNil(clock.awaitSleep())
+
+        monitor.stop()
+        XCTAssertTrue(clock.awaitNoSleep(), "the stop cancelled the pending wake-up")
+        XCTAssertNil(clock.fire())
+        XCTAssertEqual(store.creates, 1, "no attempt after the stop")
+
+        monitor.start()
+        let restarted = received.await(2)
+        XCTAssertEqual(restarted.last?.failure, nil)
+        XCTAssertEqual(restarted.last?.failedAttempts, 0, "the run belonged to the stopped session")
+        XCTAssertEqual(store.creates, 2)
+    }
+
+    // MARK: - Stop is a barrier for deliveries
+
+    /// The review's ordering on #316: a reading of the old session passed its check and was on its way to the consumer
+    /// when the host stopped detection. A stop that returns before that delivery lands lets it reach the restarted policy.
+    func testAStopWaitsOutTheDeliveryInFlightSoNothingOfItsSessionLandsAfterIt() {
+        let store = ScriptedPushedResolverStore(keys: Self.fullTunnelStore)
+        let monitor = PushedResolverMonitor(calls: store.calls, clock: FakeStoreObserverClock().clock)
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let stopReturned = LockedFlag()
+        let landedAfterStop = LockedFlag()
+        monitor.setOnChange { _ in
+            entered.signal()
+            _ = release.wait(timeout: .now() + 5)
+            if stopReturned.value { landedAfterStop.set() }
+        }
+        monitor.start()
+        XCTAssertEqual(entered.wait(timeout: .now() + 5), .success, "the first reading is being delivered")
+
+        let stopped = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            monitor.stop()
+            stopReturned.set()
+            stopped.signal()
+        }
+        // A stop that does not wait returns at once. One that waits cannot return until the delivery is released, so
+        // this bound only ever expires on the passing path; nothing is timed.
+        let returnedWhileHeld = stopped.wait(timeout: .now() + 0.5) == .success
+        release.signal()
+        if !returnedWhileHeld { XCTAssertEqual(stopped.wait(timeout: .now() + 5), .success, "the stop returns once the delivery has") }
+
+        XCTAssertFalse(returnedWhileHeld, "stop returned while a delivery of its session was still running")
+        XCTAssertFalse(landedAfterStop.value, "a delivery of the stopped session landed after stop returned")
+    }
+
+    /// A consumer may stop the monitor from its own callback, on the monitor's queue: the stop returns at once, and
+    /// the next start is a fresh session.
+    func testAStopFromInsideTheCallbackReturnsAndEndsTheSession() {
+        let store = ScriptedPushedResolverStore(keys: Self.fullTunnelStore)
+        let monitor = PushedResolverMonitor(calls: store.calls, clock: FakeStoreObserverClock().clock)
+        let stopped = DispatchSemaphore(value: 0)
+        let received = ReadingRecorder(monitor) { [weak monitor] in
+            monitor?.stop()
+            stopped.signal()
+        }
+        monitor.start()
+
+        XCTAssertEqual(received.await(1).count, 1)
+        XCTAssertEqual(stopped.wait(timeout: .now() + 5), .success, "the stop from the callback returned")
+        monitor.start()
+        XCTAssertEqual(received.await(2).count, 2, "the stop from the callback ended the session, so this start opened one")
+        XCTAssertEqual(store.creates, 2)
     }
 
     func testAFailedSubscriptionDoesNotKeepTheMonitorAlive() {
         weak var released: PushedResolverMonitor?
+        let clock = FakeStoreObserverClock()
         do {
-            let failsOnce = FailsOnce()
-            let monitor = PushedResolverMonitor(setNotificationKeys: { store, keys in
-                failsOnce.attempt() && SCDynamicStoreSetNotificationKeys(store, nil, keys)
-            })
+            let store = ScriptedPushedResolverStore(keys: Self.fullTunnelStore, subscribeFailures: 1)
+            let monitor = PushedResolverMonitor(calls: store.calls, clock: clock.clock)
             released = monitor
-            XCTAssertEqual(readings(afterStarting: monitor), [PushedResolverReading(failure: .storeSubscribe)])
+            let received = ReadingRecorder(monitor)
+            monitor.start()
+            XCTAssertEqual(received.await(1), [PushedResolverReading(failure: .storeSubscribe)])
             monitor.stop()
         }
-        // installStore may still be returning on the monitor's queue after it
+        // The attempt may still be returning on the monitor's queue after it
         // delivered; give that frame a bounded moment to unwind.
         for _ in 0..<200 where released != nil { Thread.sleep(forTimeInterval: 0.01) }
-        XCTAssertNil(released, "a failed subscribe releases the retain it took for the store context")
+        XCTAssertNil(released, "neither a failed session nor the cancelled wake-up holds the monitor")
     }
+}
 
-    private func assertFailedSubscriptionThenCleanRestart(
-        _ monitor: PushedResolverMonitor, file: StaticString = #filePath, line: UInt = #line
-    ) {
-        defer { monitor.stop() }
-        let failed = readings(afterStarting: monitor)
-        XCTAssertEqual(failed, [PushedResolverReading(failure: .storeSubscribe)],
-                       "one reading, typed as a subscribe failure", file: file, line: line)
+/// What a monitor delivered, waited for with a bound.
+private final class ReadingRecorder: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var readings: [PushedResolverReading] = []
 
-        monitor.stop()
-        let restarted = readings(afterStarting: monitor)
-        XCTAssertEqual(restarted.first?.failure, nil, "a later stop and start installs cleanly", file: file, line: line)
-    }
-
-    /// Starts the monitor and returns what it has delivered once the first
-    /// reading arrives.
-    private func readings(afterStarting monitor: PushedResolverMonitor) -> [PushedResolverReading] {
-        let received = LockedReadings()
-        let arrived = expectation(description: "a reading")
-        arrived.assertForOverFulfill = false
-        monitor.setOnChange { reading in
-            received.append(reading)
-            arrived.fulfill()
+    /// `then` runs after each reading is recorded, on the monitor's queue.
+    init(_ monitor: PushedResolverMonitor, then: @escaping @Sendable () -> Void = {}) {
+        monitor.setOnChange { [self] reading in
+            condition.withLock {
+                readings.append(reading)
+                condition.broadcast()
+            }
+            then()
         }
-        monitor.start()
-        wait(for: [arrived], timeout: 5)
-        return received.all
     }
+
+    /// The readings once there are at least `count`, or after five seconds.
+    func await(_ count: Int) -> [PushedResolverReading] {
+        let limit = Date(timeIntervalSinceNow: 5)
+        condition.lock()
+        defer { condition.unlock() }
+        while readings.count < count, condition.wait(until: limit) {}
+        return readings
+    }
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var raised = false
+    var value: Bool { lock.withLock { raised } }
+    func set() { lock.withLock { raised = true } }
 }
 
 private final class LockedReadings: @unchecked Sendable {
@@ -303,16 +435,4 @@ private final class LockedReadings: @unchecked Sendable {
     private var readings: [PushedResolverReading] = []
     var all: [PushedResolverReading] { lock.withLock { readings } }
     func append(_ reading: PushedResolverReading) { lock.withLock { readings.append(reading) } }
-}
-
-/// A subscription call that fails on its first attempt and succeeds after.
-private final class FailsOnce: @unchecked Sendable {
-    private let lock = NSLock()
-    private var attempts = 0
-    func attempt() -> Bool {
-        lock.withLock {
-            attempts += 1
-            return attempts > 1
-        }
-    }
 }

@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import ProxyKernel
 import ConduitShared
+import SystemConfiguration
 
 package struct FakeUpdatePreflight: UpdatePreflighting {
     package let failure: String?
@@ -1001,6 +1002,161 @@ package final class FakeNetworkPathObserver: NetworkPathObserving, @unchecked Se
     package func emit(_ state: NetworkPathState) {
         let delivery = lock.withLock { started ? callback : nil }
         delivery?(state)
+    }
+}
+
+/// Stands in for `StoreObserverClock.continuous`. Time moves only when a test
+/// moves it, and a sleep is held until the test fires it.
+///
+/// One sleep may be pending at a time, as a store observer holds one wake-up.
+/// Another sleep while one is pending throws at once and is counted in
+/// `overlappingSleeps`. A cancelled sleep throws and frees the slot. Every
+/// wait a test makes here is bounded.
+package final class FakeStoreObserverClock: @unchecked Sendable {
+    package struct Sleep: Equatable, Sendable {
+        package let seconds: TimeInterval
+        package let tolerance: TimeInterval
+    }
+
+    package struct Overlap: Error {}
+
+    private struct Pending {
+        let id: UInt64
+        let sleep: Sleep
+        let continuation: CheckedContinuation<Void, any Error>
+    }
+
+    private let condition = NSCondition()
+    private var current: TimeInterval = 0
+    private var pending: Pending?
+    private var nextID: UInt64 = 0
+    private var overlaps = 0
+
+    package init() {}
+
+    package var clock: StoreObserverClock {
+        StoreObserverClock(now: { [self] in now }, sleep: { [self] in try await sleep($0, $1) })
+    }
+
+    package var now: TimeInterval { condition.withLock { current } }
+
+    package var overlappingSleeps: Int { condition.withLock { overlaps } }
+
+    /// The sleep pending now, if any.
+    package var pendingSleep: Sleep? { condition.withLock { pending?.sleep } }
+
+    /// Waits up to `timeout` seconds for a sleep to be pending and returns it.
+    package func awaitSleep(timeout: TimeInterval = 5) -> Sleep? {
+        let limit = Date(timeIntervalSinceNow: timeout)
+        condition.lock()
+        defer { condition.unlock() }
+        while pending == nil, condition.wait(until: limit) {}
+        return pending?.sleep
+    }
+
+    /// Waits up to `timeout` seconds for no sleep to be pending. False when
+    /// one still is.
+    package func awaitNoSleep(timeout: TimeInterval = 5) -> Bool {
+        let limit = Date(timeIntervalSinceNow: timeout)
+        condition.lock()
+        defer { condition.unlock() }
+        while pending != nil, condition.wait(until: limit) {}
+        return pending == nil
+    }
+
+    /// Moves the clock by `seconds` without ending a sleep.
+    package func advance(by seconds: TimeInterval) {
+        condition.withLock { current += seconds }
+    }
+
+    /// Moves the clock to the end of the pending sleep and lets it return.
+    /// Returns the sleep, or nil when none was pending.
+    @discardableResult
+    package func fire() -> Sleep? {
+        let fired = condition.withLock { () -> Pending? in
+            defer { pending = nil }
+            if let pending { current += pending.sleep.seconds }
+            condition.broadcast()
+            return pending
+        }
+        fired?.continuation.resume()
+        return fired?.sleep
+    }
+
+    private func sleep(_ seconds: TimeInterval, _ tolerance: TimeInterval) async throws {
+        let id = condition.withLock { () -> UInt64 in
+            nextID &+= 1
+            return nextID
+        }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                condition.lock()
+                defer { condition.unlock() }
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else if pending != nil {
+                    overlaps += 1
+                    continuation.resume(throwing: Overlap())
+                } else {
+                    pending = Pending(id: id, sleep: Sleep(seconds: seconds, tolerance: tolerance), continuation: continuation)
+                    condition.broadcast()
+                }
+            }
+        } onCancel: {
+            let cancelled = condition.withLock { () -> Pending? in
+                guard let pending, pending.id == id else { return nil }
+                defer { self.pending = nil }
+                condition.broadcast()
+                return pending
+            }
+            cancelled?.continuation.resume(throwing: CancellationError())
+        }
+    }
+}
+
+/// `PushedResolverMonitor.Calls` over a real store session that never
+/// notifies, with every read answered from `keys`. Create, subscribe and read
+/// each fail their first `…Failures` times, so the monitor's retries can be
+/// counted without the machine's own store changes reaching them.
+package final class ScriptedPushedResolverStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private let keys: NSDictionary
+    private var createFailures: Int
+    private var subscribeFailures: Int
+    private var readFailures: Int
+    private var createCount = 0
+
+    package init(keys: [String: Any], createFailures: Int = 0, subscribeFailures: Int = 0, readFailures: Int = 0) {
+        self.keys = keys as NSDictionary
+        self.createFailures = createFailures
+        self.subscribeFailures = subscribeFailures
+        self.readFailures = readFailures
+    }
+
+    /// Sessions the monitor asked for, failed ones included.
+    package var creates: Int { lock.withLock { createCount } }
+
+    package var calls: PushedResolverMonitor.Calls {
+        var calls = PushedResolverMonitor.Calls()
+        calls.create = { [self] name, callback, context in
+            lock.withLock { createCount += 1 }
+            return fails(\.createFailures) ? nil : SCDynamicStoreCreate(kCFAllocatorDefault, name, callback, &context)
+        }
+        calls.setNotificationKeys = { [self] store, _ in
+            // A key nothing writes.
+            !fails(\.subscribeFailures)
+                && SCDynamicStoreSetNotificationKeys(store, ["State:/Conduit/Scripted/Never"] as CFArray, nil)
+        }
+        calls.copyMultiple = { [self] _, _ in fails(\.readFailures) ? nil : keys as CFDictionary }
+        return calls
+    }
+
+    private func fails(_ remaining: ReferenceWritableKeyPath<ScriptedPushedResolverStore, Int>) -> Bool {
+        lock.withLock {
+            guard self[keyPath: remaining] > 0 else { return false }
+            self[keyPath: remaining] -= 1
+            return true
+        }
     }
 }
 

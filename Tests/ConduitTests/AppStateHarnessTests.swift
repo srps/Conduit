@@ -694,7 +694,10 @@ final class AppStateHarnessTests: XCTestCase {
             harness.machine.leaveRelayRunning(targetPort: 53_531)
             harness.machine.relayStatusFailure = failure
             let state = await harness.ready()
-            await harness.settle("the decline is shown") { state.runtime.systemDNSRecoveryDeclined }
+            // The notice can show before its event is in the log.
+            await harness.settle("the decline is shown and recorded") {
+                state.runtime.systemDNSRecoveryDeclined && self.launchRecoveryEvent(harness, surface: .systemDNS) != nil
+            }
 
             XCTAssertEqual(wifi.dnsServers, ["127.0.0.1"])
             XCTAssertTrue(harness.journal.hasRecords(for: .systemDNS))
@@ -708,7 +711,10 @@ final class AppStateHarnessTests: XCTestCase {
         leaveACrashedRunsDNS(harness)
         leaveACrashedRunsRelay(harness, target: .silent)
         let state = await harness.ready()
-        await harness.settle("the decline is shown") { state.runtime.systemDNSRecoveryDeclined }
+        // The notice can show before its event is in the log.
+        await harness.settle("the decline is shown and recorded") {
+            state.runtime.systemDNSRecoveryDeclined && self.launchRecoveryEvent(harness, surface: .systemDNS) != nil
+        }
         XCTAssertEqual(launchRecoveryEvent(harness, surface: .systemDNS)?.contains("witness=target_silent"), true)
     }
 
