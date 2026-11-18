@@ -508,7 +508,8 @@ package final class ConnectionPool: @unchecked Sendable {
 
     /// Dials a dedicated tunnel connection to `forcedProxy`, or to the upstream selection picks, and runs
     /// `handshake` on it. The tunnel's attempt is the dial and the handshake, so a half-open probe slot the
-    /// selection took ends when `handshake`'s future does. `handshake` reports how the handshake ended.
+    /// selection took ends when `handshake`'s future does. A dial that fails feeds the breaker here, as a refused
+    /// connect does for a plain request (#279); `handshake` reports how the handshake ended.
     package func makeDedicatedTunnelConnection<Tunnel: Sendable>(
         forcedProxy: UpstreamProxy? = nil, target: String,
         handshake: @escaping @Sendable (PooledUpstreamConnection) -> EventLoopFuture<Tunnel>
@@ -516,6 +517,10 @@ package final class ConnectionPool: @unchecked Sendable {
         let origin = ExchangeOrigin.connect(target)
         guard let attempt = attempt(forcedProxy: forcedProxy, origin: origin, { proxy in
             acquireDedicatedTunnelConnection(for: proxy, target: target, config: configProvider())
+                .flatMapErrorThrowing { [weak self] error in
+                    self?.recordExchangeError(error, for: proxy, origin: origin)
+                    throw error
+                }
                 .flatMap(handshake)
         }) else {
             return group.next().makeFailedFuture(ConnectionPoolError.noUpstreamsConfigured)
