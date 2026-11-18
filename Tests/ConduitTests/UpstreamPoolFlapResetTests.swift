@@ -93,6 +93,48 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
         await orchestrator.stopTunnels()
     }
 
+    /// A store read that fails mid-flap reports `.unknown` between the flap and its recovery. The recovery is still one.
+    @RuntimeActor func testAFlapRecoveryAfterABlindReadingClosesTheTunnelPoolsBreakers() async throws {
+        let orchestrator = try await startOrchestrator()
+        await orchestrator.handleVPNStateChange(.connected)
+        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+
+        await orchestrator.handleVPNStateChange(.reasserting)
+        await orchestrator.handleVPNStateChange(.unknown)
+        XCTAssertEqual(orchestrator.tunnelConnectionPool.upstreamStatuses().map(\.circuitState), [.open, .open],
+                       "a blind reading is no recovery")
+        await orchestrator.handleVPNStateChange(.connected)
+
+        XCTAssertEqual(orchestrator.tunnelConnectionPool.upstreamStatuses().map(\.circuitState), [.closed, .closed])
+        await orchestrator.stopProxy()
+    }
+
+    @RuntimeActor func testAReconnectAfterABlindReadingClosesTheTunnelPoolsBreakers() async throws {
+        let orchestrator = try await startOrchestrator()
+        await orchestrator.handleVPNStateChange(.connected)
+        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+
+        await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost))
+        await orchestrator.handleVPNStateChange(.unknown)
+        await orchestrator.handleVPNStateChange(.connected)
+
+        XCTAssertEqual(orchestrator.tunnelConnectionPool.upstreamStatuses().map(\.circuitState), [.closed, .closed])
+        await orchestrator.stopProxy()
+    }
+
+    @RuntimeActor func testAFlapRecoveryAfterABlindReadingWithOnlyTunnelsRunningClosesTheTunnelPoolsBreakers() async throws {
+        let orchestrator = try await startTunnelsOnly()
+        await orchestrator.handleVPNStateChange(.connected)
+        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+
+        await orchestrator.handleVPNStateChange(.reasserting)
+        await orchestrator.handleVPNStateChange(.unknown)
+        await orchestrator.handleVPNStateChange(.connected)
+
+        XCTAssertEqual(orchestrator.tunnelConnectionPool.upstreamStatuses().map(\.circuitState), [.closed, .closed])
+        await orchestrator.stopTunnels()
+    }
+
     // MARK: - Harness
 
     /// A running proxy with two enabled upstreams, each a loopback listener

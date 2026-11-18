@@ -52,11 +52,12 @@ package struct LiveSplitDNSPolicy: Hashable, Sendable {
     /// tunnel staying up does not keep the first one's servers in use, and a
     /// replayed reading does not put them back. `.reasserting` and `.unknown`
     /// do not filter: the grace window bounds the first, and under the second
-    /// no tunnel is admitted yet. A reading with a `failure` clears it too: the
+    /// nothing is in use, since the gate withholds, and the next `.connected`
+    /// filters what was held. A reading with a `failure` clears it too: the
     /// store could not be read, so nothing says the tunnel still pushes them.
     private var heldThroughFlap: [PushedResolver] = []
 
-    /// `[]` while the gate withholds (`.disconnected`); the held set otherwise,
+    /// `[]` while the gate withholds (`.disconnected` or `.unknown`); the held set otherwise,
     /// in resolver order: `searchOrder` ascending, missing last, then `serviceID`.
     package private(set) var detectedInUse: [PushedResolver] = []
 

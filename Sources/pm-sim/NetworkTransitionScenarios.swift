@@ -100,7 +100,7 @@ enum NetworkTransitionScenarios {
         // Each call must emit one fresh reset event — the contract is
         // "recycle every time the orchestrator decides it needs to," not
         // "deduplicate based on debounce." The deduplication, if any, is
-        // the *fuser*'s responsibility upstream of this entry point.
+        // the VPN monitor's responsibility upstream of this entry point.
         let idempotenceCutoff = Date()
         await orchestrator.handleSystemWake()
         try await Task.sleep(for: .milliseconds(50))

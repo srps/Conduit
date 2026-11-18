@@ -235,8 +235,10 @@ package struct ProxyOrchestratorSnapshot: Sendable, Equatable, Codable {
 package enum DetectedSplitDNSChangeReason: String, Hashable, Sendable {
     /// A pushed-resolver reading.
     case pushed
-    /// A VPN report of `.connected` or `.unknown`.
+    /// A VPN report of `.connected`.
     case vpnConnected = "vpn_connected"
+    /// A VPN report of `.unknown`, so the host pushed no rules.
+    case vpnUnknown = "vpn_unknown"
     /// A VPN report of `.disconnected`.
     case vpnDisconnected = "vpn_disconnected"
     /// A VPN report of `.reasserting`.
@@ -1128,6 +1130,10 @@ package final class ProxyOrchestrator {
     /// An older observation that arrives after a newer one is dropped.
     private var vpnObservations = VPNObservationOrder()
 
+    /// The verdict every VPN reaction is classified against; `snapshot.vpnState` shows what the monitor last said. Kept across a
+    /// stop and a monitor restart: the breakers, held sweeps and PAC answers it describes outlive both.
+    private var vpn = VPNReactionHistory()
+
     /// Probes started, and the latest-started one that committed. Probes
     /// overlap (a VPN handler, the retry timer, the error-rate alarm); one
     /// that finishes after a later-started one committed is older evidence
@@ -1168,7 +1174,7 @@ package final class ProxyOrchestrator {
     /// The confirmed transition whose sweeps have not all run: a flap holds
     /// them, and its recovery runs the re-sweeps.
     private var strandedSweepsOwed: String?
-    /// Mirror of `snapshot.vpnState == .connected` for the DNS forwarder's
+    /// Whether the last definite VPN verdict is `.connected`, for the DNS forwarder's
     /// `@Sendable` DoH transport preference (NIO handlers cannot read the owner's
     /// snapshot). Updated in `handleVPNStateChange`.
     private let vpnConnectedForDNSBox = NIOLockedValueBox(false)
@@ -1183,7 +1189,7 @@ package final class ProxyOrchestrator {
     /// leave the reasserting state (either by recovery or by the grace window
     /// expiring into `.disconnected`).
     ///
-    /// Phase 6 (revised): rapid-flap coalescing moved to the fuser
+    /// Phase 6 (revised): rapid-flap coalescing moved to the VPN monitor
     /// (`vpnFlapMinVisibleSeconds` debounce). The orchestrator no longer
     /// tracks `lastFlapRecoveredAt` / `reassertingSuppressed` — sub-window
     /// flaps simply don't reach this layer.
@@ -1606,7 +1612,7 @@ package final class ProxyOrchestrator {
                     // The last PAC refresh ran on a network that is gone:
                     // drop its answers now and refetch once running, when a
                     // further VPN report is handled as usual.
-                    invalidatePACRoutes(reason: snapshot.vpnState == .connected ? .vpnConnected : .vpnDisconnected)
+                    invalidatePACRoutes(reason: vpn.definite == .connected ? .vpnConnected : .vpnDisconnected)
                     pacRefetchAfterStart = true
                     break
                 }
@@ -2226,7 +2232,9 @@ package final class ProxyOrchestrator {
         guard let summary = await refreshConnectivityMode(), isProxyActive else { return }
         let cause = snapshot.directModeCause
         if cause.isDirect {
-            if cause == .transientNetworkChange, summary.hasReachableUpstream {
+            // While the monitor cannot read the store, a reachable upstream does not say the tunnel is back: the monitor's next
+            // good reading, due within its retry schedule, decides the flap.
+            if cause == .transientNetworkChange, summary.hasReachableUpstream, !vpn.blind {
                 recoverStaleReassertingAfterWake(summary: summary)
                 return
             }
@@ -2308,11 +2316,16 @@ package final class ProxyOrchestrator {
         let durationSeconds = takeFlapDuration()
         let durationMS = Int(durationSeconds * 1_000)
 
-        mutateSnapshot { $0.vpnState = .connected }
+        vpn.recoverFlap()
+        mutateSnapshot {
+            $0.vpnState = vpn.observed
+            $0.vpnInterfaceName = vpn.shownTunnel
+        }
+        vpnConnectedForDNSBox.withLockedValue { $0 = true }
         // A recovery like a monitor's `.connected`: the sweeps the flap held,
         // or the address-only pass, run from here, since the monitor's own
         // `.connected` will now find nothing changed.
-        resumeStrandedSweeps()
+        resumeStrandedSweeps(recovered: "flap_recovered")
         resetUpstreamCircuitsAfterFlap()
         setDirectMode(deriveDirectModeCause(probeSummary: summary))
         resumeConnectivityMonitoring(summary: summary)
@@ -2351,6 +2364,13 @@ package final class ProxyOrchestrator {
     /// * `.disconnected → .connected` → VPN came back from a real outage.
     ///   Reset breakers, full reprobe, exit direct mode if any upstream reachable.
     ///   Close the DIRECT tunnels dialed while it was down (#148).
+    /// * `* → .unknown` → the monitor cannot read the store. Routing holds;
+    ///   only the pending sweeps wait. Every transition above is judged
+    ///   against the last definite verdict, never `.unknown` (`VPNReactionHistory`),
+    ///   so `.reasserting → .unknown → .connected` is a flap recovery, and
+    ///   the same verdict after a blind reading does nothing else but resume
+    ///   the held sweeps, except `.reasserting`, which keeps holding them.
+    ///   A wake recovers no flap while the monitor is blind.
     ///
     /// `interfaceName` is the utun the observer says carries a `.connected`
     /// verdict; it is stored for display and ignored for any other state.
@@ -2370,20 +2390,38 @@ package final class ProxyOrchestrator {
             // The newer state that was applied runs its own sweeps.
             return
         }
-        let shownInterface = state == .connected ? interfaceName : nil
-        let previous = snapshot.vpnState
-        guard previous != state else {
+        let previous: VPNReactionHistory.Definite?
+        switch vpn.record(state, tunnel: interfaceName) {
+        case nil:
+            return
+        case .blinded:
+            // The monitor cannot read the store. Nothing it reported is known to have changed, so routing holds and so does every
+            // reaction to the last definite verdict; only the sweeps wait, since a path missing now may be a flap the gap hides.
+            mutateSnapshot {
+                $0.vpnState = vpn.observed
+                $0.vpnInterfaceName = vpn.shownTunnel
+            }
+            holdStrandedSweeps()
+            return
+        case .confirmed(let afterBlind, let tunnelReplaced):
             // Same verdict, possibly a different tunnel carrying it (a second
             // VPN came up and the first went away). The name the UI shows
             // follows the observer, and a tunnel that replaced another took
             // the old one's address and routes with it, so its sockets are
-            // swept like any confirmed transition.
-            if snapshot.vpnInterfaceName != shownInterface {
-                let replaced = snapshot.vpnInterfaceName != nil && shownInterface != nil
-                mutateSnapshot { $0.vpnInterfaceName = shownInterface }
-                if replaced { startStrandedSweeps(transition: "tunnel_changed") }
+            // swept like any confirmed transition. After a blind reading the
+            // held sweeps resume, as after a flap: the verdict did not change.
+            mutateSnapshot {
+                $0.vpnState = vpn.observed
+                $0.vpnInterfaceName = vpn.shownTunnel
+            }
+            if tunnelReplaced {
+                startStrandedSweeps(transition: "tunnel_changed")
+            } else if afterBlind, vpn.definite != .reasserting {
+                resumeStrandedSweeps(recovered: "blind_recovered")
             }
             return
+        case .transition(let from):
+            previous = from
         }
         // Routing is unsettled until this returns, reprobe included, and for
         // the strict-mode hint's settle window after (#97).
@@ -2394,8 +2432,8 @@ package final class ProxyOrchestrator {
 
         vpnConnectedForDNSBox.withLockedValue { $0 = state == .connected }
         mutateSnapshot {
-            $0.vpnState = state
-            $0.vpnInterfaceName = shownInterface
+            $0.vpnState = vpn.observed
+            $0.vpnInterfaceName = vpn.shownTunnel
         }
         // A confirmed transition closes the sockets whose path it removed,
         // whatever the probe decides, now and again as routes settle
@@ -2409,7 +2447,7 @@ package final class ProxyOrchestrator {
             startStrandedSweeps(transition: "disconnected")
         case .connected where previous == .reasserting:
             disconnectRoutingPending = false
-            resumeStrandedSweeps()
+            resumeStrandedSweeps(recovered: "flap_recovered")
         case .connected:
             disconnectRoutingPending = false
             startStrandedSweeps(transition: "connected")
@@ -2423,7 +2461,7 @@ package final class ProxyOrchestrator {
         // so a recovery still closes their pool's breakers.
         guard isProxyActive else {
             switch (previous, state) {
-            case (.reasserting, .connected), (.disconnected, .connected):
+            case (.reasserting?, .connected), (.disconnected?, .connected):
                 tunnelConnectionPool.resetCircuitsAfterFlap()
             default:
                 break
@@ -2436,7 +2474,7 @@ package final class ProxyOrchestrator {
         case .reasserting:
             // Phase 6 (revised): if we reach .reasserting at all, the underlying
             // utun has been inactive for >= vpnFlapMinVisibleSeconds — sub-window
-            // blips never get here (the fuser absorbs them silently). So no
+            // blips never get here (the monitor's flap timer absorbs them). So no
             // coalesce/suppression logic at this layer.
 
             // Silent grace window. Active streams stay alive — that's the whole
@@ -2446,7 +2484,7 @@ package final class ProxyOrchestrator {
             healthChecker.stop()
             stopDirectModeReprobeTimer()
             // Direct-mode transition without a probe. The cause derivation below
-            // will return .transientNetworkChange because snapshot.vpnState was
+            // will return .transientNetworkChange because `vpn.definite` was
             // already set above.
             setDirectMode(deriveDirectModeCause(probeSummary: nil))
             mutateSnapshot {
@@ -2476,13 +2514,13 @@ package final class ProxyOrchestrator {
             // Prepare recovery state before admitting upstream traffic too:
             // clients must not see old breaker holds or utun-pinned DoH pools.
             switch previous {
-            case .reasserting:
+            case .reasserting?:
                 resetUpstreamCircuitsAfterFlap()
                 resetDNSTransportsForRecovery(source: "vpn_flap_recovered")
-            case .disconnected:
+            case .disconnected?:
                 resetUpstreamCircuitsAfterFlap()
                 resetDNSTransportsForRecovery(source: "vpn_reconnected")
-            case .unknown, .connected:
+            case nil, .connected?:
                 if snapshot.dnsRunState == .running {
                     resetDNSTransportsForRecovery(source: "vpn_connected")
                 }
@@ -2494,13 +2532,13 @@ package final class ProxyOrchestrator {
             //                              breakers, reprobe once for sanity.
             //   .disconnected → .connected: real outage ended. Same actions
             //                              but log differently.
-            //   .unknown → .connected: cold start (observer just primed);
-            //                          run a normal probe + state update.
+            //   nil → .connected: cold start (no definite verdict yet);
+            //                     run a normal probe + state update.
             let activeTunnels = snapshot.activeConnections.ordered.filter { $0.tunnel }.count
             switch previous {
-            case .reasserting:
+            case .reasserting?:
                 // Phase 6 (revised): every .reasserting -> .connected we see
-                // here is a real (super-min-visible) flap recovery; the fuser
+                // here is a real (super-min-visible) flap recovery; the flap timer
                 // already absorbed sub-window blips. No suppression needed.
                 let recoveredAt = flapClock.wallNow()
                 let durationSeconds = takeFlapDuration()
@@ -2509,7 +2547,7 @@ package final class ProxyOrchestrator {
                 guard let summary = await refreshConnectivityMode() else { return }
                 resumeConnectivityMonitoring(summary: summary)
                 // Phase 7: telemetry update. Only super-min-visible flaps reach
-                // this branch (the fuser absorbs sub-window blips), so every
+                // this branch (the flap timer absorbs sub-window blips), so every
                 // increment here corresponds to a user-visible flap event —
                 // matching the strip's "Flaps N" / "Preserved N" semantics.
                 mutateSnapshot {
@@ -2523,7 +2561,7 @@ package final class ProxyOrchestrator {
                 logStore.log(.notice,
                              "VPN flap recovered after \(durationMS) ms — \(activeTunnels) active tunnel(s) preserved.",
                              category: .network)
-            case .disconnected:
+            case .disconnected?:
                 async let pacRefreshed: Void = refreshPACRouting(force: true)
                 let summary = await refreshConnectivityMode()
                 if let summary { resumeConnectivityMonitoring(summary: summary) }
@@ -2533,8 +2571,8 @@ package final class ProxyOrchestrator {
                 guard summary != nil, generation == routingGeneration else { return }
                 emitEvent(.vpn, "vpn.connected")
                 logStore.log(.notice, "VPN reconnected — re-probing upstreams.", category: .network)
-            case .unknown, .connected:
-                // Cold start or VPN observer priming to .connected. The PAC
+            case nil, .connected?:
+                // Cold start: the first definite verdict is .connected. The PAC
                 // loaded at proxy start may predate the VPN (login before the
                 // VPN client connects), so its answers go first. Recycle DoH
                 // transports when the forwarder is running so a connect-while-app-
@@ -2622,9 +2660,7 @@ package final class ProxyOrchestrator {
             }
 
         case .unknown:
-            // Cold-state regression. Don't take action — wait for the next
-            // definitive transition. (This mostly happens at startup before
-            // the observer primes.)
+            // `vpn.record` returns `.blinded` for it, handled above.
             break
         }
     }
@@ -2652,11 +2688,11 @@ package final class ProxyOrchestrator {
     /// unlike a missing route mid-flap, does not come back. It waits the
     /// first re-sweep delay, since IPv6 addresses can return after the IPv4
     /// one the recovery was declared on.
-    private func resumeStrandedSweeps() {
+    private func resumeStrandedSweeps(recovered: String) {
         if let transition = strandedSweepsOwed {
             runStrandedSweeps(transition: transition, immediately: false)
         } else {
-            runStrandedSweeps(transition: "flap_recovered", immediately: false, addressesOnly: true,
+            runStrandedSweeps(transition: recovered, immediately: false, addressesOnly: true,
                               delays: Array(strandedResweepDelays.prefix(1)))
         }
     }
@@ -2738,7 +2774,7 @@ package final class ProxyOrchestrator {
     private func applyDeferredDisconnectRouting() {
         guard disconnectRoutingPending else { return }
         disconnectRoutingPending = false
-        guard case .disconnected(let reason) = snapshot.vpnState else { return }
+        guard case .disconnected(let reason)? = vpn.definite else { return }
         migrateUpstreamChannelsAfterVPNDisconnect(
             reason: reason, routesDirect: snapshot.directModeCause.routesClientTrafficDirectly, superseded: false
         )
@@ -3215,31 +3251,34 @@ package final class ProxyOrchestrator {
     /// Derive the effective `DirectModeCause` from the union of VPN state and
     /// upstream-probe results. VPN-driven causes win when present:
     ///
-    ///   VPN state               | Effective cause
+    ///   Last definite verdict   | Effective cause
     ///   ------------------------|---------------------------------------------
     ///   .reasserting            | .transientNetworkChange (silent grace window)
     ///   .disconnected(_)        | keep proxy routing if proxy-semantic probe succeeds;
     ///                           | otherwise .vpnDisconnected
     ///   .connected              | derive from proxy-semantic probe + config
-    ///   .unknown                | keep proxy routing if proxy-semantic probe succeeds;
+    ///   none (cold start)       | keep proxy routing if proxy-semantic probe succeeds;
     ///                           | otherwise assume off-VPN/direct startup
+    ///
+    /// A blind reading (`.unknown` mid-session) leaves the last definite
+    /// verdict in place, so routing holds through it (`VPNReactionHistory`).
     ///
     /// This avoids needing two parallel cause-priority systems. Call sites
     /// (`refreshConnectivityMode`, post-recovery reprobes in
     /// `handleVPNStateChange`) feed in their probe summary; callers that do not
     /// have one yet pass `nil` and get the conservative direct-mode answer.
     private func deriveDirectModeCause(probeSummary: UpstreamProbeSummary?) -> DirectModeCause {
-        switch snapshot.vpnState {
-        case .reasserting:
+        switch vpn.definite {
+        case .reasserting?:
             return .transientNetworkChange
-        case .disconnected:
+        case .disconnected?:
             if let summary = probeSummary, summary.hasReachableUpstream { return .none }
             return .vpnDisconnected
-        case .connected:
+        case .connected?:
             if config.enabledUpstreams.isEmpty { return .noUpstreamsConfigured }
             if let summary = probeSummary, !summary.hasReachableUpstream { return .upstreamsUnreachable }
             return .none
-        case .unknown:
+        case nil:
             if config.enabledUpstreams.isEmpty { return .noUpstreamsConfigured }
             if let summary = probeSummary, !summary.hasReachableUpstream { return .vpnDisconnected }
             return .none

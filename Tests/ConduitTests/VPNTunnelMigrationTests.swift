@@ -305,6 +305,53 @@ final class VPNTunnelMigrationTests: XCTestCase {
         })
     }
 
+    /// A blind reading between two `.connected` reports is not a connect: the recovery runs no fresh sweep, which would judge every
+    /// route, only the one address-only pass a recovery runs after the first re-sweep delay.
+    @RuntimeActor func testABlindReadingBetweenTwoConnectedReportsRunsOnlyTheAddressPass() async throws {
+        let orchestrator = orchestrator()
+        try await orchestrator.startProxy()
+        try await connectAndSettle(orchestrator)
+        let settled = migrations(orchestrator.eventLog.events).count
+        let oldAddress = try await tracked(orchestrator, local: "10.20.30.40")
+        let routeMoved = try await tracked(orchestrator, local: "10.20.30.41")
+
+        await orchestrator.handleVPNStateChange(.unknown)
+        gone.withLockedValue { _ = $0.insert("10.20.30.40") }
+        moved.withLockedValue { _ = $0.insert("10.20.30.41") }
+        await orchestrator.handleVPNStateChange(.connected)
+        try await until { self.delays.held == self.resweep }
+        await drain(oldAddress, routeMoved)
+        XCTAssertTrue(oldAddress.isActive, "the recovery waits before judging addresses")
+        XCTAssertEqual(delays.release(), resweep)
+        try await until({
+            self.migrations(orchestrator.eventLog.events).count > settled
+        }, else: "\(migrations(orchestrator.eventLog.events))")
+        await drain(oldAddress, routeMoved)
+        XCTAssertFalse(oldAddress.isActive)
+        XCTAssertTrue(routeMoved.isActive, "a blind reading judges no route")
+        XCTAssertEqual(Array(migrations(orchestrator.eventLog.events).dropFirst(settled)),
+                       ["transition=blind_recovered phase=addresses pass=1 upstream_closed=0 direct_closed=1 unchecked=0"])
+    }
+
+    /// The tunnel carrying a connected VPN changed while the store was unreadable: the recovery sweeps it as a tunnel change.
+    @RuntimeActor func testATunnelChangeAcrossABlindReadingSweeps() async throws {
+        let orchestrator = orchestrator()
+        try await orchestrator.startProxy()
+        await orchestrator.handleVPNStateChange(.connected, interfaceName: "utun4")
+        try await until { self.delays.held == self.resweep }
+        let onOldTunnel = try await tracked(orchestrator, local: "10.20.30.40")
+        gone.withLockedValue { _ = $0.insert("10.20.30.40") }
+
+        await orchestrator.handleVPNStateChange(.unknown)
+        XCTAssertNil(orchestrator.snapshot.vpnInterfaceName)
+        await orchestrator.handleVPNStateChange(.connected, interfaceName: "utun5")
+        try await until { !onOldTunnel.isActive }
+        XCTAssertEqual(orchestrator.snapshot.vpnInterfaceName, "utun5")
+        XCTAssertTrue(migrations(orchestrator.eventLog.events).contains {
+            $0.hasPrefix("transition=tunnel_changed phase=paths pass=0 ") && $0.contains(" direct_closed=1 ")
+        }, "\(migrations(orchestrator.eventLog.events))")
+    }
+
     /// A flap that a wake recovers, not a monitor report, still runs the
     /// recovery's sweep: the monitor's later `.connected` changes nothing.
     @RuntimeActor func testAWakeRecoveryRunsTheHeldSweep() async throws {
@@ -325,6 +372,46 @@ final class VPNTunnelMigrationTests: XCTestCase {
         }, else: "\(migrations(orchestrator.eventLog.events))")
         await drain(oldAddress)
         XCTAssertFalse(oldAddress.isActive)
+    }
+
+    /// A wake that finds the upstream reachable while the monitor cannot read the store mid-flap does not know the flap ended:
+    /// the tunnel may still be down. It recovers nothing, and the monitor's next good reading decides.
+    @RuntimeActor func testAWakeWhileTheMonitorIsBlindMidFlapRecoversNothing() async throws {
+        let orchestrator = orchestrator()
+        try await orchestrator.startProxy()
+        await orchestrator.handleVPNStateChange(.connected)
+        try await until { self.delays.held == self.resweep }
+        let routeMoved = try await tracked(orchestrator, local: "10.20.30.41")
+        moved.withLockedValue { _ = $0.insert("10.20.30.41") }
+        await orchestrator.handleVPNStateChange(.reasserting)
+        await orchestrator.handleVPNStateChange(.unknown)
+        let started = delays.started
+        let swept = migrations(orchestrator.eventLog.events).count
+
+        await orchestrator.handleSystemWake()
+
+        XCTAssertEqual(orchestrator.snapshot.vpnState, .unknown)
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, .transientNetworkChange, "the flap's routing holds")
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.metrics.vpnFlapCount, 0)
+        XCTAssertFalse(orchestrator.eventLog.events.contains { $0.event == "vpn.flap.recovered" })
+
+        await orchestrator.handleVPNStateChange(.connected)
+        try await until { self.delays.held == self.resweep }
+        XCTAssertEqual(delays.started, started + 1, "only the monitor's recovery resumed the held sweeps")
+        XCTAssertEqual(migrations(orchestrator.eventLog.events).count, swept)
+        await drain(routeMoved)
+        XCTAssertTrue(routeMoved.isActive)
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.metrics.vpnFlapCount, 1)
+        let recoveries = orchestrator.eventLog.events.filter { $0.event == "vpn.flap.recovered" }.compactMap(\.detail)
+        XCTAssertEqual(recoveries.count, 1, "\(recoveries)")
+        XCTAssertFalse(recoveries.contains { $0.hasSuffix("source=system_wake") }, "the monitor's reading recovered the flap")
+        XCTAssertEqual(orchestrator.eventLog.events.filter { $0.event == "vpn.flap.start" }.count, 1)
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, DirectModeCause.none)
+        XCTAssertEqual(delays.release(), resweep)
+        try await until({
+            self.migrations(orchestrator.eventLog.events).last
+                == "transition=connected phase=paths pass=1 upstream_closed=0 direct_closed=1 unchecked=0"
+        }, else: "\(migrations(orchestrator.eventLog.events))")
     }
 
     /// The first report after startup is a real transition: `unknown →
@@ -368,6 +455,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
         private let state = NIOLockedValueBox(State())
 
         var held: Duration? { state.withLockedValue { $0.held?.delay } }
+        var started: Int { state.withLockedValue { $0.started } }
         /// Delays cancelled while held, or started by a cancelled sweep.
         var cancelled: Int { state.withLockedValue { $0.cancelled } }
         var overused: Bool { state.withLockedValue { $0.overused } }

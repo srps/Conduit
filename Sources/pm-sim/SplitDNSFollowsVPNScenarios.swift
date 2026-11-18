@@ -108,9 +108,9 @@ enum SplitDNSFollowsVPNScenarios {
                 $0.split(separator: " ").last.map(String.init) ?? ""
             }
             check(
-                "the table was swapped on the push, each disconnect, the reconnect, the held key and the stop, and not in the flap",
+                "the table was swapped on the first connect (a push before it is withheld while the VPN is unknown, 0048), each disconnect, the reconnect, the held key and the stop, and not in the flap",
                 reasons == [
-                    "reason=pushed", "reason=vpn_disconnected", "reason=vpn_connected", "reason=vpn_disconnected", "reason=pushed",
+                    "reason=vpn_connected", "reason=vpn_disconnected", "reason=vpn_connected", "reason=vpn_disconnected", "reason=pushed",
                     "reason=detection_off",
                 ]
             )
@@ -147,8 +147,8 @@ enum SplitDNSFollowsVPNScenarios {
             let failures = events.filter { $0.event == "dns.split_detection_failed" }.compactMap(\.detail)
             check("the failure was reported once", failures == ["reason=store_read attempt=1"])
             let swaps = events.filter { $0.event == "dns.split_table_changed" }.compactMap(\.detail)
-            check("the table was swapped on the push, the failure, the recovery and the stop", swaps == [
-                "detected_domains=1 manual_domains=0 rules=1 reason=pushed",
+            check("the table was swapped on the first connect (0048 withholds the push before it), the failure, the recovery and the stop", swaps == [
+                "detected_domains=1 manual_domains=0 rules=1 reason=vpn_connected",
                 "detected_domains=0 manual_domains=0 rules=0 reason=detection_failed",
                 "detected_domains=1 manual_domains=0 rules=1 reason=pushed",
                 "detected_domains=0 manual_domains=0 rules=0 reason=detection_off",
@@ -320,11 +320,12 @@ enum SplitDNSFollowsVPNScenarios {
         case .failure(let failure): throw ScenarioExecutionError(message: "state root refused: \(failure)")
         }
 
+        let upstream = try await ClosingUpstream.open()
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.localPACEnabled = false
         config.pacRoutingEnabled = false
-        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.upstreams = [upstream.proxy]
         config.dnsForwarderEnabled = true
         config.dnsForwarderPort = 0
         config.dnsEntries = []
@@ -350,6 +351,7 @@ enum SplitDNSFollowsVPNScenarios {
                 kerberosTicketRecovery: FakeKerberosTicketRecovery(),
                 gss: .injected { NoGSS() },
                 pacEvaluator: FakePacEvaluator(),
+                connectivityProbe: .injected(SimulatedUpstreams.unreachable),
                 portHolderProbe: FakeListenerPortHolderProbe(),
                 loopbackPortProbe: FakeLoopbackPortProbe().liveness(port:),
                 commandRunner: { try machine.run($0, $1) },
@@ -418,6 +420,7 @@ enum SplitDNSFollowsVPNScenarios {
             notes.append("shutdown not confirmed: scratch kept at \(scratch.path)")
         }
         notes.append("tunnel server saw \(corp.total) queries")
+        notes.append("the owned upstream accepted \(upstream.accepted) connections")
         let passed = assertions.filter(\.passed).count
         return ScenarioResult(
             name: name, clientCount: assertions.count, clientsOpened: assertions.count, clientsWithFirstByte: passed,
@@ -436,7 +439,8 @@ enum SplitDNSFollowsVPNScenarios {
         return !pushed.isObserving
     }
 
-    private static func controlLimits() throws -> RuntimeServiceLimits {
+    /// Control limits for a scenario that reads the host through one in-memory client.
+    static func controlLimits() throws -> RuntimeServiceLimits {
         try RuntimeServiceLimits(
             maxRequestBytes: 4096, maxReplyBytes: 64 * 1024,
             aliasCapacityPerPartition: 8, aliasByteCapacityPerPartition: 1 << 20,
@@ -453,8 +457,8 @@ enum SplitDNSFollowsVPNScenarios {
     }
 }
 
-/// No scenario here authenticates, so a token request is a fault.
-private final class NoGSS: GSSTokenProvider {
+/// For a scenario that never authenticates, so a token request is a fault.
+final class NoGSS: GSSTokenProvider {
     func generateToken(host: String, inputToken: Data?) throws -> Data? {
         throw ScenarioExecutionError(message: "unplanned GSS token request for \(host)")
     }

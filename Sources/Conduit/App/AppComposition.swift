@@ -120,6 +120,7 @@ extension AppComposition {
                 kerberosTicketRecovery: SystemKerberosTicketRecovery(),
                 gss: .system,
                 pacEvaluator: AppState.makePACEvaluator(insecureFetcher: AppState.curlPACFetcher),
+                connectivityProbe: .system,
                 portHolderProbe: PortHolderProbe(),
                 loopbackPortProbe: { LoopbackPortProbe.liveness(port: $0) },
                 commandRunner: CommandRunner.host,

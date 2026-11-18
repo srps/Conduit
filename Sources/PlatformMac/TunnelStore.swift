@@ -23,9 +23,10 @@ extension TunnelSnapshot {
     /// key as `SCDynamicStoreCopyMultiple` returns them. Other keys, and
     /// services on an interface that is not a `utun`, are ignored.
     ///
-    /// A value of the wrong type reads as absent, as `VPNStatusMonitor` reads
-    /// it: a key that is no dictionary is no key, and an `Addresses` that is
-    /// not a list of strings lists none.
+    /// A value of the wrong type reads as absent: a key that is no dictionary
+    /// is no key, an `Addresses` that is not a list of strings lists none, and
+    /// a service whose `InterfaceName` is not a string names no tunnel. Each
+    /// such key is listed in `malformedKeys`.
     package static func parse(store: [String: Any]) -> TunnelSnapshot {
         struct Entry {
             var hasInterfaceKey = false
@@ -35,22 +36,36 @@ extension TunnelSnapshot {
             var overridesPrimary = false
         }
         var entries: [String: Entry] = [:]
+        var malformed: [String] = []
 
         for (key, value) in store {
-            guard let dictionary = value as? [String: Any], let family = Family(key: key) else { continue }
-            if let interface = middle(of: key, after: interfacePrefix, family: family) {
-                guard PushedResolverReading.isTunnelInterface(interface) else { continue }
+            guard let family = Family(key: key) else { continue }
+            let interfaceKey = middle(of: key, after: interfacePrefix, family: family)
+            let serviceKey = interfaceKey == nil ? middle(of: key, after: servicePrefix, family: family) : nil
+            if let interface = interfaceKey, !PushedResolverReading.isTunnelInterface(interface) { continue }
+            guard interfaceKey != nil || serviceKey != nil else { continue }
+            guard let dictionary = value as? [String: Any] else {
+                malformed.append(key)
+                continue
+            }
+            if let interface = interfaceKey {
                 var entry = entries[interface] ?? Entry()
                 entry.hasInterfaceKey = true
-                let addresses = dictionary["Addresses"] as? [String] ?? []
+                let listed = dictionary["Addresses"]
+                if listed != nil, !(listed is [String]) { malformed.append(key) }
+                let addresses = listed as? [String] ?? []
                 switch family {
                 case .ipv4: entry.ipv4Addresses = addresses
                 case .ipv6: entry.hasRoutableIPv6 = addresses.contains(where: isRoutableIPv6)
                 }
                 entries[interface] = entry
-            } else if let serviceID = middle(of: key, after: servicePrefix, family: family) {
-                guard let interface = dictionary["InterfaceName"] as? String,
-                      PushedResolverReading.isTunnelInterface(interface) else { continue }
+            } else if let serviceID = serviceKey {
+                let named = dictionary["InterfaceName"]
+                guard let interface = named as? String else {
+                    if named != nil { malformed.append(key) }
+                    continue
+                }
+                guard PushedResolverReading.isTunnelInterface(interface) else { continue }
                 var entry = entries[interface] ?? Entry()
                 if !entry.serviceIDs.contains(serviceID) { entry.serviceIDs.append(serviceID) }
                 if family == .ipv4, (dictionary["OverridePrimary"] as? NSNumber)?.boolValue == true {
@@ -69,7 +84,7 @@ extension TunnelSnapshot {
                 serviceID: entry.serviceIDs.min(),
                 overridesPrimary: entry.overridesPrimary
             )
-        })
+        }, malformedKeys: malformed)
     }
 
     private enum Family: String {

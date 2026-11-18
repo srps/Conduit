@@ -136,7 +136,7 @@ final class TunnelSnapshotParseTests: XCTestCase {
         XCTAssertEqual(snapshot.tunnels.map(\.interface), ["utun12"])
     }
 
-    func testAValueOfTheWrongTypeReadsAsAbsent() {
+    func testAValueOfTheWrongTypeReadsAsAbsentAndIsReported() {
         let snapshot = TunnelSnapshot.parse(store: [
             "State:/Network/Interface/utun6/IPv4": "not a dictionary",
             "State:/Network/Interface/utun7/IPv4": ["Addresses": [192, 0, 2, 1]] as [String: Any],
@@ -144,8 +144,24 @@ final class TunnelSnapshotParseTests: XCTestCase {
             "State:/Network/Service/odd/IPv4": ["InterfaceName": 6] as [String: Any],
         ])
 
-        XCTAssertEqual(snapshot, TunnelSnapshot(tunnels: [.init(interface: "utun7"), .init(interface: "utun8")]),
-                       "as VPNStatusMonitor reads them: no key, and no addresses")
+        XCTAssertEqual(snapshot.tunnels, [.init(interface: "utun7"), .init(interface: "utun8")], "no key, and no addresses")
+        XCTAssertEqual(snapshot.malformedKeys, [
+            "State:/Network/Interface/utun6/IPv4",
+            "State:/Network/Interface/utun7/IPv4",
+            "State:/Network/Interface/utun8/IPv4",
+            "State:/Network/Service/odd/IPv4",
+        ], "every dropped key is listed, in key order")
+    }
+
+    func testWellFormedKeysAndOtherInterfacesReportNothing() {
+        let snapshot = TunnelSnapshot.parse(store: [
+            "State:/Network/Interface/utun6/IPv4": ["Addresses": ["192.0.2.10"]] as [String: Any],
+            "State:/Network/Interface/utun6/IPv6": [String: Any](),
+            "State:/Network/Interface/en0/IPv4": "not a tunnel key",
+            "State:/Network/Service/wifi/IPv4": ["InterfaceName": "en0"] as [String: Any],
+        ])
+
+        XCTAssertEqual(snapshot.malformedKeys, [])
     }
 
     func testTunnelsComeInNameOrderWhateverTheDictionaryOrder() {
@@ -155,6 +171,6 @@ final class TunnelSnapshotParseTests: XCTestCase {
         })
 
         XCTAssertEqual(snapshot.tunnels.map(\.interface), ["utun0", "utun10", "utun2", "utun9"],
-                       "string order, as VPNStateFuser orders its names")
+                       "string order")
     }
 }

@@ -26,6 +26,7 @@ extension RuntimeHostEffects {
             // `.system`: the factory's own GSS construction, over the host's Kerberos recovery and event sink.
             gss: .system,
             pacEvaluator: CFPACEvaluator(),
+            connectivityProbe: .system,
             portHolderProbe: PortHolderProbe(),
             loopbackPortProbe: { LoopbackPortProbe.liveness(port: $0) },
             commandRunner: CommandRunner.host,

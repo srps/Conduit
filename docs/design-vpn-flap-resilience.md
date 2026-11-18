@@ -751,7 +751,7 @@ Shipped:
   - `.disconnected(.userInitiated)` → "Disconnected (user)"
   - `.disconnected(.networkLost)` → "Disconnected (network lost)"
   - `.disconnected(.unknown)` → "Disconnected"
-  - `.unknown` → "Not detected"
+  - `.unknown` → "Unknown" (was "Not detected" until `.unknown` also came to mean a store the monitor cannot read)
 - **Active connections counter split**: `Active N (M stalled)` shown only when `vpnState ∈ {.reasserting, .disconnected}` AND there are active CONNECT tunnels. Otherwise falls back to a plain `Active N`. The split is rendered inside the telemetry strip's first chip, not as a separate row.
 - **Telemetry strip** sits directly under the status grid in `MainView`. Four chips: `Active`, `Flaps`, `Preserved`, `Probes/min`. Visible whenever the proxy is `.running` (or `.warning`); hidden only when the proxy is stopped (cumulative counters are reset on stop). Zero values during normal operation are an honest "nothing's wrong" signal — not noise. Carries an `accessibilityLabel` that reads the full strip in one breath for VoiceOver users.
 - **"Probes/min" derivation**: directly read from `directModeCause.isExpected` cadence (60 s = 1/min for expected causes, 15 s = 4/min for `.upstreamsUnreachable`, 0 when not in direct mode). No separate time-windowed metric — the strip is honest about the system's current cadence rather than a backwards-looking rate.

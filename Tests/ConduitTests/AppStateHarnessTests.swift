@@ -23,7 +23,13 @@ final class AppStateHarness {
     private var retainedSession: StateRootSession?
     let environment: RuntimeEnvironment
     let machine: FakeMachine
-    let vpn = FakeVPNStatusObserver()
+    /// Reports `.connected` on each start, as the production monitor does when it reads an addressed tunnel: split-DNS entry
+    /// files are withheld while the VPN state is `.unknown` (decision 0048). A scenario about another state primes its own.
+    let vpn: FakeVPNStatusObserver = {
+        let vpn = FakeVPNStatusObserver()
+        vpn.primedState = .connected
+        return vpn
+    }()
     let locationObserver = FakeNetworkLocationObserver()
     /// The host starts its wake observer when it is built, so its start count says whether a host was built at all.
     let wake = FakeSystemWakeObserver()
@@ -114,6 +120,7 @@ final class AppStateHarness {
                 kerberosTicketRecovery: FakeKerberosTicketRecovery(),
                 gss: .injected { HarnessRefusingGSS() },
                 pacEvaluator: pacEvaluator,
+                connectivityProbe: .system,
                 portHolderProbe: FakeListenerPortHolderProbe(),
                 loopbackPortProbe: loopbackPortProbe.liveness(port:),
                 commandRunner: { launchPath, arguments in

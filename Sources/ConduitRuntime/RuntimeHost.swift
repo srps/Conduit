@@ -539,6 +539,7 @@ package final class RuntimeHost {
             eventLog: diagnosticsEventLog,
             resolverManager: tunnelResolverManager,
             portHolderProbe: effects.portHolderProbe,
+            connectivityProbe: effects.connectivityProbe.override,
             dnsForwarderTuning: dnsForwarderTuning
         )
         self.orchestrator = orchestrator
@@ -614,6 +615,11 @@ package final class RuntimeHost {
                     state, interfaceName: interfaceName, liveInterfaces: liveInterfaces, sequence: sequence
                 )
             }
+        }
+        // How the monitor read the store: the event into the orchestrator's log, the line derived from it.
+        self.vpnStatusMonitor.setOnEvent { [diagnosticsEventLog, logger] event, level in
+            diagnosticsEventLog.append(event)
+            logger.log(level, "VPN: \(event.event) \(event.detail ?? "")", category: .system)
         }
         // Each reading is folded into the policy here, in arrival order, because skipping one changes what a flap
         // holds. Only the hop to the owner coalesces: it applies the newest set, which is whole.

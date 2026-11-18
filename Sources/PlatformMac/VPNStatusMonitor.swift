@@ -1,431 +1,292 @@
 // SPDX-License-Identifier: Apache-2.0
-// Relocated from `ConduitCore/Network/` to `PlatformMac/`.
-// `import SystemConfiguration` is forbidden in `ConduitCore` per the
-// import fence (see AGENTS.md). The `VPNStatusObserving` protocol it produces
-// stays in `ConduitCore/Network/` — kernel consumers branch on the
-// protocol without ever seeing the SCDynamicStore concrete.
-
-import Darwin
-import ProxyKernel
 import Dispatch
 import Foundation
 import NIOConcurrencyHelpers
-import SystemConfiguration
+import ProxyKernel
 
-/// Production implementation of `VPNStatusObserving`. Tier B in the design doc
-/// (`docs/design-vpn-flap-resilience.md` § "Detection Tiers"): observes
-/// `utun*` interface state in `SCDynamicStore`, fuses the raw events into
-/// terminal `VPNObservedState` transitions via `VPNStateFuser`, and emits
-/// to the registered `onChange` callback.
+/// `VPNStatusObserving` over the dynamic store, level-triggered
+/// (`docs/design-vpn-detection-level-triggered.md`, unit U3).
 ///
-/// Threading: SCDynamicStore callbacks arrive on `monitorQueue` (a dedicated
-/// serial queue). The fuser is held as a regular ivar mutated only on
-/// `monitorQueue` — the queue's serialization replaces explicit locking.
-/// The user's `onChange` closure is invoked on `monitorQueue` — the consumer
-/// (typically `AppState`) is expected to hop to its own isolation context.
+/// Every prompt reads the whole store and reconciles: a store notification,
+/// a start, a flap deadline, a retry after a failed reading and the audit
+/// read every 60 s while healthy. The verdict is `VPNFlapTimer`'s, from the
+/// reading, the clock and the timer's memory, so a missed prompt costs
+/// latency, never correctness.
+///
+/// Each `start` opens a session: a new timer (decision 1), a new subscription
+/// and a generation that a store callback or a wake-up from an earlier session
+/// is checked against. A session holds one wake-up, at the earliest of the
+/// flap deadline, the retry and the audit (decision 0048).
+///
+/// A failed create, subscribe or read reports `.unknown`, emits
+/// `vpn.store_failed` at the attempts the read schedule reports, and is tried
+/// again on that schedule; a subscribe retry builds a new session. The first
+/// good reading after it emits `vpn.store_recovered`. Keys `parse` dropped as
+/// malformed emit `vpn.store_key_malformed` when they first appear.
+///
+/// Threading: store callbacks and wake-ups run on `monitorQueue`, which owns
+/// the session; `onChange` and `onEvent` run there. The names a consumer
+/// reads inside `onChange` are set before it is called. A reconcile reads the
+/// providers and decides outside `barrier`, then publishes inside it, the
+/// session, the events, the names and `onChange`; `stop` enters the same
+/// barrier, so once it returns nothing of the stopped session is published.
 package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
-    private let monitorQueue = DispatchQueue(label: "io.github.srps.Conduit.VPNStatusMonitor")
-
-    private let onChangeBox = NIOLockedValueBox<(@Sendable (VPNObservedState) -> Void)?>(nil)
-    private let lifecycleBox = NIOLockedValueBox<LifecycleState>(.init())
-    /// `fuser.connectedInterfaceNames.first`, copied out before every
-    /// callback so a consumer on another thread can read it without touching
-    /// the fuser. Refreshed on every decision, including `.noChange`; when
-    /// the name moves under an unchanged `.connected` (utun4 gone, utun5
-    /// still up) the verdict is delivered again so the consumer re-reads it.
-    private let connectedInterfaceBox = NIOLockedValueBox<String?>(nil)
-    /// `fuser.liveInterfaceNames`, copied out with the name above. A change
-    /// re-delivers an unchanged `.connected` too, so a consumer hears a
-    /// tunnel that went while the first name stayed (utun7 removed, utun3 up).
-    private let liveInterfacesBox = NIOLockedValueBox<[String]>([])
-
-    /// Mutated only on `monitorQueue`. Not in the lifecycle box because the
-    /// fuser holds non-Sendable state (timer book-keeping) that doesn't belong
-    /// in a cross-thread shared container.
-    private var fuser = VPNStateFuser()
-    /// Pending grace-window timer for the most recent `.reasserting` transition.
-    /// Owned by the monitor (not the fuser) so the fuser stays a pure value type.
-    private var graceWorkItem: DispatchWorkItem?
-    /// Phase 6 (revised): per-interface min-visible timers. Each utun in
-    /// `.linkDownDebouncing` has its own timer. If link recovers before the
-    /// timer fires, applyObservation cancels it. If the timer fires, it
-    /// commits the flap by calling fuser.markMinVisibleExpired().
-    private var minVisibleWorkItems: [String: DispatchWorkItem] = [:]
-
-    private struct LifecycleState {
-        var store: SCDynamicStore?
-        var started = false
-        /// Opaque pointer to the `Unmanaged<VPNStatusMonitor>` retain we passed
-        /// into `SCDynamicStoreContext.info` in `installStore`. Stored as a raw
-        /// pointer (Sendable) rather than the non-Sendable `Unmanaged` itself,
-        /// then reconstituted in `stop()` to balance the +1 retain. Cleared
-        /// alongside `store` on teardown so a second `stop()` is a no-op.
-        var contextOpaque: UnsafeMutableRawPointer?
-    }
-
-    /// Grace window before a Link-down utun is declared `.disconnected(.networkLost)`.
-    /// Read on every `.reasserting` transition so that Settings-driven config
-    /// edits propagate without restarting the monitor — mirrors the
-    /// `configProvider` closure pattern used by `ConnectionPool` and
-    /// `LocalProxyServer`.
+    private let monitorQueue: DispatchQueue
+    private let store: any TunnelStoreReading
+    private let clock: StoreObserverClock
+    private let up: VPNUpPredicate
     private let graceSecondsProvider: @Sendable () -> TimeInterval
-
-    /// Phase 6 (revised): minimum Link-inactive duration before a flap becomes
-    /// user-visible. Returning `<= 0` disables debounce (every flap immediately
-    /// visible — the pre-Phase-6-revision behavior). Read on every link-down
-    /// transition so Settings-driven config edits take effect on the next flap.
     private let minVisibleSecondsProvider: @Sendable () -> TimeInterval
 
+    private let onChangeBox = NIOLockedValueBox<(@Sendable (VPNObservedState) -> Void)?>(nil)
+    private let onEventBox = NIOLockedValueBox<(@Sendable (RuntimeEvent, LogLevel) -> Void)?>(nil)
+    private let lifecycleBox = NIOLockedValueBox<LifecycleState>(.init())
+    private let barrier = ObserverStopBarrier()
+    private let namesBox = NIOLockedValueBox<(connected: String?, live: [String])>((nil, []))
+    /// Touched only on `monitorQueue`.
+    private var session: Session?
+
+    private struct LifecycleState {
+        var started = false
+        /// Bumped by every start and stop.
+        var generation: UInt64 = 0
+        var subscription: (any TunnelStoreSubscription)?
+        /// The one pending wake-up, and its number: a wake-up runs only while
+        /// it is still the newest.
+        var wake: Task<Void, Never>?
+        var wakeID: UInt64 = 0
+    }
+
+    /// What one start has seen. Lives on `monitorQueue`.
+    private struct Session {
+        let generation: UInt64
+        var timer = VPNFlapTimer()
+        var schedule = StoreReadSchedule(audit: StoreReadSchedule.Constants.vpnAudit)
+        /// The state last delivered in this session, nil before the first.
+        var delivered: VPNObservedState?
+        /// The malformed keys the last good reading reported.
+        var malformed: Set<String> = []
+    }
+
+    /// `graceSecondsProvider` and `minVisibleSecondsProvider` are read on
+    /// every reconcile; the timer applies them only to a phase that starts
+    /// in it. A test passes its own `queue` to order a store callback
+    /// against a restart.
     package init(
         graceSecondsProvider: @escaping @Sendable () -> TimeInterval = { 5 },
-        minVisibleSecondsProvider: @escaping @Sendable () -> TimeInterval = { 1 }
+        minVisibleSecondsProvider: @escaping @Sendable () -> TimeInterval = { 1 },
+        store: any TunnelStoreReading = SystemTunnelStore(),
+        clock: StoreObserverClock = .continuous,
+        up: VPNUpPredicate = .anyIPv4Tunnel,
+        queue: DispatchQueue = DispatchQueue(label: "io.github.srps.Conduit.VPNStatusMonitor")
     ) {
+        self.monitorQueue = queue
         self.graceSecondsProvider = graceSecondsProvider
         self.minVisibleSecondsProvider = minVisibleSecondsProvider
+        self.store = store
+        self.clock = clock
+        self.up = up
+    }
+
+    deinit {
+        let state = lifecycleBox.withLockedValue { $0 }
+        state.wake?.cancel()
+        if let subscription = state.subscription { reportCancel(subscription.cancel()) }
     }
 
     package func setOnChange(_ onChange: @Sendable @escaping (VPNObservedState) -> Void) {
         onChangeBox.withLockedValue { $0 = onChange }
     }
 
-    package var connectedInterfaceName: String? {
-        connectedInterfaceBox.withLockedValue { $0 }
+    package func setOnEvent(_ onEvent: @Sendable @escaping (RuntimeEvent, LogLevel) -> Void) {
+        onEventBox.withLockedValue { $0 = onEvent }
     }
 
-    package var liveInterfaceNames: [String] {
-        liveInterfacesBox.withLockedValue { $0 }
-    }
+    package var connectedInterfaceName: String? { namesBox.withLockedValue { $0.connected } }
+
+    package var liveInterfaceNames: [String] { namesBox.withLockedValue { $0.live } }
 
     package func start() {
-        let alreadyStarted = lifecycleBox.withLockedValue { state -> Bool in
-            if state.started { return true }
+        let generation = lifecycleBox.withLockedValue { state -> UInt64? in
+            guard !state.started else { return nil }
             state.started = true
-            return false
+            state.generation &+= 1
+            return state.generation
         }
-        if alreadyStarted { return }
-
-        // Build the SCDynamicStore on the monitor queue so the callback context
-        // and the queue dispatch land together.
+        guard let generation else { return }
         monitorQueue.async { [weak self] in
-            self?.installStore()
+            guard let self, self.isCurrent(generation) else { return }
+            self.session = Session(generation: generation)
+            self.attempt(generation)
         }
     }
 
     package func stop() {
-        let teardown = lifecycleBox.withLockedValue { state -> (store: SCDynamicStore?, opaque: UnsafeMutableRawPointer?) in
-            guard state.started else { return (nil, nil) }
-            state.started = false
-            let s = state.store
-            let o = state.contextOpaque
-            state.store = nil
-            state.contextOpaque = nil
-            return (s, o)
+        let teardown = barrier.stop {
+            lifecycleBox.withLockedValue { state -> ((any TunnelStoreSubscription)?, Task<Void, Never>?) in
+                guard state.started else { return (nil, nil) }
+                defer {
+                    state.started = false
+                    state.generation &+= 1
+                    state.subscription = nil
+                    state.wake = nil
+                }
+                return (state.subscription, state.wake)
+            }
         }
-        // Cancel pending timers on the monitor queue so the cancellation is
-        // serialized with any in-flight fuser work.
-        monitorQueue.async { [weak self] in
-            self?.graceWorkItem?.cancel()
-            self?.graceWorkItem = nil
-            for (_, work) in self?.minVisibleWorkItems ?? [:] { work.cancel() }
-            self?.minVisibleWorkItems.removeAll()
+        teardown.1?.cancel()
+        if let subscription = teardown.0 { reportCancel(subscription.cancel()) }
+    }
+
+    /// The event for a subscription released without a cancel. The monitor
+    /// always cancels first, so this runs only if that is broken.
+    static func uncancelledReleaseEvent(_ result: Result<Void, TunnelReading.Failure>) -> RuntimeEvent {
+        let detail = switch result {
+        case .success: "outcome=detached"
+        case .failure(let failure): "outcome=\(failure.step.rawValue) code=\(failure.code)"
         }
-        guard let store = teardown.store else { return }
-        // Detach the store from its dispatch queue. Per Apple docs, passing nil
-        // releases the queue association; after this returns no new SCDynamicStore
-        // callbacks can fire and any in-flight callback has already completed.
-        SCDynamicStoreSetDispatchQueue(store, nil)
-        // Balance the +1 retain installStore() took for the C callback context.
-        // Safe to release here because the store is detached above — the callback
-        // that holds the only consumer of this opaque pointer can no longer fire.
-        if let opaque = teardown.opaque {
-            Unmanaged<VPNStatusMonitor>.fromOpaque(opaque).release()
-        }
+        return RuntimeEvent(kind: .health, event: "vpn.store_released_uncancelled", detail: detail)
     }
 
     // MARK: - Internals
 
-    private func installStore() {
-        // If `stop()` ran between this start() dispatching and the queue picking
-        // up our work, bail out — taking a retain now would leak self forever
-        // since the matched release in stop() has already run for the empty
-        // lifecycle.
-        guard lifecycleBox.withLockedValue({ $0.started }) else { return }
+    private func isCurrent(_ generation: UInt64) -> Bool {
+        lifecycleBox.withLockedValue { $0.started && $0.generation == generation }
+    }
 
-        // Capture self via Unmanaged.passRetained for the C callback context.
-        // The +1 retain keeps `self` alive for the duration of the
-        // SCDynamicStore subscription regardless of Swift-side references; the
-        // matching release happens in `stop()` after
-        // SCDynamicStoreSetDispatchQueue(store, nil) drains in-flight callbacks.
-        let retained = Unmanaged.passRetained(self)
-        let context = UnsafeMutableRawPointer(retained.toOpaque())
-        var scContext = SCDynamicStoreContext(
-            version: 0,
-            info: context,
-            retain: nil,
-            release: nil,
-            copyDescription: nil
+    private func emit(_ event: RuntimeEvent, _ level: LogLevel) {
+        onEventBox.withLockedValue { $0 }?(event, level)
+    }
+
+    /// A failed cancel leaves a queue the store may still call; the
+    /// generation check drops those calls.
+    private func reportCancel(_ result: Result<Void, TunnelReading.Failure>) {
+        guard case .failure(let failure) = result else { return }
+        emit(RuntimeEvent(kind: .health, event: "vpn.store_unsubscribe_failed", detail: "code=\(failure.code)"), .warning)
+    }
+
+    /// Subscribes if this session has no subscription, then reads. Runs on
+    /// `monitorQueue`.
+    private func attempt(_ generation: UInt64) {
+        guard isCurrent(generation) else { return }
+        guard lifecycleBox.withLockedValue({ $0.subscription }) == nil else {
+            reconcile(store.read(), generation)
+            return
+        }
+        let subscribed = store.subscribe(
+            queue: monitorQueue,
+            onChange: { [weak self] in self?.storeChanged(generation) },
+            onUncancelledRelease: { [onEventBox] in onEventBox.withLockedValue { $0 }?(Self.uncancelledReleaseEvent($0), .error) }
         )
-
-        let callback: SCDynamicStoreCallBack = { _, changedKeysCF, info in
-            guard let info else { return }
-            let monitor = Unmanaged<VPNStatusMonitor>.fromOpaque(info).takeUnretainedValue()
-            let changedKeys = (changedKeysCF as? [String]) ?? []
-            monitor.handleStoreChanges(changedKeys)
-        }
-
-        guard let store = SCDynamicStoreCreate(
-            kCFAllocatorDefault,
-            "io.github.srps.Conduit.VPNStatusMonitor" as CFString,
-            callback,
-            &scContext
-        ) else {
-            // SCDynamicStoreCreate failed — we never installed a callback that
-            // could touch the retained context, so release immediately so the
-            // failed-bootstrap path doesn't leak self.
-            retained.release()
-            return
-        }
-
-        // Patterns:
-        //   State:/Network/Interface/utun[0-9]+/IPv4  — assigned addresses (the
-        //                                               "tunnel reachable" signal)
-        //   State:/Network/Interface/utun[0-9]+/IPv6  — interface-alive signal,
-        //                                               disambiguates flap vs removal
-        //   Setup:/Network/Service/<UUID>             — service add/remove
-        //                                               (currently subscribed but
-        //                                               unused; kept for future
-        //                                               .userInitiated detection)
-        //
-        // /Link is intentionally absent: macOS does not publish a /Link key
-        // for utun virtual interfaces (verified via `scutil` on macOS 26 with
-        // a Cisco Secure Client tunnel up). Subscribing to it would deliver
-        // zero notifications. See `UtunRawObservation` doc.
-        let patterns: [CFString] = [
-            "State:/Network/Interface/utun[0-9]+/IPv4" as CFString,
-            "State:/Network/Interface/utun[0-9]+/IPv6" as CFString,
-            "Setup:/Network/Service/[A-F0-9-]+" as CFString,
-        ]
-        SCDynamicStoreSetNotificationKeys(store, nil, patterns as CFArray)
-        SCDynamicStoreSetDispatchQueue(store, monitorQueue)
-
-        // Stash both the store and the opaque retain pointer atomically so a
-        // racing `stop()` can find them together. If `stop()` already ran while
-        // we were assembling the store, undo our work right here so we don't
-        // strand a kernel subscription with no matching teardown path.
-        let installed = lifecycleBox.withLockedValue { state -> Bool in
-            guard state.started else { return false }
-            state.store = store
-            state.contextOpaque = context
-            return true
-        }
-        if !installed {
-            SCDynamicStoreSetDispatchQueue(store, nil)
-            retained.release()
-            return
-        }
-
-        // Prime: take an initial reading of the current utun set so we don't sit
-        // in `.unknown` until the first event after a long period of stability.
-        primeInitialState(store: store)
-    }
-
-    /// Read all current `utun*` keys once at install-time so we have a baseline
-    /// state without waiting for the first kernel event.
-    private func primeInitialState(store: SCDynamicStore) {
-        let ipv4Pattern = "State:/Network/Interface/utun[0-9]+/IPv4" as CFString
-        let ipv6Pattern = "State:/Network/Interface/utun[0-9]+/IPv6" as CFString
-        let ipv4Keys = (SCDynamicStoreCopyKeyList(store, ipv4Pattern) as? [String]) ?? []
-        let ipv6Keys = (SCDynamicStoreCopyKeyList(store, ipv6Pattern) as? [String]) ?? []
-        let allKeys = Set(ipv4Keys + ipv6Keys)
-        handleStoreChanges(Array(allKeys))
-
-        // `handleStoreChanges` admits a utun only if it currently carries IPv4
-        // (or the fuser already knows it). With the VPN down, every utun is an
-        // Apple service tunnel with an IPv6 link-local and nothing else, so no
-        // observation reaches the fuser and the state stays `.unknown` — which
-        // `SplitDNSVPNGate` treats as "assume connected". Launching off-VPN
-        // then installed split-DNS entry files pointing at unreachable
-        // tunnel-internal servers, and nothing ever emitted the
-        // `.disconnected` that would have removed them: the fuser only reaches
-        // that verdict via a utun it has previously seen with IPv4.
-        //
-        // Unlike a notification, this sweep enumerated the whole key space, so
-        // finding no IPv4-carrying tunnel is evidence, not ignorance. Settle it.
-        guard !anyTunnelHasIPv4(store: store, ipv4Keys: ipv4Keys) else { return }
-        applyFuserDecision(fuser.markNoTunnelsPresent())
-    }
-
-    /// A `utun*/IPv4` key can exist with an empty `Addresses` array, so key
-    /// presence alone doesn't mean the tunnel is up.
-    private func anyTunnelHasIPv4(store: SCDynamicStore, ipv4Keys: [String]) -> Bool {
-        ipv4Keys.contains { key in
-            guard let dict = SCDynamicStoreCopyValue(store, key as CFString) as? [String: Any] else { return false }
-            return !((dict["Addresses"] as? [String])?.isEmpty ?? true)
-        }
-    }
-
-    private func handleStoreChanges(_ changedKeys: [String]) {
-        // Called only on monitorQueue (SCDynamicStore dispatches there).
-        guard let store = lifecycleBox.withLockedValue({ $0.store }) else { return }
-
-        // Group changed keys by interface name. A single SCDynamicStore notification
-        // can include multiple keys (IPv4 + IPv6 for the same utun, for example).
-        var perInterface: [String: UtunRawObservation] = [:]
-        for key in changedKeys {
-            guard let interfaceName = Self.utunNameFromKey(key) else { continue }
-            var observation = perInterface[interfaceName] ?? UtunRawObservation()
-
-            let ipv4Key = "State:/Network/Interface/\(interfaceName)/IPv4" as CFString
-            let ipv6Key = "State:/Network/Interface/\(interfaceName)/IPv6" as CFString
-
-            // Read fresh values from the store rather than trying to parse the
-            // changedKeys callback payload — Apple's API delivers only the keys
-            // that changed, not the new values.
-            let ipv4Dict = SCDynamicStoreCopyValue(store, ipv4Key) as? [String: Any]
-            let ipv6Dict = SCDynamicStoreCopyValue(store, ipv6Key) as? [String: Any]
-
-            observation.ipv4Present = ipv4Dict != nil
-            observation.hasIPv4Address = !((ipv4Dict?["Addresses"] as? [String])?.isEmpty ?? true)
-            observation.ipv6Present = ipv6Dict != nil
-
-            perInterface[interfaceName] = observation
-        }
-
-        guard !perInterface.isEmpty else { return }
-
-        // Filter out utuns that have never had IPv4 — those are Apple service
-        // utuns (cloud relay, FaceTime audio bridge, AWDL, etc.) that get
-        // assigned IPv6 link-local but never an IPv4 address. They aren't
-        // VPN tunnels and shouldn't drive the fused state. Once a utun has
-        // been seen with IPv4 (production VPN), the fuser tracks it for the
-        // rest of the lifecycle so subsequent IPv4-loss notifications
-        // properly trigger the flap path.
-        for (name, observation) in perInterface
-        where observation.ipv4Present || fuser.knowsAbout(interfaceName: name) {
-            // If this interface had a pending min-visible timer and the
-            // observation is "fully connected", that means the link recovered
-            // before the debounce window expired. Cancel the timer up-front;
-            // applyObservation will return .noChange (silent recovery) and we
-            // never want a stale min-visible firing after the recovery.
-            if observation.isFullyConnected, let pending = minVisibleWorkItems[name] {
-                pending.cancel()
-                minVisibleWorkItems.removeValue(forKey: name)
+        switch subscribed {
+        case .failure(let failure):
+            reconcile(.failed(failure), generation)
+        case .success(let subscription):
+            let installed = lifecycleBox.withLockedValue { state -> Bool in
+                guard state.started, state.generation == generation, state.subscription == nil else { return false }
+                state.subscription = subscription
+                return true
             }
-            let decision = fuser.applyObservation(interfaceName: name, observation: observation)
-            applyFuserDecision(decision)
-        }
-    }
-
-    /// Translate the fuser's pure decision into queue/timer/callback side effects.
-    /// Called only on `monitorQueue`.
-    private func applyFuserDecision(_ decision: VPNStateFuser.Decision) {
-        let callback = onChangeBox.withLockedValue { $0 }
-        let interfaceChanged = refreshConnectedInterface()
-        switch decision {
-        case .noChange:
-            // The verdict did not move but the tunnel carrying it, or the
-            // set of live tunnels, did. Deliver the same verdict again so the
-            // hosts pick up the new names; the orchestrator treats a repeated state as a name
-            // update, not a transition, and emits no vpn.* event for it.
-            if interfaceChanged, fuser.lastEmittedState.isConnected {
-                callback?(fuser.lastEmittedState)
-            }
-            return
-        case .emit(let state):
-            // Cancel any pending grace timer — a non-reasserting state supersedes it.
-            graceWorkItem?.cancel()
-            graceWorkItem = nil
-            callback?(state)
-        case .emitAndStartGrace(let state, let then):
-            // Fire the .reasserting transition immediately and start a timer that
-            // will fire `then` (typically `.disconnected(.networkLost)`) if grace expires.
-            // Read graceSeconds fresh from the provider so a Settings change
-            // since the last flap takes effect on this transition.
-            graceWorkItem?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                // Bail if stop() has cleared `started` since this work was
-                // scheduled. The async cancel block in stop() runs on this
-                // same queue but is FIFO-ordered against the asyncAfter
-                // delivery — if the timer's deadline arrived between stop()
-                // submitting the cancel block and the cancel block actually
-                // running, the work item would otherwise emit a state to a
-                // consumer that has already torn down. Mirrors the
-                // `lifecycleBox.store` guard in `handleStoreChanges`.
-                guard self.lifecycleBox.withLockedValue({ $0.started }) else { return }
-                // Only fire if we're still in the reasserting state. A recovery
-                // would have cancelled this work item before it ran.
-                self.fuser.markGraceExpired()
-                _ = self.refreshConnectedInterface()
-                callback?(then)
-            }
-            graceWorkItem = work
-            monitorQueue.asyncAfter(deadline: .now() + graceSecondsProvider(), execute: work)
-            callback?(state)
-        case .startMinVisibleTimer(let interfaceName):
-            // Phase 6 (revised): min-visible debounce. Don't emit anything yet —
-            // the fused state didn't change (utun is still .connected from the
-            // orchestrator's POV). Start a per-interface timer; if it fires
-            // before another observation supersedes it, commit the flap. Read
-            // the duration fresh from the provider on every link-down so a
-            // Settings change applies to the next flap.
-            let minVisibleSeconds = minVisibleSecondsProvider()
-            if minVisibleSeconds <= 0 {
-                // Debounce disabled — commit the flap immediately. Mirrors the
-                // pre-revision behavior where every link-inactive triggered a
-                // .reasserting straight away.
-                let nextDecision = fuser.markMinVisibleExpired(interfaceName: interfaceName)
-                applyFuserDecision(nextDecision)
+            guard installed else {
+                reportCancel(subscription.cancel())
                 return
             }
-            // Cancel any pre-existing timer for this interface (shouldn't normally
-            // happen — applyObservation cancels on recovery — but defensive).
-            minVisibleWorkItems[interfaceName]?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                // Same lifecycle guard as the grace work item — see comment
-                // above. Without this, a min-visible timer firing in the
-                // brief window between stop() submitting its cancel block
-                // and the queue picking it up would commit a flap (emitting
-                // `.reasserting`) for a torn-down monitor.
-                guard self.lifecycleBox.withLockedValue({ $0.started }) else { return }
-                self.minVisibleWorkItems.removeValue(forKey: interfaceName)
-                let nextDecision = self.fuser.markMinVisibleExpired(interfaceName: interfaceName)
-                self.applyFuserDecision(nextDecision)
+            reconcile(store.read(), generation)
+        }
+    }
+
+    /// Runs on `monitorQueue`.
+    private func storeChanged(_ generation: UInt64) {
+        guard isCurrent(generation) else { return }
+        reconcile(store.read(), generation)
+    }
+
+    /// Runs on `monitorQueue`. The generation is checked again inside the
+    /// barrier and before each callback, so a stop made meanwhile, or by one
+    /// of these callbacks, ends the delivery there.
+    private func reconcile(_ reading: TunnelReading, _ generation: UInt64) {
+        guard isCurrent(generation), var session, session.generation == generation else { return }
+        let now = clock.now()
+        let window = VPNFlapWindow(minVisible: minVisibleSecondsProvider(), grace: graceSecondsProvider())
+        let detection = session.timer.reconcile(reading, now: now, window: window, up: up)
+
+        var events: [(RuntimeEvent, LogLevel)] = []
+        let readDue: TimeInterval?
+        switch reading {
+        case .failed(let failure):
+            let retry = session.schedule.failed(at: now)
+            if retry.reports {
+                events.append((RuntimeEvent(
+                    kind: .health, event: "vpn.store_failed",
+                    detail: "reason=\(failure.step.rawValue) code=\(failure.code) attempt=\(retry.attempt)"
+                ), .warning))
             }
-            minVisibleWorkItems[interfaceName] = work
-            monitorQueue.asyncAfter(deadline: .now() + minVisibleSeconds, execute: work)
+            readDue = retry.due
+        case .snapshot(let snapshot):
+            let healthy = session.schedule.succeeded(at: now)
+            if let attempts = healthy.recoveredAfter {
+                events.append((RuntimeEvent(kind: .health, event: "vpn.store_recovered", detail: "attempts=\(attempts)"), .notice))
+            }
+            let malformed = Set(snapshot.malformedKeys)
+            for key in malformed.subtracting(session.malformed).sorted() {
+                events.append((RuntimeEvent(kind: .health, event: "vpn.store_key_malformed", detail: "key=\(key)"), .warning))
+            }
+            session.malformed = malformed
+            readDue = healthy.due
+        }
+
+        let deliver = detection.state != session.delivered
+        session.delivered = detection.state
+        let decided = session
+        barrier.deliver {
+            guard isCurrent(generation) else { return }
+            self.session = decided
+            if let due = [readDue, detection.deadline].compactMap({ $0 }).min() {
+                arm(after: max(0, due - now), generation)
+            }
+            for (event, level) in events {
+                guard isCurrent(generation) else { return }
+                emit(event, level)
+            }
+            guard isCurrent(generation) else { return }
+            let namesMoved = namesBox.withLockedValue { names -> Bool in
+                defer { names = (detection.carrying.first, detection.live) }
+                return names.connected != detection.carrying.first || names.live != detection.live
+            }
+            // An unchanged `.connected` is delivered again when the tunnel
+            // carrying it or the live set moved, so the hosts pick up the new
+            // names; the orchestrator treats it as a name update, not a
+            // transition.
+            guard deliver || (namesMoved && detection.state == .connected) else { return }
+            onChangeBox.withLockedValue { $0 }?(detection.state)
         }
     }
 
-    /// Called only on `monitorQueue`, before any callback, so the names a
-    /// consumer reads inside `onChange` belong to the state being delivered.
-    /// Returns whether the first name or the live set moved.
-    private func refreshConnectedInterface() -> Bool {
-        let name = fuser.connectedInterfaceNames.first
-        let live = fuser.liveInterfaceNames
-        let nameMoved = connectedInterfaceBox.withLockedValue { box in
-            defer { box = name }
-            return box != name
+    /// Replaces the pending wake-up with one `delay` seconds out, allowed to
+    /// run 10% late.
+    private func arm(after delay: TimeInterval, _ generation: UInt64) {
+        let tolerance = StoreReadSchedule.leeway(for: delay)
+        lifecycleBox.withLockedValue { state in
+            guard state.started, state.generation == generation else { return }
+            state.wake?.cancel()
+            state.wakeID &+= 1
+            let wakeID = state.wakeID
+            state.wake = Task { [weak self, clock] in
+                do {
+                    try await clock.sleep(delay, tolerance)
+                } catch {
+                    // Cancelled: a stop, a restart or a newer wake-up
+                    // replaced this one, and owns what happens next.
+                    return
+                }
+                self?.monitorQueue.async { [weak self] in self?.wake(wakeID, generation) }
+            }
         }
-        let liveMoved = liveInterfacesBox.withLockedValue { box in
-            defer { box = live }
-            return box != live
-        }
-        return nameMoved || liveMoved
     }
 
-    /// Extract the utun interface name (e.g. "utun0") from a dynamic store key.
-    /// Returns nil if the key doesn't match the expected utun pattern.
-    static func utunNameFromKey(_ key: String) -> String? {
-        // Keys look like "State:/Network/Interface/utun0/Link" or
-        // "State:/Network/Interface/utun0/IPv4". Extract the second-to-last segment.
-        let parts = key.split(separator: "/")
-        guard parts.count >= 2 else { return nil }
-        let candidate = String(parts[parts.count - 2])
-        guard candidate.hasPrefix("utun"),
-              candidate.dropFirst(4).allSatisfy(\.isNumber) else { return nil }
-        return candidate
+    /// Runs on `monitorQueue`.
+    private func wake(_ wakeID: UInt64, _ generation: UInt64) {
+        guard lifecycleBox.withLockedValue({ $0.wakeID == wakeID }) else { return }
+        attempt(generation)
     }
 }
-
