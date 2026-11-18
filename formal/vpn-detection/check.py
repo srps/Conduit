@@ -53,13 +53,14 @@ MODEL = ["formal/vpn-detection/", ".claude/skills/vpn-detection-model/"]
 
 SAFETY = ["TypeOK", "NoEntryFilesOffVPN", "GateFollowsLastPublished", "NothingPublishedAfterStop",
           "WakeRecoversOnlyWhenSeeing", "SweepsNotHeldWhenDefinite", "OrchestratorAfterEntryFiles",
-          "OrchestratorFollowsLastPublished"]
+          "OrchestratorFollowsLastPublished", "ApplyOnlyFromCurrentSession"]
 LIVENESS = ["NoStuckUnknown", "FilesFollowVPN", "VPNReconnects"]
 
 # The bounds: how much the environment may do in one behaviour. Every check runs two Starts,
-# one tunnel drop and one store outage; each adds one more kind of trouble, because all of
-# them at once is more states than a CI run affords.
-BASE = dict(MaxStarts=2, MaxTunnelDrops=1, MaxSilentChanges=0, MaxStoreBreaks=1, MaxCancelFailures=0,
+# one of whose Stops may take the proxy alone down, one tunnel drop and one store outage;
+# each adds one more kind of trouble, because all of them at once is more states than a CI
+# run affords.
+BASE = dict(MaxStarts=2, MaxProxyStops=1, MaxTunnelDrops=1, MaxSilentChanges=0, MaxStoreBreaks=1, MaxCancelFailures=0,
             MaxHelperOutages=0, MaxCallbackRestarts=0, MaxSystemWakes=0, WithOrchestrator="FALSE")
 CORE = dict(BASE, MaxCancelFailures=1, MaxCallbackRestarts=1)
 # Here the one tunnel change is the one whose notification is lost.
@@ -71,12 +72,10 @@ LIVENESS_BOUNDS = BASE
 
 
 class Check:
-    def __init__(self, name, bounds, invariants=(), properties=(), expect=None, note="", full=None):
+    def __init__(self, name, bounds, invariants=(), properties=(), full=None):
         self.name, self.bounds = name, bounds  # None: a `--full` check only
         self.full = full or bounds  # the bounds `--full` runs
         self.invariants, self.properties = list(invariants), list(properties)
-        self.expect = expect  # None: must pass; otherwise the property that must break
-        self.note = note
 
     def config(self):
         lines = ["SPECIFICATION Spec" if self.properties else "INIT Init\nNEXT Next", "CONSTANTS"]
@@ -93,22 +92,22 @@ CHECKS = [
     Check("safety-core", CORE, invariants=SAFETY),
     Check("safety-lost-notification", LOST_NOTIFICATION, invariants=SAFETY),
     # The outcomes of operations queued around a helper outage, recorded in any order, are the
-    # costliest interleavings: one Start here takes 30 s, two take 6 minutes (`--full`).
+    # costliest interleavings: one Start by default, two with `--full`.
     Check("safety-helper-outage", dict(HELPER, MaxStarts=1), invariants=SAFETY, full=HELPER),
     Check("safety-orchestrator", ORCHESTRATOR, invariants=SAFETY),
     Check("liveness", LIVENESS_BOUNDS, invariants=["TypeOK"], properties=LIVENESS),
     Check("liveness-lost-notification", LOST_NOTIFICATION, invariants=["TypeOK"], properties=LIVENESS),
-    # By default one Start and no store outage. `--full` adds the store outage, which is the case
-    # where the repair must remove the files while the gate stays .unknown.
+    # By default one Start and no store outage. `--full` adds the store outage: the repair must
+    # then remove the files while the proxy runs and the gate stays .unknown.
     Check("liveness-helper-outage", dict(HELPER, MaxStarts=1, MaxStoreBreaks=0), invariants=["TypeOK"],
           properties=LIVENESS, full=dict(HELPER, MaxStarts=1)),
-    # Two Starts with the helper outage: a correction that a report kept across Stop and Start
-    # queues, failing while the helper is down. `--full` only.
+    # Two Starts with the helper outage and no store outage: after a Stop of the proxy alone the
+    # monitor runs on, so a report landing while the next Start applies queues a correction,
+    # which can fail while the helper is down. `--full` only; with the store outage as well it
+    # ran past 70 minutes and 12 GB of TLC state on a 12-core laptop without finishing, before
+    # the proxy-alone Stop was in the model.
     Check("liveness-restart-helper-outage", None, invariants=["TypeOK"], properties=LIVENESS,
           full=dict(HELPER, MaxStoreBreaks=0)),
-    Check("known-gap-u4", BASE, invariants=["ApplyOnlyFromCurrentSession"],
-          expect="ApplyOnlyFromCurrentSession",
-          note="A Start writes entry files from the verdict the last session left (design U4)."),
 ]
 
 CHECK_NAMED = {check.name: check for check in CHECKS}
@@ -120,9 +119,16 @@ class Mutant:
     def __init__(self, name, swift, edits, expect, bounds=None, check=None):
         self.name, self.swift, self.edits, self.expect = name, swift, edits, expect
         live = expect in LIVENESS
-        # `check`: the check that catches it, at the bounds `--full` runs it; a `--full` mutant only.
+        # `check`: the check that catches it, at that check's bounds in each tier (`bounds_for`).
         self.check = check
-        self.bounds = bounds or (CHECK_NAMED[check].full if check else LIVENESS_BOUNDS if live else SAFETY_BOUNDS)
+        self.bounds = bounds or (LIVENESS_BOUNDS if live else SAFETY_BOUNDS)
+
+    def bounds_for(self, full, only):
+        """The bounds this run uses, or None when the tier does not run this mutant."""
+        if not self.check:
+            return self.bounds
+        check = CHECK_NAMED[self.check]
+        return check.full if full or (only and check.bounds is None) else check.bounds
 
 
 MUTANTS = [
@@ -144,11 +150,6 @@ MUTANTS = [
            "VPNStatusMonitor.stop: the teardown runs outside barrier.stop",
            [("StopWaitsForBarrier == mon.pc \\notin BarrierPCs", "StopWaitsForBarrier == TRUE")],
            "NothingPublishedAfterStop"),
-    Mutant("b3-failure-before-stop-dropped",
-           "RuntimeHost.handleVPNStateChange: `guard networkPathObserving else { return }`, so a report "
-           "that lands after the observers stopped is dropped (the 179b477f shape)",
-           [("HostTakesReports == TRUE", "HostTakesReports == Observing")],
-           "GateFollowsLastPublished"),
     Mutant("c-unknown-keeps-files",
            "SplitDNSVPNGate.entriesWanted: `.unknown` returns true (before 0048, c9df90bb)",
            [("Wanted(v) == v \\in {\"connected\", \"reasserting\"}",
@@ -200,7 +201,8 @@ MUTANTS = [
            "OrchestratorFollowsLastPublished", bounds=ORCHESTRATOR),
     Mutant("retry-skips-unknown",
            "SplitDNSEntryFileRepair.desiredOperation returns nil for an `.unknown` gate, so planRetry runs "
-           "nothing: a removal that failed while the store was unreadable is never retried",
+           "nothing: a removal that failed while the gate is .unknown, after a Stop or on an unreadable store, "
+           "is never retried",
            [("    /\\ repair.pending /\\ helperUp /\\ ~repair.inFlight\n",
              "    /\\ repair.pending /\\ helperUp /\\ ~repair.inFlight /\\ host.gate # \"unknown\"\n")],
            "FilesFollowVPN", check="liveness-helper-outage"),
@@ -210,6 +212,16 @@ MUTANTS = [
            [("    LET keep    == RecordKeeps(o)\n",
              "    LET keep    == RecordKeeps(o) /\\ (o.ok \\/ o.owner # \"correction\")\n")],
            "FilesFollowVPN", check="liveness-restart-helper-outage"),
+    Mutant("u4-gate-kept-at-stop",
+           "RuntimeHost.stopVPNMonitor: `splitDNSGate = SplitDNSVPNGate()` removed, so the next Start applies "
+           "entry files from the stopped session's verdict (before #324)",
+           [("GateForgetsAtStop == TRUE", "GateForgetsAtStop == FALSE")],
+           "ApplyOnlyFromCurrentSession"),
+    Mutant("u4-no-fence-at-stop",
+           "RuntimeHost.stopVPNMonitor: `splitDNSGateOrder.skip(through: vpnSequencer.issued)` removed, so a "
+           "report stamped before the stop lands after it and restores the verdict",
+           [("FenceAtStop == TRUE", "FenceAtStop == FALSE")],
+           "ApplyOnlyFromCurrentSession"),
 ]
 
 
@@ -322,15 +334,9 @@ def main():
             failures.append(check.name)
             print(f"FAIL {check.name}: TLC did not finish (exit {code}), see {work / 'tlc.out'}")
             continue
-        if check.expect is None:
-            ok = got == "pass"
-            verdict = "pass" if ok else f"FAIL, {got} violated"
-        else:
-            ok = got == check.expect
-            verdict = f"still breaks {got} as recorded" if ok else f"FAIL, expected {check.expect} to break, got {got}"
+        ok = got == "pass"
+        verdict = "pass" if ok else f"FAIL, {got} violated"
         print(f"{'ok  ' if ok else 'FAIL'} {check.name}: {verdict} ({summary(output)}, {elapsed:.0f} s)")
-        if check.note and ok:
-            print(f"     {check.note}")
         if not ok:
             failures.append(check.name)
             print(f"     see {work / 'tlc.out'}")
@@ -338,7 +344,8 @@ def main():
     for mutant in MUTANTS:
         if not (args.mutants or args.only == mutant.name) or (args.only and args.only != mutant.name):
             continue
-        if mutant.check and not (args.full or args.only):
+        bounds = mutant.bounds_for(args.full, args.only)
+        if bounds is None:
             continue
         text = spec
         for old, new in mutant.edits:
@@ -346,7 +353,7 @@ def main():
                 sys.exit(f"mutant {mutant.name}: the spec no longer has exactly one copy of {old!r}; update it")
             text = text.replace(old, new)
         live = mutant.expect in LIVENESS
-        cfg = Check(mutant.name, mutant.bounds, invariants=[] if live else [mutant.expect],
+        cfg = Check(mutant.name, bounds, invariants=[] if live else [mutant.expect],
                     properties=[mutant.expect] if live else []).config()
         output, code, elapsed, work = run_tlc(jar, f"mutant-{mutant.name}", text, cfg)
         got = outcome(output, code)

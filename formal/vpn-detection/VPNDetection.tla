@@ -14,6 +14,7 @@ EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
     MaxStarts,           \* host Starts (each followed by at most one Stop)
+    MaxProxyStops,       \* Stops of the proxy alone, DNS or tunnels staying up: the monitor runs on
     MaxTunnelDrops,      \* the VPN drops or loses its address, notified
     MaxSilentChanges,    \* a store change whose notification is lost
     MaxStoreBreaks,      \* the store becomes unreadable
@@ -225,7 +226,7 @@ Call ==
     /\ stamp' = stamp + 1
     /\ inbox' = inbox \cup {[seq |-> stamp + 1, v |-> mon.verdict]}
     /\ lastPub' = mon.verdict
-    /\ ghost' = [ghost EXCEPT !.late = ghost.late \/ ~IsCurrent(mon.gen)]
+    /\ ghost' = [ghost EXCEPT !.late = ghost.late \/ ~IsCurrent(mon.gen), !.forgot = FALSE]
     /\ mon' = IdleMon
     /\ UNCHANGED <<lc, wakeTask, monQ, pendingCb, liveSubs, sess, store, budget, hostVars, orchVars>>
 
@@ -413,10 +414,6 @@ OrchHandle(r) ==
 
 -----------------------------------------------------------------------------
 
-\* Whether handleVPNStateChange takes a report at all.
-Observing == host.phase = "running"   \* networkPathObserving: set by startObservers, cleared by tearDown
-HostTakesReports == TRUE
-
 \* handleVPNStateChange awaits reconcileEntryFiles before it calls the orchestrator.
 OrchestratorAfterFiles == TRUE
 
@@ -426,12 +423,11 @@ OrchestratorAfterFiles == TRUE
 \* recorded (`RecordOutcome`). Without the orchestrator, a report the gate will skip does
 \* nothing when it runs, so it is dropped here.
 HostDeliver(r) ==
-    LET take     == HostTakesReports
-        admitted == take /\ GateAdmits(r)
+    LET admitted == GateAdmits(r)
         changed  == admitted /\ Wanted(host.gate) # Wanted(r.v)
         op       == EntryOp(r.v, host.started)
         queues   == changed /\ op # "nothing"
-        now      == take /\ WithOrchestrator /\ (~queues \/ ~OrchestratorAfterFiles)
+        now      == WithOrchestrator /\ (~queues \/ ~OrchestratorAfterFiles)
         h        == IF admitted THEN [host EXCEPT !.gate = r.v, !.gateSeq = r.seq] ELSE host
         pq       == IF queues THEN Append(platQ, Op(op, "vpn", IF now THEN NoFwd ELSE Fwd(r))) ELSE platQ
         in       == {x \in inbox \ {r} : WithOrchestrator \/ GateAdmitsAt(x, h.gateSeq)}
@@ -456,7 +452,7 @@ HStartBegin ==
                             !.capWanted = Wanted(host.gate), !.capSeq = host.gateSeq]
     /\ platQ' = Append(platQ, Op(IF Wanted(host.gate) THEN "apply" ELSE "remove", "start", NoFwd))
     /\ repair' = [repair EXCEPT !.queued = NextPlace]
-    /\ ghost' = [ghost EXCEPT !.staleApply = ghost.staleApply \/ Wanted(host.gate)]
+    /\ ghost' = [ghost EXCEPT !.staleApply = ghost.staleApply \/ (~lc.started /\ Wanted(host.gate))]
     /\ UNCHANGED <<store, budget, monVars, done, files, helperUp, orchVars>>
 
 \* Whether applyProxySurfaces sets runtimeStarted in the turn that decides its correction.
@@ -479,21 +475,42 @@ HStartObservers ==
 \* barrier.stop waits out a delivery in flight on the monitor thread.
 StopWaitsForBarrier == mon.pc \notin BarrierPCs
 
-\* RuntimeHostLifecycle.tearDown: vpnStatusMonitor.stop(), runtimeStarted = false, then
-\* tearDownProxy's clear (resolvers.clear) queued with its place. A report that lands between
-\* the two can queue only a removal, so one step stands for both.
-HStopBegin(failCancel) ==
+\* RuntimeHost.stopVPNMonitor, after vpnStatusMonitor.stop() returns: the gate goes back to a
+\* fresh SplitDNSVPNGate (.unknown), and splitDNSGateOrder.skip(through: vpnSequencer.issued)
+\* refuses every report the stopped session stamped. Every one has its stamp by then: stop
+\* waits out a delivery in flight (`StopWaitsForBarrier`), and `Call` stamps in that delivery.
+GateForgetsAtStop == TRUE
+FenceAtStop == TRUE
+Max(a, b) == IF a > b THEN a ELSE b
+
+\* RuntimeHostLifecycle.tearDown: with every module going down, stopVPNMonitor(); then
+\* runtimeStarted = false, and tearDownProxy's clear (resolvers.clear) queued with its place.
+\* A report that lands between the two can queue only a removal, so one step stands for both.
+\* A Stop of the proxy alone (`whole` false), with DNS or tunnels staying up, keeps the monitor,
+\* its session and the gate's verdict.
+HStopBegin(failCancel, whole) ==
     /\ host.phase = "running" /\ StopWaitsForBarrier
-    /\ failCancel => (budget.cancelFails > 0 /\ lc.sub # 0)
-    /\ budget' = IF failCancel THEN [budget EXCEPT !.cancelFails = @ - 1] ELSE budget
-    /\ StopMonitor(failCancel)
-    /\ host' = [host EXCEPT !.phase = "clearing", !.started = FALSE]
+    /\ failCancel => (whole /\ budget.cancelFails > 0 /\ lc.sub # 0)
+    /\ ~whole => budget.proxyStops > 0
+    /\ budget' = CASE failCancel -> [budget EXCEPT !.cancelFails = @ - 1]
+                    [] ~whole    -> [budget EXCEPT !.proxyStops = @ - 1]
+                    [] OTHER     -> budget
+    /\ LET h == [host EXCEPT !.phase = "clearing", !.started = FALSE,
+                             !.gate = IF whole /\ GateForgetsAtStop THEN "unknown" ELSE @,
+                             !.gateSeq = IF whole /\ FenceAtStop THEN Max(@, stamp) ELSE @]
+       IN /\ host' = h
+          \* Without the orchestrator a report the gate now refuses does nothing when it runs.
+          /\ inbox' = {x \in inbox : WithOrchestrator \/ GateAdmitsAt(x, h.gateSeq)}
     /\ platQ' = Append(platQ, Op("remove", "stop", NoFwd))
     /\ repair' = [repair EXCEPT !.queued = NextPlace]
-    \* What the stopped session saw is read only behind isCurrent from here on, so it is dropped.
-    /\ sess' = NoSession
-    /\ UNCHANGED <<store, monQ, pendingCb, mon, stamp, inbox, lastPub,
-                   done, files, helperUp, orchVars, ghost>>
+    /\ IF whole
+       THEN /\ StopMonitor(failCancel)
+            \* What the stopped session saw is read only behind isCurrent from here on, so it is dropped.
+            /\ sess' = NoSession
+            /\ ghost' = [ghost EXCEPT !.forgot = TRUE]
+       ELSE UNCHANGED <<lc, wakeTask, liveSubs, sess, ghost>>
+    /\ UNCHANGED <<store, monQ, pendingCb, mon, stamp, lastPub,
+                   done, files, helperUp, orchVars>>
 
 \* PlatformWork runs the next operation: SplitDNSVPNGate.perform through the helper, the
 \* start's apply, or the stop's clear. The stop's clear reports a failure only while entry
@@ -548,7 +565,7 @@ RecordOutcome(o) ==
        /\ host' = IF rest THEN RestStamps(h) ELSE h
        /\ orch' = IF rest THEN [oc EXCEPT !.seq = 0] ELSE oc
        /\ stamp' = IF rest THEN 0 ELSE stamp
-       /\ ghost' = [ghost EXCEPT !.staleApply = @ \/ (corrects /\ corrOp = "apply")]
+       /\ ghost' = [ghost EXCEPT !.staleApply = @ \/ (~lc.started /\ corrects /\ corrOp = "apply")]
        /\ UNCHANGED <<store, budget, lc, wakeTask, monQ, pendingCb, liveSubs, sess, mon, inbox, lastPub,
                       files, helperUp>>
 
@@ -598,7 +615,7 @@ Init ==
     /\ store \in [tunnel : {"none", "up"}, ok : {TRUE}]
     /\ budget = [drops |-> MaxTunnelDrops, silent |-> MaxSilentChanges, breaks |-> MaxStoreBreaks,
                  cancelFails |-> MaxCancelFailures, outages |-> MaxHelperOutages,
-                 restarts |-> MaxCallbackRestarts, wakes |-> MaxSystemWakes,
+                 restarts |-> MaxCallbackRestarts, wakes |-> MaxSystemWakes, proxyStops |-> MaxProxyStops,
                  connects |-> MaxTunnelDrops + MaxSilentChanges + 1]
     /\ lc = [started |-> FALSE, generation |-> 0, sub |-> 0]
     /\ wakeTask = [sleeping |-> FALSE, gen |-> 0]
@@ -612,14 +629,14 @@ Init ==
     /\ repair = [pending |-> FALSE, inFlight |-> FALSE, generation |-> 0, queued |-> 0]
     /\ orch = [definite |-> "none", blind |-> FALSE, sweeps |-> "idle", seq |-> 0, last |-> "unknown"]
     /\ ghost = [late |-> FALSE, fresh |-> FALSE, blindRecover |-> FALSE, staleApply |-> FALSE,
-                orchEarly |-> FALSE]
+                orchEarly |-> FALSE, forgot |-> FALSE]
 
 HostTakesReport == \E r \in inbox : HostDeliver(r)
 HostRecords == \E o \in done : RecordOutcome(o)
 
 MonitorNext == MonStep \/ Enter \/ VerdictCheck \/ Call \/ WakeFire \/ CallbackRestart
 HostNext == HostTakesReport \/ HostRecords \/ HStartBegin \/ HStartObservers
-            \/ (\E f \in BOOLEAN : HStopBegin(f)) \/ PlatformRun \/ Retry
+            \/ (\E f, w \in BOOLEAN : HStopBegin(f, w)) \/ PlatformRun \/ Retry
 OrchNext == SweepsDone \/ SystemWake
 EnvNext == VPNConnect \/ (\E t \in Tunnels : TunnelDrop(t) \/ SilentChange(t))
            \/ StoreBreak \/ StoreHeal \/ AgeLoss \/ HelperDown \/ HelperUp
@@ -665,8 +682,11 @@ NoEntryFilesOffVPN ==
            (files => store.ok /\ store.tunnel = "up")
 
 \* S2. Once the host has taken every report, the gate holds the verdict the monitor
-\* published last. Harm: a failure or a drop the monitor reported is never acted on.
-GateFollowsLastPublished == inbox = {} => host.gate = lastPub
+\* published last, or .unknown if the monitor stopped since (stopVPNMonitor, #324).
+\* Harm: a failure or a drop the monitor reported is never acted on, or a stopped
+\* session's verdict outlives it.
+GateFollowsLastPublished ==
+    inbox = {} => host.gate = IF ghost.forgot THEN "unknown" ELSE lastPub
 
 \* S3. After stop returns, nothing of that session is published: no event, no verdict.
 \* Harm: an obsolete verdict turns the retained gate and writes entry files.
@@ -690,11 +710,10 @@ OrchestratorAfterEntryFiles == ~ghost.orchEarly
 OrchestratorFollowsLastPublished ==
     (WithOrchestrator /\ ~ReportsInFlight) => orch.last = lastPub
 
-\* K1 (known gap, U4). No entry-file write is decided while the monitor is stopped, from
-\* a verdict a stopped session left. Today a Start's apply, and its correction, read that
-\* gate. Harm: if the VPN dropped while the proxy was stopped, the files go back against
-\* servers no route reaches. The removal waits for the Start to reach startObservers, then
-\* for the new session's reading, its delivery and the platform queue.
+\* S8. No entry-file write is decided while the monitor is stopped, from a verdict a stopped
+\* session left: a Start's apply and its correction read a gate the stop reset (#324).
+\* Harm: if the VPN dropped while the proxy was stopped, the files go back against servers
+\* no route reaches until the new session's first reading lands.
 ApplyOnlyFromCurrentSession == ~ghost.staleApply
 
 \* L1. A store that can be read is eventually read: the gate leaves .unknown while it runs.
