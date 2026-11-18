@@ -7,6 +7,9 @@ DerivedData/
 .DS_Store
 audit/
 .vscode/
-.claude/
+.claude/*
+!.claude/skills/
 .jj/
 __pycache__/
+formal/.tools/
+formal/*/.out/
