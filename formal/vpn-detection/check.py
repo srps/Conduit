@@ -178,7 +178,8 @@ def run_tlc(jar, name, spec_text, cfg_text):
     elapsed = time.monotonic() - started
     output = result.stdout + result.stderr
     (work / "tlc.out").write_text(output)
-    return output, elapsed, work
+    shutil.rmtree(work / "states", ignore_errors=True)
+    return output, result.returncode, elapsed, work
 
 
 def summary(output):
@@ -192,19 +193,23 @@ def summary(output):
     return ", ".join(parts)
 
 
-def broken(output):
-    """The property TLC reports violated, or None if it found no violation."""
+# TLC's exit statuses (tlc2.output.EC.ExitStatus in tla2tools 1.7.4).
+EXIT_SUCCESS, EXIT_DEADLOCK, EXIT_SAFETY, EXIT_LIVENESS = 0, 11, 12, 13
+
+
+def outcome(output, returncode):
+    """What TLC found: "pass", the invariant it reports violated, "temporal" or "deadlock".
+    None when its exit status and its output do not agree on one of those, which counts as
+    TLC not finishing: a crash, a parse error, or an evaluation error mid-run."""
     if m := re.search(r"Invariant (\w+) is violated", output):
-        return m.group(1)
+        return m.group(1) if returncode == EXIT_SAFETY else None
     if "Temporal properties were violated" in output:
-        return "temporal"
+        return "temporal" if returncode == EXIT_LIVENESS else None
     if "Deadlock reached" in output:
-        return "deadlock"
+        return "deadlock" if returncode == EXIT_DEADLOCK else None
+    if "Model checking completed. No error has been found." in output and returncode == EXIT_SUCCESS:
+        return "pass"
     return None
-
-
-def finished(output):
-    return "Model checking completed" in output or broken(output) is not None
 
 
 def main():
@@ -221,14 +226,14 @@ def main():
     for check in CHECKS:
         if args.only and args.only != check.name:
             continue
-        output, elapsed, work = run_tlc(jar, check.name, spec, check.config())
-        got = broken(output)
-        if not finished(output):
+        output, code, elapsed, work = run_tlc(jar, check.name, spec, check.config())
+        got = outcome(output, code)
+        if got is None:
             failures.append(check.name)
-            print(f"FAIL {check.name}: TLC did not finish, see {work / 'tlc.out'}")
+            print(f"FAIL {check.name}: TLC did not finish (exit {code}), see {work / 'tlc.out'}")
             continue
         if check.expect is None:
-            ok = got is None
+            ok = got == "pass"
             verdict = "pass" if ok else f"FAIL, {got} violated"
         else:
             ok = got == check.expect
@@ -251,12 +256,12 @@ def main():
         live = mutant.expect in LIVENESS
         cfg = Check(mutant.name, mutant.bounds, invariants=[] if live else [mutant.expect],
                     properties=[mutant.expect] if live else []).config()
-        output, elapsed, work = run_tlc(jar, f"mutant-{mutant.name}", text, cfg)
-        got = broken(output)
+        output, code, elapsed, work = run_tlc(jar, f"mutant-{mutant.name}", text, cfg)
+        got = outcome(output, code)
         want = "temporal" if live else mutant.expect
         ok = got == want
         print(f"{'ok  ' if ok else 'FAIL'} mutant {mutant.name}: {mutant.expect} "
-              f"{'caught' if ok else 'NOT caught (' + str(got) + ')'} ({summary(output)}, {elapsed:.0f} s)")
+              f"{'caught' if ok else f'NOT caught ({got}, exit {code})'} ({summary(output)}, {elapsed:.0f} s)")
         print(f"     {mutant.swift}")
         if not ok:
             failures.append(mutant.name)
