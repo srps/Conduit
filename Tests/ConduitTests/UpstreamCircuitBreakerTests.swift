@@ -235,6 +235,32 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         XCTAssertTrue(breaker.mayProbe(now: openedAt), "the forced probe's slot is free again at once")
     }
 
+    func testAnAnswerToTheProbeThatHoldsTheSlotClosesWithoutALatencySample() throws {
+        let openedAt = Date()
+        var breaker = openedBreaker(at: openedAt)
+        _ = breaker.recordSuccess(latencyMS: 40)
+        _ = breaker.recordFailure(now: openedAt, threshold: 1, windowSeconds: 0, baseOpenInterval: 30, maxOpenInterval: 300)
+        let held = try XCTUnwrap(breaker.claimProbe(now: openedAt.addingTimeInterval(31))).probe
+
+        XCTAssertEqual(breaker.recordProbeAnswered(held), .closed(.probeSuccess))
+        XCTAssertEqual(breaker.state, .closed)
+        XCTAssertNil(breaker.probe)
+        XCTAssertEqual(breaker.ewmaLatencyMS, 40, "the exchange records its own latency when it ends")
+        XCTAssertFalse(breaker.endProbe(held), "the answer was the verdict, so the attempt's end changes nothing")
+    }
+
+    func testAnAnswerToAProbeThatNoLongerHoldsTheSlotChangesNothing() throws {
+        let openedAt = Date()
+        var breaker = openedBreaker(at: openedAt)
+        let first = try XCTUnwrap(breaker.claimProbe(now: openedAt.addingTimeInterval(31))).probe
+        XCTAssertTrue(breaker.endProbe(first))
+        _ = try XCTUnwrap(breaker.claimProbe(now: openedAt.addingTimeInterval(32)))
+        let before = breaker
+
+        XCTAssertNil(breaker.recordProbeAnswered(first))
+        XCTAssertEqual(breaker, before, "only the holder's answer is the probe's verdict")
+    }
+
     // MARK: - HalfOpen behaviour
 
     func testHalfOpenSuccessClosesBreakerAndResetsBackoff() {

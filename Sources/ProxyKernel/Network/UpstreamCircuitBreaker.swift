@@ -19,7 +19,7 @@ import Foundation
 /// Design invariants (all verified by `UpstreamCircuitBreakerTests`):
 ///
 ///   * `state` only changes inside `recordFailure`, `recordSuccess`,
-///     `claimProbe`, `forceHalfOpen`, or `reset`. The breaker has no implicit time-driven
+///     `recordProbeAnswered`, `claimProbe`, `forceHalfOpen`, or `reset`. The breaker has no implicit time-driven
 ///     transitions; the caller drives the clock by passing `now:` at every
 ///     mutation. This keeps the structure deterministic for tests and
 ///     simulator scenarios.
@@ -48,8 +48,8 @@ import Foundation
 ///     upstream"; redundant failure signal is noise.
 ///   * The half-open probe slot is held by the `HalfOpenProbe` that
 ///     `claimProbe` or `forceHalfOpen` returned. `recordSuccess`,
-///     `recordFailure` and `reset` clear it; otherwise only `endProbe` with
-///     that probe frees it.
+///     `recordFailure` and `reset` clear it, as do `recordProbeAnswered` and
+///     `endProbe` with that probe.
 package struct UpstreamCircuitBreaker: Sendable, Equatable {
 
     // MARK: - Observable state
@@ -160,13 +160,28 @@ package struct UpstreamCircuitBreaker: Sendable, Equatable {
         case .closed:
             return nil
         case .open, .halfOpen:
-            state = .closed
-            openUntil = nil
-            lastOpenedAt = nil
-            probe = nil
-            nextOpenInterval = lastBaseOpenInterval
-            return .closed(.probeSuccess)
+            return closeOnSuccess()
         }
+    }
+
+    /// The probe's exchange got its answer before it completed: a streamed response's head, after which the
+    /// stream may run for as long as its client reads. Closes as `recordSuccess` would, without a latency
+    /// sample: the exchange records its own outcome when it ends. Does nothing unless `answered` holds the slot.
+    @discardableResult
+    package mutating func recordProbeAnswered(_ answered: HalfOpenProbe) -> Transition? {
+        guard probe == answered else { return nil }
+        consecutiveFailures = 0
+        firstFailureAt = nil
+        return closeOnSuccess()
+    }
+
+    private mutating func closeOnSuccess() -> Transition {
+        state = .closed
+        openUntil = nil
+        lastOpenedAt = nil
+        probe = nil
+        nextOpenInterval = lastBaseOpenInterval
+        return .closed(.probeSuccess)
     }
 
     /// Record a failed exchange. May trip the breaker depending on current

@@ -494,7 +494,8 @@ package final class ConnectionPool: @unchecked Sendable {
                 clientChannel: clientChannel,
                 connection: connection,
                 proxy: proxy,
-                authSource: authSource
+                authSource: authSource,
+                onResponseHead: { [weak self] in self?.recordProbeAnswered(by: attempt) }
             ), connection: connection).flatMap { result in
                 self.recordSuccess(for: result.upstream, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
                 return connection.channel.eventLoop.makeSucceededFuture(result)
@@ -1369,7 +1370,8 @@ package final class ConnectionPool: @unchecked Sendable {
         clientChannel: Channel,
         connection: PooledUpstreamConnection,
         proxy: UpstreamProxy,
-        authSource: String?
+        authSource: String?,
+        onResponseHead: @escaping () -> Void
     ) -> EventLoopFuture<StreamingExchangeResult> {
         let auth = connection.authenticationState()
         let promise = connection.channel.eventLoop.makePromise(of: StreamingExchangeResult.self)
@@ -1385,7 +1387,8 @@ package final class ConnectionPool: @unchecked Sendable {
             eventSink: eventSink,
             clientChannel: clientChannel,
             responseTimeout: upstreamResponseTimeout,
-            streamingPromise: promise
+            streamingPromise: promise,
+            onResponseHead: onResponseHead
         )
 
         return connection.channel.pipeline.addHandler(handler).flatMap {
@@ -1405,6 +1408,16 @@ package final class ConnectionPool: @unchecked Sendable {
             connection.markAuthenticated(since: auth.generation, authMethod: result.authMethod)
             self.release(connection, keepAlive: result.keepAlive)
             return connection.channel.eventLoop.makeSucceededFuture(result)
+        }
+    }
+
+    /// A streamed response's head is the upstream's answer to the half-open probe `attempt` holds (#279); the
+    /// probe does not wait for a stream that lasts as long as its client reads.
+    private func recordProbeAnswered(by attempt: UpstreamAttempt) {
+        guard let probe = attempt.probe else { return }
+        let transition = lock.withLock { breakers[attempt.proxy.id]?.recordProbeAnswered(probe) }
+        if let transition {
+            emitTransition(transition, for: attempt.proxy)
         }
     }
 
@@ -1871,6 +1884,8 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
     private let clientChannel: Channel?
     private let bufferedPromise: EventLoopPromise<UpstreamExchangeResponse>?
     private let streamingPromise: EventLoopPromise<StreamingExchangeResult>?
+    /// Told when a streamed response's head reaches the client.
+    private let onResponseHead: (() -> Void)?
 
     private var phase: Phase
     private var responseHead: HTTPResponseHead?
@@ -1915,6 +1930,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
         self.clientChannel = nil
         self.bufferedPromise = responsePromise
         self.streamingPromise = nil
+        self.onResponseHead = nil
         self.phase = isAuthenticated ? .awaitingFinal : .awaitingChallenge
     }
 
@@ -1930,7 +1946,8 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
         eventSink: (@Sendable (RuntimeEvent) -> Void)?,
         clientChannel: Channel,
         responseTimeout: TimeAmount,
-        streamingPromise: EventLoopPromise<StreamingExchangeResult>
+        streamingPromise: EventLoopPromise<StreamingExchangeResult>,
+        onResponseHead: @escaping () -> Void
     ) {
         self.connection = connection
         self.authenticatorProvider = authenticatorProvider
@@ -1945,6 +1962,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
         self.clientChannel = clientChannel
         self.bufferedPromise = nil
         self.streamingPromise = streamingPromise
+        self.onResponseHead = onResponseHead
         self.phase = isAuthenticated ? .awaitingFinal : .awaitingChallenge
     }
 
@@ -2026,6 +2044,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
                 } else {
                     clientChannel.write(HTTPServerResponsePart.head(clientHead), promise: nil)
                 }
+                onResponseHead?()
             }
         case .body(var buffer):
             if isStreaming, let clientChannel {

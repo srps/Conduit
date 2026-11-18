@@ -9,7 +9,8 @@ import XCTest
 @testable import ProxyKernel
 
 final class ScriptedUpstream: @unchecked Sendable {
-    enum Answer { case ok, status(Int), silent }
+    /// `openStream`: a chunked 200 with one chunk, then nothing, so the response never ends.
+    enum Answer { case ok, status(Int), silent, openStream }
 
     private let script: @Sendable (_ connection: Int, _ requestLine: String) -> Answer
     private let connections = NIOLockedValueBox(0)
@@ -37,6 +38,7 @@ final class ScriptedUpstream: @unchecked Sendable {
                     case .status(let code): response = "HTTP/1.1 \(code) Answered\r\nContent-Length: 0\r\n\r\n"
                     case .ok where requestLine.hasPrefix("CONNECT "): response = "HTTP/1.1 200 Connection established\r\n\r\n"
                     case .ok: response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                    case .openStream: response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nfirst\r\n"
                     }
                     channel.writeAndFlush(channel.allocator.buffer(string: response), promise: nil)
                 })

@@ -233,6 +233,50 @@ final class HalfOpenProbeLeaseTests: XCTestCase {
         await assertProbedAgainAndServes(pool, first: first)
     }
 
+    // MARK: - A streamed probe
+
+    func testAStreamedProbeIsAnsweredAtItsResponseHead() async throws {
+        let first = try await startUpstream { _, line in
+            if line.hasPrefix("CONNECT ") { return .status(502) }
+            return line.contains("stream.test") ? .openStream : .ok
+        }
+        let second = try await startAnsweringUpstream()
+        let pool = makePool([("first", first.port), ("second", second.port)])
+        defer { pool.closeAll() }
+        await tripInOrder(pool, ["first", "second"])
+
+        let clientChannel = NIOAsyncTestingChannel()
+        finishAtTearDown(clientChannel)
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://stream.test/events", headers: ["Host": "stream.test"])
+        let stream = pool.streamingExchange(head: head, body: nil, clientChannel: clientChannel)
+        guard case .head(let forwarded) = try await clientChannel.waitForOutboundWrite(as: HTTPServerResponsePart.self) else {
+            return XCTFail("the response head is forwarded first")
+        }
+        XCTAssertEqual(forwarded.status, .ok)
+
+        XCTAssertEqual(state(pool, "first"), .closed, "the head answered the probe while the stream stays open")
+        for index in 0..<3 {
+            assertAnswered(await exchange(pool, "http://after.test/\(index)"))
+        }
+        XCTAssertEqual(gets(first), 4, "the streaming upstream serves the stream and the next requests")
+        XCTAssertEqual(halfOpened("second"), 0, "the other upstream was never needed")
+        XCTAssertEqual(released(), [])
+
+        XCTAssertEqual(pool.closeAll(), 2, "the open stream and the idle connection")
+        do {
+            _ = try await stream.get()
+            XCTFail("the stream was cut after its head")
+        } catch {
+            XCTAssertTrue(ConnectionPoolError.isStreamingResponseInterrupted(error), "\(error)")
+        }
+        while try await clientChannel.readOutbound(as: HTTPServerResponsePart.self) != nil {}
+        let opened = events.withLockedValue { $0 }.filter { $0.event == "upstream.circuit_opened" }.compactMap(\.detail)
+            .filter { $0.hasPrefix("upstream=first ") }
+        XCTAssertEqual(opened.count, 2, "the trip, then the cut stream: \(opened)")
+        XCTAssertTrue(opened.last?.contains("reason=threshold") == true,
+                      "a stream cut after the probe was answered fails a closed upstream, not the probe: \(opened)")
+    }
+
     // MARK: - A failure from before a breaker reset
 
     private func stale() -> [String] {
