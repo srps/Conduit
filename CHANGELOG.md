@@ -159,8 +159,9 @@ before it asks the helper.
   Conduit was stopped, the entry files came back at Start and pointed at
   servers only the tunnel reaches. Every lookup under their domains then
   failed, the VPN gateway's own name included, until the VPN monitor's first
-  reading. A Stop that takes the proxy, DNS and port tunnels down now also
-  forgets the VPN state, so the next Start behaves like a first launch:
+  reading. A Stop that leaves nothing running (the last of the proxy, DNS
+  and port tunnel switches turned off, or Quit) now also forgets the VPN
+  state, so the next Start behaves like a first launch:
   entry files and detected resolvers wait for the monitor's first reading,
   and none are written if the VPN is gone. A Stop of the proxy alone, which
   leaves DNS or port tunnels running, keeps the VPN monitor and its state,
