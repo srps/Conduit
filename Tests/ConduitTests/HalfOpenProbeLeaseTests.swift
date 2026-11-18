@@ -233,6 +233,83 @@ final class HalfOpenProbeLeaseTests: XCTestCase {
         await assertProbedAgainAndServes(pool, first: first)
     }
 
+    // MARK: - A failure from before a breaker reset
+
+    private func stale() -> [String] {
+        events.withLockedValue { $0 }.filter { $0.event == "upstream.stale_failure_dropped" }.compactMap(\.detail)
+    }
+
+    func testACONNECTDialThatFailsAfterAFlapResetDoesNotReopenTheBreaker() async throws {
+        let port = try await refusingPort()
+        let pool = makePool([("first", port)])
+        defer { pool.closeAll() }
+
+        let parked = parkEventLoop()
+        let dial = coordinator(pool).connectUpstreamTunnel(target: "before.test:443")
+        pool.resetCircuitsAfterFlap()
+        parked.signal()
+        do {
+            _ = try await dial.get()
+            XCTFail("nothing listens on the port")
+        } catch {
+            XCTAssertFalse(ConnectionPoolError.isLocalNonUpstreamFailure(error), "\(error)")
+        }
+        XCTAssertEqual(state(pool, "first"), .closed, "the reset forgave the path the dial started on")
+        XCTAssertEqual(stale(), ["upstream=first endpoint=127.0.0.1:\(port) origin=before.test:443 verdict=failure"])
+
+        let after = await tunnel(pool, "after.test:443")
+        XCTAssertNotNil(after)
+        XCTAssertEqual(state(pool, "first"), .open, "a dial that started after the reset counts")
+    }
+
+    func testAPlainRequestWhoseDialFailsAfterAFlapResetDoesNotReopenTheBreaker() async throws {
+        let port = try await refusingPort()
+        let pool = makePool([("first", port)])
+        defer { pool.closeAll() }
+
+        let parked = parkEventLoop()
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://before.test/", headers: ["Host": "before.test"])
+        let request = pool.exchange(head: head, body: nil)
+        pool.resetCircuitsAfterFlap()
+        parked.signal()
+        do {
+            _ = try await request.get()
+            XCTFail("nothing listens on the port")
+        } catch {
+            XCTAssertFalse(ConnectionPoolError.isLocalNonUpstreamFailure(error), "\(error)")
+        }
+        XCTAssertEqual(state(pool, "first"), .closed, "the reset forgave the path the request started on")
+        XCTAssertEqual(stale(), ["upstream=first endpoint=127.0.0.1:\(port) origin=before.test:80 verdict=failure"])
+
+        guard case .failure = await exchange(pool, "http://after.test/") else { return XCTFail("nothing listens on the port") }
+        XCTAssertEqual(state(pool, "first"), .open, "a request that started after the reset counts")
+    }
+
+    func testASilenceFromBeforeAFlapResetDoesNotCountTowardTheNextOne() async throws {
+        let quiet = try await startUpstream { _, _ in .silent }
+        let pool = makePool([("first", quiet.port)])
+        defer { pool.closeAll() }
+        config.withLockedValue { $0.upstreamResponseTimeoutSeconds = 0.2 }
+
+        let parked = parkEventLoop()
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://before.test/", headers: ["Host": "before.test"])
+        let request = pool.exchange(head: head, body: nil)
+        pool.resetCircuitsAfterFlap()
+        parked.signal()
+        do {
+            _ = try await request.get()
+            XCTFail("the upstream never answers")
+        } catch {
+            XCTAssertTrue(ConnectionPoolError.isUpstreamResponseTimedOut(error), "\(error)")
+        }
+        XCTAssertEqual(stale(), ["upstream=first endpoint=127.0.0.1:\(quiet.port) origin=before.test:80 verdict=silence"])
+
+        guard case .failure(let error) = await exchange(pool, "http://after.test/") else { return XCTFail("the upstream never answers") }
+        XCTAssertTrue(ConnectionPoolError.isUpstreamResponseTimedOut(error), "\(error)")
+        XCTAssertEqual(state(pool, "first"), .closed, "one origin left unanswered since the reset is not upstream loss")
+        XCTAssertEqual(events.withLockedValue { $0 }.filter { $0.event == "upstream.silence_counted" }.count, 0)
+    }
+
     // MARK: - A CONNECT whose coordinator is gone
 
     func testATunnelWhoseCoordinatorIsReleasedBeforeItsDialLandsLeavesThePool() async throws {

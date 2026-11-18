@@ -405,6 +405,8 @@ state.nextOpenInterval = baseCircuitOpenInterval
 
 Called by the orchestrator on `.reasserting → .connected` and `.disconnected → .connected` transitions.
 
+A dial or exchange that started before the reset can still fail after it, on the path the reset forgave. Each attempt keeps the reset epoch it started under, and a failure or silence it reports after a later reset is not counted: it is `upstream.stale_failure_dropped` instead (#279). A success still counts, since an answer is the upstream's own word.
+
 ### `prewarmConnections` gating
 
 Today `prewarmConnections` (`ConnectionPool.swift:212`) is launched unconditionally at `LocalProxyServer.start()`. Change: skip when `directModeCause != .none`. Saves N upstream TCP handshakes that would never be used in an off-VPN start.

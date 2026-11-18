@@ -143,7 +143,6 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         forcedProxy: UpstreamProxy?
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
         let pool = self.pool
-        let start = Date()
         return pool.makeDedicatedTunnelConnection(forcedProxy: forcedProxy, target: target) { [weak self] (connection: PooledUpstreamConnection) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
             guard let self else {
                 pool.abandonDedicatedTunnel(connection, target: target)
@@ -170,10 +169,6 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                 handler.start()
                 return promise.futureResult
             }.flatMap { (established: PooledUpstreamConnection) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
-                pool.recordDedicatedTunnelSuccess(
-                    for: established.proxy,
-                    latencyMS: Int(Date().timeIntervalSince(start) * 1_000)
-                )
                 // The handshake handler stays, holding reads paused and any
                 // server-first bytes, until `attachRelay` hands them over.
                 return established.channel.eventLoop.makeSucceededFuture(
@@ -185,7 +180,6 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                 // A VPN-transition sweep closed it mid-handshake (#148): the
                 // upstream did nothing wrong, and it is not retried.
                 let error: Error = connection.wasRetiredByVPNTransition ? ConnectionPoolError.vpnTransitionDuringConnect : error
-                pool.recordExchangeError(error, for: connection.proxy, origin: .connect(target))
                 return connection.channel.eventLoop.makeFailedFuture(error)
             }
         }
