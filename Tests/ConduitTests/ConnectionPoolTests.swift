@@ -770,7 +770,9 @@ final class ConnectionPoolTests: XCTestCase {
         defer { pool.closeAll() }
 
         do {
-            _ = try await pool.makeDedicatedTunnelConnection(forcedProxy: proxy).get()
+            _ = try await pool.makeDedicatedTunnelConnection(forcedProxy: proxy, target: "origin.test:443") {
+                $0.channel.eventLoop.makeSucceededFuture($0)
+            }.get()
             XCTFail("Dedicated CONNECT tunnel acquisition should respect maxConnections")
         } catch ConnectionPoolError.poolExhausted {
             // Expected.

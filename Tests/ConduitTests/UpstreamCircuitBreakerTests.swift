@@ -131,8 +131,7 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
 
         // Try to half-open before backoff has elapsed.
         let beforeBackoff = now.addingTimeInterval(15 + 5)  // last failure was at 12 s, openUntil at 12+30 = 42 s
-        let transition = breaker.claimProbe(now: beforeBackoff)
-        XCTAssertNil(transition)
+        XCTAssertNil(breaker.claimProbe(now: beforeBackoff))
         XCTAssertEqual(breaker.state, .open, "Must stay open until openUntil elapses")
     }
 
@@ -144,7 +143,8 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         }
         // openUntil = 12 + 30 = 42 s after openedAt
         let pastBackoff = openedAt.addingTimeInterval(43)
-        let transition = breaker.claimProbe(now: pastBackoff)
+        let claim = breaker.claimProbe(now: pastBackoff)
+        let transition = claim?.transition
         XCTAssertNotNil(transition)
         if case let .halfOpened(elapsedSeconds) = transition! {
             XCTAssertGreaterThanOrEqual(elapsedSeconds, 30)
@@ -152,7 +152,8 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
             XCTFail("Expected .halfOpened, got \(transition!)")
         }
         XCTAssertEqual(breaker.state, .halfOpen)
-        XCTAssertTrue(breaker.halfOpenProbeInFlight)
+        XCTAssertNotNil(breaker.probe)
+        XCTAssertEqual(breaker.probe, claim?.probe, "the claim hands out the probe that holds the slot")
     }
 
     func testHalfOpenProbeInFlightBlocksConcurrentHalfOpenAttempts() {
@@ -165,6 +166,73 @@ final class UpstreamCircuitBreakerTests: XCTestCase {
         _ = breaker.claimProbe(now: pastBackoff)  // arms the probe
         let secondAttempt = breaker.claimProbe(now: pastBackoff.addingTimeInterval(0.1))
         XCTAssertNil(secondAttempt, "Second claimProbe with probe in flight returns nil (no transition)")
+    }
+
+    // MARK: - The probe slot's holder (#279)
+
+    private func openedBreaker(at openedAt: Date) -> UpstreamCircuitBreaker {
+        var breaker = UpstreamCircuitBreaker()
+        _ = breaker.recordFailure(now: openedAt, threshold: 1, windowSeconds: 0, baseOpenInterval: 30, maxOpenInterval: 300)
+        return breaker
+    }
+
+    func testEndingTheProbeThatHoldsTheSlotFreesItForTheNextClaim() throws {
+        let openedAt = Date()
+        var breaker = openedBreaker(at: openedAt)
+        let first = try XCTUnwrap(breaker.claimProbe(now: openedAt.addingTimeInterval(31)))
+
+        XCTAssertTrue(breaker.endProbe(first.probe), "the attempt ended without a verdict")
+        XCTAssertEqual(breaker.state, .halfOpen, "no verdict, so the breaker stays half-open")
+        XCTAssertNil(breaker.probe)
+        let second = try XCTUnwrap(breaker.claimProbe(now: openedAt.addingTimeInterval(32)), "the freed slot is claimable")
+        XCTAssertNil(second.transition, "already half-open")
+        XCTAssertNotEqual(second.probe, first.probe)
+    }
+
+    func testAProbeThatNoLongerHoldsTheSlotCannotFreeIt() throws {
+        let openedAt = Date()
+        var breaker = openedBreaker(at: openedAt)
+        let first = try XCTUnwrap(breaker.claimProbe(now: openedAt.addingTimeInterval(31)))
+        XCTAssertTrue(breaker.endProbe(first.probe))
+        let second = try XCTUnwrap(breaker.claimProbe(now: openedAt.addingTimeInterval(32)))
+
+        XCTAssertFalse(breaker.endProbe(first.probe), "an attempt that already handed its slot back cannot free another's")
+        XCTAssertEqual(breaker.probe, second.probe)
+        XCTAssertFalse(breaker.mayProbe(now: openedAt.addingTimeInterval(33)))
+    }
+
+    func testAVerdictClearsTheSlotSoTheAttemptsEndChangesNothing() throws {
+        let openedAt = Date()
+        var failed = openedBreaker(at: openedAt)
+        let failedProbe = try XCTUnwrap(failed.claimProbe(now: openedAt.addingTimeInterval(31))).probe
+        _ = failed.recordFailure(now: openedAt.addingTimeInterval(32), threshold: 1, windowSeconds: 0, baseOpenInterval: 30, maxOpenInterval: 300)
+        let reopened = failed
+        XCTAssertFalse(failed.endProbe(failedProbe))
+        XCTAssertEqual(failed, reopened, "the failure reopened the breaker; the end leaves it so")
+
+        var answered = openedBreaker(at: openedAt)
+        let answeredProbe = try XCTUnwrap(answered.claimProbe(now: openedAt.addingTimeInterval(31))).probe
+        _ = answered.recordSuccess(latencyMS: 10)
+        XCTAssertFalse(answered.endProbe(answeredProbe))
+        XCTAssertEqual(answered.state, .closed)
+
+        var reset = openedBreaker(at: openedAt)
+        let resetProbe = try XCTUnwrap(reset.claimProbe(now: openedAt.addingTimeInterval(31))).probe
+        _ = reset.reset(reason: .vpnFlapRecovered, baseOpenInterval: 30)
+        XCTAssertFalse(reset.endProbe(resetProbe))
+        XCTAssertEqual(reset.state, .closed)
+    }
+
+    func testForcingHalfOpenHandsOutTheProbe() throws {
+        let openedAt = Date()
+        var breaker = openedBreaker(at: openedAt)
+        let forced = try XCTUnwrap(breaker.forceHalfOpen(), "an open breaker may be forced before its interval passes")
+        XCTAssertEqual(forced.transition, .halfOpened(elapsedSeconds: 0))
+        XCTAssertEqual(breaker.probe, forced.probe)
+        XCTAssertNil(breaker.forceHalfOpen(), "a half-open breaker's slot is already accounted for")
+
+        XCTAssertTrue(breaker.endProbe(forced.probe))
+        XCTAssertTrue(breaker.mayProbe(now: openedAt), "the forced probe's slot is free again at once")
     }
 
     // MARK: - HalfOpen behaviour

@@ -144,7 +144,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
         let pool = self.pool
         let start = Date()
-        return pool.makeDedicatedTunnelConnection(forcedProxy: forcedProxy, target: target).flatMap { [weak self] (connection: PooledUpstreamConnection, _: ProxyConfig) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
+        return pool.makeDedicatedTunnelConnection(forcedProxy: forcedProxy, target: target) { [weak self] (connection: PooledUpstreamConnection) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
             guard let self else {
                 return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
             }

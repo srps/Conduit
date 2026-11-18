@@ -337,7 +337,7 @@ final class UpstreamSilenceTests: XCTestCase {
 
         assertTimedOut(await exchange(pool, "http://slow.test/slow"), "the half-open probe lands on a slow origin")
         XCTAssertEqual(status(pool)?.circuitState, .halfOpen, "one slow origin neither closes nor reopens the breaker")
-        XCTAssertEqual(released(), ["upstream=quiet endpoint=127.0.0.1:\(subject.port) origin=slow.test:80"])
+        XCTAssertEqual(released(), ["upstream=quiet endpoint=127.0.0.1:\(subject.port) origin=slow.test:80 ending=silence"])
         XCTAssertEqual(counted(), [])
 
         config.withLockedValue { $0.upstreams.append(UpstreamProxy(name: "other", host: "127.0.0.1", port: other.port, priority: 1)) }

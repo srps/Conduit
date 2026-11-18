@@ -118,7 +118,9 @@ final class ConnectionPoolConcurrencyTests: XCTestCase {
         // The logger holds the pool through the box; break the cycle.
         addTeardownBlock { poolBox.withLockedValue { $0 = nil } }
 
-        let (tunnel, _) = try await pool.makeDedicatedTunnelConnection(target: "origin.test:443").get()
+        let tunnel = try await pool.makeDedicatedTunnelConnection(target: "origin.test:443") {
+            $0.channel.eventLoop.makeSucceededFuture($0)
+        }.get()
 
         XCTAssertEqual(sweeps.withLockedValue { $0 }, [0], "the sweep at publication closes nothing")
         XCTAssertTrue(tunnel.isDedicatedTunnel)
