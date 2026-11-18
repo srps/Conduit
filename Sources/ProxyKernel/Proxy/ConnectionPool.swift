@@ -547,7 +547,7 @@ package final class ConnectionPool: @unchecked Sendable {
 
     /// Runs `body` on `forcedProxy` or the selected upstream; `nil` when no upstream is enabled. A half-open probe
     /// the selection took is ended before `result` completes, whatever the outcome (#279).
-    private func attempt<Value>(
+    private func attempt<Value: Sendable>(
         forcedProxy: UpstreamProxy?, origin: ExchangeOrigin, _ body: (UpstreamAttempt) -> EventLoopFuture<Value>
     ) -> (upstream: UpstreamProxy, result: EventLoopFuture<Value>)? {
         if let forcedProxy {
@@ -633,8 +633,9 @@ package final class ConnectionPool: @unchecked Sendable {
             return .unhealthy(.configurationRefused(detail: refusal.errorDescription ?? ""), responseTimeMS: 0)
         }
         let start = Date()
-        var head = HTTPRequestHead(version: .http1_1, method: .HEAD, uri: urlString)
-        head.headers.add(name: "Host", value: URL(string: urlString)?.host ?? "example.com")
+        let head = HTTPRequestHead(
+            version: .http1_1, method: .HEAD, uri: urlString, headers: ["Host": URL(string: urlString)?.host ?? "example.com"]
+        )
         // The probe timeout bounds a connect made for this check; a pooled
         // connection is reused as is.
         // Canonical seconds, not the whole-millisecond legacy reading: a 1.001-second
