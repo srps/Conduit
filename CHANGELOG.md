@@ -19,12 +19,12 @@ SOCKS5 names and tunnel targets that could add lines to an authenticated
 CONNECT or to `proxy.log`. Helper protocol v5 is unchanged. The schema-two
 settings files keep their format: `config.json` gains an optional
 `dnsFollowVPNResolvers` key, which 0.6.2 skips as an unknown key. The
-platform-state journal keeps its format, and the v1 control protocol only gains
-the optional `detectedSplitDNS` snapshot field, so 0.6.2 can still read the
-files this version writes.
+platform-state journal keeps its format, so 0.6.2 can still read the files
+this version writes. The legacy v1 control protocol is unchanged, and the v2
+runtime snapshot only gains the optional `detectedSplitDNS` field.
 
 No helper update is needed. The helper's own code and its protocol did not
-change, and Settings → General shows a 0.6.2 helper as "Installed". A helper
+change, and Settings → General shows a 0.6.2 helper as "Installed and running". A helper
 built from this release refuses one more input than the 0.6.2 helper, a DNS
 server address with a NUL byte in it, and the app already refuses that address
 before it asks the helper.
@@ -38,10 +38,8 @@ before it asks the helper.
   the last set in use. While the VPN status is Unknown, the set is withheld. A
   dynamic store that cannot be read, created or subscribed to drops the set
   until a reading succeeds. Conduit tries again after 1, 2, 4, 8 and 16 s, then
-  every 30 s (decision 0048, #304); before, a store that could not be created
-  or subscribed to kept the set off until the DNS forwarder was stopped and
-  started or `dnsFollowVPNResolvers` was turned off and on. No forwarder restart and no configuration write is involved, and
-  manual entries work as before. `dnsFollowVPNResolvers: false` in
+  every 30 s (decision 0048, #304). No forwarder restart and no configuration
+  write is involved, and manual entries work as before. `dnsFollowVPNResolvers: false` in
   `config.json` turns it off; Settings has no control for it yet. New events:
   `dns.split_table_changed`, `dns.split_detected`,
   `dns.split_resolver_ignored`, `dns.split_detection_failed`,
@@ -186,12 +184,15 @@ before it asks the helper.
   upstream's half-open probe when the response head arrives, not when the
   stream ends, so the upstream is no longer passed over for the length of
   the stream.
-- A CONNECT dial that lands after its client has gone is closed and frees its
-  pool slot (`connection.tunnel_abandoned`). Before, the connection stayed
+- A CONNECT dial that lands after its tunnel's owner has been released, as
+  when the proxy stops or a listener is rebuilt mid-dial, is closed and frees
+  its pool slot (`connection.tunnel_abandoned`). Before, the connection stayed
   open and counted against the pool.
 
 ### Development
 
+- `pm-vpn-check --pushed-dns` prints the resolvers and domains a connected VPN
+  pushes, masked (#299).
 - `pm-vpn-check --snapshot` and `--watch` print masked readings of the VPN
   keys in the dynamic store, to record what a VPN client writes as it
   connects, flaps and disconnects (#308). Captures stay on the machine that
