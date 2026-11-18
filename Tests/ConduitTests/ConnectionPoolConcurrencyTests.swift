@@ -63,7 +63,7 @@ final class ConnectionPoolConcurrencyTests: XCTestCase {
                                   authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") })
         addTeardownBlock { pool.closeAll() }
 
-        await pool.prewarmConnections(perUpstream: expected)
+        try await pool.prewarmConnections(perUpstream: expected).get()
         let connections = pool.allConnectionSnapshot
         XCTAssertEqual(connections.count, expected, "prewarm leaves its connections idle", file: file, line: line)
         XCTAssertTrue(connections.allSatisfy { !$0.inUse }, file: file, line: line)

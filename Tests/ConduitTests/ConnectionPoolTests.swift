@@ -56,7 +56,7 @@ final class ConnectionPoolTests: XCTestCase {
         XCTAssertEqual(selected, config.upstreams[1].endpoint)
 
         for _ in 0..<5 {
-            await pool.prewarmConnections()
+            try await pool.prewarmConnections().get()
             XCTAssertEqual(pool.activeUpstream(), selected)
         }
         pool.closeAll()

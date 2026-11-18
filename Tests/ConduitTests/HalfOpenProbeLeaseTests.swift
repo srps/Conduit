@@ -354,6 +354,23 @@ final class HalfOpenProbeLeaseTests: XCTestCase {
         XCTAssertEqual(events.withLockedValue { $0 }.filter { $0.event == "upstream.silence_counted" }.count, 0)
     }
 
+    func testAPrewarmDialThatFailsAfterAFlapResetDoesNotReopenTheBreaker() async throws {
+        let port = try await refusingPort()
+        let pool = makePool([("first", port)])
+        defer { pool.closeAll() }
+
+        let parked = parkEventLoop()
+        let warming = pool.prewarmConnections()
+        pool.resetCircuitsAfterFlap()
+        parked.signal()
+        try await warming.get()
+        XCTAssertEqual(state(pool, "first"), .closed, "the reset forgave the path the prewarm dial started on")
+        XCTAssertEqual(stale(), ["upstream=first endpoint=127.0.0.1:\(port) origin=prewarm verdict=failure"])
+
+        try await pool.prewarmConnections().get()
+        XCTAssertEqual(state(pool, "first"), .open, "a prewarm dial that started after the reset counts")
+    }
+
     // MARK: - A CONNECT whose coordinator is gone
 
     func testATunnelWhoseCoordinatorIsReleasedBeforeItsDialLandsLeavesThePool() async throws {

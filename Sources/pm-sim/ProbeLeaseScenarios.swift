@@ -282,6 +282,17 @@ enum ProbeLeaseScenarios {
         let staleDropped = flap.details("upstream.stale_failure_dropped", upstream: "refusing")
         let freshError = await flap.connect("after-flap.test:443")
 
+        let warm = Fixture(upstreams: [UpstreamProxy(name: "prewarmed", host: "127.0.0.1", port: refusedPort, priority: 0)], group: parkable, logger: logger)
+        ScenarioCleanup.register { warm.pool.closeAll() }
+        let warmResume = park(parkable)
+        let staleWarm = warm.pool.prewarmConnections()
+        warm.pool.resetCircuitsAfterFlap()
+        warmResume.signal()
+        try await staleWarm.get()
+        let stateAfterStaleWarm = warm.state("prewarmed")
+        let staleWarmDropped = warm.details("upstream.stale_failure_dropped", upstream: "prewarmed")
+        try await warm.pool.prewarmConnections().get()
+
         let localReleased = local.details("upstream.probe_released", upstream: "first")
         let refusingOpened = dial.details("upstream.circuit_opened", upstream: "refusing")
         let refusingHalfOpened = dial.details("upstream.circuit_half_opened", upstream: "refusing")
@@ -320,6 +331,9 @@ enum ProbeLeaseScenarios {
                           && staleDropped.count == 1 && staleDropped[0].hasSuffix(" origin=before-flap.test:443 verdict=failure")),
                 .init("a CONNECT dial that started after the reset counted",
                       freshError != nil && flap.state("refusing") == .open),
+                .init("a prewarm dial that started before a flap reset and failed after it did not reopen the breaker",
+                      stateAfterStaleWarm == .closed && staleWarmDropped.count == 1 && staleWarmDropped[0].hasSuffix(" origin=prewarm verdict=failure")),
+                .init("a prewarm dial that started after the reset counted", warm.state("prewarmed") == .open),
             ],
             notes: [
                 "first: \(first.served) plain requests served; second: \(second.served)",
@@ -327,7 +341,7 @@ enum ProbeLeaseScenarios {
                 "refusing opened: \(refusingOpened)",
                 "refusing half-opened: \(refusingHalfOpened.count)",
                 "streamer: \(streamer.served) plain requests served; spare: \(spare.served); opened: \(streamerOpened)",
-                "stale failures dropped: \(staleDropped)",
+                "stale failures dropped: \(staleDropped); prewarm: \(staleWarmDropped)",
             ]
         )
     }

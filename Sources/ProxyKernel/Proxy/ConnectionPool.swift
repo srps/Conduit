@@ -726,38 +726,35 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    package func prewarmConnections(perUpstream: Int = 1) async {
-        let proxies = lock.withLock {
+    /// Dials every enabled upstream `perUpstream` times and leaves the connections idle in the pool. Every dial has
+    /// started when this returns, under the breaker reset epoch of that moment; the future completes once each has
+    /// landed or failed, and never fails.
+    package func prewarmConnections(perUpstream: Int = 1) -> EventLoopFuture<Void> {
+        let (proxies, resetEpoch) = lock.withLock {
             let current = configProvider().enabledUpstreams
             syncUpstreamStatesLocked(with: current)
-            return current
+            return (current, breakerResetEpoch)
         }
-        guard !proxies.isEmpty, perUpstream > 0 else { return }
-
-        await withTaskGroup(of: Void.self) { group in
-            for proxy in proxies {
-                for _ in 0..<perUpstream {
-                    group.addTask { [weak self] in
-                        guard let self else { return }
-                        do {
-                            // Through acquisition, so a prewarm dial holds a
-                            // pool slot and is tracked for VPN migration.
-                            // Not a selection: every upstream is prewarmed at
-                            // once, and the last dial to land would otherwise
-                            // become the active upstream (#164).
-                            let connection = try await self.acquireConnection(
-                                for: proxy, target: "prewarm", preferFreshConnection: true, selects: false
-                            ).get()
-                            self.release(connection, keepAlive: true)
-                            self.logger.log(.debug, "Prewarmed upstream connection for \(proxy.endpoint).", category: .proxy)
-                        } catch {
-                            if !ConnectionPoolError.isLocalNonUpstreamFailure(error) { self.recordFailure(for: proxy) }
-                            self.logger.log(.debug, "Prewarm failed for \(proxy.endpoint): \(error.displayDescription)", category: .proxy)
-                        }
+        let dials = proxies.flatMap { proxy in
+            (0..<max(0, perUpstream)).map { _ in
+                let attempt = UpstreamAttempt(proxy: proxy, probe: nil, resetEpoch: resetEpoch)
+                // Through acquisition, so a prewarm dial holds a pool slot and is tracked for VPN migration. Not a
+                // selection: every upstream is prewarmed at once, and the last dial to land would otherwise become
+                // the active upstream (#164).
+                return acquireConnection(for: proxy, target: "prewarm", preferFreshConnection: true, selects: false)
+                    .map { [weak self] connection in
+                        self?.release(connection, keepAlive: true)
+                        self?.logger.log(.debug, "Prewarmed upstream connection for \(proxy.endpoint).", category: .proxy)
                     }
-                }
+                    .recover { [weak self] error in
+                        if !ConnectionPoolError.isLocalNonUpstreamFailure(error) {
+                            self?.recordFailure(of: attempt, answered: false, origin: "prewarm")
+                        }
+                        self?.logger.log(.debug, "Prewarm failed for \(proxy.endpoint): \(error.displayDescription)", category: .proxy)
+                    }
             }
         }
+        return EventLoopFuture.andAllSucceed(dials, on: group.next())
     }
 
     /// Pure filter: returns the IDs of connections that should be reaped as stalled.
@@ -1209,7 +1206,7 @@ package final class ConnectionPool: @unchecked Sendable {
     }
 
     /// One attempt's view of its upstream: the upstream it runs on, the half-open probe its selection took, if
-    /// any, and the breaker reset epoch it started under. Only `attempt` makes one.
+    /// any, and the breaker reset epoch it started under. Only `attempt` and a prewarm dial make one.
     private struct UpstreamAttempt {
         let proxy: UpstreamProxy
         let probe: UpstreamCircuitBreaker.HalfOpenProbe?
@@ -1444,9 +1441,9 @@ package final class ConnectionPool: @unchecked Sendable {
         if ConnectionPoolError.isUpstreamResponseTimedOut(error) {
             recordSilence(for: attempt, origin: origin)
         } else if ConnectionPoolError.isUpstreamAnswer(error) {
-            recordFailure(of: attempt, answered: true, origin: origin)
+            recordFailure(of: attempt, answered: true, origin: origin.description)
         } else if !ConnectionPoolError.isLocalNonUpstreamFailure(error) {
-            recordFailure(of: attempt, answered: false, origin: origin)
+            recordFailure(of: attempt, answered: false, origin: origin.description)
         }
     }
 
@@ -1473,7 +1470,7 @@ package final class ConnectionPool: @unchecked Sendable {
             guard counts, breakers[proxy.id]?.state != .open else { return nil }
             return (ledger.origins, recordFailureLocked(for: proxy, thresholds: thresholds))
         }
-        if stale { reportStaleFailure(of: attempt, origin: origin, verdict: "silence") }
+        if stale { reportStaleFailure(of: attempt, origin: origin.description, verdict: "silence") }
         guard let counted else { return }
         let origins = counted.origins.map(\.description)
         eventSink?(RuntimeEvent(
@@ -1486,7 +1483,7 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    /// A failure outside any attempt: a prewarm dial, or a caller driving the breaker directly.
+    /// A failure outside any attempt: a caller driving the breaker directly.
     private func recordFailure(for proxy: UpstreamProxy) {
         let config = configProvider()
         let thresholds = breakerThresholds(from: config)
@@ -1499,7 +1496,8 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    private func recordFailure(of attempt: UpstreamAttempt, answered: Bool, origin: ExchangeOrigin) {
+    /// `origin` names what the attempt asked for in the stale-failure report: an exchange's origin, or `prewarm`.
+    private func recordFailure(of attempt: UpstreamAttempt, answered: Bool, origin: String) {
         let proxy = attempt.proxy
         let config = configProvider()
         let thresholds = breakerThresholds(from: config)
@@ -1519,7 +1517,7 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    private func reportStaleFailure(of attempt: UpstreamAttempt, origin: ExchangeOrigin, verdict: String) {
+    private func reportStaleFailure(of attempt: UpstreamAttempt, origin: String, verdict: String) {
         let event = RuntimeEvent(
             kind: .health, event: "upstream.stale_failure_dropped",
             detail: "upstream=\(attempt.proxy.name) endpoint=\(attempt.proxy.endpoint) origin=\(origin) verdict=\(verdict)"
