@@ -21,6 +21,7 @@ final class SOCKS5Server: @unchecked Sendable {
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
     private let inboundBudget: InboundConnectionBudget
     private let handshakeTimeout: TimeAmount
+    private let nameRejectionGate: RuntimeEventRepeatGate
     private var serverChannel: Channel?
 
     var listeningHost: String? {
@@ -44,9 +45,11 @@ final class SOCKS5Server: @unchecked Sendable {
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void = { _ in },
         onConnectionClosed: @Sendable @escaping (UUID) -> Void = { _ in },
-        onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void = { _ in }
+        onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void = { _ in },
+        nameRejectionGate: RuntimeEventRepeatGate = RuntimeEventRepeatGate()
     ) {
         precondition(handshakeTimeout.nanoseconds > 0)
+        self.nameRejectionGate = nameRejectionGate
         self.inboundBudget = inboundBudget
         self.handshakeTimeout = handshakeTimeout
         self.group = group
@@ -96,7 +99,8 @@ final class SOCKS5Server: @unchecked Sendable {
                             eventSink: self.eventSink,
                             onConnectionOpened: self.onConnectionOpened,
                             onConnectionClosed: self.onConnectionClosed,
-                            onConnectionActivity: self.onConnectionActivity
+                            onConnectionActivity: self.onConnectionActivity,
+                            nameRejectionGate: self.nameRejectionGate
                         )
                     )
                 }
@@ -132,6 +136,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     private enum State { case greeting, request, routing, relaying }
     private var state: State = .greeting
     private let handshakeTimeout: TimeAmount
+    private let nameRejectionGate: RuntimeEventRepeatGate
     private var handshakeDeadline: Scheduled<Void>?
     private var connectionID: UUID?
     private var accumulated = ByteBufferAllocator().buffer(capacity: 512)
@@ -148,10 +153,12 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void,
         onConnectionClosed: @Sendable @escaping (UUID) -> Void,
-        onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void
+        onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void,
+        nameRejectionGate: RuntimeEventRepeatGate
     ) {
         precondition(handshakeTimeout.nanoseconds > 0)
         self.handshakeTimeout = handshakeTimeout
+        self.nameRejectionGate = nameRejectionGate
         self.connectCoordinator = connectCoordinator
         self.logger = logger
         self.group = group
@@ -314,8 +321,15 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             let bytes = buf.readBytes(length: 4)!
             host = bytes.map { String($0) }.joined(separator: ".")
         case 3:
-            let len: UInt8 = buf.readInteger()!
-            host = buf.readString(length: Int(len))!
+            let length = Int(buf.readInteger(as: UInt8.self)!)
+            let name = buf.readString(length: length)!
+            // Every log line, event and CONNECT below names this host as it is, so a name that is not one goes no further.
+            guard HostSyntax.isHost(name) else {
+                reportRejectedName(byteCount: length)
+                sendReply(context: context, rep: 0x01)
+                return false
+            }
+            host = name
         case 4:
             let bytes = buf.readBytes(length: 16)!
             let parts = stride(from: 0, to: 16, by: 2).map { i in
@@ -401,6 +415,18 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             pacPlan: .noOpinion
         )
         return false
+    }
+
+    /// One shared key, and only the name's length, as for `connection.tunnel_target_rejected`: a local client chose
+    /// every byte of the name and how often to send one, so no redaction of it can promise to hide what it put there.
+    private func reportRejectedName(byteCount: Int) {
+        guard let suppressed = nameRejectionGate.admit(host: "", reason: "connection.socks5_name_rejected") else { return }
+        let event = RuntimeEvent(
+            kind: .connection, event: "connection.socks5_name_rejected",
+            detail: "name_bytes=\(byteCount) suppressed=\(suppressed)"
+        )
+        eventSink?(event)
+        logger.log(.warning, "\(event.event) \(event.detail ?? ""): not a host name or address; refused before routing.", category: .proxy)
     }
 
     private func finishRequestRouting(

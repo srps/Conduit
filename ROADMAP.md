@@ -291,7 +291,8 @@ list below does not gate the core release:
    prober's slow `CONNECT`, the DNS health tick, the launchd residue read,
    CONNECT failover on a timeout and the first authentication's deadline, plus
    the [#184](https://github.com/srps/Conduit/issues/184) spike. The half-open
-   probe slot's missing lease is [#279](https://github.com/srps/Conduit/issues/279).
+   probe slot now belongs to the attempt that took it, and a refused CONNECT
+   dial feeds the breaker ([#279](https://github.com/srps/Conduit/issues/279)).
 5. **Liveness-audit follow-ups:** the direct-connect cache
    ([#196](https://github.com/srps/Conduit/issues/196)), DNS cache stores
    across a transport reset ([#200](https://github.com/srps/Conduit/issues/200))

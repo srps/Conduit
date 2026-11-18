@@ -552,6 +552,28 @@ final class AppStateActivationParityTests: XCTestCase {
         }
     }
 
+    /// The app's Stop and Start over the same host as the daemon's (`DaemonRuntimeHostTests`): the tunnel goes away while the proxy is
+    /// stopped, and the Start, which applies its surfaces before the VPN monitor's new session reports, writes no entry file from the
+    /// verdict the Stop left behind.
+    func testATunnelRemovedWhileTheProxyIsStoppedWritesNoEntryFileOnTheNextStart() async throws {
+        let (harness, state) = try await ready(
+            platform: PlatformIntegrationConfig(manageDNSResolvers: true), configure: { $0.upstreams = [] }
+        )
+        await startProxy(state, harness)
+        await harness.settle("the primed connected report writes the entry file") { harness.machine.resolverFile(for: "corp.example") != nil }
+        await stopProxy(state, harness)
+        await harness.settle("the Stop removes it") { harness.machine.resolverFile(for: "corp.example") == nil }
+        let writes = harness.machine.privilege.commands(matching: .applyDNS).count
+        harness.vpn.primedState = nil
+
+        await startProxy(state, harness)
+        await observersRun(harness)
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .applyDNS).count, writes, "nothing is written before the new session reports")
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"))
+        harness.vpn.emit(.connected)
+        await harness.settle("the new session's report writes it") { harness.machine.resolverFile(for: "corp.example") != nil }
+    }
+
     /// DNS on, then off, through the app's saved commands, then a Settings save submitted as soon as the file shows the Stop's disable,
     /// typically before the Stop's settlement reaches the app. The save meets the Stop's write as a `baselineMismatch`; the ledger holds
     /// it while that own Stop is out, the Stop's chained write explains it, and the same draft goes again under the new baseline. So the

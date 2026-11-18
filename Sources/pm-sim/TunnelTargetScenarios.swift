@@ -4,17 +4,19 @@ import NIOConcurrencyHelpers
 import ProxyKernel
 
 /// A SOCKS5 client names its target as up to 255 bytes of anything, and the
-/// listener's tunnel writes that target into the CONNECT request line and
-/// `Host` header of a request that carries Conduit's `Proxy-Authorization`.
-/// A name with CR LF in it is refused before anything is dialled, with one
-/// `connection.tunnel_target_rejected`; a well-formed name still tunnels.
+/// listener writes that name into log lines and into the CONNECT request line
+/// and `Host` header of a request that carries Conduit's `Proxy-Authorization`.
+/// A name that is not a host (CR LF, a space and `=`, userinfo) is refused when
+/// the request is parsed, with one `connection.socks5_name_rejected` and no log
+/// line or CONNECT of its own; a well-formed name still tunnels (#309).
 enum TunnelTargetScenarios {
     @RuntimeActor
     static func crlfTargetRefused(verbose: Bool) async throws -> ScenarioResult {
         let name = "tunnel-target-crlf"
         let start = Date()
         let events = NIOLockedValueBox<[RuntimeEvent]>([])
-        let harness = SimHarness(verbose: verbose)
+        let logger = RecordingLogSink(minLevel: .debug)
+        let harness = SimHarness(verbose: verbose, logger: logger)
         ScenarioCleanup.register { await harness.stop() }
         try await harness.start(
             originBehavior: .silent,
@@ -25,33 +27,42 @@ enum TunnelTargetScenarios {
             throw NSError(domain: "pm-sim.tunnel-target", code: 1, userInfo: [NSLocalizedDescriptionKey: "SOCKS5 listener did not start"])
         }
 
-        let forged = try await reply(connecting: "a.corp.example\r\nX-Injected: 1", port: 443, socksPort: socksPort, harness: harness)
+        let forgedNames = ["a.corp.example\r\nX-Injected: 1", "a.corp.example upstream=X-Injected", "alice:s3cr3t@a.corp.example"]
+        var forgedReplies: [UInt8?] = []
+        for forged in forgedNames {
+            forgedReplies.append(try await reply(connecting: forged, port: 443, socksPort: socksPort, harness: harness))
+        }
         let headsAfterForged = upstream.requestHeadCount
-        let rejected = events.withLockedValue { $0 }.filter { $0.event == "connection.tunnel_target_rejected" }
+        let rejected = events.withLockedValue { $0 }.filter { $0.event == "connection.socks5_name_rejected" }
         let detail = rejected.first?.detail ?? ""
+        let forgedText = (logger.entries().map(\.message) + events.withLockedValue { $0 }.map { $0.detail ?? "" })
+            .filter { text in ["X-Injected", "s3cr3t", "\r", "\n"].contains { text.contains($0) } }
 
         let wellFormed = try await reply(connecting: "origin.corp.example", port: 443, socksPort: socksPort, harness: harness)
         let tunnelsAfterWellFormed = upstream.connectCount
 
         return ScenarioResult(
             name: name,
-            clientCount: 2, clientsOpened: 2, clientsWithFirstByte: 2, clientsClosedEarly: 1,
+            clientCount: forgedNames.count + 1, clientsOpened: forgedNames.count + 1,
+            clientsWithFirstByte: forgedNames.count + 1, clientsClosedEarly: forgedNames.count,
             totalBytes: 0,
             durationSeconds: Date().timeIntervalSince(start),
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
             assertions: [
-                .init("the CR LF target got a SOCKS failure reply", forged != nil && forged != 0x00),
-                .init("the CR LF target never reached the upstream", headsAfterForged == 0),
-                .init("one connection.tunnel_target_rejected", rejected.count == 1),
-                .init("the event shows only the bracketed target's length", detail == "target_bytes=\("[a.corp.example\r\nX-Injected: 1]:443".utf8.count) suppressed=0"),
-                .init("a well-formed target still tunnels", wellFormed == 0x00 && tunnelsAfterWellFormed == 1),
+                .init("every forged name got a general-failure reply", forgedReplies == forgedNames.map { _ in 0x01 }),
+                .init("no forged name reached the upstream", headsAfterForged == 0),
+                .init("one connection.socks5_name_rejected for the three", rejected.count == 1),
+                .init("the event shows only the first name's length", detail == "name_bytes=\(forgedNames[0].utf8.count) suppressed=0"),
+                .init("no log line or event holds a forged name's text", forgedText.isEmpty),
+                .init("a well-formed name still tunnels", wellFormed == 0x00 && tunnelsAfterWellFormed == 1),
             ],
             notes: [
-                "forgedReply=\(forged.map { String(format: "0x%02X", $0) } ?? "<none>")",
+                "forgedReplies=\(forgedReplies.map { $0.map { String(format: "0x%02X", $0) } ?? "<none>" })",
                 "upstreamHeadsAfterForged=\(headsAfterForged)",
                 "rejected=\(rejected.map { $0.detail ?? "" })",
+                "forgedText=\(forgedText.map(\.debugDescription))",
                 "wellFormedReply=\(wellFormed.map { String(format: "0x%02X", $0) } ?? "<none>") tunnels=\(tunnelsAfterWellFormed)",
             ]
         )

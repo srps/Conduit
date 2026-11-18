@@ -14,6 +14,11 @@ package final class VPNObservationSequencer: @unchecked Sendable {
 
     package init() {}
 
+    /// The last stamp handed out, 0 before the first.
+    package var issued: UInt64 {
+        lock.withLock { last }
+    }
+
     /// The next stamp. Call on the monitor's callback, before any hop.
     package func next() -> UInt64 {
         lock.withLock {
@@ -36,5 +41,11 @@ package struct VPNObservationOrder: Sendable {
         guard sequence > applied else { return false }
         applied = sequence
         return true
+    }
+
+    /// Refuses every report stamped `sequence` or earlier from now on, without admitting one: a consumer that forgot what the
+    /// observer told it calls this when the observer stops, so a report of the stopped session cannot reach it late.
+    package mutating func skip(through sequence: UInt64) {
+        applied = max(applied, sequence)
     }
 }

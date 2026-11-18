@@ -116,6 +116,8 @@ Existing controls: listeners bind loopback by default; gateway mode is explicit;
 
 Admission bounds: HTTP and SOCKS5 share `inboundConnectionMaxLimit`, including idle accepted peers. SOCKS greeting and CONNECT-request parsing share a ten-second total deadline, which partial progress cannot reset; negotiation buffering is capped at the protocol maximum. Lowering the admission cap rejects new arrivals without evicting existing sessions.
 
+Client-chosen names: a SOCKS5 domain name (ATYP 3) must be a host, an IP address or a domain name with an optional trailing dot (`HostSyntax.isHost`), before any log line, event, routing decision or dial uses it. Anything else, such as a name holding CR, LF, a space, `=`, `@`, `?` or `#`, gets reply 0x01 and one rate-limited `connection.socks5_name_rejected` event that carries the name's length, never its text (#309). An IP literal holding a NUL is refused, because `inet_pton` stops reading at the NUL. CONNECT targets get the same protection from #313's check.
+
 Current gaps: daemon-first LaunchAgent ownership and socket/control-plane lifecycle are not shipped yet, so the GUI still owns runtime lifetime in app mode.
 
 Planned work: the LaunchAgent daemon, control socket, atomic snapshot file, watchdog restart, and graceful upgrade.

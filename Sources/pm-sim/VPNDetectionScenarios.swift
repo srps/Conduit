@@ -22,6 +22,9 @@ import ProxyKernel
 ///   as nothing.
 /// - `vpn-blind-flap-recovery`: a read fails during a flap and the next reading finds the tunnel back. The entry file is
 ///   withheld while blind and put back after; the host reports a flap recovery, not a cold connect.
+/// - `vpn-tunnel-removed-while-stopped`: the tunnel goes away while the runtime is stopped. The next Start applies its
+///   surfaces before the monitor's new session reads the store, and writes no entry file from the verdict the stop left
+///   behind; the new session's first reading is a disconnect.
 enum VPNDetectionScenarios {
     @RuntimeActor
     static func blindGapDisconnect() async throws -> ScenarioResult {
@@ -146,6 +149,26 @@ enum VPNDetectionScenarios {
         }
     }
 
+    @RuntimeActor
+    static func tunnelRemovedWhileStopped() async throws -> ScenarioResult {
+        try await run(name: "vpn-tunnel-removed-while-stopped") { stage, check in
+            check("the first reading is connected", try await stage.shows(.connected))
+            check("connected installs the entry file, written once", stage.entryFile && stage.applies == 1)
+
+            await stage.stopRuntime()
+            check("the stop removes the entry file", !stage.entryFile)
+            stage.store.setInterface("utun6", ipv4: nil, ipv6: nil)
+
+            try await stage.startRuntime()
+            check("the start wrote no entry file before the new session read the store", stage.applies == 1 && !stage.entryFile)
+            // A session that never saw the tunnel cannot say how it went: a disconnect of unknown cause.
+            check("the new session's first reading is a disconnect", try await stage.shows(.disconnected(.unknown)))
+            check("no entry file was ever written for the removed tunnel", stage.applies == 1 && !stage.entryFile)
+        } verify: { events, check in
+            check("a healthy store reports nothing", storeEvents(events).isEmpty)
+        }
+    }
+
     private static func storeEvents(_ events: [RuntimeEvent]) -> [String] {
         let store: Set = ["vpn.store_failed", "vpn.store_recovered", "vpn.store_key_malformed", "vpn.store_unsubscribe_failed",
                           "vpn.store_released_uncancelled"]
@@ -223,6 +246,14 @@ enum VPNDetectionScenarios {
                 try await Task.sleep(for: .milliseconds(10))
             }
             return nil
+        }
+
+        func stopRuntime() async {
+            await host.stopRuntime()
+        }
+
+        func startRuntime() async throws {
+            try await host.startRuntime()
         }
 
         /// Runs what the monitor's queue holds, so a reading it was prompted for has been delivered.

@@ -414,27 +414,34 @@ final class RuntimeHostSplitDNSTests: XCTestCase {
         ])
     }
 
-    /// The VPN observer reports a verdict only when it changes, across its own stop and start too, so the verdict
-    /// the gate holds at a stop is the one the next start has to judge by. Forgetting it would leave the gate at
-    /// `.unknown`, which admits every reading, with no report coming to correct it.
-    @RuntimeActor func testAStopKeepsTheVPNVerdictForTheNextStartsFirstReading() async throws {
+    /// The VPN monitor's new session reports its first reading after the next Start brought detection up, and the pushed-resolver
+    /// observer reads the store first. Until that report the verdict is the cold start's `.unknown`, which withholds the set
+    /// (decision 0048): the connected verdict from before the stop would put a tunnel's resolvers in use that may be gone.
+    @RuntimeActor func testARestartWithholdsTheReadingUntilTheNewMonitorSessionReports() async throws {
         let running = try await start(primed: PushedResolverReading(resolvers: [corp()]))
-        await running.report(.disconnected(reason: .userInitiated), live: [])
-        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .idle)
+        await running.report(.connected, live: ["utun6"])
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .inUse)
         let reported = running.events("dns.split_detected")
 
         await running.host.stopRuntime()
         await running.host.deliveries.drain()
         XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS, .none)
+        XCTAssertEqual(
+            running.events("dns.split_table_changed").suffix(1), ["detected_domains=0 manual_domains=0 rules=0 reason=vpn_observer_stopped"],
+            "the stop withdrew the set with the verdict"
+        )
         try await running.host.startRuntime()
         await running.host.deliveries.drain()
 
         XCTAssertEqual(running.harness.pushedResolvers.startCount, 2, "the observer read the store again")
-        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .idle, "the reading is not in use off the VPN")
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .idle, "the reading waits for the new session's report")
         XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.rows.count, 1)
-        XCTAssertEqual(running.events("dns.split_detected"), reported, "nothing entered the set in use")
+        XCTAssertEqual(running.events("dns.split_detected").count, reported.count + 1, "only the stop's clear since")
         let asked = running.corp.totalQueries
         _ = try await SplitDNSProbe.resolve("host.corp.example", port: running.port)
-        XCTAssertEqual(running.corp.totalQueries, asked)
+        XCTAssertEqual(running.corp.totalQueries, asked, "no query went to the tunnel's server")
+
+        await running.report(.connected, live: ["utun6"])
+        XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .inUse, "the new session's report puts it in use")
     }
 }

@@ -24,6 +24,10 @@ import Foundation
 /// here — two DNS-server validators whose callers do ask "either family",
 /// because `networksetup -setdnsservers` takes both. Each caller still names
 /// the family it means; `isLiteral` is for the ones that mean both.
+///
+/// `inet_pton` reads a C string, so it stops at the first NUL and would
+/// certify `192.0.2.1\0` followed by anything. A string holding a NUL is
+/// therefore refused before it is asked.
 public enum IPAddressSyntax {
     /// Bracketed literals are **not** accepted for either family: brackets are
     /// URL authority syntax (RFC 3986 §3.2.2), not part of an address, and the
@@ -32,6 +36,7 @@ public enum IPAddressSyntax {
     /// make this quietly answer a different question for one caller than for
     /// the rest.
     public static func isIPv4(_ address: String) -> Bool {
+        guard !address.utf8.contains(0) else { return false }
         var buffer = in_addr()
         return inet_pton(AF_INET, address, &buffer) == 1
     }
@@ -42,7 +47,7 @@ public enum IPAddressSyntax {
     /// shell-adjacent consumer would misread, and no caller has a use for a
     /// link-local server.
     public static func isIPv6(_ address: String) -> Bool {
-        guard !address.contains("%") else { return false }
+        guard !address.contains("%"), !address.utf8.contains(0) else { return false }
         var buffer = in6_addr()
         return inet_pton(AF_INET6, address, &buffer) == 1
     }

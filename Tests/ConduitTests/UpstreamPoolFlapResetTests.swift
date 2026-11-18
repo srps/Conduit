@@ -19,7 +19,7 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
     @RuntimeActor func testAFlapRecoveryClosesTheTunnelPoolsBreakers() async throws {
         let orchestrator = try await startOrchestrator()
         await orchestrator.handleVPNStateChange(.connected)
-        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+        await openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
 
         await orchestrator.handleVPNStateChange(.reasserting)
         await orchestrator.handleVPNStateChange(.connected)
@@ -31,7 +31,7 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
     @RuntimeActor func testAReconnectAfterAnOutageClosesTheTunnelPoolsBreakers() async throws {
         let orchestrator = try await startOrchestrator()
         await orchestrator.handleVPNStateChange(.connected)
-        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+        await openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
 
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
         await orchestrator.handleVPNStateChange(.connected)
@@ -44,7 +44,7 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
         let orchestrator = try await startOrchestrator()
         await orchestrator.handleVPNStateChange(.connected)
         await orchestrator.handleVPNStateChange(.reasserting)
-        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+        await openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
 
         await orchestrator.handleSystemWake()
 
@@ -57,7 +57,7 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
     @RuntimeActor func testAFlapRecoveryWithOnlyTunnelsRunningClosesTheTunnelPoolsBreakers() async throws {
         let orchestrator = try await startTunnelsOnly()
         await orchestrator.handleVPNStateChange(.connected)
-        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+        await openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
 
         await orchestrator.handleVPNStateChange(.reasserting)
         await orchestrator.handleVPNStateChange(.connected)
@@ -70,7 +70,7 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
     @RuntimeActor func testAReconnectWithOnlyTunnelsRunningClosesTheTunnelPoolsBreakers() async throws {
         let orchestrator = try await startTunnelsOnly()
         await orchestrator.handleVPNStateChange(.connected)
-        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+        await openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
 
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
         await orchestrator.handleVPNStateChange(.connected)
@@ -84,7 +84,7 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
     @RuntimeActor func testLosingTheVPNWithOnlyTunnelsRunningLeavesTheTunnelPoolsBreakersOpen() async throws {
         let orchestrator = try await startTunnelsOnly()
         await orchestrator.handleVPNStateChange(.connected)
-        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+        await openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
 
         await orchestrator.handleVPNStateChange(.reasserting)
         await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost))
@@ -97,7 +97,7 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
     @RuntimeActor func testAFlapRecoveryAfterABlindReadingClosesTheTunnelPoolsBreakers() async throws {
         let orchestrator = try await startOrchestrator()
         await orchestrator.handleVPNStateChange(.connected)
-        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+        await openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
 
         await orchestrator.handleVPNStateChange(.reasserting)
         await orchestrator.handleVPNStateChange(.unknown)
@@ -112,7 +112,7 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
     @RuntimeActor func testAReconnectAfterABlindReadingClosesTheTunnelPoolsBreakers() async throws {
         let orchestrator = try await startOrchestrator()
         await orchestrator.handleVPNStateChange(.connected)
-        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+        await openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
 
         await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost))
         await orchestrator.handleVPNStateChange(.unknown)
@@ -125,7 +125,7 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
     @RuntimeActor func testAFlapRecoveryAfterABlindReadingWithOnlyTunnelsRunningClosesTheTunnelPoolsBreakers() async throws {
         let orchestrator = try await startTunnelsOnly()
         await orchestrator.handleVPNStateChange(.connected)
-        openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
+        await openEveryBreaker(of: orchestrator.tunnelConnectionPool, in: orchestrator)
 
         await orchestrator.handleVPNStateChange(.reasserting)
         await orchestrator.handleVPNStateChange(.unknown)
@@ -138,7 +138,8 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
     // MARK: - Harness
 
     /// A running proxy with two enabled upstreams, each a loopback listener
-    /// that answers a Negotiate 407, which the probe counts as a reachable proxy.
+    /// that answers a Negotiate 407, which the probe counts as a reachable proxy,
+    /// and a CONNECT to `trip.test` with a 502.
     @RuntimeActor private func startOrchestrator() async throws -> ProxyOrchestrator {
         let orchestrator = try await makeOrchestrator()
         try await orchestrator.startProxy()
@@ -178,10 +179,11 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
         return ProxyOrchestrator(config: config, logger: DiscardingLogSink())
     }
 
-    @RuntimeActor private func openEveryBreaker(of pool: ConnectionPool, in orchestrator: ProxyOrchestrator) {
+    /// Each upstream refuses a CONNECT to `trip.test` with a 502, threshold times over.
+    @RuntimeActor private func openEveryBreaker(of pool: ConnectionPool, in orchestrator: ProxyOrchestrator) async {
         let threshold = orchestrator.config.circuitFailureThreshold
         for proxy in orchestrator.config.enabledUpstreams {
-            for _ in 0..<threshold { pool.recordDedicatedTunnelFailure(for: proxy) }
+            await pool.failTunnels(through: proxy, count: threshold, target: "trip.test:443")
         }
         XCTAssertEqual(pool.upstreamStatuses().map(\.circuitState), [.open, .open], "precondition: every breaker is open")
     }
@@ -189,11 +191,18 @@ final class UpstreamPoolFlapResetTests: XCTestCase {
 
 private final class NegotiateChallenger: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
+    private var pending = ""
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let response = "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate\r\nContent-Length: 0\r\n\r\n"
-        var out = context.channel.allocator.buffer(capacity: response.utf8.count)
-        out.writeString(response)
-        context.writeAndFlush(NIOAny(out), promise: nil)
+        var buffer = unwrapInboundIn(data)
+        pending += buffer.readString(length: buffer.readableBytes) ?? ""
+        while let end = pending.range(of: "\r\n\r\n") {
+            let requestLine = pending[pending.startIndex..<end.lowerBound].prefix { $0 != "\r" }
+            pending.removeSubrange(pending.startIndex..<end.upperBound)
+            let response = requestLine.hasPrefix("CONNECT trip.test:")
+                ? "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
+                : "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate\r\nContent-Length: 0\r\n\r\n"
+            context.writeAndFlush(NIOAny(context.channel.allocator.buffer(string: response)), promise: nil)
+        }
     }
 }
