@@ -132,3 +132,19 @@ jobs:
         "$conduit_bin_dir/pm-sim" bounded-writers
         python3 scripts/test-dns-shutdown.py "$conduit_bin_dir/pm-dns"
         python3 scripts/test-status-stream.py "$conduit_bin_dir/pm-proxy"
+
+  vpn-detection-model:
+    # The TLA+ model of the VPN detection chain (formal/vpn-detection, skill
+    # vpn-detection-model). It needs Java and Python, not Xcode, so it runs
+    # beside the build on a Linux runner.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      with:
+        distribution: temurin
+        java-version: "21"
+    - name: Model-check VPN detection with TLC, and show each historical bug caught
+      run: python3 formal/vpn-detection/check.py --mutants
