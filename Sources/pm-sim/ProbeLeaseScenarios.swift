@@ -6,8 +6,9 @@ import NIOHTTP1
 import NIOPosix
 import ProxyKernel
 
-/// A half-open probe that ends without a verdict hands its slot back, and a CONNECT whose dial is refused is the
-/// probe's failure (#279), through the real pool, CONNECT coordinator and exchange handlers over loopback. It dials
+/// A half-open probe that ends without a verdict hands its slot back, a CONNECT whose dial is refused is the
+/// probe's failure, a streamed probe is answered at its response head, and a failure from before a flap reset is
+/// not counted (#279), through the real pool, CONNECT coordinator and exchange handlers over loopback. It dials
 /// only the listeners it starts and one port it closed itself.
 enum ProbeLeaseScenarios {
     private static let name = "half-open-probe-lease"
@@ -29,6 +30,9 @@ enum ProbeLeaseScenarios {
                         let response: String
                         if requestLine.hasPrefix("CONNECT ") {
                             response = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
+                        } else if requestLine.contains("stream.test") {
+                            plainRequests.withLockedValue { $0 += 1 }
+                            response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nfirst\r\n"
                         } else {
                             plainRequests.withLockedValue { $0 += 1 }
                             response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
@@ -58,6 +62,49 @@ enum ProbeLeaseScenarios {
                     pending.removeSubrange(pending.startIndex..<end.upperBound)
                     onRequest(context.channel, head.components(separatedBy: "\r\n").first ?? "")
                 }
+            }
+        }
+    }
+
+    /// The client side of a streamed exchange: a loopback connection whose far end reports when the response
+    /// head the pool forwarded has arrived.
+    private struct StreamClient {
+        let channel: Channel
+        let headArrived: EventLoopFuture<Void>
+
+        @RuntimeActor static func open(group: EventLoopGroup) async throws -> StreamClient {
+            let arrived = group.next().makePromise(of: Void.self)
+            let reader = try await ServerBootstrap(group: group)
+                .childChannelInitializer { $0.pipeline.addHandler(HeadWatcher(arrived)) }
+                .bind(host: "127.0.0.1", port: 0).get()
+            ScenarioCleanup.register { reader.close(promise: nil) }
+            guard let port = reader.localAddress?.port else {
+                arrived.fail(ScenarioExecutionError(message: "the stream reader has no port"))
+                throw ScenarioExecutionError(message: "the stream reader has no port")
+            }
+            let channel = try await ClientBootstrap(group: group)
+                .channelInitializer { $0.pipeline.addHandler(HTTPResponseEncoder()) }
+                .connect(host: "127.0.0.1", port: port).get()
+            ScenarioCleanup.register { channel.close(promise: nil) }
+            return StreamClient(channel: channel, headArrived: arrived.futureResult)
+        }
+
+        private final class HeadWatcher: ChannelInboundHandler, @unchecked Sendable {
+            typealias InboundIn = ByteBuffer
+            private let arrived: EventLoopPromise<Void>
+            private var received = ""
+
+            init(_ arrived: EventLoopPromise<Void>) { self.arrived = arrived }
+
+            func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+                var buffer = unwrapInboundIn(data)
+                received += buffer.readString(length: buffer.readableBytes) ?? ""
+                if received.contains("\r\n\r\n") { arrived.succeed() }
+            }
+
+            func channelInactive(context: ChannelHandlerContext) {
+                arrived.fail(ScenarioExecutionError(message: "the stream closed before its head arrived"))
+                context.fireChannelInactive()
             }
         }
     }
@@ -113,9 +160,12 @@ enum ProbeLeaseScenarios {
 
         /// The tunnel's error, or `nil` once it is established (and closed again).
         func connect(_ target: String, through chain: [UpstreamProxy] = []) async -> Error? {
+            await outcome(of: coordinator.connectUpstreamTunnel(target: target, proxyChain: chain))
+        }
+
+        func outcome(of tunnel: EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)>) async -> Error? {
             do {
-                let established = try await coordinator.connectUpstreamTunnel(target: target, proxyChain: chain).get()
-                try await established.channel.close().get()
+                try await tunnel.get().channel.close().get()
                 return nil
             } catch {
                 return error
@@ -177,6 +227,61 @@ enum ProbeLeaseScenarios {
         let reopenedAfterProbe = dial.state("refusing") == .open
         let againTunnel = await dial.connect("again.test:443")
 
+        let streamer = AnsweringUpstream(), spare = AnsweringUpstream()
+        for upstream in [streamer, spare] {
+            ScenarioCleanup.register {
+                do {
+                    try await upstream.stop()
+                } catch {
+                    logger.log(.warning, "\(name): upstream listener close: \(error)", category: .proxy)
+                }
+            }
+            try await upstream.start(group: group)
+        }
+        let streaming = Fixture(upstreams: [
+            UpstreamProxy(name: "streamer", host: "127.0.0.1", port: streamer.port, priority: 0),
+            UpstreamProxy(name: "spare", host: "127.0.0.1", port: spare.port, priority: 1),
+        ], group: group, logger: logger)
+        ScenarioCleanup.register { streaming.pool.closeAll() }
+        try await streaming.tripWithCONNECT("streamer")
+        try await streaming.tripWithCONNECT("spare")
+        let client = try await StreamClient.open(group: group)
+        let streamHead = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://stream.test/events", headers: ["Host": "stream.test"])
+        let stream = streaming.pool.streamingExchange(head: streamHead, body: nil, clientChannel: client.channel)
+        try await client.headArrived.get()
+        let streamerAtHead = streaming.state("streamer")
+        var whileStreaming: [Result<Int, Error>] = []
+        for index in 0..<3 { whileStreaming.append(await streaming.get("http://during.test/\(index)")) }
+        let servedWhileStreaming = streamer.served
+        streaming.pool.closeAll()
+        let streamCut: Error?
+        do {
+            _ = try await stream.get()
+            streamCut = nil
+        } catch {
+            streamCut = error
+        }
+        let streamerOpened = streaming.details("upstream.circuit_opened", upstream: "streamer")
+
+        let parkable = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        ScenarioCleanup.register {
+            do {
+                try await parkable.shutdownGracefully()
+            } catch {
+                logger.log(.warning, "\(name): event loop group shutdown: \(error)", category: .proxy)
+            }
+        }
+        let flap = Fixture(upstreams: [UpstreamProxy(name: "refusing", host: "127.0.0.1", port: refusedPort, priority: 0)], group: parkable, logger: logger)
+        ScenarioCleanup.register { flap.pool.closeAll() }
+        let resume = park(parkable)
+        let staleDial = flap.coordinator.connectUpstreamTunnel(target: "before-flap.test:443")
+        flap.pool.resetCircuitsAfterFlap()
+        resume.signal()
+        let staleError = await flap.outcome(of: staleDial)
+        let stateAfterStale = flap.state("refusing")
+        let staleDropped = flap.details("upstream.stale_failure_dropped", upstream: "refusing")
+        let freshError = await flap.connect("after-flap.test:443")
+
         let localReleased = local.details("upstream.probe_released", upstream: "first")
         let refusingOpened = dial.details("upstream.circuit_opened", upstream: "refusing")
         let refusingHalfOpened = dial.details("upstream.circuit_half_opened", upstream: "refusing")
@@ -184,7 +289,7 @@ enum ProbeLeaseScenarios {
         if case .failure(let error) = refusedProbe { localFailed = ConnectionPoolError.isAuthHandshakeLimitExceeded(error) } else { localFailed = false }
 
         return ScenarioResult(
-            name: name, clientCount: 6, clientsOpened: 6, clientsWithFirstByte: 3,
+            name: name, clientCount: 12, clientsOpened: 12, clientsWithFirstByte: 7,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(started),
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
             assertions: [
@@ -202,13 +307,40 @@ enum ProbeLeaseScenarios {
                       probeTunnel != nil && reopenedAfterProbe && refusingOpened.contains { $0.contains(" reason=probe_failed ") }),
                 .init("the next CONNECT probed the refusing upstream again",
                       againTunnel != nil && refusingHalfOpened.count == 2),
+                .init("a streamed probe's response head closed the breaker while the stream stayed open",
+                      streamerAtHead == .closed && streaming.details("upstream.circuit_half_opened", upstream: "streamer").count == 1),
+                .init("the streaming upstream served the next requests, and the other upstream was never asked",
+                      whileStreaming.allSatisfy { if case .success(200) = $0 { true } else { false } } && servedWhileStreaming == 4
+                          && spare.served == 0 && streaming.details("upstream.circuit_half_opened", upstream: "spare").isEmpty),
+                .init("a stream cut after its head failed a closed upstream, not the probe",
+                      streamCut.map(ConnectionPoolError.isStreamingResponseInterrupted) == true && streamerOpened.count == 2
+                          && streamerOpened.last?.contains(" reason=threshold ") == true),
+                .init("a CONNECT dial that started before a flap reset and failed after it did not reopen the breaker",
+                      staleError.map { !ConnectionPoolError.isLocalNonUpstreamFailure($0) } == true && stateAfterStale == .closed
+                          && staleDropped.count == 1 && staleDropped[0].hasSuffix(" origin=before-flap.test:443 verdict=failure")),
+                .init("a CONNECT dial that started after the reset counted",
+                      freshError != nil && flap.state("refusing") == .open),
             ],
             notes: [
                 "first: \(first.served) plain requests served; second: \(second.served)",
                 "released: \(localReleased)",
                 "refusing opened: \(refusingOpened)",
                 "refusing half-opened: \(refusingHalfOpened.count)",
+                "streamer: \(streamer.served) plain requests served; spare: \(spare.served); opened: \(streamerOpened)",
+                "stale failures dropped: \(staleDropped)",
             ]
         )
+    }
+
+    /// Holds `group`'s only event loop until the returned semaphore is signalled, so a dial started meanwhile
+    /// lands only after the scenario's next steps.
+    private static func park(_ group: MultiThreadedEventLoopGroup) -> DispatchSemaphore {
+        let parked = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+        group.next().execute {
+            parked.signal()
+            resume.wait()
+        }
+        parked.wait()
+        return resume
     }
 }
