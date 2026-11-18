@@ -66,8 +66,9 @@ package final class LiveSplitDNSDetection: @unchecked Sendable {
 
     /// Drops the last reading and the held set, and leaves the empty set for the owner to apply. A store event the
     /// owner has not taken stays for that take, so a failure that arrived just before the stop is still reported. A
-    /// reading that arrives after this is dropped: the next start reads the store again. The VPN verdict stays,
-    /// because the VPN observer reports only a change and so never repeats it.
+    /// reading that arrives after this is dropped: the next start reads the store again. The VPN verdict stays: a
+    /// running VPN observer reports only a change and so never repeats it. It goes when that observer stops
+    /// (`vpnObserverStopped`).
     package func stop() {
         lock.withLock {
             state.running = false
@@ -108,6 +109,17 @@ package final class LiveSplitDNSDetection: @unchecked Sendable {
             case .reasserting: .flapHeld
             }
             update(reading: state.policy.lastReading, reason: reason)
+        }
+    }
+
+    /// The VPN observer stopped, so its verdict and live tunnels go back to the cold start's: `.unknown`, which
+    /// withholds the set until its next session reports (decision 0048).
+    package func vpnObserverStopped() {
+        lock.withLock {
+            state.gate = SplitDNSVPNGate()
+            state.liveInterfaces = []
+            guard state.running else { return }
+            update(reading: state.policy.lastReading, reason: .vpnObserverStopped)
         }
     }
 

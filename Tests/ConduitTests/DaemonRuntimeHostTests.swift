@@ -4527,7 +4527,9 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertNil(host.splitDNSRepair.pending, "the start settled the repair: its sweep left no residue")
         let repaired = host.orchestrator.eventLog.events.filter { $0.event == "platform.split_dns_repaired" }.compactMap(\.detail)
         XCTAssertEqual(repaired.count, 1, "\(repaired)")
-        XCTAssertEqual(repaired.first?.hasPrefix("operation=apply by=start "), true, "\(repaired)")
+        // The Stop took the VPN verdict with the monitor, so the start removes; the new session's report writes the file after it.
+        XCTAssertEqual(repaired.first?.hasPrefix("operation=remove by=start "), true, "\(repaired)")
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "the primed report wrote the entry file")
         await host.stopRuntime()
     }
 

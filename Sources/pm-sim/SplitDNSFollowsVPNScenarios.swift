@@ -111,7 +111,7 @@ enum SplitDNSFollowsVPNScenarios {
                 "the table was swapped on the first connect (a push before it is withheld while the VPN is unknown, 0048), each disconnect, the reconnect, the held key and the stop, and not in the flap",
                 reasons == [
                     "reason=vpn_connected", "reason=vpn_disconnected", "reason=vpn_connected", "reason=vpn_disconnected", "reason=pushed",
-                    "reason=detection_off",
+                    "reason=vpn_observer_stopped",
                 ]
             )
             let outcomes = events.filter { $0.event == "dns.split_detected" }.compactMap(\.detail).map {
@@ -151,7 +151,7 @@ enum SplitDNSFollowsVPNScenarios {
                 "detected_domains=1 manual_domains=0 rules=1 reason=vpn_connected",
                 "detected_domains=0 manual_domains=0 rules=0 reason=detection_failed",
                 "detected_domains=1 manual_domains=0 rules=1 reason=pushed",
-                "detected_domains=0 manual_domains=0 rules=0 reason=detection_off",
+                "detected_domains=0 manual_domains=0 rules=0 reason=vpn_observer_stopped",
             ])
             let outcomes = events.filter { $0.event == "dns.split_detected" }.compactMap(\.detail).map {
                 $0.split(separator: " ").last.map(String.init) ?? ""
@@ -201,7 +201,7 @@ enum SplitDNSFollowsVPNScenarios {
             let reasons = events.filter { $0.event == "dns.split_table_changed" }.compactMap(\.detail).map {
                 $0.split(separator: " ").last.map(String.init) ?? ""
             }
-            check("the table was swapped on the recovered reading and the stop", reasons == ["reason=pushed", "reason=detection_off"])
+            check("the table was swapped on the recovered reading and the stop", reasons == ["reason=pushed", "reason=vpn_observer_stopped"])
         }
     }
 

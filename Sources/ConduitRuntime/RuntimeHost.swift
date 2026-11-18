@@ -1344,6 +1344,18 @@ package final class RuntimeHost {
         await reconcileSystemDNSIfRunning()
     }
 
+    /// The one stop of the VPN monitor, and the verdict goes with it. The gate and detection go back to the cold start's `.unknown`, which
+    /// withholds the entry files and the detected set (decision 0048), until the monitor's next session reports its first reading: the
+    /// tunnel may go away while the monitor is stopped, and the next Start applies its surfaces before that report lands. Fenced after
+    /// the stop returns, when every report of the stopped session has its stamp, so one still hopping to this owner is not admitted.
+    func stopVPNMonitor() {
+        vpnStatusMonitor.stop()
+        splitDNSGate = SplitDNSVPNGate()
+        splitDNSGateOrder.skip(through: vpnSequencer.issued)
+        splitDNSDetection.vpnObserverStopped()
+        applyPendingSplitDNSDetection()
+    }
+
     /// Puts the entry files where the gate wants them now (`SplitDNSVPNGate.entryFileOperation`). Decided, given its place in the repair's
     /// order and queued on `platformWork` in this turn, so work decided after it lands after it; recorded once it returns. The VPN
     /// transitions and the corrections after a write queued with an older gate state all come through here.

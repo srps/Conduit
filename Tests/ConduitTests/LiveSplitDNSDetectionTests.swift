@@ -38,6 +38,36 @@ final class LiveSplitDNSDetectionTests: XCTestCase {
         XCTAssertEqual(set?.reason, .pushed)
     }
 
+    func testTheVPNObserverStoppingWithdrawsTheSetUntilItsNextReport() {
+        let detection = connected()
+        detection.receive(PushedResolverReading(resolvers: [corp]))
+        _ = detection.take()
+
+        detection.vpnObserverStopped()
+        let withdrawn = detection.take()?.set
+        XCTAssertEqual(withdrawn?.rules, [])
+        XCTAssertEqual(withdrawn?.display, DetectedSplitDNSDisplay(state: .idle, rows: [corpRow]))
+        XCTAssertEqual(withdrawn?.reason, .vpnObserverStopped)
+
+        detection.stop()
+        _ = detection.take()
+        detection.start()
+        detection.receive(PushedResolverReading(resolvers: [corp]))
+        XCTAssertEqual(detection.take()?.set?.rules, [], "a reading before the next report is not in use")
+        detection.report(gate: gate(.connected), liveInterfaces: ["utun6"])
+        XCTAssertEqual(detection.take()?.set?.rules.map(\.domain), ["corp.example"])
+    }
+
+    /// Detection stopped by DNS while the VPN observer runs keeps the verdict: that observer will not report it again.
+    func testADetectionStopKeepsTheVerdictOfARunningVPNObserver() {
+        let detection = connected()
+        detection.stop()
+        _ = detection.take()
+        detection.start()
+        detection.receive(PushedResolverReading(resolvers: [corp]))
+        XCTAssertEqual(detection.take()?.set?.rules.map(\.domain), ["corp.example"])
+    }
+
     func testABurstLeavesOnlyItsNewestSetPending() {
         let detection = connected()
 
