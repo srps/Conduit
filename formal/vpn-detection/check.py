@@ -4,7 +4,7 @@
     python3 formal/vpn-detection/check.py            # the checks CI runs
     python3 formal/vpn-detection/check.py --mutants  # also show each property catching its bug
     python3 formal/vpn-detection/check.py --only safety-core
-    python3 formal/vpn-detection/check.py --full     # the helper-outage checks at their larger bounds
+    python3 formal/vpn-detection/check.py --full --mutants  # larger bounds, the `--full` checks and mutants
 
 Fetches the pinned tla2tools.jar from the TLA+ GitHub releases into
 formal/.tools/, verifies its SHA-256, and needs Java 11 or later. TLC output
@@ -51,7 +51,7 @@ LIVENESS_BOUNDS = BASE
 
 class Check:
     def __init__(self, name, bounds, invariants=(), properties=(), expect=None, note="", full=None):
-        self.name, self.bounds = name, bounds
+        self.name, self.bounds = name, bounds  # None: a `--full` check only
         self.full = full or bounds  # the bounds `--full` runs
         self.invariants, self.properties = list(invariants), list(properties)
         self.expect = expect  # None: must pass; otherwise the property that must break
@@ -77,23 +77,31 @@ CHECKS = [
     Check("safety-orchestrator", ORCHESTRATOR, invariants=SAFETY),
     Check("liveness", LIVENESS_BOUNDS, invariants=["TypeOK"], properties=LIVENESS),
     Check("liveness-lost-notification", LOST_NOTIFICATION, invariants=["TypeOK"], properties=LIVENESS),
-    # One Start and no store outage: the property here is that the repair retry puts the files
-    # right, which neither changes. 8 s; with the store outage, 9 minutes (`--full`).
+    # By default one Start and no store outage. `--full` adds the store outage, which is the case
+    # where the repair must remove the files while the gate stays .unknown.
     Check("liveness-helper-outage", dict(HELPER, MaxStarts=1, MaxStoreBreaks=0), invariants=["TypeOK"],
           properties=LIVENESS, full=dict(HELPER, MaxStarts=1)),
+    # Two Starts with the helper outage: a correction that a report kept across Stop and Start
+    # queues, failing while the helper is down. `--full` only.
+    Check("liveness-restart-helper-outage", None, invariants=["TypeOK"], properties=LIVENESS,
+          full=dict(HELPER, MaxStoreBreaks=0)),
     Check("known-gap-u4", BASE, invariants=["ApplyOnlyFromCurrentSession"],
           expect="ApplyOnlyFromCurrentSession",
           note="A Start writes entry files from the verdict the last session left (design U4)."),
 ]
 
+CHECK_NAMED = {check.name: check for check in CHECKS}
+
 
 class Mutant:
     """A historical bug, mirrored in the spec. `swift` names the scratch change in the product code."""
 
-    def __init__(self, name, swift, edits, expect, bounds=None):
+    def __init__(self, name, swift, edits, expect, bounds=None, check=None):
         self.name, self.swift, self.edits, self.expect = name, swift, edits, expect
         live = expect in LIVENESS
-        self.bounds = bounds or (LIVENESS_BOUNDS if live else SAFETY_BOUNDS)
+        # `check`: the check that catches it, at the bounds `--full` runs it; a `--full` mutant only.
+        self.check = check
+        self.bounds = bounds or (CHECK_NAMED[check].full if check else LIVENESS_BOUNDS if live else SAFETY_BOUNDS)
 
 
 MUTANTS = [
@@ -169,6 +177,18 @@ MUTANTS = [
            "ProxyOrchestrator.handleVPNStateChange: the `vpnObservations.admit` check removed (#155)",
            [("OrchAdmits(r) == r.seq > orch.seq", "OrchAdmits(r) == TRUE")],
            "OrchestratorFollowsLastPublished", bounds=ORCHESTRATOR),
+    Mutant("retry-skips-unknown",
+           "SplitDNSEntryFileRepair.desiredOperation returns nil for an `.unknown` gate, so planRetry runs "
+           "nothing: a removal that failed while the store was unreadable is never retried",
+           [("    /\\ repair.pending /\\ helperUp /\\ ~repair.inFlight\n",
+             "    /\\ repair.pending /\\ helperUp /\\ ~repair.inFlight /\\ host.gate # \"unknown\"\n")],
+           "FilesFollowVPN", check="liveness-helper-outage"),
+    Mutant("correction-failure-dropped",
+           "RuntimeHost.applyProxySurfaces: the gate-moved correction runs its operation but does not "
+           "record a failure, so nothing is pending and no retry comes",
+           [("    LET keep    == RecordKeeps(o)\n",
+             "    LET keep    == RecordKeeps(o) /\\ (o.ok \\/ o.owner # \"correction\")\n")],
+           "FilesFollowVPN", check="liveness-restart-helper-outage"),
 ]
 
 
@@ -241,7 +261,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mutants", action="store_true", help="also run every historical-bug mutant")
     parser.add_argument("--only", help="run only the named check or mutant")
-    parser.add_argument("--full", action="store_true", help="run the checks at their larger bounds")
+    parser.add_argument("--full", action="store_true",
+                        help="run the checks at their larger bounds, the `--full` checks, and with --mutants their mutants")
     args = parser.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
 
@@ -252,7 +273,9 @@ def main():
     for check in CHECKS:
         if args.only and args.only != check.name:
             continue
-        if args.full:
+        if args.full or check.bounds is None:
+            if not (args.full or args.only):
+                continue
             check.bounds = check.full
         output, code, elapsed, work = run_tlc(jar, check.name, spec, check.config())
         got = outcome(output, code)
@@ -275,6 +298,8 @@ def main():
 
     for mutant in MUTANTS:
         if not (args.mutants or args.only == mutant.name) or (args.only and args.only != mutant.name):
+            continue
+        if mutant.check and not (args.full or args.only):
             continue
         text = spec
         for old, new in mutant.edits:
