@@ -5,6 +5,7 @@
     python3 formal/vpn-detection/check.py --mutants  # also show each property catching its bug
     python3 formal/vpn-detection/check.py --only safety-core
     python3 formal/vpn-detection/check.py --full --mutants  # larger bounds, the `--full` checks and mutants
+    python3 formal/vpn-detection/check.py --changed origin/main  # the covered files a branch changes
 
 Fetches the pinned tla2tools.jar from the TLA+ GitHub releases into
 formal/.tools/, verifies its SHA-256, and needs Java 11 or later. TLC output
@@ -29,6 +30,26 @@ OUT = HERE / ".out"
 TLA_VERSION = "1.7.4"
 TLA_URL = f"https://github.com/tlaplus/tlaplus/releases/download/v{TLA_VERSION}/tla2tools.jar"
 TLA_SHA256 = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
+
+# The coverage record's files (.claude/skills/vpn-detection-model/SKILL.md), and the model's own.
+# A change to any of them runs `--full --mutants` in CI (`--changed`).
+COVERED = [
+    "Sources/PlatformMac/VPNStatusMonitor.swift",
+    "Sources/PlatformMac/ObserverStopBarrier.swift",
+    "Sources/PlatformMac/StoreObserverClock.swift",
+    "Sources/ProxyKernel/Network/StoreReadSchedule.swift",
+    "Sources/ProxyKernel/Network/VPNFlapTimer.swift",
+    "Sources/PlatformMac/SplitDNSVPNGate.swift",
+    "Sources/PlatformMac/SplitDNSEntryFileRepair.swift",
+    "Sources/ProxyKernel/Network/VPNObservationSequencer.swift",
+    "Sources/ProxyKernel/Network/VPNReactionHistory.swift",
+    "Sources/ConduitRuntime/RuntimeHost.swift",
+    "Sources/ConduitRuntime/RuntimeHostLifecycle.swift",
+    "Sources/PlatformMac/PlatformWork.swift",
+    "Sources/PlatformMac/ObserverDeliveries.swift",
+    "Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift",
+]
+MODEL = ["formal/vpn-detection/", ".claude/skills/vpn-detection-model/"]
 
 SAFETY = ["TypeOK", "NoEntryFilesOffVPN", "GateFollowsLastPublished", "NothingPublishedAfterStop",
           "WakeRecoversOnlyWhenSeeing", "SweepsNotHeldWhenDefinite", "OrchestratorAfterEntryFiles",
@@ -257,14 +278,32 @@ def outcome(output, returncode):
     return None
 
 
+def changed(ref):
+    """The covered and model files that differ between `ref` and the working tree."""
+    root = HERE.parent.parent
+    for path in COVERED:
+        if not (root / path).is_file():
+            sys.exit(f"{path} is in COVERED but does not exist; update the coverage record and COVERED")
+    result = subprocess.run(["git", "diff", "--name-only", ref, "--", *COVERED, *MODEL],
+                            cwd=root, capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.exit(f"git diff {ref} failed: {result.stderr.strip()}")
+    return result.stdout.split()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mutants", action="store_true", help="also run every historical-bug mutant")
     parser.add_argument("--only", help="run only the named check or mutant")
     parser.add_argument("--full", action="store_true",
                         help="run the checks at their larger bounds, the `--full` checks, and with --mutants their mutants")
+    parser.add_argument("--changed", metavar="REF",
+                        help="print the covered and model files changed since REF, and run nothing")
     args = parser.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
+    if args.changed:
+        print("\n".join(changed(args.changed)))
+        return
 
     jar = tla_jar()
     spec = SPEC.read_text()
