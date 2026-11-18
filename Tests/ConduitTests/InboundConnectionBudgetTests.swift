@@ -153,7 +153,7 @@ final class InboundConnectionBudgetTests: XCTestCase {
             directModeProvider: { (true, .noUpstreamsConfigured) }, pacRoutingEngine: nil,
             configProvider: { config }, gatewayMode: false, handshakeTimeout: .seconds(1),
             eventSink: events.append, onConnectionOpened: { _ in XCTFail("Negotiation rejection started routing") }, onConnectionClosed: { _ in },
-            onConnectionActivity: { _ in }
+            onConnectionActivity: { _ in }, nameRejectionGate: RuntimeEventRepeatGate()
         ), loop: loop)
     }
 

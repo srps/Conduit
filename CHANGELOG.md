@@ -78,6 +78,19 @@ packaging; 0.6.1 is the latest published release.
   the refusals held back. It gives the target's length but none of its text,
   which may hold credentials or line breaks. The HTTP listener's parser already
   closed the connection on these bytes in a CONNECT line.
+- A local SOCKS5 client can no longer add lines to `proxy.log` or fields to
+  an event, or put credentials in either, through the name it asks for (#309).
+  The SOCKS5 listener wrote that name, up to 255 bytes of anything, into log
+  lines and the `routing.socks5_force_proxy` event before any check, and a
+  name such as `alice:s3cr3t@a.corp.example` also reached the upstream's
+  CONNECT. The listener now refuses a name that is not an IP address or a
+  domain name (letters, digits, `-` and `_` in labels of at most 63
+  characters, with an optional trailing dot) when it parses the request,
+  before any routing decision or log line. The client gets reply 0x01
+  (general failure). It is reported as `connection.socks5_name_rejected`, at
+  most once a minute with a count of the refusals held back, and it gives the
+  name's length but none of its text. An address with a NUL and more text
+  after it is no longer taken for an address anywhere Conduit checks one.
 - Port tunnels and the transparent proxy use an upstream again as soon as the
   VPN comes back. A flap recovery, a reconnect after an outage and a wake
   recovery closed the circuit breakers of the client listener's upstream pool
