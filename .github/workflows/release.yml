@@ -30,7 +30,9 @@ jobs:
     # deploy from, so pull requests and manual runs never see them and
     # package ad-hoc.
     environment: ${{ github.ref_type == 'tag' && 'release' || '' }}
-    timeout-minutes: 30
+    # 0.6.2 took 24 min here; 0.7.0's PR run took 13.8 min of tests and 13 min
+    # of the optimized PAC build before packaging, so 30 min ran out (#325).
+    timeout-minutes: 50
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       # NIO misuse crashes the run instead of warning (see swift.yml).
@@ -48,7 +50,7 @@ jobs:
       - name: Run the standard full test suite
         run: /usr/bin/script -q /dev/null /usr/bin/xcrun swift test </dev/null
       - name: Verify optimized PAC behavior
-        timeout-minutes: 15
+        timeout-minutes: 25
         shell: bash
         run: |
           set -euo pipefail
