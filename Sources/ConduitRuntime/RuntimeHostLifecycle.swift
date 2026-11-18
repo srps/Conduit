@@ -744,7 +744,7 @@ extension RuntimeHost {
         var remaining = modules.filter { goesOn($0) }
         guard !remaining.isEmpty else { return [] }
         if remaining.union(modulesDown()) == Self.allModules {
-            vpnStatusMonitor.stop()
+            stopVPNMonitor()
             networkLocationObserver.stop()
             networkPathObserver.stop()
             networkPathObserving = false

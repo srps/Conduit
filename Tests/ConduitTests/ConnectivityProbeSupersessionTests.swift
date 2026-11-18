@@ -794,4 +794,16 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         XCTAssertTrue(orchestrator.admit(first), "a second consumer is not consumed by the first")
         XCTAssertTrue(orchestrator.admit(second))
     }
+
+    @RuntimeActor func testASkipRefusesEveryStampIssuedBeforeItAndAdmitsTheNext() async {
+        let sequencer = VPNObservationSequencer()
+        XCTAssertEqual(sequencer.issued, 0)
+        let late = sequencer.next()
+        var gate = VPNObservationOrder()
+        gate.skip(through: sequencer.issued)
+        XCTAssertFalse(gate.admit(late), "a stamp issued before the skip is refused")
+        gate.skip(through: 0)
+        XCTAssertEqual(gate.applied, late, "a skip never moves the position back")
+        XCTAssertTrue(gate.admit(sequencer.next()))
+    }
 }

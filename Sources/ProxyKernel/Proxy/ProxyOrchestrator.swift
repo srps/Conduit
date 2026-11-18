@@ -243,6 +243,8 @@ package enum DetectedSplitDNSChangeReason: String, Hashable, Sendable {
     case vpnDisconnected = "vpn_disconnected"
     /// A VPN report of `.reasserting`.
     case flapHeld = "flap_held"
+    /// The VPN observer stopped, which takes its verdict back to `.unknown`, so the host pushed no rules.
+    case vpnObserverStopped = "vpn_observer_stopped"
     /// Detection stopped, so the host pushed no rules.
     case detectionOff = "detection_off"
     /// A reading that could not read the store, so the host pushed no rules.

@@ -55,6 +55,7 @@ package final class FakeVPNStatusObserver: VPNStatusObserving, @unchecked Sendab
     private let interfaceBox = NIOLockedValueBox<String?>(nil)
     private let liveInterfacesBox = NIOLockedValueBox<[String]>([])
     private let primedBox = NIOLockedValueBox<VPNObservedState?>(nil)
+    private let deliveredAsStoppedBox = NIOLockedValueBox<VPNObservedState?>(nil)
 
     package init() {}
 
@@ -95,7 +96,21 @@ package final class FakeVPNStatusObserver: VPNStatusObserving, @unchecked Sendab
         onChangeBox.withLockedValue { $0 }?(primed)
     }
 
+    /// A state delivered from inside `stop()`, before it returns, then cleared. The production monitor lets a reading it
+    /// is already publishing finish before its stop returns, so the owner's hop for that reading can land after the stop.
+    package var deliveredAsStopped: VPNObservedState? {
+        get { deliveredAsStoppedBox.withLockedValue { $0 } }
+        set { deliveredAsStoppedBox.withLockedValue { $0 = newValue } }
+    }
+
     package func stop() {
+        let wasStarted = startedBox.withLockedValue { $0 }
+        if wasStarted, let state = deliveredAsStoppedBox.withLockedValue({ state -> VPNObservedState? in
+            defer { state = nil }
+            return state
+        }) {
+            onChangeBox.withLockedValue { $0 }?(state)
+        }
         startedBox.withLockedValue { $0 = false }
     }
 
