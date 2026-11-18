@@ -82,6 +82,7 @@ enum PMSim {
               upstream-flap           upstream up/down/up; assert breaker opens, half-opens, closes
               upstream-slow-origin    one slow origin behind a healthy upstream: 502s, no breaker, no failover (#197)
               upstream-silent         upstream silent across two origins: silences count, breaker opens, secondary serves (#197)
+              half-open-probe-lease   a probe that fails locally hands its slot back; a refused CONNECT dial is the probe's failure; a streamed probe ends at its head; a failure from before a flap reset is dropped (#279)
               recovery-unreachable-ladder  unreachable upstream: ladder skips re-auth, exhaustion does not blame the password
               recovery-ephemeral-rebind  port 0: the ladder's recycle lands on a fresh port; snapshot and DoH route follow it
               recovery-superseded-by-disconnect  a disconnect that routes DIRECT owns the status a superseded ladder left
@@ -290,6 +291,7 @@ enum PMSim {
         "upstream-flap",
         "upstream-slow-origin",
         "upstream-silent",
+        "half-open-probe-lease",
         "recovery-unreachable-ladder",
         "recovery-ephemeral-rebind",
         "recovery-superseded-by-disconnect",
@@ -491,6 +493,8 @@ enum PMSim {
             return [try await SilentUpstreamScenarios.slowOrigin(verbose: verbose)]
         case "upstream-silent":
             return [try await SilentUpstreamScenarios.silentUpstream(verbose: verbose)]
+        case "half-open-probe-lease":
+            return [try await ProbeLeaseScenarios.probeLease(verbose: verbose)]
         case "websocket-upgrade":
             return [try await UpgradeScenarios.websocketUpgrade(verbose: verbose)]
         case "connect-early-direct":

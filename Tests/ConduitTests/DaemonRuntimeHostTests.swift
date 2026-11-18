@@ -2458,7 +2458,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         config.dnsForwarderPort = 0
         // Back-to-back failures open a breaker.
         config.circuitBreakerWindowSeconds = 0
-        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: try await releasedLoopbackPort(), priority: 0)]
         config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.53"])]
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageDNSResolvers: true))
         let host = try await harness.makeHost()
@@ -2468,7 +2468,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(host.orchestrator.snapshot.vpnState, .connected, "precondition: the primed report landed")
         XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "precondition: connected installs the entry file")
         let pool = host.orchestrator.tunnelConnectionPool
-        for _ in 0..<config.circuitFailureThreshold { pool.recordDedicatedTunnelFailure(for: config.upstreams[0]) }
+        await pool.failTunnels(through: config.upstreams[0], count: config.circuitFailureThreshold)
         XCTAssertEqual(pool.upstreamStatuses().map(\.circuitState), [.open], "precondition: the breaker is open")
 
         harness.vpn.emit(.reasserting)

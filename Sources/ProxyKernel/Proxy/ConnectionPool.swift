@@ -59,6 +59,10 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
     /// was not written into a CONNECT (`TunnelAuthority.isWritable`). Local:
     /// no upstream was dialled.
     case malformedTunnelTarget
+    /// The CONNECT coordinator was released while the tunnel's dial was in
+    /// flight, so the dialed connection was closed unused. Local: the
+    /// upstream was never asked.
+    case tunnelCoordinatorReleased
 
     package var errorDescription: String? {
         switch self {
@@ -92,6 +96,8 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
             return OutboundSocketRegistry.fullMessage
         case .malformedTunnelTarget:
             return "The tunnel's target holds a space, a control character or a non-ASCII byte."
+        case .tunnelCoordinatorReleased:
+            return "The proxy stopped before the tunnel could be set up."
         }
     }
 
@@ -112,6 +118,7 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
     package static func isLocalNonUpstreamFailure(_ error: Error) -> Bool {
         isAuthHandshakeLimitExceeded(error) || isPoolExhausted(error) || isVPNTransitionDuringConnect(error)
             || isConnectionTrackingFull(error) || isIdleConnectionSilent(error) || error as? ConnectionPoolError == .malformedTunnelTarget
+            || error as? ConnectionPoolError == .tunnelCoordinatorReleased
     }
 
     package static func isUpstreamResponseTimedOut(_ error: Error) -> Bool {
@@ -372,6 +379,9 @@ package final class ConnectionPool: @unchecked Sendable {
     private var preferredProxyIndex = 0
     private var selectionCounter = 0
     private var lastSelectedUpstreamID: UUID?
+    /// Advanced by every `resetCircuitsAfterFlap`. An attempt keeps the value it started under, and a failure it
+    /// reports after a later reset is not counted.
+    private var breakerResetEpoch: UInt64 = 0
 
     package init(
         group: EventLoopGroup,
@@ -396,13 +406,17 @@ package final class ConnectionPool: @unchecked Sendable {
     }
 
     package func exchange(head: HTTPRequestHead, body: ByteBuffer?) -> EventLoopFuture<UpstreamExchangeResponse> {
-        bufferedExchange(head: head, requestBody: body.map(HTTPRequestBody.memory), forcedProxy: nil, allowRetry: true,
-                         preferFreshConnection: false, authSource: nil)
+        exchange(head: head, requestBody: body.map(HTTPRequestBody.memory))
     }
 
     package func exchange(head: HTTPRequestHead, requestBody: HTTPRequestBody?) -> EventLoopFuture<UpstreamExchangeResponse> {
-        bufferedExchange(head: head, requestBody: requestBody, forcedProxy: nil, allowRetry: true,
-                         preferFreshConnection: false, authSource: nil)
+        guard let attempt = attempt(forcedProxy: nil, origin: ExchangeOrigin(head), { attempt in
+            bufferedExchange(on: attempt, head: head, requestBody: requestBody, allowRetry: true,
+                             preferFreshConnection: false, authSource: nil)
+        }) else {
+            return group.next().makeFailedFuture(ConnectionPoolError.noUpstreamsConfigured)
+        }
+        return attempt.result
     }
 
     package func streamingExchange(
@@ -447,20 +461,14 @@ package final class ConnectionPool: @unchecked Sendable {
         authSource: String? = nil,
         forcedProxy: UpstreamProxy? = nil
     ) -> StreamingExchangeAttempt {
-        let config = configProvider()
-        guard let proxy = forcedProxy ?? selectProxy(from: config) else {
+        guard let attempt = attempt(forcedProxy: forcedProxy, origin: ExchangeOrigin(head), { attempt in
+            streamingExchange(head: head, requestBody: requestBody, clientChannel: clientChannel, authSource: authSource, attempt: attempt)
+        }) else {
             return StreamingExchangeAttempt(
                 upstream: nil, result: group.next().makeFailedFuture(ConnectionPoolError.noUpstreamsConfigured)
             )
         }
-
-        return StreamingExchangeAttempt(upstream: proxy, result: streamingExchange(
-            head: head,
-            requestBody: requestBody,
-            clientChannel: clientChannel,
-            authSource: authSource,
-            proxy: proxy
-        ))
+        return StreamingExchangeAttempt(upstream: attempt.upstream, result: attempt.result)
     }
 
     private func streamingExchange(
@@ -468,10 +476,11 @@ package final class ConnectionPool: @unchecked Sendable {
         requestBody: HTTPRequestBody?,
         clientChannel: Channel,
         authSource: String?,
-        proxy: UpstreamProxy
+        attempt: UpstreamAttempt
     ) -> EventLoopFuture<StreamingExchangeResult> {
+        let proxy = attempt.proxy
         let start = Date()
-        let attempt: EventLoopFuture<StreamingExchangeResult> = acquireConnection(
+        let exchange: EventLoopFuture<StreamingExchangeResult> = acquireConnection(
             for: proxy,
             target: head.uri,
             preferFreshConnection: false
@@ -485,7 +494,8 @@ package final class ConnectionPool: @unchecked Sendable {
                 clientChannel: clientChannel,
                 connection: connection,
                 proxy: proxy,
-                authSource: authSource
+                authSource: authSource,
+                onResponseHead: { [weak self] in self?.recordProbeAnswered(by: attempt) }
             ), connection: connection).flatMap { result in
                 self.recordSuccess(for: result.upstream, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
                 return connection.channel.eventLoop.makeSucceededFuture(result)
@@ -497,25 +507,82 @@ package final class ConnectionPool: @unchecked Sendable {
         // failures and are excluded below.
         // A client that hung up after the upstream answered in full is a
         // success for the upstream, not a breaker signal.
-        return attempt.flatMapError { [weak self] (error: Error) -> EventLoopFuture<StreamingExchangeResult> in
-            guard let self else { return attempt }
+        return exchange.flatMapError { [weak self] (error: Error) -> EventLoopFuture<StreamingExchangeResult> in
+            guard let self else { return exchange }
             if ConnectionPoolError.isClientClosedDuringResponse(error) {
                 self.recordSuccess(for: proxy, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
             } else {
-                self.recordExchangeError(error, for: proxy, origin: ExchangeOrigin(head))
+                self.recordExchangeError(error, for: attempt, origin: ExchangeOrigin(head))
             }
             return self.group.next().makeFailedFuture(error)
         }
     }
 
-    package func makeDedicatedTunnelConnection(
-        forcedProxy: UpstreamProxy? = nil, target: String? = nil
-    ) -> EventLoopFuture<(PooledUpstreamConnection, ProxyConfig)> {
-        let config = configProvider()
-        guard let proxy = forcedProxy ?? selectProxy(from: config) else {
+    /// Dials a dedicated tunnel connection to `forcedProxy` or the selected upstream and runs `handshake` on it.
+    /// The dial and the handshake are one exchange for the breaker: a tunnel `handshake` established is a success,
+    /// and a failed dial or handshake is recorded as any exchange's failure. A half-open probe the selection took
+    /// is held until `handshake`'s future completes.
+    package func makeDedicatedTunnelConnection<Tunnel: Sendable>(
+        forcedProxy: UpstreamProxy? = nil, target: String,
+        handshake: @escaping @Sendable (PooledUpstreamConnection) -> EventLoopFuture<Tunnel>
+    ) -> EventLoopFuture<Tunnel> {
+        let origin = ExchangeOrigin.connect(target)
+        guard let attempt = attempt(forcedProxy: forcedProxy, origin: origin, { attempt in
+            let start = Date()
+            return acquireDedicatedTunnelConnection(for: attempt.proxy, target: target, config: configProvider())
+                .flatMap(handshake)
+                .map { [weak self] (tunnel: Tunnel) -> Tunnel in
+                    self?.recordSuccess(for: attempt.proxy, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
+                    return tunnel
+                }
+                .flatMapErrorThrowing { [weak self] error in
+                    self?.recordExchangeError(error, for: attempt, origin: origin)
+                    throw error
+                }
+        }) else {
             return group.next().makeFailedFuture(ConnectionPoolError.noUpstreamsConfigured)
         }
-        return acquireDedicatedTunnelConnection(for: proxy, target: target ?? proxy.endpoint, config: config)
+        return attempt.result
+    }
+
+    /// Runs `body` on `forcedProxy` or the selected upstream; `nil` when no upstream is enabled. A half-open probe
+    /// the selection took is ended before `result` completes, whatever the outcome (#279).
+    private func attempt<Value: Sendable>(
+        forcedProxy: UpstreamProxy?, origin: ExchangeOrigin, _ body: (UpstreamAttempt) -> EventLoopFuture<Value>
+    ) -> (upstream: UpstreamProxy, result: EventLoopFuture<Value>)? {
+        if let forcedProxy {
+            let attempt = UpstreamAttempt(proxy: forcedProxy, probe: nil, resetEpoch: lock.withLock { breakerResetEpoch })
+            return (forcedProxy, body(attempt))
+        }
+        guard let attempt = selectProxy(from: configProvider()) else { return nil }
+        let result = body(attempt)
+        guard let probe = attempt.probe else { return (attempt.proxy, result) }
+        let ended = result.eventLoop.makePromise(of: Value.self)
+        result.whenComplete { [weak self] outcome in
+            self?.endProbe(probe, of: attempt.proxy, origin: origin, outcome: outcome.map { _ in () })
+            ended.completeWith(outcome)
+        }
+        return (attempt.proxy, ended.futureResult)
+    }
+
+    private func endProbe(
+        _ probe: UpstreamCircuitBreaker.HalfOpenProbe, of proxy: UpstreamProxy, origin: ExchangeOrigin, outcome: Result<Void, Error>
+    ) {
+        let released = lock.withLock { breakers[proxy.id]?.endProbe(probe) ?? false }
+        guard released else { return }
+        let ending = Self.probeEnding(outcome)
+        eventSink?(RuntimeEvent(
+            kind: .health, event: "upstream.probe_released",
+            detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) origin=\(origin) ending=\(ending)"
+        ))
+        logger.log(.info, "Upstream \(proxy.name)'s half-open probe to \(origin) ended without a verdict (\(ending)); the next request probes it again.", category: .network)
+    }
+
+    private static func probeEnding(_ outcome: Result<Void, Error>) -> String {
+        guard case .failure(let error) = outcome else { return "unrecorded" }
+        if ConnectionPoolError.isUpstreamResponseTimedOut(error) { return "silence" }
+        if ConnectionPoolError.isLocalNonUpstreamFailure(error) { return "local" }
+        return "unrecorded"
     }
 
     private func authHandshakeLimits() -> AuthHandshakeLimiter.Limits {
@@ -526,18 +593,23 @@ package final class ConnectionPool: @unchecked Sendable {
         )
     }
 
-    package func recordDedicatedTunnelSuccess(for proxy: UpstreamProxy, latencyMS: Int) {
-        recordSuccess(for: proxy, latencyMS: latencyMS)
-    }
-
-    package func recordDedicatedTunnelFailure(for proxy: UpstreamProxy) {
-        recordFailure(for: proxy)
-    }
-
     package func removeDedicatedTunnel(_ connection: PooledUpstreamConnection) {
         lock.withLockVoid {
             removeConnectionLocked(id: connection.id)
         }
+    }
+
+    /// Closes and drops a dedicated tunnel whose dial landed after its CONNECT coordinator was released, so nothing
+    /// will run its handshake; its owner is gone too, so the event is the only report.
+    package func abandonDedicatedTunnel(_ connection: PooledUpstreamConnection, target: String) {
+        connection.channel.close(mode: .all, promise: nil)
+        removeDedicatedTunnel(connection)
+        let event = RuntimeEvent(
+            kind: .connection, event: "connection.tunnel_abandoned",
+            detail: "target=\(SensitiveValueSanitizer.observableTarget(target)) upstream=\(connection.proxy.endpoint)"
+        )
+        eventSink?(event)
+        logger.log(.info, "\(event.event) \(event.detail ?? ""): the CONNECT coordinator was released while the dial was in flight; the connection was closed unused.", category: .proxy)
     }
 
     package func removeDedicatedTunnelByChannel(_ channel: Channel) {
@@ -561,33 +633,35 @@ package final class ConnectionPool: @unchecked Sendable {
             return .unhealthy(.configurationRefused(detail: refusal.errorDescription ?? ""), responseTimeMS: 0)
         }
         let start = Date()
-        var head = HTTPRequestHead(version: .http1_1, method: .HEAD, uri: urlString)
-        head.headers.add(name: "Host", value: URL(string: urlString)?.host ?? "example.com")
+        let head = HTTPRequestHead(
+            version: .http1_1, method: .HEAD, uri: urlString, headers: ["Host": URL(string: urlString)?.host ?? "example.com"]
+        )
         // The probe timeout bounds a connect made for this check; a pooled
         // connection is reused as is.
         // Canonical seconds, not the whole-millisecond legacy reading: a 1.001-second
         // probe keeps its millisecond, and the floor is still one millisecond.
         let probeTimeout = TimeAmount.nanoseconds(max(DurationUnits.runtimeNanoseconds(configProvider().health.connectionCheckTimeout), 1_000_000))
         do {
-            guard let proxy = selectProxy(from: configProvider()) else { throw ConnectionPoolError.noUpstreamsConfigured }
-            let response: UpstreamExchangeResponse
-            do {
-                response = try await bufferedExchange(
-                    head: head, requestBody: nil, forcedProxy: proxy, allowRetry: true,
+            guard let attempt = attempt(forcedProxy: nil, origin: ExchangeOrigin(head), { attempt in
+                let proxy = attempt.proxy
+                return bufferedExchange(
+                    on: attempt, head: head, requestBody: nil, allowRetry: true,
                     preferFreshConnection: false, authSource: nil, connectTimeout: probeTimeout, isHealthCheck: true
-                ).get()
-            } catch let error as ConnectionPoolError where error == .idleConnectionSilent {
-                let event = RuntimeEvent(
-                    kind: .health, event: "health.idle_connection_silent",
-                    detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) retry=fresh_connection"
-                )
-                eventSink?(event)
-                logger.log(.info, "Health check got no answer from \(proxy.endpoint) on an idle connection; asking a fresh one.", category: .network)
-                response = try await bufferedExchange(
-                    head: head, requestBody: nil, forcedProxy: proxy, allowRetry: false,
-                    preferFreshConnection: true, authSource: nil, connectTimeout: probeTimeout, isHealthCheck: true
-                ).get()
-            }
+                ).flatMapError { error in
+                    guard ConnectionPoolError.isIdleConnectionSilent(error) else { return self.group.next().makeFailedFuture(error) }
+                    let event = RuntimeEvent(
+                        kind: .health, event: "health.idle_connection_silent",
+                        detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) retry=fresh_connection"
+                    )
+                    self.eventSink?(event)
+                    self.logger.log(.info, "Health check got no answer from \(proxy.endpoint) on an idle connection; asking a fresh one.", category: .network)
+                    return self.bufferedExchange(
+                        on: attempt, head: head, requestBody: nil, allowRetry: false,
+                        preferFreshConnection: true, authSource: nil, connectTimeout: probeTimeout, isHealthCheck: true
+                    )
+                }
+            }) else { throw ConnectionPoolError.noUpstreamsConfigured }
+            let response = try await attempt.result.get()
             let elapsed = Int(Date().timeIntervalSince(start) * 1_000)
             let code = Int(response.head.status.code)
             let upstream = response.upstream.endpoint
@@ -645,38 +719,35 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    package func prewarmConnections(perUpstream: Int = 1) async {
-        let proxies = lock.withLock {
+    /// Dials every enabled upstream `perUpstream` times and leaves the connections idle in the pool. Every dial has
+    /// started when this returns, under the breaker reset epoch of that moment; the future completes once each has
+    /// landed or failed, and never fails.
+    package func prewarmConnections(perUpstream: Int = 1) -> EventLoopFuture<Void> {
+        let (proxies, resetEpoch) = lock.withLock {
             let current = configProvider().enabledUpstreams
             syncUpstreamStatesLocked(with: current)
-            return current
+            return (current, breakerResetEpoch)
         }
-        guard !proxies.isEmpty, perUpstream > 0 else { return }
-
-        await withTaskGroup(of: Void.self) { group in
-            for proxy in proxies {
-                for _ in 0..<perUpstream {
-                    group.addTask { [weak self] in
-                        guard let self else { return }
-                        do {
-                            // Through acquisition, so a prewarm dial holds a
-                            // pool slot and is tracked for VPN migration.
-                            // Not a selection: every upstream is prewarmed at
-                            // once, and the last dial to land would otherwise
-                            // become the active upstream (#164).
-                            let connection = try await self.acquireConnection(
-                                for: proxy, target: "prewarm", preferFreshConnection: true, selects: false
-                            ).get()
-                            self.release(connection, keepAlive: true)
-                            self.logger.log(.debug, "Prewarmed upstream connection for \(proxy.endpoint).", category: .proxy)
-                        } catch {
-                            if !ConnectionPoolError.isLocalNonUpstreamFailure(error) { self.recordFailure(for: proxy) }
-                            self.logger.log(.debug, "Prewarm failed for \(proxy.endpoint): \(error.displayDescription)", category: .proxy)
-                        }
+        let dials = proxies.flatMap { proxy in
+            (0..<max(0, perUpstream)).map { _ in
+                let attempt = UpstreamAttempt(proxy: proxy, probe: nil, resetEpoch: resetEpoch)
+                // Through acquisition, so a prewarm dial holds a pool slot and is tracked for VPN migration. Not a
+                // selection: every upstream is prewarmed at once, and the last dial to land would otherwise become
+                // the active upstream (#164).
+                return acquireConnection(for: proxy, target: "prewarm", preferFreshConnection: true, selects: false)
+                    .map { [weak self] connection in
+                        self?.release(connection, keepAlive: true)
+                        self?.logger.log(.debug, "Prewarmed upstream connection for \(proxy.endpoint).", category: .proxy)
                     }
-                }
+                    .recover { [weak self] error in
+                        if !ConnectionPoolError.isLocalNonUpstreamFailure(error) {
+                            self?.recordFailure(of: attempt, answered: false, origin: "prewarm")
+                        }
+                        self?.logger.log(.debug, "Prewarm failed for \(proxy.endpoint): \(error.displayDescription)", category: .proxy)
+                    }
             }
         }
+        return EventLoopFuture.andAllSucceed(dials, on: group.next())
     }
 
     /// Pure filter: returns the IDs of connections that should be reaped as stalled.
@@ -882,7 +953,7 @@ package final class ConnectionPool: @unchecked Sendable {
         for proxy: UpstreamProxy,
         target: String,
         config: ProxyConfig
-    ) -> EventLoopFuture<(PooledUpstreamConnection, ProxyConfig)> {
+    ) -> EventLoopFuture<PooledUpstreamConnection> {
         let maxConns = config.maxConnections
         var retired: [PooledUpstreamConnection] = []
         let result: AcquireResult = lock.withLock {
@@ -906,9 +977,7 @@ package final class ConnectionPool: @unchecked Sendable {
         case .exhausted:
             return group.next().makeFailedFuture(ConnectionPoolError.poolExhausted)
         case .needsNew:
-            return makeRawConnection(to: proxy, target: target).map { conn in
-                (conn, config)
-            }.always { [weak self] _ in
+            return makeRawConnection(to: proxy, target: target).always { [weak self] _ in
                 self?.lock.withLockVoid {
                     self?.pendingConnectionCount -= 1
                     self?.preconditionCapacityLocked(maxConnections: maxConns)
@@ -1129,49 +1198,61 @@ package final class ConnectionPool: @unchecked Sendable {
         )
     }
 
-    private func selectProxy(from config: ProxyConfig) -> UpstreamProxy? {
+    /// One attempt's view of its upstream: the upstream it runs on, the half-open probe its selection took, if
+    /// any, and the breaker reset epoch it started under. Only `attempt` and a prewarm dial make one.
+    private struct UpstreamAttempt {
+        let proxy: UpstreamProxy
+        let probe: UpstreamCircuitBreaker.HalfOpenProbe?
+        let resetEpoch: UInt64
+    }
+
+    private func selectProxy(from config: ProxyConfig) -> UpstreamAttempt? {
         let proxies = config.enabledUpstreams
         guard !proxies.isEmpty else { return nil }
-        let result: (proxy: UpstreamProxy?, pending: [PendingTransitionEmission]) = lock.withLock {
+        let result: (selection: UpstreamAttempt, emission: PendingTransitionEmission?) = lock.withLock {
             syncUpstreamStatesLocked(with: proxies)
             let now = Date.now
-            let outcome = selectableProxiesLocked(from: proxies, now: now)
-            guard !outcome.candidates.isEmpty else {
+            let selected: UpstreamProxy
+            let claim: UpstreamCircuitBreaker.ProbeClaim?
+            switch selectableProxiesLocked(from: proxies, now: now) {
+            case .candidates(let candidates):
+                selected = chooseProxyLocked(from: candidates)
+                claim = breakers[selected.id]?.claimProbe(now: now)
+            case .longestOpen(let fallback):
+                selected = fallback
+                claim = breakers[fallback.id]?.forceHalfOpen()
+            case .allProbing:
                 let index = min(preferredProxyIndex, max(0, proxies.count - 1))
-                return (proxies[index], outcome.pendingEmissions)
+                return (UpstreamAttempt(proxy: proxies[index], probe: nil, resetEpoch: breakerResetEpoch), nil)
             }
-            let selected = chooseProxyLocked(from: outcome.candidates)
-            var pending = outcome.pendingEmissions
-            if let claimed = claimProbeLocked(for: selected, now: now) { pending.append(claimed) }
             lastSelectedUpstreamID = selected.id
             if let selectedIndex = proxies.firstIndex(where: { $0.id == selected.id }) {
                 preferredProxyIndex = selectedIndex
             }
-            return (selected, pending)
+            let emission = claim?.transition.map {
+                PendingTransitionEmission(transition: $0, name: selected.name, endpoint: selected.endpoint)
+            }
+            return (UpstreamAttempt(proxy: selected, probe: claim?.probe, resetEpoch: breakerResetEpoch), emission)
         }
-        for emission in result.pending {
+        if let emission = result.emission {
             publishEmission(emission)
         }
-        return result.proxy
+        return result.selection
     }
 
     private func bufferedExchange(
+        on attempt: UpstreamAttempt,
         head: HTTPRequestHead,
         requestBody: HTTPRequestBody?,
-        forcedProxy: UpstreamProxy?,
         allowRetry: Bool,
         preferFreshConnection: Bool,
         authSource: String?,
         connectTimeout: TimeAmount? = nil,
         isHealthCheck: Bool = false
     ) -> EventLoopFuture<UpstreamExchangeResponse> {
-        let config = configProvider()
-        guard let proxy = forcedProxy ?? selectProxy(from: config) else {
-            return group.next().makeFailedFuture(ConnectionPoolError.noUpstreamsConfigured)
-        }
-
+        let proxy = attempt.proxy
         let start = Date()
-        let attempt: EventLoopFuture<UpstreamExchangeResponse> = acquireConnection(
+        let exchange: EventLoopFuture<UpstreamExchangeResponse> = acquireConnection(
             for: proxy,
             target: head.uri,
             preferFreshConnection: preferFreshConnection,
@@ -1203,23 +1284,23 @@ package final class ConnectionPool: @unchecked Sendable {
         // trip. Pre-extraction the chain was nested and connect failures
         // bypassed the breaker entirely — a real-world bug, not just a
         // scenario quirk.
-        return attempt.flatMapError { [weak self] (error: Error) -> EventLoopFuture<UpstreamExchangeResponse> in
+        return exchange.flatMapError { [weak self] (error: Error) -> EventLoopFuture<UpstreamExchangeResponse> in
             // `self?.group...makeFailedFuture(error)`
             // is unreachable here — `guard let self else` fires precisely
             // when `self` is nil, so the `??` left side always evaluates to
-            // nil. The propagation that actually happens is `return attempt`
+            // nil. The propagation that actually happens is `return exchange`
             // (which is already in a failed state because we got here via
             // `flatMapError`). Simplifying makes the intent obvious.
-            guard let self else { return attempt }
+            guard let self else { return exchange }
             let shouldRetry = allowRetry
                 && Self.isIdempotentMethod(head.method)
                 && Self.isRetryableConnectionError(error)
             if shouldRetry {
                 self.logger.log(.debug, "Retrying idempotent request via fresh connection after upstream reset (\(proxy.endpoint)).", category: .proxy)
                 return self.bufferedExchange(
+                    on: attempt,
                     head: head,
                     requestBody: requestBody,
-                    forcedProxy: proxy,
                     allowRetry: false,
                     preferFreshConnection: true,
                     authSource: authSource,
@@ -1227,7 +1308,7 @@ package final class ConnectionPool: @unchecked Sendable {
                     isHealthCheck: isHealthCheck
                 )
             }
-            self.recordExchangeError(error, for: proxy, origin: ExchangeOrigin(head))
+            self.recordExchangeError(error, for: attempt, origin: ExchangeOrigin(head))
             return self.group.next().makeFailedFuture(error)
         }
     }
@@ -1279,7 +1360,8 @@ package final class ConnectionPool: @unchecked Sendable {
         clientChannel: Channel,
         connection: PooledUpstreamConnection,
         proxy: UpstreamProxy,
-        authSource: String?
+        authSource: String?,
+        onResponseHead: @escaping () -> Void
     ) -> EventLoopFuture<StreamingExchangeResult> {
         let auth = connection.authenticationState()
         let promise = connection.channel.eventLoop.makePromise(of: StreamingExchangeResult.self)
@@ -1295,7 +1377,8 @@ package final class ConnectionPool: @unchecked Sendable {
             eventSink: eventSink,
             clientChannel: clientChannel,
             responseTimeout: upstreamResponseTimeout,
-            streamingPromise: promise
+            streamingPromise: promise,
+            onResponseHead: onResponseHead
         )
 
         return connection.channel.pipeline.addHandler(handler).flatMap {
@@ -1318,6 +1401,16 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
+    /// A streamed response's head is the upstream's answer to the half-open probe `attempt` holds (#279); the
+    /// probe does not wait for a stream that lasts as long as its client reads.
+    private func recordProbeAnswered(by attempt: UpstreamAttempt) {
+        guard let probe = attempt.probe else { return }
+        let transition = lock.withLock { breakers[attempt.proxy.id]?.recordProbeAnswered(probe) }
+        if let transition {
+            emitTransition(transition, for: attempt.proxy)
+        }
+    }
+
     private func recordSuccess(for proxy: UpstreamProxy, latencyMS: Int) {
         var emittedTransition: UpstreamCircuitBreaker.Transition?
         lock.withLockVoid {
@@ -1336,13 +1429,14 @@ package final class ConnectionPool: @unchecked Sendable {
     /// Feeds the breaker from a failed exchange or tunnel (#197). A response timeout is a silence on
     /// `origin`, which counts only across origins. A status the upstream answered with is an answer, so
     /// it clears the pending silences and then counts as the failure it was before. A local refusal counts nothing.
-    package func recordExchangeError(_ error: Error, for proxy: UpstreamProxy, origin: ExchangeOrigin) {
+    /// Nothing counts when a breaker reset came after `attempt` started: the reset forgave the path it ran on.
+    private func recordExchangeError(_ error: Error, for attempt: UpstreamAttempt, origin: ExchangeOrigin) {
         if ConnectionPoolError.isUpstreamResponseTimedOut(error) {
-            recordSilence(for: proxy, origin: origin)
+            recordSilence(for: attempt, origin: origin)
         } else if ConnectionPoolError.isUpstreamAnswer(error) {
-            recordFailure(for: proxy, answered: true)
+            recordFailure(of: attempt, answered: true, origin: origin.description)
         } else if !ConnectionPoolError.isLocalNonUpstreamFailure(error) {
-            recordFailure(for: proxy)
+            recordFailure(of: attempt, answered: false, origin: origin.description)
         }
     }
 
@@ -1351,65 +1445,65 @@ package final class ConnectionPool: @unchecked Sendable {
         upstreamIdentities[proxy.id]?.endpoint == proxy.endpoint
     }
 
-    private func recordSilence(for proxy: UpstreamProxy, origin: ExchangeOrigin) {
+    private func recordSilence(for attempt: UpstreamAttempt, origin: ExchangeOrigin) {
+        let proxy = attempt.proxy
         let config = configProvider()
         let thresholds = breakerThresholds(from: config)
-        enum Outcome {
-            case probeReleased
-            case counted(origins: [ExchangeOrigin], transition: UpstreamCircuitBreaker.Transition?)
-        }
-        let outcome: Outcome? = lock.withLock {
+        var stale = false
+        let counted: (origins: [ExchangeOrigin], transition: UpstreamCircuitBreaker.Transition?)? = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
-            var counts = false
-            var pending: [ExchangeOrigin] = []
-            if namesCurrentEndpointLocked(proxy) {
-                var ledger = silences[proxy.id] ?? UpstreamSilences()
-                counts = ledger.recordSilence(origin: origin)
-                pending = ledger.origins
-                silences[proxy.id] = ledger
+            guard attempt.resetEpoch == breakerResetEpoch else {
+                stale = true
+                return nil
             }
-            var breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
-            guard counts else {
-                guard breaker.releaseHalfOpenProbe() else { return nil }
-                breakers[proxy.id] = breaker
-                return .probeReleased
-            }
-            guard breaker.state != .open else { return nil }
-            return .counted(origins: pending, transition: recordFailureLocked(for: proxy, thresholds: thresholds))
+            guard namesCurrentEndpointLocked(proxy) else { return nil }
+            var ledger = silences[proxy.id] ?? UpstreamSilences()
+            let counts = ledger.recordSilence(origin: origin)
+            silences[proxy.id] = ledger
+            guard counts, breakers[proxy.id]?.state != .open else { return nil }
+            return (ledger.origins, recordFailureLocked(for: proxy, thresholds: thresholds))
         }
-        switch outcome {
-        case nil:
-            return
-        case .probeReleased:
-            eventSink?(RuntimeEvent(
-                kind: .health, event: "upstream.probe_released",
-                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) origin=\(origin)"
-            ))
-            logger.log(.info, "Upstream \(proxy.name)'s half-open probe met only a silence from \(origin); the next request probes again.", category: .network)
-        case let .counted(counted, transition):
-            let origins = counted.map(\.description)
-            eventSink?(RuntimeEvent(
-                kind: .health, event: "upstream.silence_counted",
-                detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) origin=\(origin) origins=\(origins.joined(separator: ","))"
-            ))
-            logger.log(.notice, "Upstream \(proxy.name) answered nothing for \(origins.count) origins (\(origins.joined(separator: ", "))); counting the silence as a failure.", category: .network)
-            if let transition {
-                emitTransition(transition, for: proxy)
-            }
+        if stale { reportStaleFailure(of: attempt, origin: origin.description, verdict: "silence") }
+        guard let counted else { return }
+        let origins = counted.origins.map(\.description)
+        eventSink?(RuntimeEvent(
+            kind: .health, event: "upstream.silence_counted",
+            detail: "upstream=\(proxy.name) endpoint=\(proxy.endpoint) origin=\(origin) origins=\(origins.joined(separator: ","))"
+        ))
+        logger.log(.notice, "Upstream \(proxy.name) answered nothing for \(origins.count) origins (\(origins.joined(separator: ", "))); counting the silence as a failure.", category: .network)
+        if let transition = counted.transition {
+            emitTransition(transition, for: proxy)
         }
     }
 
-    private func recordFailure(for proxy: UpstreamProxy, answered: Bool = false) {
+    /// `origin` names what the attempt asked for in the stale-failure report: an exchange's origin, or `prewarm`.
+    private func recordFailure(of attempt: UpstreamAttempt, answered: Bool, origin: String) {
+        let proxy = attempt.proxy
         let config = configProvider()
         let thresholds = breakerThresholds(from: config)
+        var stale = false
         let emittedTransition: UpstreamCircuitBreaker.Transition? = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
+            guard attempt.resetEpoch == breakerResetEpoch else {
+                stale = true
+                return nil
+            }
             if answered, namesCurrentEndpointLocked(proxy) { silences[proxy.id] = nil }
             return recordFailureLocked(for: proxy, thresholds: thresholds)
         }
+        if stale { reportStaleFailure(of: attempt, origin: origin, verdict: "failure") }
         if let emittedTransition {
             emitTransition(emittedTransition, for: proxy)
         }
+    }
+
+    private func reportStaleFailure(of attempt: UpstreamAttempt, origin: String, verdict: String) {
+        let event = RuntimeEvent(
+            kind: .health, event: "upstream.stale_failure_dropped",
+            detail: "upstream=\(attempt.proxy.name) endpoint=\(attempt.proxy.endpoint) origin=\(origin) verdict=\(verdict)"
+        )
+        eventSink?(event)
+        logger.log(.info, "Upstream \(attempt.proxy.name)'s \(verdict) for \(origin) came from an attempt that started before the breakers were reset; not counting it.", category: .network)
     }
 
     private func recordFailureLocked(for proxy: UpstreamProxy, thresholds: BreakerThresholds) -> UpstreamCircuitBreaker.Transition? {
@@ -1440,6 +1534,7 @@ package final class ConnectionPool: @unchecked Sendable {
         var pending: [PendingTransitionEmission] = []
         lock.withLockVoid {
             syncUpstreamStatesLocked(with: configProvider().enabledUpstreams)
+            breakerResetEpoch += 1
             silences.removeAll()
             for (id, var breaker) in breakers {
                 if let transition = breaker.reset(reason: .vpnFlapRecovered, baseOpenInterval: baseOpenInterval) {
@@ -1476,7 +1571,7 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    /// Container the callers of `selectableProxiesLocked` use to publish
+    /// Container selection and the flap reset use to publish
     /// breaker transitions OUTSIDE the pool lock. The fields are pre-
     /// resolved (`name` + `endpoint` already looked up while still holding
     /// the lock) so the publish path is purely a `eventSink?` + `logger.log`
@@ -1487,16 +1582,18 @@ package final class ConnectionPool: @unchecked Sendable {
         let endpoint: String
     }
 
-    private struct SelectableProxiesOutcome {
-        let candidates: [UpstreamProxy]
-        let pendingEmissions: [PendingTransitionEmission]
+    private enum Selectable {
+        /// Closed breakers and those whose probe slot may be taken now.
+        case candidates([UpstreamProxy])
+        /// None of those: the longest-opened breaker, to force half-open.
+        case longestOpen(UpstreamProxy)
+        case allProbing
     }
 
-    private func selectableProxiesLocked(from proxies: [UpstreamProxy], now: Date) -> SelectableProxiesOutcome {
+    private func selectableProxiesLocked(from proxies: [UpstreamProxy], now: Date) -> Selectable {
         var candidates: [UpstreamProxy] = []
         var fallback: UpstreamProxy?
         var fallbackOpenedAt = Date.distantFuture
-        var pending: [PendingTransitionEmission] = []
 
         for proxy in proxies {
             let breaker = breakers[proxy.id] ?? UpstreamCircuitBreaker()
@@ -1511,29 +1608,8 @@ package final class ConnectionPool: @unchecked Sendable {
             }
         }
 
-        if candidates.isEmpty, let fallback {
-            // Last-resort: no upstream's backoff has elapsed yet but we
-            // need *something* to try. Force the longest-opened breaker
-            // into half-open. This mirrors the pre-extraction behaviour
-            // and keeps client requests from failing-fast when every
-            // upstream is open.
-            var breaker = breakers[fallback.id] ?? UpstreamCircuitBreaker()
-            if let transition = breaker.forceHalfOpen() {
-                pending.append(PendingTransitionEmission(transition: transition, name: fallback.name, endpoint: fallback.endpoint))
-                breakers[fallback.id] = breaker
-            }
-            return SelectableProxiesOutcome(candidates: [fallback], pendingEmissions: pending)
-        }
-
-        return SelectableProxiesOutcome(candidates: candidates, pendingEmissions: pending)
-    }
-
-    private func claimProbeLocked(for selected: UpstreamProxy, now: Date) -> PendingTransitionEmission? {
-        var breaker = breakers[selected.id] ?? UpstreamCircuitBreaker()
-        defer { breakers[selected.id] = breaker }
-        return breaker.claimProbe(now: now).map {
-            PendingTransitionEmission(transition: $0, name: selected.name, endpoint: selected.endpoint)
-        }
+        if !candidates.isEmpty { return .candidates(candidates) }
+        return fallback.map(Selectable.longestOpen) ?? .allProbing
     }
 
     private func chooseProxyLocked(from proxies: [UpstreamProxy]) -> UpstreamProxy {
@@ -1786,6 +1862,8 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
     private let clientChannel: Channel?
     private let bufferedPromise: EventLoopPromise<UpstreamExchangeResponse>?
     private let streamingPromise: EventLoopPromise<StreamingExchangeResult>?
+    /// Told when a streamed response's head reaches the client.
+    private let onResponseHead: (() -> Void)?
 
     private var phase: Phase
     private var responseHead: HTTPResponseHead?
@@ -1830,6 +1908,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
         self.clientChannel = nil
         self.bufferedPromise = responsePromise
         self.streamingPromise = nil
+        self.onResponseHead = nil
         self.phase = isAuthenticated ? .awaitingFinal : .awaitingChallenge
     }
 
@@ -1845,7 +1924,8 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
         eventSink: (@Sendable (RuntimeEvent) -> Void)?,
         clientChannel: Channel,
         responseTimeout: TimeAmount,
-        streamingPromise: EventLoopPromise<StreamingExchangeResult>
+        streamingPromise: EventLoopPromise<StreamingExchangeResult>,
+        onResponseHead: @escaping () -> Void
     ) {
         self.connection = connection
         self.authenticatorProvider = authenticatorProvider
@@ -1860,6 +1940,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
         self.clientChannel = clientChannel
         self.bufferedPromise = nil
         self.streamingPromise = streamingPromise
+        self.onResponseHead = onResponseHead
         self.phase = isAuthenticated ? .awaitingFinal : .awaitingChallenge
     }
 
@@ -1941,6 +2022,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
                 } else {
                     clientChannel.write(HTTPServerResponsePart.head(clientHead), promise: nil)
                 }
+                onResponseHead?()
             }
         case .body(var buffer):
             if isStreaming, let clientChannel {

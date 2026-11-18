@@ -381,8 +381,10 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
                                    category: .proxy)
                 return
             }
-            await pool.prewarmConnections()
-            self.logger.log(.debug, "Completed upstream connection prewarm.", category: .proxy)
+            let logger = self.logger
+            pool.prewarmConnections().whenSuccess {
+                logger.log(.debug, "Completed upstream connection prewarm.", category: .proxy)
+            }
         }
     }
 

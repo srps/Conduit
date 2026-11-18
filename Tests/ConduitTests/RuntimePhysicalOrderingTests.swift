@@ -635,7 +635,9 @@ final class RuntimePhysicalOrderingTests: XCTestCase {
         ]
         addTeardownBlock { await orchestrator.stopTunnels() }
         // A connection someone else holds in the shared pool, as the transparent proxy's would be.
-        let (pooled, _) = try await orchestrator.tunnelConnectionPool.makeDedicatedTunnelConnection().get()
+        let pooled = try await orchestrator.tunnelConnectionPool.makeDedicatedTunnelConnection(target: "origin.test:443") {
+            $0.channel.eventLoop.makeSucceededFuture($0)
+        }.get()
 
         await orchestrator.startTunnels()
         XCTAssertEqual(orchestrator.snapshot.tunnelsRunState, .running)

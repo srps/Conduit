@@ -63,7 +63,7 @@ final class ConnectionPoolConcurrencyTests: XCTestCase {
                                   authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") })
         addTeardownBlock { pool.closeAll() }
 
-        await pool.prewarmConnections(perUpstream: expected)
+        try await pool.prewarmConnections(perUpstream: expected).get()
         let connections = pool.allConnectionSnapshot
         XCTAssertEqual(connections.count, expected, "prewarm leaves its connections idle", file: file, line: line)
         XCTAssertTrue(connections.allSatisfy { !$0.inUse }, file: file, line: line)
@@ -118,7 +118,9 @@ final class ConnectionPoolConcurrencyTests: XCTestCase {
         // The logger holds the pool through the box; break the cycle.
         addTeardownBlock { poolBox.withLockedValue { $0 = nil } }
 
-        let (tunnel, _) = try await pool.makeDedicatedTunnelConnection(target: "origin.test:443").get()
+        let tunnel = try await pool.makeDedicatedTunnelConnection(target: "origin.test:443") {
+            $0.channel.eventLoop.makeSucceededFuture($0)
+        }.get()
 
         XCTAssertEqual(sweeps.withLockedValue { $0 }, [0], "the sweep at publication closes nothing")
         XCTAssertTrue(tunnel.isDedicatedTunnel)
