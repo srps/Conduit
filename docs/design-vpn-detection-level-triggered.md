@@ -180,6 +180,14 @@ Two more differences fall outside what the differential check modelled:
 
 A change to `minVisible` or `grace` during a flap is not a difference. The shipped monitor reads each value when it arms that timer: `minVisible` at the loss, `grace` when the debounce expires. The timer fixes each window at the same two moments.
 
+## How the chain is model-checked
+
+The timer checks above stop at `VPNFlapTimer`. The bugs that reached users lived around it: a monitor that never read again, a verdict published after its session stopped, and a gate that kept entry files on `.unknown`. [`formal/vpn-detection/VPNDetection.tla`](../formal/vpn-detection/VPNDetection.tla) models the whole chain in TLA+: the store and its notifications, `VPNStatusMonitor`'s queue, sessions, wake-up and barrier, the host's unordered deliveries and `SplitDNSVPNGate`, the platform queue and the helper, Start and Stop, and `VPNReactionHistory` with the sweeps. TLC checks every interleaving under small bounds. Real time is reduced to three marks per loss: inside `minVisible`, inside grace, and past both.
+
+`python3 formal/vpn-detection/check.py --mutants` runs it, and the `vpn-detection-model` job in CI runs the same command. It checks five safety properties and three liveness properties. It also reintroduces each historical bug in the spec, as the Swift change that caused it, and fails unless TLC catches the bug. The project skill [`.claude/skills/vpn-detection-model/SKILL.md`](../.claude/skills/vpn-detection-model/SKILL.md) has the properties, the bounds, the coverage record that maps each action to its Swift function, and the sync commit.
+
+The model also records one gap it finds on main. A Start applies entry files from the gate the last session left, before `startObservers` reads the store. If the VPN dropped while the proxy was stopped, the files come back until the first reading of the new session removes them. Unit U4 ("deliver the first verdict before surfaces are applied") closes it. The `known-gap-u4` check fails until then, and `check.py` reports when it starts passing.
+
 ## Migration units
 
 Each unit is one pull request that leaves the product working.
