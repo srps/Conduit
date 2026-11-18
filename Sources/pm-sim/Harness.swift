@@ -23,8 +23,8 @@ final class SimHarness {
 
     private var configBox: ProxyConfig
 
-    init(verbose: Bool) {
-        self.logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
+    init(verbose: Bool, logger: (any LogSink)? = nil) {
+        self.logger = logger ?? ConsoleLogSink(minLevel: verbose ? .debug : .warning)
         self.configBox = ProxyConfig()
     }
 

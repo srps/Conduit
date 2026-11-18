@@ -93,7 +93,7 @@ enum PMSim {
               server-first-socks5     SOCKS5: upstream greeting coalesced with the 200 reaches the client
               audit-hop-response      Audit: proxied HTTP response hop-by-hop header leak
               audit-socks5-rsv        Audit: SOCKS5 CONNECT non-zero RSV handling
-              tunnel-target-crlf      Security: a SOCKS5 name with CR LF is refused before any upstream is dialled
+              tunnel-target-crlf      Security: a SOCKS5 name that is not a host is refused before any log line or upstream
               audit-expect-trailers   Audit: Expect: 100-continue answered, trailers passed through
               dns-doh-blocked         DNS: internal server dead + DoH answering 404 still answers the client
               dns-doh-upstream-407    DNS: DoH never reaches a 407-answering upstream directly; a proxy challenge is refused, never handed to macOS (0045)
