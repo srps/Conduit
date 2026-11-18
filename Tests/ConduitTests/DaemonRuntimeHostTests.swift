@@ -4938,6 +4938,88 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .resolverFile))
         await host.stopRuntime()
     }
+
+    // MARK: VPN verdict across a stop
+
+    /// The tunnel goes away while the runtime is stopped. The next Start applies its surfaces before the VPN monitor's new session has
+    /// read the store, so the verdict from before the stop must not reach them: an entry file written from it points at servers only the
+    /// tunnel reached, and blackholes the domain, the gateway's own name included, until the report lands. Nothing is written before the
+    /// new session reports, nothing after a disconnected report, and a connected report writes it as on a cold start.
+    @RuntimeActor func testATunnelRemovedWhileStoppedWritesNoEntryFileOnTheNextStart() async throws {
+        let host = try await launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.deliveries.drain()
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "the primed connected report writes the entry file")
+        await host.stopRuntime()
+        await host.deliveries.drain()
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "the stop removes it")
+        let writes = harness.machine.privilege.commands(matching: .applyDNS).count
+        // The new session has not read the store yet when the Start applies its surfaces; its report comes below.
+        harness.vpn.primedState = nil
+
+        try await host.startRuntime()
+        await host.deliveries.drain()
+        XCTAssertFalse(host.splitDNSGate.entriesWanted, "the stop took the verdict with the monitor")
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .applyDNS).count, writes, "nothing is written before the new session reports")
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"))
+
+        harness.vpn.emit(.disconnected(reason: .userInitiated))
+        await host.deliveries.drain()
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .applyDNS).count, writes, "nor after it reports the tunnel gone")
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"))
+
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "the new session's connected report writes it")
+        await host.stopRuntime()
+    }
+
+    /// The monitor can be publishing a report as it stops: its stop waits for that report's callback, and the hop to the owner lands
+    /// after the stop. That report belongs to the stopped session, so it must not hand the gate back the verdict the stop forgot.
+    @RuntimeActor func testAReportInFlightAsTheMonitorStopsDoesNotRestoreTheVerdict() async throws {
+        let host = try await launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.deliveries.drain()
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"))
+
+        harness.vpn.deliveredAsStopped = .connected
+        await host.stopRuntime()
+        await host.deliveries.drain()
+        XCTAssertNil(harness.vpn.deliveredAsStopped, "the report was published inside the stop")
+        XCTAssertFalse(host.splitDNSGate.entriesWanted, "the stopped session's report is not admitted")
+        let writes = harness.machine.privilege.commands(matching: .applyDNS).count
+        // The new session has not read the store yet when the Start applies its surfaces; its report comes below.
+        harness.vpn.primedState = nil
+
+        try await host.startRuntime()
+        await host.deliveries.drain()
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .applyDNS).count, writes, "nothing is written before the new session reports")
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"))
+        await host.stopRuntime()
+    }
+
+    /// A proxy Stop that leaves DNS up keeps the monitor running, and a running monitor reports only a change, so the verdict has to stay:
+    /// the next proxy Start writes the entry file from it with no new report.
+    @RuntimeActor func testAProxyStopThatKeepsTheMonitorRunningKeepsTheVerdict() async throws {
+        let host = try await launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true), dnsForwarderEnabled: true)
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        await host.deliveries.drain()
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"))
+
+        _ = await host.stopProxy()
+        await host.deliveries.drain()
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running, "DNS stays up, and the monitor with it")
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "the proxy's stop clears its resolver files")
+        XCTAssertTrue(host.splitDNSGate.entriesWanted, "the verdict stays with the running monitor")
+
+        _ = try await host.startProxy(conditionalDNS: false)
+        await host.deliveries.drain()
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "the proxy Start writes it from the kept verdict")
+        await host.stopRuntime()
+    }
 }
 
 /// The host's path-settle waits, held until the test releases them. One is held at a time, as the host keeps one settle in flight; a
