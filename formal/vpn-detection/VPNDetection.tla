@@ -417,17 +417,25 @@ OrchHandle(r) ==
 \* handleVPNStateChange awaits reconcileEntryFiles before it calls the orchestrator.
 OrchestratorAfterFiles == TRUE
 
+\* networkPathObserving: startObservers sets it in the turn that starts the monitor, and
+\* tearDown clears it in the turn that calls stopVPNMonitor, so it is lc.started. A Stop of
+\* the proxy alone leaves it set.
+ObserversRunning == lc.started
+\* Whether handleVPNStateChange runs at all for a report that lands: it has no guard.
+HostTakesReports == TRUE
+
 \* RuntimeHost.handleVPNStateChange, its first turn: the gate's admit and update, the decision
 \* and the queueing. With nothing queued, reconcileEntryFiles returns without suspending and
 \* the orchestrator is called in this turn. Otherwise the task resumes once its operation is
 \* recorded (`RecordOutcome`). Without the orchestrator, a report the gate will skip does
 \* nothing when it runs, so it is dropped here.
 HostDeliver(r) ==
-    LET admitted == GateAdmits(r)
+    LET take     == HostTakesReports
+        admitted == take /\ GateAdmits(r)
         changed  == admitted /\ Wanted(host.gate) # Wanted(r.v)
         op       == EntryOp(r.v, host.started)
         queues   == changed /\ op # "nothing"
-        now      == WithOrchestrator /\ (~queues \/ ~OrchestratorAfterFiles)
+        now      == take /\ WithOrchestrator /\ (~queues \/ ~OrchestratorAfterFiles)
         h        == IF admitted THEN [host EXCEPT !.gate = r.v, !.gateSeq = r.seq] ELSE host
         pq       == IF queues THEN Append(platQ, Op(op, "vpn", IF now THEN NoFwd ELSE Fwd(r))) ELSE platQ
         in       == {x \in inbox \ {r} : WithOrchestrator \/ GateAdmitsAt(x, h.gateSeq)}

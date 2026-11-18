@@ -150,6 +150,12 @@ MUTANTS = [
            "VPNStatusMonitor.stop: the teardown runs outside barrier.stop",
            [("StopWaitsForBarrier == mon.pc \\notin BarrierPCs", "StopWaitsForBarrier == TRUE")],
            "NothingPublishedAfterStop"),
+    Mutant("b3-failure-before-stop-dropped",
+           "RuntimeHost.handleVPNStateChange: `guard networkPathObserving else { return }` (the 179b477f shape), "
+           "so a report that lands after a whole-host Stop never reaches the orchestrator: a store failure "
+           "published just before the Stop leaves it on the last definite verdict",
+           [("HostTakesReports == TRUE", "HostTakesReports == ObserversRunning")],
+           "OrchestratorFollowsLastPublished", check="safety-orchestrator"),
     Mutant("c-unknown-keeps-files",
            "SplitDNSVPNGate.entriesWanted: `.unknown` returns true (before 0048, c9df90bb)",
            [("Wanted(v) == v \\in {\"connected\", \"reasserting\"}",
