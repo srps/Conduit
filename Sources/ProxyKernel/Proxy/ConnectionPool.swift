@@ -59,6 +59,10 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
     /// was not written into a CONNECT (`TunnelAuthority.isWritable`). Local:
     /// no upstream was dialled.
     case malformedTunnelTarget
+    /// The CONNECT coordinator was released while the tunnel's dial was in
+    /// flight, so the dialed connection was closed unused. Local: the
+    /// upstream was never asked.
+    case tunnelCoordinatorReleased
 
     package var errorDescription: String? {
         switch self {
@@ -92,6 +96,8 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
             return OutboundSocketRegistry.fullMessage
         case .malformedTunnelTarget:
             return "The tunnel's target holds a space, a control character or a non-ASCII byte."
+        case .tunnelCoordinatorReleased:
+            return "The proxy stopped before the tunnel could be set up."
         }
     }
 
@@ -112,6 +118,7 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
     package static func isLocalNonUpstreamFailure(_ error: Error) -> Bool {
         isAuthHandshakeLimitExceeded(error) || isPoolExhausted(error) || isVPNTransitionDuringConnect(error)
             || isConnectionTrackingFull(error) || isIdleConnectionSilent(error) || error as? ConnectionPoolError == .malformedTunnelTarget
+            || error as? ConnectionPoolError == .tunnelCoordinatorReleased
     }
 
     package static func isUpstreamResponseTimedOut(_ error: Error) -> Bool {
@@ -586,6 +593,19 @@ package final class ConnectionPool: @unchecked Sendable {
         lock.withLockVoid {
             removeConnectionLocked(id: connection.id)
         }
+    }
+
+    /// Closes and drops a dedicated tunnel whose dial landed after its CONNECT coordinator was released, so nothing
+    /// will run its handshake; its owner is gone too, so the event is the only report.
+    package func abandonDedicatedTunnel(_ connection: PooledUpstreamConnection, target: String) {
+        connection.channel.close(mode: .all, promise: nil)
+        removeDedicatedTunnel(connection)
+        let event = RuntimeEvent(
+            kind: .connection, event: "connection.tunnel_abandoned",
+            detail: "target=\(SensitiveValueSanitizer.observableTarget(target)) upstream=\(connection.proxy.endpoint)"
+        )
+        eventSink?(event)
+        logger.log(.info, "\(event.event) \(event.detail ?? ""): the CONNECT coordinator was released while the dial was in flight; the connection was closed unused.", category: .proxy)
     }
 
     package func removeDedicatedTunnelByChannel(_ channel: Channel) {

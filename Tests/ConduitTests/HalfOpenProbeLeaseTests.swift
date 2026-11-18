@@ -89,6 +89,18 @@ final class HalfOpenProbeLeaseTests: XCTestCase {
         return coordinator
     }
 
+    /// Holds the group's only event loop until the returned semaphore is signalled, so nothing the loop would run,
+    /// a dial landing included, happens before the test's next steps.
+    private func parkEventLoop() -> DispatchSemaphore {
+        let parked = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+        group.next().execute {
+            parked.signal()
+            resume.wait()
+        }
+        parked.wait()
+        return resume
+    }
+
     private static func authenticator() -> ProxyAuthenticator {
         NTLMAuthenticator(credentials: ProxyCredentials(username: "test", domain: "TEST", workstation: "MAC", ntHash: SecretBytes.repeating(0, count: 16)))
     }
@@ -219,6 +231,38 @@ final class HalfOpenProbeLeaseTests: XCTestCase {
 
         XCTAssertEqual(released(), ["upstream=first endpoint=127.0.0.1:\(first.port) origin=probe.test:443 ending=local"])
         await assertProbedAgainAndServes(pool, first: first)
+    }
+
+    // MARK: - A CONNECT whose coordinator is gone
+
+    func testATunnelWhoseCoordinatorIsReleasedBeforeItsDialLandsLeavesThePool() async throws {
+        let upstream = try await startAnsweringUpstream()
+        let pool = makePool([("first", upstream.port)])
+        defer { pool.closeAll() }
+        var owner: CONNECTCoordinator? = CONNECTCoordinator(
+            pool: pool, authenticatorProvider: { _ in Self.authenticator() }, logger: DiscardingLogSink(),
+            authHandshakeLimiter: limiter, authLimitProvider: { Self.authLimits }
+        )
+        weak let released = owner
+
+        let parked = parkEventLoop()
+        let tunnel = owner!.connectUpstreamTunnel(target: "gone.test:443")
+        owner = nil
+        XCTAssertNil(released, "nothing but the caller held the coordinator")
+        parked.signal()
+
+        do {
+            _ = try await tunnel.get()
+            XCTFail("no coordinator is left to run the handshake")
+        } catch {
+            XCTAssertEqual(error as? ConnectionPoolError, .tunnelCoordinatorReleased)
+            XCTAssertTrue(ConnectionPoolError.isLocalNonUpstreamFailure(error))
+        }
+        XCTAssertEqual(pool.allConnectionSnapshot.count, 0, "the dialed connection does not hold a pool slot")
+        XCTAssertEqual(upstream.requestLines, [], "the upstream was never asked")
+        XCTAssertEqual(state(pool, "first"), .closed)
+        let abandoned = events.withLockedValue { $0 }.filter { $0.event == "connection.tunnel_abandoned" }.compactMap(\.detail)
+        XCTAssertEqual(abandoned, ["target=gone.test:443 upstream=127.0.0.1:\(upstream.port)"])
     }
 
     // MARK: - A CONNECT that fails to dial

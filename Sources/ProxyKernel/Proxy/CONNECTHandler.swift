@@ -146,7 +146,8 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         let start = Date()
         return pool.makeDedicatedTunnelConnection(forcedProxy: forcedProxy, target: target) { [weak self] (connection: PooledUpstreamConnection) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
             guard let self else {
-                return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
+                pool.abandonDedicatedTunnel(connection, target: target)
+                return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.tunnelCoordinatorReleased)
             }
 
             self.logger.log(.info, "CONNECT handshake to \(connection.proxy.endpoint) for \(SensitiveValueSanitizer.observableTarget(target))", category: .proxy)
