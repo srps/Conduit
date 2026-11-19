@@ -118,6 +118,35 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
         XCTAssertEqual(events(named: "dns.network_resolver_fallback").count, 0)
     }
 
+    func testPushedServersThatComeIntoUseWhileDoHIsHeldMeanTheNetworkServerIsNotAsked() async throws {
+        let network = try await networkDNS(answering: true)
+        let tunnel = try await silentServer()
+        let doh = try await dohProvider(silent: true)
+        let live = NIOLockedValueBox(SplitDNSTable(manual: [], detected: []))
+        let port = try await start(
+            dohPort: doh.port, networkPort: network.port, internalPort: tunnel.port,
+            splitDNS: { live.withLockedValue { $0 } }
+        )
+        let pushed = SplitDNSTable(
+            manual: [],
+            detected: [SplitDNSRule(domain: "corp.example", servers: ["192.0.2.80"], origins: [.detected(interface: "utun4")])]
+        )
+        let switched = Task {
+            for _ in 0..<500 where doh.requestCount() == 0 {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            live.withLockedValue { $0 = pushed }
+        }
+
+        let reply = try await rawReply("www.example.com", port: port)
+        try await switched.value
+
+        XCTAssertGreaterThan(doh.requestCount(), 0)
+        XCTAssertEqual(reply.map(DNSWireFormat.extractRCode), 2, "SERVFAIL")
+        XCTAssertEqual(network.totalQueries, 0, "the table in use at fallback time has pushed servers")
+        XCTAssertEqual(events(named: "dns.network_resolver_fallback").count, 0)
+    }
+
     func testBothSilentAnswerServfailInsideTheRelayWindow() async throws {
         let network = try await silentServer()
         let doh = try await dohProvider(silent: true)
@@ -202,6 +231,7 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
         internalPort: Int = 9,
         entries: [DomainDNSEntry] = [],
         table: SplitDNSTable? = nil,
+        splitDNS: (@Sendable () -> SplitDNSTable)? = nil,
         dohRequestTimeout: TimeInterval = 0.3,
         networkResolverTimeout: TimeAmount = .milliseconds(300),
         lookupWindow: TimeAmount? = nil
@@ -224,7 +254,7 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
         let events = events
         let recoveries = recoveries
         let servers = networkServers
-        let fixedTable: (@Sendable () -> SplitDNSTable)? = table.map { fixed in { @Sendable in fixed } }
+        let fixedTable: (@Sendable () -> SplitDNSTable)? = splitDNS ?? table.map { fixed in { @Sendable in fixed } }
         let forwarder = LocalDNSForwarder(
             group: MultiThreadedEventLoopGroup.singleton,
             logger: RecordingLogSink(minLevel: .debug),

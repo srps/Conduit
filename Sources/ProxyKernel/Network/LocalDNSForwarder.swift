@@ -1131,7 +1131,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
 
     /// Events carry how many servers the network names, never which.
     private func askNetworkResolver(query: [UInt8], name: String, table: SplitDNSTable, began: NIODeadline) async -> [UInt8]? {
-        guard !Task.isCancelled, !table.usesPushedServers,
+        guard !Task.isCancelled, !table.usesPushedServers, splitDNSProvider?().usesPushedServers != true,
               let servers = networkResolverProvider?(), !servers.isEmpty else { return nil }
         let remaining = tuning.lookupWindow - (NIODeadline.now() - began)
         let attempt = await askInternalServers(
