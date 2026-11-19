@@ -83,7 +83,11 @@ enum ProbeLeaseScenarios {
                 throw ScenarioExecutionError(message: "the stream reader has no port")
             }
             let channel = try await ClientBootstrap(group: group)
-                .channelInitializer { $0.pipeline.addHandler(HTTPResponseEncoder()) }
+                .channelInitializer { channel in
+                    channel.eventLoop.makeCompletedFuture {
+                        try channel.pipeline.syncOperations.addHandler(HTTPResponseEncoder())
+                    }
+                }
                 .connect(host: "127.0.0.1", port: port).get()
             ScenarioCleanup.register { channel.close(promise: nil) }
             return StreamClient(channel: channel, headArrived: arrived.futureResult)
