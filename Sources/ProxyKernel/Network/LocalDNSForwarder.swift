@@ -63,6 +63,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     private let configProvider: () -> ProxyConfig
     private let splitDNSProvider: (@Sendable () -> SplitDNSTable)?
     private let networkResolverProvider: (@Sendable () -> [String])?
+    private let proxyHostsProvider: (@Sendable () -> ProxyHostNames)?
     private let onResolutionRecovered: (@Sendable (DNSResolutionRecovery) -> Void)?
     private let preferProxyPathForDoH: @Sendable () -> Bool
     private let localProxyPort: @Sendable () -> Int?
@@ -106,6 +107,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         // The split-DNS table each query consults. Nil reads the manual entries from `configProvider`.
         splitDNSProvider: (@Sendable () -> SplitDNSTable)? = nil,
         networkResolverProvider: (@Sendable () -> [String])? = nil,
+        proxyHostsProvider: (@Sendable () -> ProxyHostNames)? = nil,
         // Called at most once per path, from any thread.
         onResolutionRecovered: (@Sendable (DNSResolutionRecovery) -> Void)? = nil,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool = { false },
@@ -126,6 +128,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         self.configProvider = configProvider
         self.splitDNSProvider = splitDNSProvider
         self.networkResolverProvider = networkResolverProvider
+        self.proxyHostsProvider = proxyHostsProvider
         self.onResolutionRecovered = onResolutionRecovered
         self.preferProxyPathForDoH = preferProxyPathForDoH
         self.localProxyPort = localProxyPort
@@ -199,6 +202,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             configProvider: configProvider,
             splitDNSProvider: splitDNSProvider,
             networkResolverProvider: networkResolverProvider,
+            proxyHostsProvider: proxyHostsProvider,
             onResolutionRecovered: onResolutionRecovered,
             preferProxyPathForDoH: preferProxyPathForDoH,
             localProxyPort: localProxyPort,
@@ -557,6 +561,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private let configProvider: () -> ProxyConfig
     private let splitDNSProvider: (@Sendable () -> SplitDNSTable)?
     private let networkResolverProvider: (@Sendable () -> [String])?
+    private let proxyHostsProvider: (@Sendable () -> ProxyHostNames)?
     private let onResolutionRecovered: (@Sendable (DNSResolutionRecovery) -> Void)?
     private let preferProxyPathForDoH: @Sendable () -> Bool
     private let localProxyPort: @Sendable () -> Int?
@@ -577,6 +582,8 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private let unsatisfiedPathGate = RuntimeEventRepeatGate(repeatInterval: 5)
     /// One `dns.network_resolver_fallback` per outcome per minute: with DoH blocked, every new name falls back.
     private let networkFallbackGate = RuntimeEventRepeatGate()
+    /// One `dns.proxy_host_via_tunnel` per outcome per minute, as for the network fallback.
+    private let proxyHostViaTunnelGate = RuntimeEventRepeatGate()
     /// What circuit events and logs call a network server, never its address.
     static let networkResolverLabel = "network-resolver"
     private let serverHealth = InternalServerHealth()
@@ -653,6 +660,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         configProvider: @escaping () -> ProxyConfig,
         splitDNSProvider: (@Sendable () -> SplitDNSTable)? = nil,
         networkResolverProvider: (@Sendable () -> [String])? = nil,
+        proxyHostsProvider: (@Sendable () -> ProxyHostNames)? = nil,
         onResolutionRecovered: (@Sendable (DNSResolutionRecovery) -> Void)? = nil,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool,
         localProxyPort: @escaping @Sendable () -> Int?,
@@ -668,6 +676,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         self.configProvider = configProvider
         self.splitDNSProvider = splitDNSProvider
         self.networkResolverProvider = networkResolverProvider
+        self.proxyHostsProvider = proxyHostsProvider
         self.onResolutionRecovered = onResolutionRecovered
         self.preferProxyPathForDoH = preferProxyPathForDoH
         self.localProxyPort = localProxyPort
@@ -892,7 +901,8 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// the next attempt would not fit `tuning.internalStageBudget`, and
     /// falls back to DoH on silence (decision 0043); any other name asks the
     /// first internal server whose circuit is closed, if there is one
-    /// (#296), then DoH; a name the table has no server for then gets one network-server attempt unless pushed servers are in use (decision 0050). A
+    /// (#296), then DoH, except an upstream proxy's own name while pushed servers are in use, which asks every pushed
+    /// server as an internal name does and never DoH (decision 0051); a name the table has no server for then gets one network-server attempt unless pushed servers are in use (decision 0050). A
     /// cancelled lookup (`resetUpstreamTransports`) answers SERVFAIL as soon
     /// as its attempt returns and starts no further one.
     ///
@@ -906,7 +916,10 @@ private final class DNSResolutionCore: @unchecked Sendable {
         let config = configProvider()
         let table = splitDNSProvider?() ?? SplitDNSTable(manual: config.dnsEntries, detected: [])
         let rule = table.rule(matching: domain)
-        let isInternal = rule != nil || DNSWireFormat.isMulticastDNSName(domain)
+        let isMulticast = DNSWireFormat.isMulticastDNSName(domain)
+        let isProxyHostViaTunnel = rule == nil && !isMulticast && table.usesPushedServers
+            && (proxyHostsProvider?().contains(domain) ?? false)
+        let isInternal = rule != nil || isMulticast || isProxyHostViaTunnel
         let queryType = DNSWireFormat.extractQueryType(from: queryBytes)
         let cacheKey = DNSCacheKey(domain: domain.lowercased(), queryType: queryType)
 
@@ -947,10 +960,13 @@ private final class DNSResolutionCore: @unchecked Sendable {
         if isInternal {
             // A `.local` name under no entry is asked of the first servers,
             // as it always was; it never falls back.
-            let servers = rule?.servers ?? table.firstServers
+            let servers = isProxyHostViaTunnel ? table.pushedServers : rule?.servers ?? table.firstServers
             let attempt = await askInternalServers(servers, query: queryBytes, timeout: tuning.internalDomainTimeout)
             response = attempt.response
             answered = response != nil
+            if isProxyHostViaTunnel, !Task.isCancelled {
+                reportProxyHostViaTunnel(name: domain, servers: servers.count, asked: attempt.asked.count, answered: answered)
+            }
             // Off the VPN the internal server cannot be reached, and the VPN
             // gateway's own hostname is often under a split-DNS domain: asking
             // only that server would keep the VPN from ever coming up. So
@@ -1031,7 +1047,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         }
 
         // A `.local` name under no entry says nothing about the path: it never leaves for public DNS.
-        if rule != nil || !DNSWireFormat.isMulticastDNSName(domain) {
+        if rule != nil || !isMulticast {
             if answered {
                 noteAnswered(viaNetworkResolver: viaNetworkResolver)
             } else if response?.isEmpty ?? true {
@@ -1166,6 +1182,30 @@ private final class DNSResolutionCore: @unchecked Sendable {
         logger.log(
             outcome == "answered" ? .info : .warning,
             "DNS: DoH gave no answer for \(name) and no split-DNS server could be asked; \(what).\(held)",
+            category: .network
+        )
+    }
+
+    private func reportProxyHostViaTunnel(name: String, servers: Int, asked: Int, answered: Bool) {
+        let outcome = answered ? "answered" : asked == 0 ? "not_asked" : "silent"
+        guard let suppressed = proxyHostViaTunnelGate.admit(host: "proxy-host", reason: outcome) else {
+            logger.log(.debug, "DNS: proxy host \(name) asked of the tunnel's servers only; \(outcome).", category: .network)
+            return
+        }
+        eventSink?(RuntimeEvent(
+            kind: .routing,
+            event: "dns.proxy_host_via_tunnel",
+            detail: "name=\(name) servers=\(servers) outcome=\(outcome) suppressed=\(suppressed)"
+        ))
+        let what = switch outcome {
+        case "answered": "a tunnel server answered"
+        case "silent": "no tunnel server answered, and DoH is not asked for a proxy's own name"
+        default: "no tunnel server could be asked (every circuit is open or the budget is spent)"
+        }
+        let held = suppressed > 0 ? " \(suppressed) more with this outcome were not logged since the last line." : ""
+        logger.log(
+            answered ? .info : .warning,
+            "DNS: upstream proxy host \(name) resolved through the tunnel's servers only; \(what).\(held)",
             category: .network
         )
     }

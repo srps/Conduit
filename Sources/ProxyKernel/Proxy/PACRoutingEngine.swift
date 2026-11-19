@@ -147,6 +147,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// Drives the route cache and the evaluation timing, so tests can move
     /// time. The refresh interval and fetch backoff use the wall clock.
     private let now: @Sendable () -> Date
+    private let proxyHosts: PACProxyHosts?
 
     // The pre-split concrete resolver default was
     // removed — the kernel can no longer construct the concrete resolver.
@@ -161,9 +162,11 @@ package final class PACRoutingEngine: @unchecked Sendable {
         pacLoader: (@Sendable (String) async throws -> String)? = nil,
         queuedEvaluationLimit: Int = 64,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
+        proxyHosts: PACProxyHosts? = nil,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.now = now
+        self.proxyHosts = proxyHosts
         self.evaluationReportGate = RuntimeEventRepeatGate(repeatInterval: Self.slowEvaluationReportInterval, now: now)
         self.truncationReportGate = RuntimeEventRepeatGate(repeatInterval: 60, now: now)
         self.configProvider = configProvider
@@ -897,7 +900,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
         _ chain: PACChain, forKey key: String, evaluatedWith pacURL: String, generation: UInt64, scriptVersion version: UInt64
     ) -> StoreOutcome {
         let now = self.now()
-        return lock.withLock {
+        let outcome: StoreOutcome = lock.withLock {
             guard ExactText.same(cachedPACURL, pacURL), jsEvaluator != nil, routeGeneration == generation else { return .superseded }
             guard scriptVersion == version else { return .scriptReplaced }
             routeCache[key] = RouteCacheEntry(
@@ -909,6 +912,8 @@ package final class PACRoutingEngine: @unchecked Sendable {
             evictRouteCacheIfNeededLocked(now: now)
             return .stored
         }
+        if outcome != .superseded { proxyHosts?.record(chain) }
+        return outcome
     }
 
     /// Evaluations running or queued, one per cache key and generation
