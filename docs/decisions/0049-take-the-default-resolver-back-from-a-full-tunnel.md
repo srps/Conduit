@@ -2,7 +2,7 @@
 
 - Date: 2026-11-19
 - Decision: proposed
-- Implementation: planned
+- Implementation: implemented
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -32,8 +32,8 @@ While a full-tunnel VPN holds the default resolver and Conduit's DNS relay serve
 
 1. **Scope.** Only a service whose `State:/Network/Service/<id>/IPv4` has `OverridePrimary` 1, whose DNS key has `ServerAddresses` and no `SupplementalMatchDomains`, and which is the primary service in `State:/Network/Global/IPv4`. A split tunnel does not take the default resolver and is never touched. Only `ServerAddresses` changes; every other field of the key is written back as read. The helper never deletes the client's key. On the owner's machine (2026-11-19, the first build) a release during a 196 ms flap found the service's IPv4 key briefly absent, took the service for removed, and deleted the DNS key; the client never republished it, and the Mac had no default resolver until the VPN reconnected. A write that recreates a key for a service the client really removed holds the originals, which is inert without an IPv4 key and what the client publishes on reconnect.
 2. **Preconditions.** The override is applied only while "Manage system DNS" is on, the relay is listening on `127.0.0.1:53` over both UDP and TCP with an answering target, and the live split-DNS set (0044) is in use for that tunnel, so internal names have the tunnel's servers. There is no separate preference: "Manage system DNS" already means Conduit is the Mac's resolver, and turning it off releases the override.
-3. **The helper owns the override.** Three new commands, `vpn-dns-override-apply`, `-release` and `-status`, behind a new helper feature within protocol v5. Apply is a compare-and-swap: the helper writes only if the key's current `ServerAddresses` equal the servers the caller read, and only while the forwarder answers a reserved probe name that it serves locally. The helper keeps the service and its original servers in memory and in a root-only file under `/var/run`, which, like the key, does not survive a reboot. It watches the pid of the caller that applied.
-4. **Release is a compare-and-swap too.** The helper writes the originals back only if the key still holds exactly `127.0.0.1`. If the client has written anything else since, or the key is gone, the helper drops its record and writes nothing: the client's value is authoritative.
+3. **The helper owns the override.** Three new commands, `vpn-dns-override-apply`, `-release` and `-status`, behind a new helper feature within protocol v5. Apply is a compare-then-write: the helper writes only if the key's current `ServerAddresses` equal the servers the caller read, and only while the forwarder answers a reserved probe name that it serves locally. It reads the key again after that probe and the record's save, and refuses `changed` if the key moved. SCDynamicStore has no atomic swap, so a client write in the microseconds between the read and the write is overwritten. The helper keeps the service and its original servers in memory and in a root-only file under `/var/run`, which, like the key, does not survive a reboot. It watches the pid of the caller that applied.
+4. **Release is a compare-then-write too.** The helper writes the originals back only if the key still holds exactly `127.0.0.1`. If the client has written anything else since, or the key is gone, the helper drops its record and writes nothing: the client's value is authoritative. If the restoring write itself fails, the helper keeps the record and its file, retries the release on each tick before any probe, and refuses an apply for another service until the restore lands.
 5. **The helper releases without being asked** when:
    - the owning process exits, watched with `EVFILT_PROC NOTE_EXIT` on the pid from the caller's audit token
    - the relay stops, its UDP or its TCP half, or a relay restart fails
@@ -78,11 +78,19 @@ While a full-tunnel VPN holds the default resolver and Conduit's DNS relay serve
 
 The failure that would disprove the design: the key left at `127.0.0.1` while nothing answers on `:53`, after any of the triggers in 5 and 6, for longer than the design's bound for that trigger (at most 30 s plus one helper request in flight).
 
-Evidence is to come: ledger unit tests over a fake store and probe, policy and parser tests, pm-sim scenarios over `FakeMachine` running the real ledger, a separate TLA+ spec `formal/vpn-detection/VPNDNSOverride.tla` with mutants, and the owner's real-VPN checks listed in the design.
+The evidence is ledger unit tests over a fake store and probe, policy and parser tests, pm-sim scenarios over `FakeMachine` running the real ledger, and a separate TLA+ spec with mutants; the owner's real-VPN checks listed in the design are still to come.
 
 ## Implementation evidence
 
-None yet.
+Implemented in #330:
+
+- The helper's ledger, its record file and its checks: [`VPNDNSOverrideLedger.swift`](../../Sources/ConduitShared/VPNDNSOverrideLedger.swift), [`VPNDNSOverrideValidation.swift`](../../Sources/ConduitShared/VPNDNSOverrideValidation.swift); the commands, the `kevent` loop and the TCP relay: [`HelperDaemon.swift`](../../Sources/ConduitHelper/HelperDaemon.swift), [`HelperEventLoop.swift`](../../Sources/ConduitHelper/HelperEventLoop.swift), [`TCPRelay.swift`](../../Sources/ProxyKernel/Network/TCPRelay.swift).
+- The app side: [`VPNResolverOverridePolicy.swift`](../../Sources/PlatformMac/VPNResolverOverridePolicy.swift), [`VPNResolverOverrideController.swift`](../../Sources/PlatformMac/VPNResolverOverrideController.swift), the reading's substitution in [`PushedResolver.swift`](../../Sources/PlatformMac/PushedResolver.swift), and the host's ordering in [`RuntimeHostVPNDNSOverride.swift`](../../Sources/ConduitRuntime/RuntimeHostVPNDNSOverride.swift) and [`RuntimeHostSplitDNSDetection.swift`](../../Sources/ConduitRuntime/RuntimeHostSplitDNSDetection.swift).
+- Tests: [`VPNDNSOverrideLedgerTests.swift`](../../Tests/ConduitTests/VPNDNSOverrideLedgerTests.swift) (every refusal, the compare-then-write and the re-read after the probe, a failed restore kept and retried, the release triggers, persistence), [`VPNResolverOverrideTests.swift`](../../Tests/ConduitTests/VPNResolverOverrideTests.swift) (the policy and the controller, an apply confirmed by status counted once), [`HelperVPNDNSOverrideTests.swift`](../../Tests/ConduitTests/HelperVPNDNSOverrideTests.swift), [`PushedResolverSubstitutionTests.swift`](../../Tests/ConduitTests/PushedResolverSubstitutionTests.swift), [`RuntimeHostVPNDNSOverrideTests.swift`](../../Tests/ConduitTests/RuntimeHostVPNDNSOverrideTests.swift), [`TCPRelayDNSTests.swift`](../../Tests/ConduitTests/TCPRelayDNSTests.swift).
+- pm-sim: the `dns-vpn-override-*` scenarios in [`VPNDNSOverrideScenarios.swift`](../../Sources/pm-sim/VPNDNSOverrideScenarios.swift), over `FakeMachine` running the real ledger.
+- The model: [`VPNDNSOverride.tla`](../../formal/vpn-detection/VPNDNSOverride.tla), run by [`check.py`](../../formal/vpn-detection/check.py) with its mutants. It has no failing store write, so the kept record and its retry are covered by the tests and `dns-vpn-override-restore-retry` only.
+
+Does not prove: behaviour with a real Cisco client on macOS 27, a client write inside the compare-then-write window, or the owner's real-VPN checks listed in the design, which are still to come.
 
 ## Open questions
 

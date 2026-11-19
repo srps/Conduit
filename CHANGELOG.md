@@ -7,11 +7,28 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
+**Needs a helper update.** The full-tunnel resolver override below runs in the
+privileged helper, so it needs the helper from this build: reinstall it from
+Settings → General → **Update Helper** (one admin prompt), or with
+`sudo ./install-helper.sh` from a source checkout. Helper protocol v5 is
+unchanged; an older helper keeps working, lacks the new feature, and the app
+then leaves the VPN's DNS alone.
+
 - A burst of proxy connections that fall back to NTLM while the saved
   password is still being read, as behind the Keychain prompt after an
   update, no longer stalls Conduit. Each handshake waits for that read off
   Swift's shared threads, so the rest of Conduit keeps running and every
   handshake gets the password once it arrives (#327).
+- On a full-tunnel VPN that takes the Mac's default resolver (seen with macOS
+  27), public names resolve again. While "Manage system DNS" is on, the relay
+  serves and live split DNS has the tunnel's servers in use, the helper points
+  that VPN's published DNS servers at Conduit's relay, and internal names keep
+  going to the tunnel's servers. The helper writes only over the servers it
+  compared, gives them back when Conduit stops serving (Stop, Quit, "Manage
+  system DNS" off, the app exiting, the relay or forwarder going away, the
+  helper stopping or starting), never deletes the VPN's key, and retries a
+  restore it could not write on its next tick. The helper's DNS relay now
+  carries TCP as well as UDP (decision 0049).
 - Off the VPN, on a corporate LAN that blocks public DNS-over-HTTPS, lookups
   now fall back to the network's own DNS server (the one DHCP gives the Mac)
   when DoH gets no answer and no split-DNS server covers the name, so the PAC,

@@ -91,7 +91,7 @@ All of these run on the helper's one thread.
 - The key's current `ServerAddresses` equal `expected` exactly (`changed`), and `expected` holds no loopback address (`invalid`).
 - The relay is listening on both UDP and TCP, and the probe answers (`relay_not_serving`).
 
-If they hold, it persists the record first, then writes the key back field for field, with `ServerAddresses = [127.0.0.1]`. After the write it checks that the service's IPv4 key still exists. If it does not (the client removing the service, or a flap), it writes the originals back over its own `127.0.0.1`, holds nothing and refuses `not_found`. It never removes the key.
+If they hold, it persists the record first. It then reads the key again: the probe can take up to about 2 s, so a key that no longer equals the first read means the client wrote it meanwhile, and the ledger forgets the record and refuses `changed`. Otherwise it writes the key back field for field, with `ServerAddresses = [127.0.0.1]`. After the write it checks that the service's IPv4 key still exists. If it does not (the client removing the service, or a flap), it writes the originals back over its own `127.0.0.1`, holds nothing and refuses `not_found`. It never removes the key.
 
 **`release(reason:)`**:
 
@@ -99,23 +99,24 @@ If they hold, it persists the record first, then writes the key back field for f
 - If the key holds anything else, or is gone, it writes nothing.
 - A restoring write is the last thing a release does. It never removes the key afterwards, even when the service's IPv4 key is absent: mid-flap that key is briefly gone, and a deleted DNS key is not republished (owner's machine, 2026-11-19: the Mac was left with no default resolver). A key recreated for a service the client really removed holds the originals and is inert.
 
-It then drops the record and deletes the file. The reasons are `requested`, `owner_exited`, `relay_stopped`, `target_refused`, `target_silent`, `helper_stopping` and `helper_start`.
+It then drops the record and deletes the file, unless the restoring write failed (`restore_failed`). Then it keeps the record and its file and marks the restore pending, so the key at `127.0.0.1` still has something behind it; the next tick retries the release, with the same reason, before any probe, one retry per tick. A `key_changed` or `key_gone` result still drops the record, as the client owns the key then. While a restore is pending, an apply first retries it, and refuses `write_failed` if it fails again: the ledger never holds two records, and never overwrites the file of a pending one. The log line reads `write=restore_failed restore_pending=next_tick`, and `status` carries the pending reason. The reasons are `requested`, `owner_exited`, `relay_stopped`, `target_refused`, `target_silent`, `helper_stopping` and `helper_start`.
 
 **`status()`** returns the service and the originals, or nil.
 
 **`tick()`** runs every 10 s while a record exists:
 
+- A restore is pending: retry the release, and nothing else this tick.
 - The TCP relay is not listening, or the UDP relay is not running: release with `relay_stopped`.
 - The probe is refused on two consecutive ticks: release with `target_refused`, at most 20 s after the forwarder went away. A single refusal is a forwarder restart in progress.
 - The probe is silent on three consecutive ticks: release with `target_silent`, at most 30 s. The probe never waits on DoH or the tunnel, so a silent reply means the forwarder's event loop isn't running.
 
 **Relay restarts.** `start-dns-relay` with a new target port, or over a relay that died in place, restarts the relay inside the helper. The record is kept across that restart, and the next tick probes the new target. If the restart fails, on UDP or on TCP, the ledger releases with `relay_stopped`. `stop-dns-relay` releases before it stops the relay.
 
-#### The compare-and-swap window
+#### The compare-then-write window
 
-The compare-and-swap is three steps: read, compare, write. SCDynamicStore has no atomic compare, so a gap remains on both sides, microseconds wide on one thread:
+Apply and release each compare, then write. SCDynamicStore has no atomic swap, so a client write in the microseconds between the read and the write is overwritten:
 
-- **Apply.** A client write between apply's read and its write is overwritten with `127.0.0.1`, and the record holds the servers apply read. A later release writes those back rather than the client's newest.
+- **Apply.** Apply's last read is the one after the probe and the record's save, so its window is that read to the write. A client write inside it is overwritten with `127.0.0.1`, and the record holds the servers apply read. A later release writes those back rather than the client's newest.
 - **Release.** A client write between release's read of `127.0.0.1` and its write gets the originals written over it.
 
 In both cases the client republishes on its next change, and the app re-applies against what it then reads. This is recorded, not closed. The precise rule the rest of the design keeps (`NoClobber` in the model): an apply overwrites only the value it read and found equal to the caller's servers, a release overwrites only the `127.0.0.1` it wrote, and any other overwrite is a client write inside one of these two windows.
@@ -189,7 +190,7 @@ It **applies** when all of these hold:
 
 No current record matches when the record's key was rewritten in place: a reading after the helper's write (one that showed the key overridden) shows the client's own servers in it, and the helper's `status` still holds the record. A client can do this inside a flap, with the same servers, or on its own. The controller asks for `status` on such a reading and then applies again; a reading that leaves the service out says nothing about the key and asks nothing.
 
-**Re-apply.** The controller keeps, per service, the last apply that landed: when, and against which servers.
+**Re-apply.** The controller keeps, per service, the last apply that landed: when, and against which servers. An apply whose reply was lost lands when a later `status` shows the helper holding it: it is counted then, once, as its reply would have counted it, and `dns.vpn_override_applied` carries `confirmed=status`. A `status` that holds the record with a restore pending emits `dns.vpn_override_restore_pending` once; the controller keeps its record until the helper's restore lands.
 
 - **Same servers.** An apply against the servers of the last landed apply is the client re-asserting its value. It counts toward no cap and never suspends.
 - **Spacing.** An apply for one service comes at least 10 s after the last apply that landed for it (`minimumApplySpacing`). An apply due sooner is `.wait(until:)`: the controller arms one wake through its injected sleep, and the pass the wake runs decides again. A rewrite after a quieter spell is applied at once. This is the only bound on same-server re-applies: a client that rewrites the instant the helper writes gets at most 6 helper writes a minute. A refused apply wrote nothing, so it is not spaced: the republish after a flap's `not_primary` is applied at once.
@@ -276,6 +277,7 @@ Each bound adds up to 30 s for one helper request already in flight.
 | VPN disconnects | the client removes the key; release writes nothing | — |
 | configd restarts | the client rebuilds the key; the app re-applies | one reading or tick |
 | Read/write race with the client | release restores the servers read, not the newest | the client's next write |
+| The restoring write fails | the record and its file are kept; the next tick retries before probing | next tick, ≤ 10 s |
 
 The only row that leaves `127.0.0.1` with nothing behind it is the helper and the app both gone with no restart. That double failure leaves system DNS in the same state today (#274).
 
@@ -289,7 +291,8 @@ The only row that leaves `127.0.0.1` with nothing behind it is the helper and th
 
 - **Ledger unit tests**, over a fake store, a fake probe and a fake clock:
   - every refusal reason
-  - the compare-and-swap on apply and on release
+  - the compare-then-write on apply and on release, and the re-read after the probe
+  - a failed restore kept, retried on the next tick, and blocking an apply to another service
   - field-for-field preservation
   - the delete race
   - each release trigger, and the tick thresholds: one refused tick and no release, then two; three silent ticks
@@ -317,6 +320,7 @@ The only row that leaves `127.0.0.1` with nothing behind it is the helper and th
   - `dns-vpn-override-split-tunnel`: the override is never applied.
   - `dns-vpn-override-tcp-bind-fails`: a TCP relay that cannot bind leaves UDP serving and the override refused.
   - `dns-vpn-override-tcp-relay-dies`: a TCP relay that dies makes the helper release on its next tick.
+  - `dns-vpn-override-restore-retry`: a restore the helper cannot write keeps its record and lands on a later tick.
 - **TCP relay tests** (`TCPRelayDNSTests`): a length-prefixed query reaches a fake target over a real `TCPRelay` on ephemeral ports and a large answer comes back whole; a connection past the session cap is closed before a target connection is spent on it.
 - **TLA+**: `formal/vpn-detection/VPNDNSOverride.tla`, a separate small spec run by the same `check.py`. The main VPN spec already takes about 77 of its 120 CI minutes.
   - **State**: the key, the record, the relay and probe, the owner, the app's view, and the live set.

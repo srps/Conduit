@@ -2,7 +2,7 @@
 
 - Date: 2026-11-19
 - Decision: proposed
-- Implementation: partial
+- Implementation: implemented
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -28,7 +28,7 @@ On the same network, 0.6.1 worked only because a manual split-DNS entry, since d
 
 1. **The source.** The network's server is the `ServerAddresses` of the primary service's `State:/Network/Service/<id>/DNS`, where the primary service is `State:/Network/Global/IPv4`'s `PrimaryService`. Never `Setup:`, which holds Conduit's own `127.0.0.1`. A primary service on a tunnel interface gives none: a full tunnel's servers are pushed ones. The pushed-resolver observer reads it beside the pushed resolvers, from the keys it already watches plus `State:/Network/Global/IPv4`, so there is no second watcher.
 2. **Validated at the boundary** (decision 0046, a trusted local source replaced whole): only IP literals, never loopback (`127/8`, `::1`, `::ffff:127.x`), each once, at most 4 (`PushedResolverReading.networkServerLimit`). Loopback is what Conduit itself writes, as the relay address in `Setup:` and as the 0049 override in a full tunnel's key, so the network server is never one Conduit wrote, on or off the VPN.
-3. **When.** Only for a name the table has no server for: a public name with no entry that names servers, or a name under an entry that names none. Only after every DoH route went unanswered: a provider's answer is never second-guessed. Never while any rule in the table asks a server a tunnel pushed: the fallback is for a network with no internal server. The VPN verdict itself does not gate it.
+3. **When.** Only for a name the table has no server for: a public name with no entry that names servers, or a name under an entry that names none. Only after every DoH route went unanswered: a provider's answer is never second-guessed. Never while any rule in the table asks a server a tunnel pushed, in the table the lookup began with or the one in use when DoH gave up: the fallback is for a network with no internal server. The VPN verdict itself does not gate it.
 4. **Bounds.** One attempt, on the first network server whose circuit is closed, with its own timeout (1.5 s, `DNSForwarderTuning.networkResolverTimeout`), made only while a whole attempt fits what is left of the helper relay's 10 s pending window (`UDPRelay.staleTimeoutSeconds`) since the lookup began. It shares the internal servers' circuit breaker (#290), so a silent network server stops costing lookups after three silences.
 5. **Reporting.** `dns.network_resolver_fallback` with `outcome=answered|silent|not_asked` and the number of network servers, never an address, rate-limited to one per outcome per minute. `dns.network_resolver_changed` when the set changes, with counts. The circuit events name the server `network-resolver`. The forwarder's counters gain `networkResolverFallbacks`.
 6. **Recovery.** When DNS answers on a path after lookups on it went unanswered, or when only the network server answered, the orchestrator retries at once what failed meanwhile: a PAC fetch past the failure backoff and, in direct mode, the upstream probe (`dns.resolution_recovered`). Once per path: the forwarder's start, or a transports reset.
@@ -51,7 +51,7 @@ On the same network, 0.6.1 worked only because a manual split-DNS entry, since d
 ## Invariants and verification
 
 - The network server is never loopback and never comes from a tunnel's service or from `Setup:`. `Tests/ConduitTests/NetworkResolverParseTests.swift`: primary only, tunnel excluded, loopback and non-literals skipped, capped, nothing after a failed reading.
-- DoH answering means the network server is never asked; a table server or pushed servers in use mean it is never asked; with DoH silent and no table server it is asked once and answers; both silent answer SERVFAIL inside the relay window; no attempt is made that cannot fit the window; its circuit opens under its label. `Tests/ConduitTests/DNSForwarderNetworkResolverTests.swift`, counting queries, not timing them, except for the window itself.
+- DoH answering means the network server is never asked; a table server or pushed servers in use mean it is never asked, including pushed servers that come into use while DoH is held; with DoH silent and no table server it is asked once and answers; both silent answer SERVFAIL inside the relay window; no attempt is made that cannot fit the window; its circuit opens under its label. `Tests/ConduitTests/DNSForwarderNetworkResolverTests.swift`, counting queries, not timing them, except for the window itself.
 - The host gives the forwarder the servers whatever the VPN verdict, reports counts only, and clears them on a failed reading or a stop. `Tests/ConduitTests/RuntimeHostSplitDNSTests.swift`.
 - The liveness probe is answered at once while every upstream is silent. `Tests/ConduitTests/DNSLivenessProbeTests.swift`.
 - End to end through the actual host: `pm-sim dns-offvpn-network-resolver`, with the VPN disconnected, the manual entry disabled, DoH accepting and never answering, and the network's server a loopback stub. A public name and an upstream hostname resolve, the fallback event fires, routing returns to the upstream after the probe, and a PAC whose host only the stub knows loads. With the fallback disabled, six of its eleven checks fail; with the recovery retry disabled, three fail.
@@ -59,7 +59,7 @@ On the same network, 0.6.1 worked only because a manual split-DNS entry, since d
 
 ## Implementation evidence
 
-Partial, in progress on this branch:
+Implemented in #330:
 
 - The source: [`PushedResolver.swift`](../../Sources/PlatformMac/PushedResolver.swift) (`NetworkResolver`, `parseNetworkResolver`) and [`PushedResolverMonitor.swift`](../../Sources/PlatformMac/PushedResolverMonitor.swift) (the global IPv4 key). The host hands it over in [`RuntimeHostSplitDNSDetection.swift`](../../Sources/ConduitRuntime/RuntimeHostSplitDNSDetection.swift).
 - The fallback, its bounds, event and counter, and the recovery report: [`LocalDNSForwarder.swift`](../../Sources/ProxyKernel/Network/LocalDNSForwarder.swift); the recovery retry: [`ProxyOrchestrator.swift`](../../Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift) (`handleDNSResolutionRecovered`).
