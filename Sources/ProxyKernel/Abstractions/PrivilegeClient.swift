@@ -135,6 +135,8 @@ package protocol PrivilegeClient: Sendable {
     /// eight passwords. Implementations that can amortise elevation override
     /// this; the default loops, which is correct for anything that cannot.
     func execute(batch: [PrivilegedBatchStep]) throws
+
+    func vpnDNSOverride(_ request: VPNDNSOverrideRequest) throws -> VPNDNSOverrideReply
 }
 
 extension PrivilegeClient {
@@ -143,4 +145,43 @@ extension PrivilegeClient {
             try execute(step.operation, values: step.values)
         }
     }
+
+    package func vpnDNSOverride(_ request: VPNDNSOverrideRequest) throws -> VPNDNSOverrideReply {
+        .unsupported
+    }
+}
+
+package enum VPNDNSOverrideRequest: Sendable, Equatable {
+    /// Compare-and-set: rewrites `ServerAddresses` to `127.0.0.1` only while they equal `expected`.
+    case apply(service: String, expected: [String])
+    case release
+    case status
+}
+
+package enum VPNDNSOverrideRefusal: String, Sendable, Equatable, CaseIterable {
+    case notFound = "not_found"
+    case notFullTunnel = "not_full_tunnel"
+    case notPrimary = "not_primary"
+    case changed
+    case invalid
+    case relayNotServing = "relay_not_serving"
+    case writeFailed = "write_failed"
+}
+
+package struct VPNDNSOverrideState: Sendable, Equatable {
+    package var serviceID: String
+    package var originals: [String]
+
+    package init(serviceID: String, originals: [String]) {
+        self.serviceID = serviceID
+        self.originals = originals
+    }
+}
+
+package enum VPNDNSOverrideReply: Sendable, Equatable {
+    case unsupported
+    case applied
+    case refused(VPNDNSOverrideRefusal)
+    case released
+    case status(VPNDNSOverrideState?, lastRelease: String? = nil)
 }

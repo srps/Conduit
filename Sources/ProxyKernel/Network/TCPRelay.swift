@@ -8,6 +8,8 @@ private final class TCPRelaySessionFDTracker: @unchecked Sendable {
 
     var isRetired: Bool { lock.withLock { retired } }
 
+    var sessionCount: Int { lock.withLock { activeFDs.count / 2 } }
+
     /// False once `retire()` has run: an accept that completed after the
     /// relay was stopped must not start a session nobody will stop.
     func insert(_ fd1: Int32, _ fd2: Int32) -> Bool {
@@ -52,13 +54,23 @@ package final class TCPRelay: @unchecked Sendable {
     private var sessionFDTracker = TCPRelaySessionFDTracker()
     private let sessionWillStart: @Sendable (Int32, Int32) -> Void
     private let sessionDidStop: @Sendable () -> Void
+    /// `nil` adds no cap: the transparent relay's target, the proxy, caps its own (`maxConnections`).
+    private let maximumSessions: Int?
+    /// Called on the accept thread with the running refusal total.
+    private let refusedAtCapacity: @Sendable (Int) -> Void
+    private var refusedTotal = 0
 
     /// Hooks delimit worker ownership for deterministic lifecycle tests. They
     /// are called once per session, never from the per-byte forwarding loop.
     package init(
+        maximumSessions: Int? = nil,
+        refusedAtCapacity: @escaping @Sendable (Int) -> Void = { _ in },
         sessionWillStart: @escaping @Sendable (Int32, Int32) -> Void = { _, _ in },
         sessionDidStop: @escaping @Sendable () -> Void = {}
     ) {
+        precondition(maximumSessions.map { $0 > 0 } ?? true, "a relay that admits no session is not a relay")
+        self.maximumSessions = maximumSessions
+        self.refusedAtCapacity = refusedAtCapacity
         self.sessionWillStart = sessionWillStart
         self.sessionDidStop = sessionDidStop
     }
@@ -219,6 +231,12 @@ package final class TCPRelay: @unchecked Sendable {
                     continue
                 }
                 break
+            }
+            if let maximumSessions, tracker.sessionCount >= maximumSessions {
+                close(clientFD)
+                let total = lock.withLock { () -> Int in refusedTotal += 1; return refusedTotal }
+                refusedAtCapacity(total)
+                continue
             }
             // Darwin may inherit O_NONBLOCK from the listener. Session I/O
             // remains blocking and is interrupted with shutdown, not close.

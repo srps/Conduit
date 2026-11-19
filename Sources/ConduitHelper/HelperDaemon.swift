@@ -70,14 +70,14 @@ enum HelperDaemon {
             exit(EXIT_FAILURE)
         }
 
-        signal(SIGTERM) { _ in
-            unlink(HelperConstants.socketPath)
-            exit(EXIT_SUCCESS)
+        // kqueue still records an ignored signal, so the release on SIGTERM runs on the loop, not in a handler.
+        signal(SIGTERM, SIG_IGN)
+        signal(SIGINT, SIG_IGN)
+        guard fcntl(serverFD, F_SETFL, fcntl(serverFD, F_GETFL) | O_NONBLOCK) == 0 else {
+            HelperLog.error("Failed to make the listening socket non-blocking: \(errnoMessage)")
+            exit(EXIT_FAILURE)
         }
-        signal(SIGINT) { _ in
-            unlink(HelperConstants.socketPath)
-            exit(EXIT_SUCCESS)
-        }
+        let loop = HelperEventLoop(listenFD: serverFD)
 
         // Seed from the live console so a helper restarted mid-session can
         // admit teardown at logout without having served a request first.
@@ -86,96 +86,128 @@ enum HelperDaemon {
             lastConsoleUID = consoleAtStart
         }
         callerIdentity = loadCallerIdentity()
+        vpnDNSOverride.start()
         HelperLog.notice("ConduitHelper daemon listening on \(socketPath)")
 
         while true {
-            var clientAddr = sockaddr_un()
-            var clientLen = socklen_t(MemoryLayout<sockaddr_un>.size)
-            let clientFD = withUnsafeMutablePointer(to: &clientAddr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                    accept(serverFD, sockPtr, &clientLen)
-                }
+            let tickDue = vpnDNSOverride.status() != nil
+            switch loop.next(tickDue: tickDue) {
+            case .connection:
+                serveConnection(listenFD: serverFD)
+            case .ownerExited(let pid):
+                HelperLog.notice("vpn-dns-override owner pid=\(pid) exited")
+                vpnDNSOverride.release(reason: .ownerExited)
+            case .tick:
+                vpnDNSOverride.tick()
+            case .signal(let number):
+                HelperLog.notice("ConduitHelper received signal \(number); stopping")
+                vpnDNSOverride.release(reason: .helperStopping)
+                unlink(HelperConstants.socketPath)
+                exit(EXIT_SUCCESS)
+            case .failed(let why):
+                HelperLog.error("ConduitHelper event loop failed (\(why)); stopping")
+                vpnDNSOverride.release(reason: .helperStopping)
+                unlink(HelperConstants.socketPath)
+                exit(EXIT_FAILURE)
             }
-            guard clientFD >= 0 else { continue }
-            // Who is on the other end, read off the socket before a byte of
-            // the request: an identity refusal holds whatever the request says.
-            let identity = callerIdentity.identifier.identify(fd: clientFD)
-            let callerVerdict = HelperAdmission.callerVerdict(policy: callerIdentity.policy, identity: identity)
-            // One accept loop, no threads: whatever a peer is given, every
-            // other client waits for. The bound is on the whole request, not
-            // on each read, so a peer that drips bytes gains nothing by it.
-            // A peer that will be refused whatever it asks gets a fraction.
-            let refusalBeforeReading: PeerRefusal?
-            if case .refused(let why) = callerVerdict {
-                refusalBeforeReading = PeerRefusal(reason: .unauthorized, message: why.message, outcome: why.auditOutcome)
-            } else {
-                refusalBeforeReading = peerRefusalBeforeReading(clientFD).map(PeerRefusal.init(uidRefusal:))
+            loop.watchOwner(vpnDNSOverride.status() == nil ? nil : overrideOwner) {
+                HelperLog.notice("vpn-dns-override owner pid=\($0) already gone")
+                vpnDNSOverride.release(reason: .ownerExited)
             }
-            let budget = refusalBeforeReading == nil ? TransactionBudget.admitted : TransactionBudget.refused
-            // Read the request first even then: at the loginwindow the verdict
-            // depends on the command, and the reply must not race the client's
-            // write — a client refused before it wrote sees a broken pipe,
-            // not the refusal it retries on.
-            let read = HelperLineIO.readLine(
-                fd: clientFD,
-                deadline: HelperLineIO.deadline(afterMilliseconds: budget.requestMilliseconds),
-                maxBytes: budget.requestBytes
-            )
-            if read == .deadlineExceeded {
-                HelperLog.warning("Request not received within \(budget.requestMilliseconds) ms; dropping it")
+        }
+    }
+
+    private static func serveConnection(listenFD serverFD: Int32) {
+        var clientAddr = sockaddr_un()
+        var clientLen = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let clientFD = withUnsafeMutablePointer(to: &clientAddr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                accept(serverFD, sockPtr, &clientLen)
             }
-            var request: HelperRequest?
-            if case .line(let data) = read, refusalBeforeReading == nil {
-                request = try? JSONDecoder().decode(HelperRequest.self, from: data)
-            }
-            let replyDeadline = HelperLineIO.deadline(afterMilliseconds: budget.replyMilliseconds)
-            // The early verdict stands: re-deciding after the wait could admit
-            // a peer whose request was deliberately never decoded.
-            let refusal = refusalBeforeReading
-                ?? peerRefusal(clientFD, command: request?.command, values: request?.values ?? []).map(PeerRefusal.init(uidRefusal:))
-            // The audit line is built from what the helper measured and
-            // decided, never from the request's values or an error's text:
-            // those carry whatever the peer sent. A peer refused early has
-            // no command in its line, since its request is never decoded.
-            if refusalBeforeReading == nil, refusal?.reason != .unauthorized,
-               let request, request.command == .compareNetworkSettings,
-               let replyVersion = HelperProtocolVersion.replyVersion(forRequest: request.protocolVersion),
-               HelperAdmission.scopedSettingsAdmission(values: request.values) == .invalidArguments {
-                let line = HelperAudit.line(identity: identity, verdict: callerVerdict, command: request.command, outcome: .invalidArguments)
-                HelperLog.notice(line)
-                var response = HelperResponse.error("Invalid scoped network settings")
-                response.protocolVersion = replyVersion
-                writeLine(fd: clientFD, response: response, deadline: replyDeadline)
-                close(clientFD)
-                continue
-            }
-            if let refusal {
-                let line = HelperAudit.line(identity: identity, verdict: callerVerdict, command: request?.command, outcome: refusal.outcome)
-                switch refusal.reason {
-                case .unauthorized: HelperLog.warning(line)
-                case .noConsoleUser: HelperLog.notice(line)
-                }
-                writeLine(fd: clientFD, response: .refused(refusal.reason, refusal.message), deadline: replyDeadline)
-                close(clientFD)
-                continue
-            }
-            let outcome = handleConnection(clientFD, request: request, replyDeadline: replyDeadline)
+        }
+        guard clientFD >= 0 else { return }
+        // Only the listener is non-blocking; `HelperLineIO` polls a blocking connection.
+        if fcntl(clientFD, F_SETFL, fcntl(clientFD, F_GETFL) & ~O_NONBLOCK) != 0 {
+            HelperLog.warning("Could not make the connection blocking (\(errnoMessage)); serving it non-blocking")
+        }
+        // Who is on the other end, read off the socket before a byte of
+        // the request: an identity refusal holds whatever the request says.
+        let identity = callerIdentity.identifier.identify(fd: clientFD)
+        let callerVerdict = HelperAdmission.callerVerdict(policy: callerIdentity.policy, identity: identity)
+        // One accept loop, no threads: whatever a peer is given, every
+        // other client waits for. The bound is on the whole request, not
+        // on each read, so a peer that drips bytes gains nothing by it.
+        // A peer that will be refused whatever it asks gets a fraction.
+        let refusalBeforeReading: PeerRefusal?
+        if case .refused(let why) = callerVerdict {
+            refusalBeforeReading = PeerRefusal(reason: .unauthorized, message: why.message, outcome: why.auditOutcome)
+        } else {
+            refusalBeforeReading = peerRefusalBeforeReading(clientFD).map(PeerRefusal.init(uidRefusal:))
+        }
+        let budget = refusalBeforeReading == nil ? TransactionBudget.admitted : TransactionBudget.refused
+        // Read the request first even then: at the loginwindow the verdict
+        // depends on the command, and the reply must not race the client's
+        // write — a client refused before it wrote sees a broken pipe,
+        // not the refusal it retries on.
+        let read = HelperLineIO.readLine(
+            fd: clientFD,
+            deadline: HelperLineIO.deadline(afterMilliseconds: budget.requestMilliseconds),
+            maxBytes: budget.requestBytes
+        )
+        if read == .deadlineExceeded {
+            HelperLog.warning("Request not received within \(budget.requestMilliseconds) ms; dropping it")
+        }
+        var request: HelperRequest?
+        if case .line(let data) = read, refusalBeforeReading == nil {
+            request = try? JSONDecoder().decode(HelperRequest.self, from: data)
+        }
+        let replyDeadline = HelperLineIO.deadline(afterMilliseconds: budget.replyMilliseconds)
+        // The early verdict stands: re-deciding after the wait could admit
+        // a peer whose request was deliberately never decoded.
+        let refusal = refusalBeforeReading
+            ?? peerRefusal(clientFD, command: request?.command, values: request?.values ?? []).map(PeerRefusal.init(uidRefusal:))
+        // The audit line is built from what the helper measured and
+        // decided, never from the request's values or an error's text:
+        // those carry whatever the peer sent. A peer refused early has
+        // no command in its line, since its request is never decoded.
+        if refusalBeforeReading == nil, refusal?.reason != .unauthorized,
+           let request, request.command == .compareNetworkSettings,
+           let replyVersion = HelperProtocolVersion.replyVersion(forRequest: request.protocolVersion),
+           HelperAdmission.scopedSettingsAdmission(values: request.values) == .invalidArguments {
+            let line = HelperAudit.line(identity: identity, verdict: callerVerdict, command: request.command, outcome: .invalidArguments)
+            HelperLog.notice(line)
+            var response = HelperResponse.error("Invalid scoped network settings")
+            response.protocolVersion = replyVersion
+            writeLine(fd: clientFD, response: response, deadline: replyDeadline)
             close(clientFD)
-            let line = HelperAudit.line(identity: identity, verdict: callerVerdict, command: request?.command, outcome: outcome)
-            // A ping changes nothing and arrives every health tick; it is
-            // logged where it can be read live without filling the store.
-            if request?.command == .ping, outcome == .ok {
-                HelperLog.info(line)
-            } else {
-                HelperLog.notice(line)
+            return
+        }
+        if let refusal {
+            let line = HelperAudit.line(identity: identity, verdict: callerVerdict, command: request?.command, outcome: refusal.outcome)
+            switch refusal.reason {
+            case .unauthorized: HelperLog.warning(line)
+            case .noConsoleUser: HelperLog.notice(line)
             }
+            writeLine(fd: clientFD, response: .refused(refusal.reason, refusal.message), deadline: replyDeadline)
+            close(clientFD)
+            return
+        }
+        let outcome = handleConnection(clientFD, request: request, replyDeadline: replyDeadline, peerPID: identity.pid ?? localPeerPID(clientFD))
+        close(clientFD)
+        let line = HelperAudit.line(identity: identity, verdict: callerVerdict, command: request?.command, outcome: outcome)
+        // A ping changes nothing and arrives every health tick; it is
+        // logged where it can be read live without filling the store.
+        if request?.command == .ping, outcome == .ok {
+            HelperLog.info(line)
+        } else {
+            HelperLog.notice(line)
         }
     }
 
     // MARK: - Connection Handling
 
     /// Returns how it ended, for the audit line.
-    private static func handleConnection(_ fd: Int32, request: HelperRequest?, replyDeadline: UInt64) -> HelperAuditOutcome {
+    private static func handleConnection(_ fd: Int32, request: HelperRequest?, replyDeadline: UInt64, peerPID: pid_t?) -> HelperAuditOutcome {
         guard let request else {
             writeLine(fd: fd, response: .error("Invalid request"), deadline: replyDeadline)
             return .invalidRequest
@@ -194,7 +226,7 @@ enum HelperDaemon {
             ), deadline: replyDeadline)
             return .unsupportedVersion
         }
-        let (processed, outcome) = processRequest(request)
+        let (processed, outcome) = processRequest(request, peerPID: peerPID)
         var response = processed
         // Answer in the dialect we were addressed in.
         response.protocolVersion = replyVersion
@@ -205,7 +237,7 @@ enum HelperDaemon {
     }
 
     /// The reply, and its category for the audit line.
-    private static func processRequest(_ request: HelperRequest) -> (HelperResponse, HelperAuditOutcome) {
+    private static func processRequest(_ request: HelperRequest, peerPID: pid_t?) -> (HelperResponse, HelperAuditOutcome) {
         // One budget for every child the command runs, `networksetup` and
         // `ifconfig` alike. The client's deadline is built from the same number.
         let deadline = HelperLineIO.deadline(afterMilliseconds: HelperSubprocess.operationMilliseconds)
@@ -213,6 +245,15 @@ enum HelperDaemon {
         case .ping:
             var response = HelperResponse.ok()
             response.features = HelperFeature.allCases
+            return (response, .ok)
+        case .vpnDNSOverrideApply:
+            return applyVPNDNSOverride(values: request.values, peerPID: peerPID)
+        case .vpnDNSOverrideRelease:
+            return releaseVPNDNSOverride()
+        case .vpnDNSOverrideStatus:
+            var response = HelperResponse.ok()
+            response.vpnDNSOverride = vpnDNSOverrideStatus()
+            response.vpnDNSOverrideLastRelease = vpnDNSOverride.lastRelease?.rawValue
             return (response, .ok)
         case .dnsRelayStatus:
             return dnsRelayStatus()
@@ -223,6 +264,8 @@ enum HelperDaemon {
             }
             return relayOutcome(startDNSRelay(targetPort: port))
         case .stopDNSRelay:
+            // The key must never point at a relay that is gone.
+            vpnDNSOverride.release(reason: .relayStopped)
             stopDNSRelay()
             return (.ok(), .ok)
         case .startTCPRelay:
@@ -432,33 +475,123 @@ enum HelperDaemon {
         String(cString: strerror(errno))
     }
 
-    // MARK: - DNS UDP Relay
-
     nonisolated(unsafe) private static var relay: UDPRelay?
     nonisolated(unsafe) private static var currentDNSRelayTarget: Int?
+    nonisolated(unsafe) private static var dnsTCPRelay: TCPRelay?
+    nonisolated(unsafe) private static var currentDNSTCPRelayTarget: Int?
+
+    static let dnsTCPRelayMaximumSessions = 64
 
     private static func startDNSRelay(targetPort: Int) -> HelperResponse {
-        // Idempotent: 48 of the field log's DNS-relay starts carried the
-        // same target as the relay already running. See `TCPRelayPlan`.
-        // "Running" is the socket's word, not ours — a relay whose loop
-        // died in place is restarted, not reported.
-        if let running = relay, running.isRunning, currentDNSRelayTarget == targetPort {
-            return .ok()
+        let udpUnchanged = relay?.isRunning == true && currentDNSRelayTarget == targetPort
+        let tcpUnchanged = dnsTCPRelay?.isRunning == true && currentDNSTCPRelayTarget == targetPort
+        if udpUnchanged && tcpUnchanged { return .ok() }
+        if !udpUnchanged {
+            if let dead = relay, !dead.isRunning {
+                HelperLog.warning("DNS relay had died in place; restarting")
+            }
+            stopUDPDNSRelay()
+            let r = UDPRelay()
+            do {
+                try r.start(listenPort: 53, targetPort: targetPort)
+                relay = r
+                currentDNSRelayTarget = targetPort
+                HelperLog.notice("DNS relay started: 127.0.0.1:53 -> 127.0.0.1:\(targetPort)")
+            } catch {
+                stopDNSTCPRelay()
+                vpnDNSOverride.relayRestarted(succeeded: false)
+                return .error(error.localizedDescription)
+            }
         }
-        if let dead = relay, !dead.isRunning {
-            HelperLog.warning("DNS relay had died in place; restarting")
+        if !tcpUnchanged {
+            startDNSTCPRelay(targetPort: targetPort)
         }
-        stopDNSRelay()
-        let r = UDPRelay()
+        vpnDNSOverride.relayRestarted(succeeded: dnsTCPRelay != nil)
+        return .ok()
+    }
+
+    private static func startDNSTCPRelay(targetPort: Int) {
+        if let dead = dnsTCPRelay, !dead.isRunning {
+            HelperLog.warning("DNS TCP relay had died in place; restarting")
+        }
+        stopDNSTCPRelay()
+        let maximum = dnsTCPRelayMaximumSessions
+        let r = TCPRelay(maximumSessions: maximum, refusedAtCapacity: { total in
+            if total == 1 || total % 100 == 0 {
+                HelperLog.warning("dns-relay tcp at_capacity sessions=\(maximum) refused_total=\(total)")
+            }
+        })
         do {
-            try r.start(listenPort: 53, targetPort: targetPort)
-            relay = r
-            currentDNSRelayTarget = targetPort
-            HelperLog.notice("DNS relay started: 127.0.0.1:53 -> 127.0.0.1:\(targetPort)")
-            return .ok()
+            try r.start(listenPort: 53, targetPort: targetPort, host: "127.0.0.1")
+            dnsTCPRelay = r
+            currentDNSTCPRelayTarget = targetPort
+            HelperLog.notice("DNS TCP relay started: 127.0.0.1:53 -> 127.0.0.1:\(targetPort)")
         } catch {
-            return .error(error.localizedDescription)
+            HelperLog.error("dns-relay tcp start_failed listen=127.0.0.1:53 target=127.0.0.1:\(targetPort) udp=\(relay?.isRunning == true ? "running" : "stopped") error=\"\(HelperAudit.bounded(error.localizedDescription))\"")
         }
+    }
+
+    nonisolated(unsafe) private static let vpnDNSOverride = VPNDNSOverrideLedger(
+        store: SCDynamicStoreVPNDNSStore(),
+        probe: RelayForwarderProbe(relay: { relay }, tcpRelay: { dnsTCPRelay }),
+        persistence: VPNDNSOverrideFile(),
+        report: logVPNDNSOverride
+    )
+
+    nonisolated(unsafe) private static var overrideOwner: pid_t?
+
+    private static func logVPNDNSOverride(_ outcome: VPNDNSOverrideOutcome) {
+        if outcome.isFailure {
+            HelperLog.error(outcome.logLine)
+        } else if case .nothingToRelease = outcome {
+            HelperLog.info(outcome.logLine)
+        } else {
+            HelperLog.notice(outcome.logLine)
+        }
+    }
+
+    private static func vpnDNSOverrideStatus() -> HelperVPNDNSOverrideStatus? {
+        vpnDNSOverride.status().map { HelperVPNDNSOverrideStatus(serviceID: $0.serviceID, originals: $0.originals) }
+    }
+
+    private static func applyVPNDNSOverride(values: [String], peerPID: pid_t?) -> (HelperResponse, HelperAuditOutcome) {
+        guard (2...(1 + VPNDNSOverrideValidation.maximumServers)).contains(values.count) else {
+            return (.error("Invalid VPN DNS override"), .invalidArguments)
+        }
+        var response: HelperResponse
+        let outcome: HelperAuditOutcome
+        switch vpnDNSOverride.apply(service: values[0], expected: Array(values.dropFirst())) {
+        case .applied:
+            overrideOwner = peerPID
+            if peerPID == nil {
+                HelperLog.warning("vpn-dns-override applied with no owner pid; only the probe ticks can release it")
+            }
+            response = .ok()
+            outcome = .ok
+        case .refused(let reason):
+            response = .error("VPN DNS override refused: \(reason.rawValue)")
+            response.vpnDNSOverrideRefusal = reason
+            outcome = reason == .invalid ? .invalidArguments : .declined
+        }
+        response.vpnDNSOverride = vpnDNSOverrideStatus()
+        return (response, outcome)
+    }
+
+    private static func releaseVPNDNSOverride() -> (HelperResponse, HelperAuditOutcome) {
+        let write = vpnDNSOverride.release(reason: .requested)
+        if write?.failed == true {
+            return (.error("VPN DNS override release could not write the key: \(write?.rawValue ?? "?")"), .commandFailed)
+        }
+        var response = HelperResponse.ok()
+        response.vpnDNSOverride = vpnDNSOverrideStatus()
+        return (response, .ok)
+    }
+
+    private static func localPeerPID(_ fd: Int32) -> pid_t? {
+        var pid: pid_t = 0
+        var length = socklen_t(MemoryLayout<pid_t>.size)
+        guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0, pid > 0 else { return nil }
+        return pid
     }
 
     private static func dnsRelayStatus() -> (HelperResponse, HelperAuditOutcome) {
@@ -469,10 +602,11 @@ enum HelperDaemon {
             HelperLog.error("DNS relay status failed: \(error.localizedDescription)")
             return (.error("DNS relay status failed: \(error.localizedDescription)"), .commandFailed)
         }
+        let tcpListening = dnsTCPRelay?.isRunning == true
         var response = HelperResponse.ok()
         switch status {
         case .notRunning:
-            response.dnsRelay = HelperDNSRelayStatus(listening: false, targetPort: nil, target: .notRunning)
+            response.dnsRelay = HelperDNSRelayStatus(listening: false, targetPort: nil, target: .notRunning, tcpListening: tcpListening)
         case .relaying(let targetPort, let verdict):
             let target: HelperDNSRelayStatus.Target
             switch verdict {
@@ -480,17 +614,31 @@ enum HelperDaemon {
             case .answered: target = .answered
             case .silent: target = .silent
             }
-            response.dnsRelay = HelperDNSRelayStatus(listening: true, targetPort: targetPort, target: target)
+            response.dnsRelay = HelperDNSRelayStatus(listening: true, targetPort: targetPort, target: target, tcpListening: tcpListening)
         }
         return (response, .ok)
     }
 
+    /// Both halves: the key is never left on half a relay.
     private static func stopDNSRelay() {
+        stopUDPDNSRelay()
+        stopDNSTCPRelay()
+    }
+
+    private static func stopUDPDNSRelay() {
         guard relay != nil else { return }
         relay?.stop()
         relay = nil
         currentDNSRelayTarget = nil
         HelperLog.notice("DNS relay stopped")
+    }
+
+    private static func stopDNSTCPRelay() {
+        guard dnsTCPRelay != nil else { return }
+        dnsTCPRelay?.stop()
+        dnsTCPRelay = nil
+        currentDNSTCPRelayTarget = nil
+        HelperLog.notice("DNS TCP relay stopped")
     }
 
     // MARK: - Transparent TCP Relay

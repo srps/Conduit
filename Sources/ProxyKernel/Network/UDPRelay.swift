@@ -53,15 +53,26 @@ package final class UDPRelay: @unchecked Sendable {
     /// Throws only for a failure of this process's own socket calls, which
     /// says nothing about the target.
     package func status(boundMilliseconds: Int = UDPRelay.statusBoundMilliseconds) throws -> DNSRelayStatus {
+        try status(asking: DNSWireFormat.livenessProbeDomain, boundMilliseconds: boundMilliseconds)
+    }
+
+    /// The forwarder answers the probe itself, so only a stalled event loop is slower than this.
+    package static let forwarderProbeBoundMilliseconds = 500
+
+    package func forwarderProbe(boundMilliseconds: Int = UDPRelay.forwarderProbeBoundMilliseconds) throws -> DNSRelayStatus {
+        try status(asking: DNSWireFormat.forwarderProbeDomain, boundMilliseconds: boundMilliseconds)
+    }
+
+    private func status(asking domain: String, boundMilliseconds: Int) throws -> DNSRelayStatus {
         let current = lock.withLock { listenFD >= 0 ? target : nil }
         guard let current else { return .notRunning }
         return .relaying(
             targetPort: current.port,
-            target: try Self.probe(host: current.host, port: current.port, boundMilliseconds: boundMilliseconds)
+            target: try Self.probe(host: current.host, port: current.port, domain: domain, boundMilliseconds: boundMilliseconds)
         )
     }
 
-    private static func probe(host: String, port: Int, boundMilliseconds: Int) throws -> DNSRelayTargetVerdict {
+    private static func probe(host: String, port: Int, domain: String, boundMilliseconds: Int) throws -> DNSRelayTargetVerdict {
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { throw UDPRelayError.socketCreationFailed(errnoText) }
         defer { close(fd) }
@@ -78,7 +89,7 @@ package final class UDPRelay: @unchecked Sendable {
         }
         guard connected == 0 else { throw UDPRelayError.connectFailed(port, errnoText) }
 
-        let query = DNSWireFormat.buildQuery(domain: DNSWireFormat.livenessProbeDomain, txID: UInt16.random(in: .min ... .max))
+        let query = DNSWireFormat.buildQuery(domain: domain, txID: UInt16.random(in: .min ... .max))
         if Darwin.send(fd, query, query.count, 0) < 0 {
             guard errno == ECONNREFUSED else { throw UDPRelayError.probeFailed(port, "send: \(errnoText)") }
             return .refused

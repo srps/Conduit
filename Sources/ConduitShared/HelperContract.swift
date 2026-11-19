@@ -167,6 +167,9 @@ public enum HelperCommand: String, Codable, Sendable, CaseIterable {
     /// Reports what the DNS relay is doing and what a fresh query to its
     /// target found, in `HelperResponse.dnsRelay`. No values; changes nothing.
     case dnsRelayStatus = "dns-relay-status"
+    case vpnDNSOverrideApply = "vpn-dns-override-apply"
+    case vpnDNSOverrideRelease = "vpn-dns-override-release"
+    case vpnDNSOverrideStatus = "vpn-dns-override-status"
     case ping = "ping"
 }
 
@@ -175,6 +178,27 @@ public enum HelperCommand: String, Codable, Sendable, CaseIterable {
 /// that is busy by its absence here, without sending a command that fails.
 public enum HelperFeature: String, Codable, Sendable, CaseIterable {
     case dnsRelayStatus = "dns-relay-status"
+    case vpnDNSOverride = "vpn-dns-override"
+}
+
+public struct HelperVPNDNSOverrideStatus: Codable, Sendable, Equatable {
+    public var serviceID: String
+    public var originals: [String]
+
+    public init(serviceID: String, originals: [String]) {
+        self.serviceID = serviceID
+        self.originals = originals
+    }
+}
+
+public enum HelperVPNDNSOverrideRefusal: String, Codable, Sendable, CaseIterable {
+    case notFound = "not_found"
+    case notFullTunnel = "not_full_tunnel"
+    case notPrimary = "not_primary"
+    case changed
+    case invalid
+    case relayNotServing = "relay_not_serving"
+    case writeFailed = "write_failed"
 }
 
 /// The reply to `dns-relay-status`.
@@ -192,11 +216,14 @@ public struct HelperDNSRelayStatus: Codable, Sendable, Equatable {
     public var listening: Bool
     public var targetPort: Int?
     public var target: Target
+    /// Optional on the wire: an older helper never sends it and an older client ignores it.
+    public var tcpListening: Bool?
 
-    public init(listening: Bool, targetPort: Int?, target: Target) {
+    public init(listening: Bool, targetPort: Int?, target: Target, tcpListening: Bool? = nil) {
         self.listening = listening
         self.targetPort = targetPort
         self.target = target
+        self.tcpListening = tcpListening
     }
 }
 
@@ -399,6 +426,9 @@ public struct HelperResponse: Codable, Sendable, Equatable {
     /// Set only on a ping reply, by a helper that has any. Unknown names are
     /// dropped on decode.
     public var features: [HelperFeature]?
+    public var vpnDNSOverride: HelperVPNDNSOverrideStatus?
+    public var vpnDNSOverrideRefusal: HelperVPNDNSOverrideRefusal?
+    public var vpnDNSOverrideLastRelease: String?
 
     public static func ok() -> HelperResponse {
         HelperResponse(protocolVersion: HelperProtocolVersion.current, success: true)
@@ -437,7 +467,10 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         standardError: String? = nil,
         refusal: HelperRefusal? = nil,
         dnsRelay: HelperDNSRelayStatus? = nil,
-        features: [HelperFeature]? = nil
+        features: [HelperFeature]? = nil,
+        vpnDNSOverride: HelperVPNDNSOverrideStatus? = nil,
+        vpnDNSOverrideRefusal: HelperVPNDNSOverrideRefusal? = nil,
+        vpnDNSOverrideLastRelease: String? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.success = success
@@ -448,6 +481,9 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         self.refusal = refusal
         self.dnsRelay = dnsRelay
         self.features = features
+        self.vpnDNSOverride = vpnDNSOverride
+        self.vpnDNSOverrideRefusal = vpnDNSOverrideRefusal
+        self.vpnDNSOverrideLastRelease = vpnDNSOverrideLastRelease
     }
 
     enum CodingKeys: String, CodingKey {
@@ -460,6 +496,9 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         case refusal
         case dnsRelay
         case features
+        case vpnDNSOverride
+        case vpnDNSOverrideRefusal
+        case vpnDNSOverrideLastRelease
     }
 
     public init(from decoder: Decoder) throws {
@@ -475,6 +514,9 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         refusal = try? container.decodeIfPresent(HelperRefusal.self, forKey: .refusal)
         dnsRelay = try? container.decodeIfPresent(HelperDNSRelayStatus.self, forKey: .dnsRelay)
         features = try container.decodeIfPresent([String].self, forKey: .features)?.compactMap(HelperFeature.init(rawValue:))
+        vpnDNSOverride = try? container.decodeIfPresent(HelperVPNDNSOverrideStatus.self, forKey: .vpnDNSOverride)
+        vpnDNSOverrideRefusal = try? container.decodeIfPresent(HelperVPNDNSOverrideRefusal.self, forKey: .vpnDNSOverrideRefusal)
+        vpnDNSOverrideLastRelease = try? container.decodeIfPresent(String.self, forKey: .vpnDNSOverrideLastRelease)
     }
 }
 
@@ -497,4 +539,6 @@ public enum HelperConstants {
     /// means identity is not enforced. See `HelperCallerPolicyFile`.
     package static let callerRequirementDirectory = "/Library/Application Support/io.github.srps.Conduit"
     package static let callerRequirementPath = callerRequirementDirectory + "/helper-callers.req"
+    package static let runtimeStateDirectory = "/var/run/io.github.srps.Conduit.Helper"
+    package static let vpnDNSOverrideRecordPath = runtimeStateDirectory + "/vpn-dns-override.json"
 }
