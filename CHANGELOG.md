@@ -7,6 +7,16 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
+- Off the VPN, on a corporate LAN that blocks public DNS-over-HTTPS, lookups
+  now fall back to the network's own DNS server (the one DHCP gives the Mac)
+  when DoH gets no answer and no split-DNS server covers the name, so the PAC,
+  the upstream proxies' hostnames and public names resolve again without a
+  manual split-DNS entry. While DoH answers, or while a VPN's pushed servers
+  are in use, that server is never asked. When DNS starts answering again,
+  Conduit retries the PAC and the upstream probe at once instead of after the
+  PAC's failure backoff, and the DNS health check no longer restarts a relay
+  that only had slow upstreams (decision 0050).
+
 ## 0.7.0
 
 This release makes Conduit's VPN on/off verdict, and the split DNS that depends

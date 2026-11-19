@@ -154,6 +154,8 @@ The per-domain server cap applies to the detected servers, before the merge. `Li
 
 Rule order decides `firstServers`, the one internal attempt a public name makes. `SplitDNSTable(manual:detected:)` lists the manual rules in configuration order, as `init(entries:)` does today, then the detected-only domains in resolver order. A user with manual entries keeps today's first server, or the detected server ahead of it when the first manual domain is also pushed. A user with no manual entries gains this one attempt on the tunnel's first server only while the detected set is in use. Off the VPN the gate withholds the set, so no attempt is made, as today (#296).
 
+The order for a name, after an intercept rule and the cache (decision 0050): the matched rule's servers, or for a public name one attempt on `firstServers`; then DoH; then, only when every DoH route went unanswered and the table had no server for the name, one attempt on the network's own DNS server, the primary non-tunnel service's `State:` DNS servers that the same observer reads. That last stage is skipped while any rule asks a pushed server (`SplitDNSTable.usesPushedServers`), and is made only while a whole attempt fits what is left of the relay's 10 s window.
+
 ### Platform values (`PlatformMac`)
 
 ```swift
