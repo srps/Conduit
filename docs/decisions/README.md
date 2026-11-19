@@ -74,3 +74,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0048](0048-store-read-schedule.md) | Retry a failed store reading with backoff, audit a healthy one every 60 s, and withhold split DNS while blind | accepted | implemented | none |
 | [0049](0049-take-the-default-resolver-back-from-a-full-tunnel.md) | Take the default resolver back from a full-tunnel VPN through the helper | proposed | implemented | pending |
 | [0050](0050-ask-the-network-resolver-when-doh-is-silent.md) | Ask the network's own DNS server once when DoH is silent and no internal server can be asked | proposed | implemented | pending |
+| [0051](0051-resolve-upstream-proxy-names-through-the-tunnel.md) | Resolve upstream proxy hostnames through the tunnel's servers, never through DoH | proposed | implemented | none |
