@@ -106,6 +106,16 @@ package final class VPNResolverOverrideController {
     }
 
     package func decide(_ inputs: Inputs) -> VPNResolverOverrideAction {
+        let action = decide(inputs, record: record)
+        // An apply that may have landed is released like a held record once it is no longer wanted.
+        if record == nil, let unconfirmedApply, action == .none {
+            let unconfirmed = decide(inputs, record: unconfirmedApply)
+            if case .release = unconfirmed { return unconfirmed }
+        }
+        return action
+    }
+
+    private func decide(_ inputs: Inputs, record: VPNDNSOverrideState?) -> VPNResolverOverrideAction {
         VPNResolverOverridePolicy.decide(VPNResolverOverrideInput(
             helperSupports: support != .unsupported,
             manageSystemDNS: inputs.manageSystemDNS,

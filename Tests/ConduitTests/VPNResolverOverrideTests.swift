@@ -733,6 +733,24 @@ final class VPNResolverOverrideControllerTests: XCTestCase {
         XCTAssertEqual(controller.wakeAt, confirmedAt + VPNResolverOverridePolicy.minimumApplySpacing)
     }
 
+    @RuntimeActor func testAnApplyWhoseReplyIsLostIsReleasedOnceItIsNoLongerWanted() async {
+        let client = ScriptedVPNDNSOverrideClient()
+        let controller = controller(client)
+        client.loseApplyReplies()
+        await controller.pass({ self.inputs() }, pollStatus: false)
+        XCTAssertNil(controller.record)
+        XCTAssertEqual(client.record, heldRecord, "the helper holds it")
+
+        let unwanted = inputs([], inUse: [], entriesWanted: false)
+        XCTAssertEqual(controller.decide(unwanted), .release(.gate), "the set waits for this release")
+        await controller.pass({ unwanted }, pollStatus: false)
+
+        XCTAssertEqual(client.requests.last, .release)
+        XCTAssertNil(client.record)
+        XCTAssertEqual(events.last, "dns.vpn_override_released reason=gate")
+        XCTAssertFalse(controller.mayHoldRecord)
+    }
+
     @RuntimeActor func testAppliesWhoseRepliesAreLostCountTowardTheCap() async {
         let client = ScriptedVPNDNSOverrideClient()
         let controller = controller(client)
