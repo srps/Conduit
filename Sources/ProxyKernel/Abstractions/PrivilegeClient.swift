@@ -183,5 +183,5 @@ package enum VPNDNSOverrideReply: Sendable, Equatable {
     case applied
     case refused(VPNDNSOverrideRefusal)
     case released
-    case status(VPNDNSOverrideState?, lastRelease: String? = nil)
+    case status(VPNDNSOverrideState?, lastRelease: String? = nil, restorePending: String? = nil)
 }

@@ -121,6 +121,7 @@ enum PMSim {
               dns-vpn-override-republish-burst DNS: a client re-asserting the same servers is re-applied at once and never suspends; a rewrite inside 10 s waits (0049)
               dns-vpn-override-tcp-bind-fails DNS: a TCP relay that cannot bind leaves UDP serving and the override refused (0049)
               dns-vpn-override-tcp-relay-dies DNS: a TCP relay that dies makes the helper release on its next tick (0049)
+              dns-vpn-override-restore-retry DNS: a restore the helper cannot write keeps its record and lands on a later tick (0049)
               observable-target-redaction  Query/fragment privacy across observations
               private-config-boundary  Private configuration frame: cap, read schedules, redaction and refusals
               private-editor-codec  Private editor read and reply: correlation, admission, observation, reply cap and kinds
@@ -342,6 +343,7 @@ enum PMSim {
         "dns-vpn-override-republish-burst",
         "dns-vpn-override-tcp-bind-fails",
         "dns-vpn-override-tcp-relay-dies",
+        "dns-vpn-override-restore-retry",
         "observable-target-redaction",
         "private-config-boundary",
         "private-editor-codec",
@@ -587,6 +589,8 @@ enum PMSim {
             return [try await VPNDNSOverrideScenarios.tcpBindFails()]
         case "dns-vpn-override-tcp-relay-dies":
             return [try await VPNDNSOverrideScenarios.tcpRelayDies()]
+        case "dns-vpn-override-restore-retry":
+            return [try await VPNDNSOverrideScenarios.restoreRetry()]
         case "observable-target-redaction":
             return [try await ObservableTargetScenarios.redaction()]
         case "private-config-boundary":

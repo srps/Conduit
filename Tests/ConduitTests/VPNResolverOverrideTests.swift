@@ -17,6 +17,7 @@ final class ScriptedVPNDNSOverrideClient: PrivilegeClient, @unchecked Sendable {
     private let lock = NSLock()
     private var held: VPNDNSOverrideState?
     private var lastRelease: String?
+    private var restorePending: String?
     private var script: [Scripted] = []
     private var log: [VPNDNSOverrideRequest] = []
     private var onCall: (@Sendable (VPNDNSOverrideRequest) -> Void)?
@@ -41,7 +42,12 @@ final class ScriptedVPNDNSOverrideClient: PrivilegeClient, @unchecked Sendable {
         lock.withLock {
             held = nil
             lastRelease = reason
+            restorePending = nil
         }
+    }
+
+    func failRestore(reason: String) {
+        lock.withLock { restorePending = reason }
     }
 
     func execute(_ operation: PrivilegedOperation, values: [String]) throws {}
@@ -68,7 +74,7 @@ final class ScriptedVPNDNSOverrideClient: PrivilegeClient, @unchecked Sendable {
                 held = nil
                 return .released
             case .status:
-                return .status(held, lastRelease: lastRelease)
+                return .status(held, lastRelease: lastRelease, restorePending: restorePending)
             }
         }
     }
@@ -695,6 +701,26 @@ final class VPNResolverOverrideControllerTests: XCTestCase {
         }
 
         XCTAssertFalse(events.contains { $0.hasPrefix("dns.vpn_override_suspended") })
+    }
+
+    @RuntimeActor func testARestoreTheHelperCouldNotWriteIsReportedOnceAndItsReleaseFollows() async {
+        let client = ScriptedVPNDNSOverrideClient()
+        let controller = controller(client)
+        await applied(controller)
+        events = []
+
+        client.failRestore(reason: "owner_exited")
+        await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: true)
+        await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: true)
+
+        XCTAssertEqual(events, ["dns.vpn_override_restore_pending service=com.cisco.anyconnect reason=helper:owner_exited"])
+        XCTAssertEqual(controller.record, heldRecord, "the key still reads 127.0.0.1 until the restore lands")
+        XCTAssertEqual(controller.substitutions.current, [service: tunnelServers])
+
+        client.releaseOnItsOwn(reason: "owner_exited")
+        await controller.pass({ self.inputs() }, pollStatus: true)
+        XCTAssertEqual(events.last, "dns.vpn_override_released reason=helper:owner_exited")
+        XCTAssertNil(controller.record)
     }
 
     @RuntimeActor func testAReleaseWithNothingSentAsksNothing() async {

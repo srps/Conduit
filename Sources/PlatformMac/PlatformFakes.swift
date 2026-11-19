@@ -429,7 +429,7 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     package func vpnDNSOverride(_ request: VPNDNSOverrideRequest) throws -> VPNDNSOverrideReply {
         _ = try privilege.vpnDNSOverride(request)
         guard vpnDNSOverrideSupported else { return .unsupported }
-        return withVPNDNSLedger { ledger in
+        return try withVPNDNSLedger { ledger in
             switch request {
             case .apply(let service, let expected):
                 switch ledger.apply(service: service, expected: expected) {
@@ -437,12 +437,15 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
                 case .refused(let reason): return .refused(VPNDNSOverrideRefusal(reason))
                 }
             case .release:
-                ledger.release(reason: .requested)
+                if let write = ledger.release(reason: .requested), write.failed {
+                    throw PrivilegeClientError.executionFailed("VPN DNS override release could not write the key: \(write.rawValue)")
+                }
                 return .released
             case .status:
                 return .status(
                     ledger.status().map { VPNDNSOverrideState(serviceID: $0.serviceID, originals: $0.originals) },
-                    lastRelease: ledger.lastRelease?.rawValue
+                    lastRelease: ledger.lastRelease?.rawValue,
+                    restorePending: ledger.restorePending?.rawValue
                 )
             }
         }
@@ -478,8 +481,8 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     }
 
     @discardableResult
-    private func withVPNDNSLedger<T>(_ body: (VPNDNSOverrideLedger) -> T) -> T {
-        vpnDNSLock.withLock { body(vpnDNSLedger) }
+    private func withVPNDNSLedger<T>(_ body: (VPNDNSOverrideLedger) throws -> T) rethrows -> T {
+        try vpnDNSLock.withLock { try body(vpnDNSLedger) }
     }
 
     private func makeVPNDNSLedger() -> VPNDNSOverrideLedger {

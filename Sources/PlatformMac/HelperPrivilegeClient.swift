@@ -492,7 +492,8 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
             case .status:
                 return .status(
                     try Self.overrideState(response.vpnDNSOverride),
-                    lastRelease: Self.releaseReason(response.vpnDNSOverrideLastRelease)
+                    lastRelease: Self.releaseReason(response.vpnDNSOverrideLastRelease),
+                    restorePending: Self.releaseReason(response.vpnDNSOverrideRestorePending)
                 )
             }
         }

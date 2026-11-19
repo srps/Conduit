@@ -154,14 +154,20 @@ final class HelperVPNDNSOverrideTests: XCTestCase {
         held.vpnDNSOverride = HelperVPNDNSOverrideStatus(serviceID: service, originals: servers)
         var released = HelperResponse.ok()
         released.vpnDNSOverrideLastRelease = "target_refused"
-        let helper = try FakeHelper(replies: [held, released, .ok()])
+        var pending = held
+        pending.vpnDNSOverrideRestorePending = "owner_exited"
+        let helper = try FakeHelper(replies: [held, released, pending, .ok()])
         defer { helper.stop() }
         let client = clientProbe(helper.path).client
 
         XCTAssertEqual(try client.vpnDNSOverride(.status), .status(VPNDNSOverrideState(serviceID: service, originals: servers)))
         XCTAssertEqual(try client.vpnDNSOverride(.status), .status(nil, lastRelease: "target_refused"))
+        XCTAssertEqual(
+            try client.vpnDNSOverride(.status),
+            .status(VPNDNSOverrideState(serviceID: service, originals: servers), restorePending: "owner_exited")
+        )
         XCTAssertEqual(try client.vpnDNSOverride(.release), .released)
-        XCTAssertEqual(helper.commandsSeen, [.vpnDNSOverrideStatus, .vpnDNSOverrideStatus, .vpnDNSOverrideRelease])
+        XCTAssertEqual(helper.commandsSeen, [.vpnDNSOverrideStatus, .vpnDNSOverrideStatus, .vpnDNSOverrideStatus, .vpnDNSOverrideRelease])
     }
 
     func testAStatusOutOfShapeIsAnError() throws {
