@@ -417,6 +417,13 @@ package enum DNSWireFormat {
     /// usually holds it and a reply does not wait on an upstream.
     package static let livenessProbeDomain = "one.one.one.one"
 
+    /// Answered locally with NXDOMAIN, never forwarded: a reply proves only that the forwarder's event loop runs.
+    package static let forwarderProbeDomain = "conduit-probe.invalid"
+
+    package static func isForwarderProbe(_ query: [UInt8]) -> Bool {
+        hasExactlyOneQuestion(query) && extractDomainName(from: query).lowercased() == forwarderProbeDomain
+    }
+
     package static func buildQuery(domain: String, txID: UInt16 = 0xABCD, qtype: UInt16 = 1) -> [UInt8] {
         var packet: [UInt8] = []
         packet.append(UInt8(txID >> 8))
