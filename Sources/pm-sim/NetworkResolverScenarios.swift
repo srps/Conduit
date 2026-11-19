@@ -328,7 +328,7 @@ private final class AnsweringDNSStub: @unchecked Sendable {
     }
 }
 
-private final class HangingListener: @unchecked Sendable {
+final class HangingListener: @unchecked Sendable {
     let port: Int
     private let channel: Channel
     private let acceptedBox: NIOLockedValueBox<Int>
