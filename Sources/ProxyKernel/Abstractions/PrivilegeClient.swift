@@ -152,7 +152,8 @@ extension PrivilegeClient {
 }
 
 package enum VPNDNSOverrideRequest: Sendable, Equatable {
-    /// Compare-and-set: rewrites `ServerAddresses` to `127.0.0.1` only while they equal `expected`.
+    /// Compare-then-write: rewrites `ServerAddresses` to `127.0.0.1` only while they equal `expected`. SCDynamicStore has no
+    /// atomic swap, so a client write in the microseconds between the read and the write is overwritten.
     case apply(service: String, expected: [String])
     case release
     case status
