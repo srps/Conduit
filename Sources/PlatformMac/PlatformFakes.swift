@@ -722,6 +722,7 @@ package final class FakeVPNDNSForwarderProbe: VPNDNSForwarderProbe, @unchecked S
     private var _verdict: VPNDNSProbeVerdict
     private var _probes = 0
     private var _tcpRelayListening = true
+    private var _onProbe: (@Sendable () -> Void)?
 
     package init(verdict: VPNDNSProbeVerdict = .answered) {
         _verdict = verdict
@@ -743,8 +744,14 @@ package final class FakeVPNDNSForwarderProbe: VPNDNSForwarderProbe, @unchecked S
         lock.withLock { _tcpRelayListening }
     }
 
+    package var onProbe: (@Sendable () -> Void)? {
+        get { lock.withLock { _onProbe } }
+        set { lock.withLock { _onProbe = newValue } }
+    }
+
     package func probe() -> VPNDNSProbeVerdict {
-        lock.withLock {
+        onProbe?()
+        return lock.withLock {
             _probes += 1
             return _verdict
         }

@@ -209,6 +209,12 @@ package final class VPNDNSOverrideLedger {
             report(.refused(service: service, reason: .writeFailed))
             return .refused(.writeFailed)
         }
+        // No atomic swap: the probe took time, so the gap left is this read to the write.
+        guard store.dns(service: service) == current else {
+            forgetRecord()
+            report(.refused(service: service, reason: .changed))
+            return .refused(.changed)
+        }
         var overridden = current
         overridden["ServerAddresses"] = .strings(Self.relayServers)
         guard store.setDNS(overridden, service: service) else {

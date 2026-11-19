@@ -347,6 +347,20 @@ final class VPNDNSOverrideLedgerTests: XCTestCase {
         ])
     }
 
+    func testAKeyTheClientRewritesDuringTheProbeIsRefusedChangedAndNotWritten() {
+        let store = self.store!
+        let service = self.service
+        probe.onProbe = { store.clientRewrite(service, servers: ["192.0.2.99"]) }
+
+        XCTAssertEqual(ledger.apply(service: service, expected: servers), .refused(.changed))
+
+        XCTAssertEqual(store.writes, [])
+        XCTAssertEqual(store.serverAddresses(service), ["192.0.2.99"])
+        XCTAssertNil(ledger.status())
+        XCTAssertNil(file.bytes)
+        XCTAssertEqual(outcomes, [.refused(service: service, reason: .changed)])
+    }
+
     func testReleaseWithNothingHeldWritesNothing() {
         ledger.release(reason: .requested)
         XCTAssertEqual(store.writes, [])
