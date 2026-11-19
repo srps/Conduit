@@ -110,6 +110,17 @@ enum PMSim {
               dns-split-flap-holds    DNS: a VPN flap with the DNS key withdrawn keeps the pushed server answering; a disconnect stops it (0044)
               dns-split-detection-failed DNS: a pushed-resolver store that cannot be read drops the detected set; the next reading restores it (0044)
               dns-split-detection-retries DNS: a pushed-resolver store that cannot be created or subscribed to is retried on the read schedule until it reads (0048, #304)
+              dns-offvpn-network-resolver DNS: off the VPN with DoH blocked, the network's own DNS server answers; routing and the PAC recover (0050)
+              dns-vpn-override-applies DNS: a full tunnel's key is pointed at the relay once the set is live; internal names still reach the tunnel's servers (0049)
+              dns-vpn-override-client-rewrite DNS: each rewrite with new servers is applied again, three in ten minutes, then the override suspends for ten minutes (0049)
+              dns-vpn-override-disconnect DNS: a removed key or a gate turning off releases the override; a reconnect applies again (0049)
+              dns-vpn-override-stop DNS: Manage system DNS off and a Stop each release before the relay stops (0049)
+              dns-vpn-override-helper-release DNS: a refused forwarder makes the helper release; the app reads its reason and backs off (0049)
+              dns-vpn-override-split-tunnel DNS: a split tunnel's key is never touched (0049)
+              dns-vpn-override-flap DNS: the client withdrawing and republishing its service in a flap keeps the override; refusals never suspend it (0049)
+              dns-vpn-override-republish-burst DNS: a client re-asserting the same servers is re-applied at once and never suspends; a rewrite inside 10 s waits (0049)
+              dns-vpn-override-tcp-bind-fails DNS: a TCP relay that cannot bind leaves UDP serving and the override refused (0049)
+              dns-vpn-override-tcp-relay-dies DNS: a TCP relay that dies makes the helper release on its next tick (0049)
               observable-target-redaction  Query/fragment privacy across observations
               private-config-boundary  Private configuration frame: cap, read schedules, redaction and refusals
               private-editor-codec  Private editor read and reply: correlation, admission, observation, reply cap and kinds
@@ -320,6 +331,17 @@ enum PMSim {
         "dns-split-flap-holds",
         "dns-split-detection-failed",
         "dns-split-detection-retries",
+        "dns-offvpn-network-resolver",
+        "dns-vpn-override-applies",
+        "dns-vpn-override-client-rewrite",
+        "dns-vpn-override-disconnect",
+        "dns-vpn-override-stop",
+        "dns-vpn-override-helper-release",
+        "dns-vpn-override-split-tunnel",
+        "dns-vpn-override-flap",
+        "dns-vpn-override-republish-burst",
+        "dns-vpn-override-tcp-bind-fails",
+        "dns-vpn-override-tcp-relay-dies",
         "observable-target-redaction",
         "private-config-boundary",
         "private-editor-codec",
@@ -543,6 +565,28 @@ enum PMSim {
             return [try await SplitDNSFollowsVPNScenarios.detectionFailed()]
         case "dns-split-detection-retries":
             return [try await SplitDNSFollowsVPNScenarios.detectionRetries()]
+        case "dns-offvpn-network-resolver":
+            return [try await NetworkResolverScenarios.offVPNNetworkResolver()]
+        case "dns-vpn-override-applies":
+            return [try await VPNDNSOverrideScenarios.applies()]
+        case "dns-vpn-override-client-rewrite":
+            return [try await VPNDNSOverrideScenarios.clientRewrite()]
+        case "dns-vpn-override-disconnect":
+            return [try await VPNDNSOverrideScenarios.disconnect()]
+        case "dns-vpn-override-stop":
+            return [try await VPNDNSOverrideScenarios.stop()]
+        case "dns-vpn-override-helper-release":
+            return [try await VPNDNSOverrideScenarios.helperRelease()]
+        case "dns-vpn-override-split-tunnel":
+            return [try await VPNDNSOverrideScenarios.splitTunnel()]
+        case "dns-vpn-override-flap":
+            return [try await VPNDNSOverrideScenarios.flap()]
+        case "dns-vpn-override-republish-burst":
+            return [try await VPNDNSOverrideScenarios.republishBurst()]
+        case "dns-vpn-override-tcp-bind-fails":
+            return [try await VPNDNSOverrideScenarios.tcpBindFails()]
+        case "dns-vpn-override-tcp-relay-dies":
+            return [try await VPNDNSOverrideScenarios.tcpRelayDies()]
         case "observable-target-redaction":
             return [try await ObservableTargetScenarios.redaction()]
         case "private-config-boundary":
