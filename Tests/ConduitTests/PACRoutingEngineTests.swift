@@ -72,6 +72,27 @@ final class PACRoutingEngineTests: XCTestCase {
         )
     }
 
+    func testEvaluatedProxyHostsAreRecordedForTheForwarder() async throws {
+        var config = ProxyConfig.testFixture()
+        config.pacURL = "http://example.com/proxy.pac"
+        config.pacRoutingEnabled = true
+        let script = """
+        function FindProxyForURL(url, host) {
+            return "PROXY First.Proxy.example.com:8080; PROXY second.proxy.example.com:3128; DIRECT";
+        }
+        """
+        let hosts = PACProxyHosts()
+        let engine = PACRoutingEngine(
+            configProvider: { config }, resolver: CFPACEvaluator(), refreshInterval: 300, pacLoader: { _ in script }, proxyHosts: hosts
+        )
+
+        try await engine.refresh(force: true)
+        XCTAssertEqual(hosts.current, [], "nothing is recorded before an answer")
+        _ = engine.route(for: "https://www.example.org/", host: "www.example.org")
+
+        XCTAssertEqual(hosts.current, ["first.proxy.example.com", "second.proxy.example.com"])
+    }
+
     func testRefreshIntervalControlsPACReloads() async throws {
         var config = ProxyConfig.testFixture()
         config.pacURL = "http://example.com/proxy.pac"

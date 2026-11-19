@@ -1217,6 +1217,8 @@ package final class ProxyOrchestrator {
     private let splitDNSBox: NIOLockedValueBox<SplitDNSState>
     /// In a box for the same reason. Written only by `applyNetworkResolverServers`.
     private let networkResolverBox = NIOLockedValueBox<[String]>([])
+    /// The proxy hosts PAC answers named, for the forwarder's proxy-host path (decision 0051).
+    private let pacProxyHosts = PACProxyHosts()
     private let dnsForwarderTuning: DNSForwarderTuning
 
     /// Phase 4: Monotonic instant of the most recent `.connected → .reasserting`
@@ -1285,7 +1287,8 @@ package final class ProxyOrchestrator {
             configProvider: { [configBox] in configBox.current },
             resolver: pacEvaluator,
             logger: logStore,
-            eventSink: { [eventLog] event in eventLog.append(event) }
+            eventSink: { [eventLog] event in eventLog.append(event) },
+            proxyHosts: pacProxyHosts
         )
     }()
 
@@ -1296,6 +1299,9 @@ package final class ProxyOrchestrator {
         configProvider: { [configBox] in configBox.current },
         splitDNSProvider: { [splitDNSBox] in splitDNSBox.withLockedValue { $0.table } },
         networkResolverProvider: { [networkResolverBox] in networkResolverBox.withLockedValue { $0 } },
+        proxyHostsProvider: { [configBox, pacProxyHosts] in
+            ProxyHostNames(config: configBox.current, pacHosts: pacProxyHosts.current)
+        },
         onResolutionRecovered: { [weak self] recovery in
             Task { @RuntimeActor in await self?.handleDNSResolutionRecovered(recovery) }
         },
