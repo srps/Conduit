@@ -139,11 +139,12 @@ jobs:
         python3 scripts/test-status-stream.py "$conduit_bin_dir/pm-proxy"
 
   vpn-detection-model:
-    # The TLA+ model of the VPN detection chain (formal/vpn-detection, skill
-    # vpn-detection-model). It needs Java and Python, not Xcode, so it runs
-    # beside the build on a Linux runner. Every run checks the default tier;
-    # a change to a covered file or to the model, and the nightly run, check
-    # the full tier (check.py --full).
+    # The TLA+ models of the VPN detection chain and of the 0049 resolver
+    # override (formal/vpn-detection, skills vpn-detection-model and
+    # vpn-dns-override-model). It needs Java and Python, not Xcode, so it runs
+    # beside the build on a Linux runner. Every run checks both specs' default
+    # tier; a change to a spec's covered files or model runs that spec's full
+    # tier (check.py --full-for), and the nightly run checks every full tier.
     runs-on: ubuntu-24.04
     # About 20 minutes for the default tier and 60 to 80 for the full tier on
     # a 4-core runner (44 minutes with 4 TLC workers on a 12-core laptop).
@@ -176,11 +177,13 @@ jobs:
           echo "args=--full --mutants" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-        # check.py's COVERED list is the coverage record's files.
-        changed="$(python3 formal/vpn-detection/check.py --changed "$base")"
-        if [ -n "$changed" ]; then
-          printf 'Covered or model files changed:\n%s\n' "$changed"
-          echo "args=--full --mutants" >> "$GITHUB_OUTPUT"
+        # Each spec's coverage list in check.py is its coverage record's files;
+        # only the specs whose files changed run their full tier.
+        specs="$(python3 formal/vpn-detection/check.py --full-for "$base")"
+        if [ -n "$specs" ]; then
+          printf 'Covered or model files changed for: %s\n' "$specs"
+          python3 formal/vpn-detection/check.py --changed "$base"
+          echo "args=--full=$specs --mutants" >> "$GITHUB_OUTPUT"
         else
           echo "args=--mutants" >> "$GITHUB_OUTPUT"
         fi
