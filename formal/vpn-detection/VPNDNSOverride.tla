@@ -422,11 +422,16 @@ AppTake ==
     /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, fwd, budget, ghost>>
 
 \* A flap lasts well under a tick, so a tick re-arms only once the service is back.
+\* A status that adopts an unconfirmed apply counts it as ApplyOK does.
 Polled(a) ==
     IF rec.has /\ rec.n \in {a.known, a.unApply} \ {NONE}
-    THEN [a EXCEPT !.known = rec.n, !.box = rec.n, !.unApply = NONE, !.unRel = FALSE, !.fresh = @ \/ svc, !.tries = 0,
-                   !.rewritten = @ \/ (SameRewriteReapplies /\ svc /\ a.view = key /\ key \in Versions
-                                       /\ ~a.ovr)]
+    THEN LET adopt == rec.n # a.known
+         IN [a EXCEPT !.known = rec.n, !.box = rec.n, !.unApply = NONE, !.unRel = FALSE, !.fresh = @ \/ svc, !.tries = 0,
+                      !.rewritten = @ \/ (SameRewriteReapplies /\ svc /\ a.view = key /\ key \in Versions
+                                          /\ ~a.ovr),
+                      !.applies = IF adopt /\ RefusalsSeparate /\ ~(SameServersUncapped /\ rec.n = a.lastN)
+                                  THEN @ + 1 ELSE @,
+                      !.lastN = IF adopt THEN rec.n ELSE @, !.spaced = @ \/ adopt]
     ELSE [Forget(a) EXCEPT !.fresh = @ \/ svc, !.tries = 0]
 
 AppPoll ==

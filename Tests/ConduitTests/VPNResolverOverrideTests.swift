@@ -18,6 +18,7 @@ final class ScriptedVPNDNSOverrideClient: PrivilegeClient, @unchecked Sendable {
     private var held: VPNDNSOverrideState?
     private var lastRelease: String?
     private var restorePending: String?
+    private var losesApplyReplies = false
     private var script: [Scripted] = []
     private var log: [VPNDNSOverrideRequest] = []
     private var onCall: (@Sendable (VPNDNSOverrideRequest) -> Void)?
@@ -50,6 +51,10 @@ final class ScriptedVPNDNSOverrideClient: PrivilegeClient, @unchecked Sendable {
         lock.withLock { restorePending = reason }
     }
 
+    func loseApplyReplies() {
+        lock.withLock { losesApplyReplies = true }
+    }
+
     func execute(_ operation: PrivilegedOperation, values: [String]) throws {}
     func dnsRelayStatus() throws -> DNSRelayStatus? { nil }
 
@@ -65,18 +70,20 @@ final class ScriptedVPNDNSOverrideClient: PrivilegeClient, @unchecked Sendable {
         case nil: break
         }
         guard supported else { return .unsupported }
-        return lock.withLock {
+        let (reply, lost) = lock.withLock { () -> (VPNDNSOverrideReply, Bool) in
             switch request {
             case .apply(let service, let expected):
                 held = VPNDNSOverrideState(serviceID: service, originals: expected)
-                return .applied
+                return (.applied, losesApplyReplies)
             case .release:
                 held = nil
-                return .released
+                return (.released, false)
             case .status:
-                return .status(held, lastRelease: lastRelease, restorePending: restorePending)
+                return (.status(held, lastRelease: lastRelease, restorePending: restorePending), false)
             }
         }
+        if lost { throw Unreachable() }
+        return reply
     }
 }
 
@@ -701,6 +708,48 @@ final class VPNResolverOverrideControllerTests: XCTestCase {
         }
 
         XCTAssertFalse(events.contains { $0.hasPrefix("dns.vpn_override_suspended") })
+    }
+
+    @RuntimeActor func testAnApplyWhoseReplyIsLostIsCountedOnceWhenTheStatusConfirmsIt() async {
+        let client = ScriptedVPNDNSOverrideClient()
+        let controller = controller(client)
+        client.loseApplyReplies()
+        await controller.pass({ self.inputs() }, pollStatus: false)
+        XCTAssertEqual(events, ["dns.vpn_override_failed operation=apply reason=helper_unreachable"])
+
+        await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: true)
+        let confirmedAt = clock.now
+        await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: true)
+
+        XCTAssertEqual(controller.record, heldRecord)
+        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_applied") }, [
+            "dns.vpn_override_applied service=com.cisco.anyconnect servers=2 confirmed=status",
+        ])
+
+        clock.advance(.seconds(3))
+        let sent = client.requests.count
+        await controller.pass({ self.inputs([fullTunnel()]) }, pollStatus: false)
+        XCTAssertFalse(client.requests.dropFirst(sent).contains { if case .apply = $0 { true } else { false } }, "spaced from the confirmed apply")
+        XCTAssertEqual(controller.wakeAt, confirmedAt + VPNResolverOverridePolicy.minimumApplySpacing)
+    }
+
+    @RuntimeActor func testAppliesWhoseRepliesAreLostCountTowardTheCap() async {
+        let client = ScriptedVPNDNSOverrideClient()
+        let controller = controller(client)
+        client.loseApplyReplies()
+        for index in 1...4 {
+            let servers = ["203.0.113.\(index)"]
+            await controller.pass({ self.inputs([fullTunnel(servers: servers)], inUse: Set(servers)) }, pollStatus: false)
+            await controller.pass(
+                { self.inputs([fullTunnel(servers: servers, overridden: true)], inUse: Set(servers)) }, pollStatus: true
+            )
+            clock.advance(.seconds(20))
+        }
+
+        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_applied") }.count, 3)
+        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_suspended") }, [
+            "dns.vpn_override_suspended service=com.cisco.anyconnect cap=applied",
+        ])
     }
 
     @RuntimeActor func testARestoreTheHelperCouldNotWriteIsReportedOnceAndItsReleaseFollows() async {

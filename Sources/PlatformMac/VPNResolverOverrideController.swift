@@ -67,6 +67,8 @@ package final class VPNResolverOverrideController {
     private var wakeTask: Task<Void, Never>?
 
     private var unconfirmedApply: VPNDNSOverrideState?
+    private var unconfirmedApplySequence: UInt64 = 0
+    private var accountedApplySequence: UInt64 = 0
     private var restorePendingReported = false
     private var unconfirmedRelease = false
     private var appliesInFlight = 0
@@ -243,12 +245,7 @@ package final class VPNResolverOverrideController {
         let fresh = settle(sequence)
         switch result {
         case .success(.applied):
-            if lastApplies[service]?.servers != expected { note(service, in: &applies) }
-            noteLanded(service, servers: expected)
-            backoffStep = 0
-            backoffUntil = nil
-            let detail = "service=\(service) servers=\(expected.count)"
-            emit(RuntimeEvent(kind: .health, event: "dns.vpn_override_applied", detail: detail), .notice)
+            landed(attempt, sequence: sequence, detail: "")
             guard fresh else { return }
             record = attempt
             appliedAt = now()
@@ -260,7 +257,7 @@ package final class VPNResolverOverrideController {
             if fresh { markUnsupported() }
         case .success(.refused(.writeFailed)):
             failed("apply", reason: VPNDNSOverrideRefusal.writeFailed.rawValue)
-            if fresh { unconfirmedApply = attempt }
+            if fresh { unconfirm(attempt, sequence: sequence) }
         case .success(.refused(let refusal)):
             emit(RuntimeEvent(kind: .health, event: "dns.vpn_override_refused", detail: "reason=\(refusal.rawValue)"), .warning)
             if refusal == .relayNotServing { armBackoff() }
@@ -268,11 +265,28 @@ package final class VPNResolverOverrideController {
             self.substitutions.set(record.map { [$0.serviceID: $0.originals] } ?? [:])
         case .success(let reply):
             failed("apply", reason: "unexpected_reply_\(Self.name(reply))")
-            if fresh { unconfirmedApply = attempt }
+            if fresh { unconfirm(attempt, sequence: sequence) }
         case .failure(let error):
             failed("apply", reason: error.localizedDescription)
-            if fresh { unconfirmedApply = attempt }
+            if fresh { unconfirm(attempt, sequence: sequence) }
         }
+    }
+
+    private func unconfirm(_ attempt: VPNDNSOverrideState, sequence: UInt64) {
+        unconfirmedApply = attempt
+        unconfirmedApplySequence = sequence
+    }
+
+    /// Counts an apply the helper holds once, whether its reply or a later status shows it.
+    private func landed(_ attempt: VPNDNSOverrideState, sequence: UInt64, detail suffix: String) {
+        guard sequence > accountedApplySequence else { return }
+        accountedApplySequence = sequence
+        if lastApplies[attempt.serviceID]?.servers != attempt.originals { note(attempt.serviceID, in: &applies) }
+        noteLanded(attempt.serviceID, servers: attempt.originals)
+        backoffStep = 0
+        backoffUntil = nil
+        let detail = "service=\(attempt.serviceID) servers=\(attempt.originals.count)\(suffix)"
+        emit(RuntimeEvent(kind: .health, event: "dns.vpn_override_applied", detail: detail), .notice)
     }
 
     private func call(_ request: VPNDNSOverrideRequest) async -> Result<VPNDNSOverrideReply, any Error> {
@@ -297,10 +311,12 @@ package final class VPNResolverOverrideController {
     ) {
         let ours = [record, unconfirmedApply].compactMap { $0 }
         let releasedByHelper = record != nil && held == nil && !unconfirmedRelease
+        let adopted = unconfirmedApply
         unconfirmedApply = nil
         unconfirmedRelease = false
         if let held, ours.contains(held) {
             if held != record {
+                if held == adopted { landed(held, sequence: unconfirmedApplySequence, detail: " confirmed=status") }
                 writeSeen = false
                 keyRewritten = false
                 appliedAt = now()

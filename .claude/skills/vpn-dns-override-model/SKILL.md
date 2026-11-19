@@ -90,7 +90,7 @@ Synced at SYNC_COMMIT. Move it forward only after you confirm, function by funct
 | `key`, `svc`, `ver`, `ClientRewrite`, `ClientRewriteSame`, `ClientDelete`, `ClientPublishDNS`, `ClientPublishIPv4`, `ClientRepublish`, `ClientIPv4Flap`, `ClientIPv4Back` | the VPN client writing `State:/Network/Service/<id>/DNS` and `/IPv4` (another process) |
 | `vgate`, `GateFlap`, `GateBack` | `SplitDNSVPNGate.entriesWanted` (its chain is `VPNDetection.tla`) |
 | `rec` | `Sources/ConduitShared/VPNDNSOverrideLedger.swift` `record` and `persistence` |
-| `HAccept` (apply) | `VPNDNSOverrideLedger.apply`: `check()` (one `dns(service:)` read, `ipv4Exists`, `primaryService`, `servers == expected`, `probe.tcpListening()`, `probe.probe()`), the release of another service's record, `persistence.save` |
+| `HAccept` (apply) | `VPNDNSOverrideLedger.apply`: `check()` (one `dns(service:)` read, `ipv4Exists`, `primaryService`, `servers == expected`, `probe.tcpListening()`, `probe.probe()`), the release of another service's record, `persistence.save`, and the second `dns(service:)` read that must equal the first (the model's one read is this one) |
 | `HApplyWrite` | `apply`: `store.setDNS(overridden)` |
 | `HApplyIPv4`, `ApplyChecksService`, `WatchOwner` | `apply`: `guard store.ipv4Exists(service:)`, `record = replacement`, `resetProbeStreaks`; `Sources/ConduitHelper/HelperDaemon.swift` `applyVPNDNSOverride` (`overrideOwner = peerPID`) and `run`'s `loop.watchOwner(...)`, `ESRCH` releasing `.ownerExited` |
 | `HApplyGoneRead`, `HApplyGoneWrite`, `ApplyGoneCompares` | `apply`'s no-IPv4 path: `store.dns(service:) == overridden`, `setDNS` of the originals, `forgetRecord`, refused `not_found` |
@@ -107,7 +107,7 @@ Synced at SYNC_COMMIT. Move it forward only after you confirm, function by funct
 | `DecisionOf`, `WantedOf`, `UseSetOf`, `ServersInUse`, `HoldRule`, `KeepsThroughFlap` | `Sources/PlatformMac/VPNResolverOverridePolicy.swift` `decide`, `wanted`; `Sources/ConduitRuntime/RuntimeHostVPNDNSOverride.swift` `vpnDNSOverrideInputs`; `HoldRule`, `HoldOnSetInUse`: `VPNResolverOverridePolicy.holds`; `CapReached`, `SameServers`, `SameServersUncapped`: the cap and `lastApplies`' servers |
 | `MayHoldOf`, `known`, `unApply`, `unRel`, `applies`, `refusals`, `lastN`, `spaced`, `susp`, `rewritten`, `fresh`, `tries`, `RefusalsSeparate`, `RefusalsCapped`, `RefusalRetriesAtOnce`, `SuspensionsExpire` | `Sources/PlatformMac/VPNResolverOverrideController.swift` `mayHoldRecord`, `record`, `unconfirmedApply`, `unconfirmedRelease`, `applies` (`note(_:in:)`), `lastApplies` (`noteLanded`), `wakeAt`, `suspended`, `keyRewritten`, `observe` |
 | `SpacingElapses`, `SuspensionExpires` | controller `armWake(at:)` and `onWake` (`RuntimeHost.requestVPNDNSOverrideRun`); `observe`'s expiry of `suspended` past `suspensionLifetime` |
-| `AppPoll`, `Polled`, `SameRewriteReapplies` | controller `pass`'s `status(_:)` and `confirm(_:lastRelease:reading:)` (`keyRewritten` once `writeSeen` or `readingSettle`) |
+| `AppPoll`, `Polled`, `SameRewriteReapplies` | controller `pass`'s `status(_:)` and `confirm(_:lastRelease:restorePending:reading:)` (`keyRewritten` once `writeSeen` or `readingSettle`; an adopted `unconfirmedApply` counted through `landed`) |
 | `AppPass`, `ApplyOK`, `ApplyRefused`, `ApplyFailed`, `ReleaseOK`, `ReleaseFailed`, `AfterCall` | controller `pass`, `apply`, `release`; `RuntimeHostVPNDNSOverride.runVPNDNSOverride` (the held set after the pass, `HeldSetRechecked`) |
 | `AppTake`, `NewSet`, `HoldBeforeRelease`, `FlapHold` | `Sources/ConduitRuntime/RuntimeHostSplitDNSDetection.swift` `applyPendingSplitDNSDetection`, `vpnDNSOverrideReleases(before:)`; `LiveSplitDNSDetection.take`; `Sources/PlatformMac/LiveSplitDNSPolicy.swift` `heldThroughFlap` (added to the model on claude/vpn-override-flap: without it every flap dropped the set) |
 | `AppRestartRelay`, `AppStartDNS` | `RuntimeHost.handleDNSHealthResult` (a relay restart); `startDNSModule` and `SystemDNSManager.startRelay` |
@@ -128,6 +128,7 @@ The atomicity of each step, and the code it relies on, is in the spec's header.
 6. A helper reply is applied by the app instance that sent it, and dropped if it exited.
 7. The pid watch, the reply and the held set's application join the step that ends their event or turn; no key is touched between them.
 8. `readingSettle` is abstracted as the reading being the key as it is: the status call that finds a same-server rewrite comes after the reading has caught up.
+9. A store write never fails. A failed restore keeps the record (`restorePending`) and the next tick retries it before any probe; the Swift tests and `dns-vpn-override-restore-retry` cover that, not the model.
 
 ## What it leaves out
 
