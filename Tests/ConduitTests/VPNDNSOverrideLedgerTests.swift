@@ -255,13 +255,96 @@ final class VPNDNSOverrideLedgerTests: XCTestCase {
         XCTAssertTrue(outcomes.contains(.serviceGoneDuringApply(service: service, restored: true)))
     }
 
-    func testAFailedRestoreIsReportedAndTheRecordDropped() {
+    func testAFailedRestoreIsReportedAndTheRecordKeptForTheNextTick() {
         applied()
         store.failsWrites = true
         ledger.release(reason: .requested)
-        XCTAssertNil(ledger.status())
+        let held = VPNDNSOverrideRecord(serviceID: service, originals: servers)
+        XCTAssertEqual(ledger.status(), held)
+        XCTAssertEqual(ledger.restorePending, .requested)
+        XCTAssertEqual(file.load(), .record(held), "the record stays on disk")
+        XCTAssertNil(ledger.lastRelease, "nothing was released yet")
         XCTAssertEqual(outcomes, [.released(service: service, reason: .requested, write: .restoreFailed)])
         XCTAssertTrue(outcomes[0].isFailure)
+        XCTAssertTrue(outcomes[0].logLine.hasSuffix("write=restore_failed restore_pending=next_tick"), outcomes[0].logLine)
+    }
+
+    func testAFailedRestoreIsRetriedOnTheNextTickBeforeAnyProbeAndLands() {
+        applied()
+        store.failsWrites = true
+        ledger.release(reason: .ownerExited)
+        ledger.tick()
+        XCTAssertEqual(ledger.restorePending, .ownerExited, "still failing: kept")
+        XCTAssertEqual(outcomes.count, 2, "one retry per tick")
+
+        store.failsWrites = false
+        probe.verdict = .refused
+        let probesBefore = probe.probes
+        ledger.tick()
+
+        XCTAssertEqual(probe.probes, probesBefore, "the retry comes before any probe")
+        XCTAssertEqual(store.serverAddresses(service), servers)
+        XCTAssertNil(ledger.status())
+        XCTAssertNil(ledger.restorePending)
+        XCTAssertNil(file.bytes)
+        XCTAssertEqual(ledger.lastRelease, .ownerExited)
+        XCTAssertEqual(outcomes.last, .released(service: service, reason: .ownerExited, write: .restored))
+    }
+
+    func testAPendingRestoreWhoseKeyTheClientRewroteIsForgotten() {
+        applied()
+        store.failsWrites = true
+        ledger.release(reason: .requested)
+        store.failsWrites = false
+        store.clientRewrite(service, servers: ["192.0.2.99"])
+
+        ledger.tick()
+
+        XCTAssertNil(ledger.status())
+        XCTAssertNil(file.bytes)
+        XCTAssertEqual(store.serverAddresses(service), ["192.0.2.99"])
+        XCTAssertEqual(outcomes.last, .released(service: service, reason: .requested, write: .keyChanged))
+    }
+
+    func testAPersistedRecordWhoseRestoreFailsAtHelperStartIsKeptForTheNextTick() {
+        applied()
+        store.failsWrites = true
+        let restarted = makeLedger()
+        restarted.start()
+
+        let held = VPNDNSOverrideRecord(serviceID: service, originals: servers)
+        XCTAssertEqual(restarted.status(), held)
+        XCTAssertEqual(restarted.restorePending, .helperStart)
+        XCTAssertEqual(file.load(), .record(held))
+        XCTAssertEqual(outcomes, [.released(service: service, reason: .helperStart, write: .restoreFailed)])
+
+        store.failsWrites = false
+        restarted.tick()
+        XCTAssertNil(restarted.status())
+        XCTAssertEqual(store.serverAddresses(service), servers)
+        XCTAssertEqual(outcomes.last, .released(service: service, reason: .helperStart, write: .restored))
+    }
+
+    func testAnApplyToAnotherServiceWhileARestoreIsPendingIsRefused() {
+        applied()
+        let other = "11111111-2222-3333-4444-555555555555"
+        store.connectFullTunnel(other, servers: ["203.0.113.53"])
+        store.primary = service
+        store.failsWrites = true
+        ledger.release(reason: .requested)
+        store.primary = other
+        outcomes = []
+
+        XCTAssertEqual(ledger.apply(service: other, expected: ["203.0.113.53"]), .refused(.writeFailed))
+
+        let held = VPNDNSOverrideRecord(serviceID: service, originals: servers)
+        XCTAssertEqual(ledger.status(), held, "one record, the pending one")
+        XCTAssertEqual(file.load(), .record(held), "its file is not overwritten")
+        XCTAssertEqual(store.serverAddresses(other), ["203.0.113.53"])
+        XCTAssertEqual(outcomes, [
+            .released(service: service, reason: .requested, write: .restoreFailed),
+            .refused(service: other, reason: .writeFailed),
+        ])
     }
 
     func testReleaseWithNothingHeldWritesNothing() {

@@ -98,6 +98,8 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
             return "\(prefix) applied service=\(HelperAudit.safe(service)) servers=\(servers)"
         case .refused(let service, let reason):
             return "\(prefix) refused service=\(HelperAudit.safe(service)) reason=\(reason.rawValue)"
+        case .released(let service, let reason, let write) where write.failed:
+            return "\(prefix) release service=\(HelperAudit.safe(service)) reason=\(reason.rawValue) write=\(write.rawValue) restore_pending=next_tick"
         case .released(let service, let reason, let write):
             return "\(prefix) released service=\(HelperAudit.safe(service)) reason=\(reason.rawValue) write=\(write.rawValue)"
         case .nothingToRelease(let reason):
@@ -152,6 +154,8 @@ package final class VPNDNSOverrideLedger {
     private let report: (VPNDNSOverrideOutcome) -> Void
     private var record: VPNDNSOverrideRecord?
     package private(set) var lastRelease: VPNDNSOverrideReleaseReason?
+    /// Set while the record is held only because its restore failed; each tick retries it before any probe.
+    package private(set) var restorePending: VPNDNSOverrideReleaseReason?
     private var consecutiveRefused = 0
     private var consecutiveSilent = 0
 
@@ -192,8 +196,10 @@ package final class VPNDNSOverrideLedger {
         case .passed(let dns):
             current = dns
         }
-        if let held = record, held.serviceID != service {
-            release(reason: .requested)
+        if let held = record, held.serviceID != service || restorePending != nil,
+           release(reason: restorePending ?? .requested)?.failed == true {
+            report(.refused(service: service, reason: .writeFailed))
+            return .refused(.writeFailed)
         }
         let replacement = VPNDNSOverrideRecord(serviceID: service, originals: expected)
         do {
@@ -262,8 +268,12 @@ package final class VPNDNSOverrideLedger {
             return nil
         }
         let write = restore(held)
-        forgetRecord()
-        lastRelease = reason
+        if write.failed {
+            restorePending = reason
+        } else {
+            forgetRecord()
+            lastRelease = reason
+        }
         report(.released(service: held.serviceID, reason: reason, write: write))
         return write
     }
@@ -277,6 +287,10 @@ package final class VPNDNSOverrideLedger {
 
     package func tick() {
         guard let held = record else { return }
+        if let pending = restorePending {
+            release(reason: pending)
+            return
+        }
         guard probe.tcpListening() else {
             release(reason: .relayStopped)
             return
@@ -323,6 +337,7 @@ package final class VPNDNSOverrideLedger {
 
     private func forgetRecord() {
         record = nil
+        restorePending = nil
         resetProbeStreaks()
         deleteFile()
     }

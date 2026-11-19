@@ -254,6 +254,7 @@ enum HelperDaemon {
             var response = HelperResponse.ok()
             response.vpnDNSOverride = vpnDNSOverrideStatus()
             response.vpnDNSOverrideLastRelease = vpnDNSOverride.lastRelease?.rawValue
+            response.vpnDNSOverrideRestorePending = vpnDNSOverride.restorePending?.rawValue
             return (response, .ok)
         case .dnsRelayStatus:
             return dnsRelayStatus()

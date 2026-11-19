@@ -429,6 +429,8 @@ public struct HelperResponse: Codable, Sendable, Equatable {
     public var vpnDNSOverride: HelperVPNDNSOverrideStatus?
     public var vpnDNSOverrideRefusal: HelperVPNDNSOverrideRefusal?
     public var vpnDNSOverrideLastRelease: String?
+    /// The release reason while the helper still holds the record because its restore failed.
+    public var vpnDNSOverrideRestorePending: String?
 
     public static func ok() -> HelperResponse {
         HelperResponse(protocolVersion: HelperProtocolVersion.current, success: true)
@@ -470,7 +472,8 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         features: [HelperFeature]? = nil,
         vpnDNSOverride: HelperVPNDNSOverrideStatus? = nil,
         vpnDNSOverrideRefusal: HelperVPNDNSOverrideRefusal? = nil,
-        vpnDNSOverrideLastRelease: String? = nil
+        vpnDNSOverrideLastRelease: String? = nil,
+        vpnDNSOverrideRestorePending: String? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.success = success
@@ -484,6 +487,7 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         self.vpnDNSOverride = vpnDNSOverride
         self.vpnDNSOverrideRefusal = vpnDNSOverrideRefusal
         self.vpnDNSOverrideLastRelease = vpnDNSOverrideLastRelease
+        self.vpnDNSOverrideRestorePending = vpnDNSOverrideRestorePending
     }
 
     enum CodingKeys: String, CodingKey {
@@ -499,6 +503,7 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         case vpnDNSOverride
         case vpnDNSOverrideRefusal
         case vpnDNSOverrideLastRelease
+        case vpnDNSOverrideRestorePending
     }
 
     public init(from decoder: Decoder) throws {
@@ -517,6 +522,7 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         vpnDNSOverride = try? container.decodeIfPresent(HelperVPNDNSOverrideStatus.self, forKey: .vpnDNSOverride)
         vpnDNSOverrideRefusal = try? container.decodeIfPresent(HelperVPNDNSOverrideRefusal.self, forKey: .vpnDNSOverrideRefusal)
         vpnDNSOverrideLastRelease = try? container.decodeIfPresent(String.self, forKey: .vpnDNSOverrideLastRelease)
+        vpnDNSOverrideRestorePending = try? container.decodeIfPresent(String.self, forKey: .vpnDNSOverrideRestorePending)
     }
 }
 

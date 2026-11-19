@@ -67,6 +67,7 @@ package final class VPNResolverOverrideController {
     private var wakeTask: Task<Void, Never>?
 
     private var unconfirmedApply: VPNDNSOverrideState?
+    private var restorePendingReported = false
     private var unconfirmedRelease = false
     private var appliesInFlight = 0
     private var releaseInFlight: UInt64?
@@ -216,9 +217,9 @@ package final class VPNResolverOverrideController {
         let result = await call(.status)
         guard settle(sequence) else { return }
         switch result {
-        case .success(.status(let held, let lastRelease)):
+        case .success(.status(let held, let lastRelease, let restorePending)):
             support = .supported
-            confirm(held, lastRelease: lastRelease, reading: reading)
+            confirm(held, lastRelease: lastRelease, restorePending: restorePending, reading: reading)
         case .success(.unsupported):
             markUnsupported()
         case .success(let reply):
@@ -291,7 +292,9 @@ package final class VPNResolverOverrideController {
         return true
     }
 
-    private func confirm(_ held: VPNDNSOverrideState?, lastRelease: String?, reading: PushedResolverReading) {
+    private func confirm(
+        _ held: VPNDNSOverrideState?, lastRelease: String?, restorePending: String?, reading: PushedResolverReading
+    ) {
         let ours = [record, unconfirmedApply].compactMap { $0 }
         let releasedByHelper = record != nil && held == nil && !unconfirmedRelease
         unconfirmedApply = nil
@@ -306,6 +309,7 @@ package final class VPNResolverOverrideController {
             let settled = writeSeen || appliedAt.map { now() - $0 >= Self.readingSettle } ?? true
             if settled, Self.ownServers(of: held, in: reading) { keyRewritten = true }
             substitutions.set([held.serviceID: held.originals])
+            notePendingRestore(of: held, reason: restorePending)
         } else if releasedByHelper {
             forgetRecord()
             let known = lastRelease.flatMap(VPNDNSOverrideReleaseReason.init(rawValue:))?.rawValue
@@ -318,10 +322,23 @@ package final class VPNResolverOverrideController {
         }
     }
 
+    private func notePendingRestore(of held: VPNDNSOverrideState, reason: String?) {
+        guard let reason else {
+            restorePendingReported = false
+            return
+        }
+        guard !restorePendingReported else { return }
+        restorePendingReported = true
+        let known = VPNDNSOverrideReleaseReason(rawValue: reason)?.rawValue ?? "unknown"
+        let detail = "service=\(held.serviceID) reason=helper:\(known)"
+        emit(RuntimeEvent(kind: .health, event: "dns.vpn_override_restore_pending", detail: detail), .warning)
+    }
+
     private func forgetRecord() {
         record = nil
         unconfirmedApply = nil
         unconfirmedRelease = false
+        restorePendingReported = false
         writeSeen = false
         keyRewritten = false
         appliedAt = nil

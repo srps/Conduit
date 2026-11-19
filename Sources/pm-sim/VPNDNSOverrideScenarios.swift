@@ -16,7 +16,7 @@ enum VPNDNSOverrideScenarios {
     private static let relay = ["127.0.0.1"]
     private static let overrideEvents: Set<String> = [
         "dns.vpn_override_applied", "dns.vpn_override_released", "dns.vpn_override_refused",
-        "dns.vpn_override_suspended", "dns.vpn_override_failed",
+        "dns.vpn_override_suspended", "dns.vpn_override_failed", "dns.vpn_override_restore_pending",
     ]
 
     @RuntimeActor
@@ -233,6 +233,43 @@ enum VPNDNSOverrideScenarios {
         } verify: { events, check in
             let releases = names(events).filter { $0.hasPrefix("dns.vpn_override_released") }
             check("the release carries the helper's reason", releases.first == "dns.vpn_override_released reason=helper:relay_stopped")
+        }
+    }
+
+    @RuntimeActor
+    static func restoreRetry() async throws -> ScenarioResult {
+        try await run(name: "dns-vpn-override-restore-retry") { stage, check in
+            try await stage.connect()
+            check("the override lands", try await stage.until { stage.key == relay })
+            stage.publish()
+            try await stage.pass()
+
+            stage.machine.vpnDNSStore.failsWrites = true
+            stage.machine.vpnDNSProbe.verdict = .refused
+            stage.machine.tickVPNDNSOverride()
+            stage.machine.tickVPNDNSOverride()
+            check("the release could not write the key", stage.released == [.restoreFailed] && stage.key == relay)
+            check("the record is kept, on disk, for a retry",
+                  stage.machine.vpnDNSRecordFile.bytes != nil
+                      && stage.machine.vpnDNSOverrideOutcomes.last?.logLine.hasSuffix("restore_pending=next_tick") == true)
+
+            stage.machine.tickVPNDNSOverride()
+            check("each tick retries once", stage.released == [.restoreFailed, .restoreFailed])
+
+            stage.machine.vpnDNSStore.failsWrites = false
+            stage.machine.tickVPNDNSOverride()
+            check("the next tick's retry restores the servers",
+                  stage.released == [.restoreFailed, .restoreFailed, .restored] && stage.key == tunnelServers)
+            check("the record is gone", stage.machine.vpnDNSRecordFile.bytes == nil)
+
+            stage.machine.vpnDNSProbe.verdict = .answered
+            stage.publish()
+            check("the app sees the helper's release",
+                  try await stage.until { stage.events.contains { $0.event == "dns.vpn_override_released" } })
+        } verify: { events, check in
+            let releases = names(events).filter { $0.hasPrefix("dns.vpn_override_released") }
+            check("the release carries the reason of the release that failed",
+                  releases.first == "dns.vpn_override_released reason=helper:target_refused")
         }
     }
 
