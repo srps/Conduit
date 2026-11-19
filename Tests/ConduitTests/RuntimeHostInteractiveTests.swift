@@ -103,6 +103,7 @@ final class InteractiveHostHarness {
         var pacEvaluator: any PacEvaluator = FakePacEvaluator()
         /// The state-file access the host's store uses; a test that parks a store step names a `HeldStateFileRead`.
         var stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem()
+        var vpnDNSOverride: (any PrivilegeClient)?
         /// The helper status source; nil observes none. A preflight test names a `FakeHelperLifecycle` read through `hold`.
         var helperStatus: (any HelperLifecycleManaging)?
         /// The saved-password store; a credentials test shares it with the app-side writer it stands in for.
@@ -133,6 +134,7 @@ final class InteractiveHostHarness {
             let dnsProbes = self.dnsProbes
             let dnsProbe = self.dnsProbe
             let helperStatus = self.helperStatus.map { HoldingHelperStatus(base: $0, hold: hold) }
+            let vpnDNSOverride = self.vpnDNSOverride
             let built = try await RuntimeHost.open(
                 stateSession: session,
                 logger: logger,
@@ -141,7 +143,10 @@ final class InteractiveHostHarness {
                 terminalExit: { XCTFail("the runtime host ended the process") },
                 effects: RuntimeHostEffects(
                     privilege: { _ in
-                        RuntimePrivilegeAdapters(client: HoldingPrivilegeClient(base: machine, hold: hold), helperStatus: helperStatus)
+                        RuntimePrivilegeAdapters(
+                            client: HoldingPrivilegeClient(base: machine, hold: hold, vpnDNSOverride: vpnDNSOverride),
+                            helperStatus: helperStatus
+                        )
                     },
                     credentials: credentials,
                     kerberosTicketRecovery: FakeKerberosTicketRecovery(),

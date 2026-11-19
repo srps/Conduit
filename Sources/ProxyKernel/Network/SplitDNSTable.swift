@@ -122,6 +122,10 @@ package struct SplitDNSTable: Hashable, Sendable {
         rules.first { !$0.servers.isEmpty }?.servers ?? []
     }
 
+    package var usesPushedServers: Bool {
+        rules.contains { $0.origins.contains { $0 != .manual } }
+    }
+
     private static func normalize(_ domain: String) -> String {
         var lower = domain.lowercased()
         while lower.hasSuffix(".") { lower.removeLast() }

@@ -30,8 +30,12 @@ extension RuntimeHost {
 
     /// Applies the newest detected set and reports what the policy rejected or could not read, events first. The
     /// events describe the step from the set the orchestrator holds to this one, so a set that a burst of
-    /// readings passed through and left is not reported. Idempotent: with nothing pending it does nothing.
+    /// readings passed through and left is not reported.
+    ///
+    /// A set that needs a release first or lands mid-pass waits for the override pass, so the relay never lacks the tunnel.
     func applyPendingSplitDNSDetection() {
+        defer { requestVPNDNSOverrideRun(pollStatus: false) }
+        applyNetworkResolver(splitDNSDetection.lastReading.network)
         guard let pending = splitDNSDetection.take() else { return }
         for change in pending.store {
             switch change {
@@ -51,6 +55,23 @@ extension RuntimeHost {
         }
         reportIgnoredResolvers(pending.ignored)
         guard let set = pending.set else { return }
+        if vpnDNSOverrideRunning || vpnDNSOverrideReleases(before: set) {
+            vpnDNSOverrideHeldSet = set
+            return
+        }
+        applyDetectedSet(set)
+    }
+
+    /// Reports counts only, never the addresses.
+    private func applyNetworkResolver(_ network: NetworkResolver?) {
+        let servers = network?.servers ?? []
+        guard orchestrator.applyNetworkResolverServers(servers) else { return }
+        let detail = network.map { "interface=\($0.interface) servers=\($0.servers.count) skipped=\($0.skipped)" }
+            ?? "interface=none servers=0 skipped=0"
+        record(RuntimeEvent(kind: .health, event: "dns.network_resolver_changed", detail: detail), level: .notice)
+    }
+
+    func applyDetectedSet(_ set: LiveSplitDNSDetection.DetectedSet) {
         reportDetectedSplitDNS(before: orchestrator.snapshot.detectedSplitDNS, after: set.display)
         orchestrator.applyDetectedSplitDNSRules(set.rules, display: set.display, reason: set.reason)
     }
