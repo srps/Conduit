@@ -29,7 +29,7 @@ That path has a circular dependency. While the VPN is connected, DoH prefers the
 4. **How.** Ask every pushed server, in rule order and each once (`SplitDNSTable.pushedServers`), with `internalDomainTimeout`, the internal stage budget and the internal servers' circuit breaker, as an internal name is asked. The first reply, NXDOMAIN included, is the answer. Silence answers SERVFAIL. It never falls through to DoH or to the 0050 network resolver. Like an internal answer, it is not cached.
 5. **Off the VPN.** No pushed servers are in use, so the names take the public-name path unchanged.
 6. **Reporting.** `dns.proxy_host_via_tunnel` with `name=`, `servers=` (a count, never an address), `outcome=answered|silent|not_asked` and `suppressed=`, at most one per outcome per 60 s, as `dns.network_resolver_fallback` is.
-7. **Wiring.** The orchestrator hands the forwarder a `proxyHostsProvider`, in the same shape as `splitDNSProvider` and `networkResolverProvider`. It reads the current configuration and the `PACProxyHosts` record that `PACRoutingEngine` writes each time it stores an evaluated chain.
+7. **Wiring.** The orchestrator hands the forwarder a `proxyHostsProvider`, in the same shape as `splitDNSProvider` and `networkResolverProvider`. It reads the current configuration and the `PACProxyHosts` record that `PACRoutingEngine` writes each time it stores an evaluated chain. Off the VPN the same set is kept out of the 0050 network fallback, as its item 8 keeps the configured hosts.
 
 ## Alternatives
 
@@ -50,6 +50,7 @@ That path has a circular dependency. While the VPN is connected, DoH prefers the
 ## Invariants and verification
 
 - While pushed servers are in use, a configured or PAC-learned proxy host asks every pushed server and never DoH; NXDOMAIN is the answer; silence is SERVFAIL; the event carries a count, never an address, once per outcome per window. Off the VPN the same name takes the public path. A name that only has a proxy host as a suffix is a public name. `Tests/ConduitTests/DNSForwarderProxyHostTests.swift`.
+- Off the VPN, with DoH silent, a PAC-learned proxy host is never asked of the network's server: SERVFAIL and `outcome=proxy_host`. `DNSForwarderNetworkResolverTests.testAPACLearnedProxyHostIsNeverAskedOfTheNetworkServer`.
 - The PAC record holds its cap and evicts the host seen longest ago; the engine records an evaluated chain's `PROXY` hosts. `DNSForwarderProxyHostTests` and `PACRoutingEngineTests.testEvaluatedProxyHostsAreRecordedForTheForwarder`.
 - End to end through the actual host: `pm-sim dns-proxy-names-via-tunnel`. On a full tunnel that pushes `de.corp.example`, with the first pushed server silent and DoH never answering, the upstream's hostname resolves through the second pushed server, DoH is not asked for it, and a public name keeps its single attempt and DoH. With the proxy-host path disabled, four of its twelve checks fail.
 - What would disprove the design: a proxy host that reaches DoH or the network resolver while pushed servers are in use, a proxy host that reaches a pushed server off the VPN, a suffix match, or a `dns.proxy_host_via_tunnel` event that carries an address.

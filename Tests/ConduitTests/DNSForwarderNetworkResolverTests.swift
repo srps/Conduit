@@ -168,6 +168,23 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
         ], "one event per outcome per minute")
     }
 
+    func testAPACLearnedProxyHostIsNeverAskedOfTheNetworkServer() async throws {
+        let network = try await networkDNS(answering: true)
+        let doh = try await dohProvider(silent: true)
+        let port = try await start(
+            dohPort: doh.port, networkPort: network.port,
+            proxyHosts: ProxyHostNames(names: ["pac-proxy.corp.example"])
+        )
+
+        let reply = try await rawReply("pac-proxy.corp.example", port: port)
+
+        XCTAssertEqual(reply.map(DNSWireFormat.extractRCode), 2, "SERVFAIL, never the network's unauthenticated answer")
+        XCTAssertEqual(network.queryCount("pac-proxy.corp.example"), 0)
+        XCTAssertEqual(events(named: "dns.network_resolver_fallback").compactMap(\.detail), [
+            "name=pac-proxy.corp.example servers=1 outcome=proxy_host suppressed=0",
+        ])
+    }
+
     func testBothSilentAnswerServfailInsideTheRelayWindow() async throws {
         let network = try await silentServer()
         let doh = try await dohProvider(silent: true)
@@ -256,6 +273,7 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
         dohRequestTimeout: TimeInterval = 0.3,
         networkResolverTimeout: TimeAmount = .milliseconds(300),
         lookupWindow: TimeAmount? = nil,
+        proxyHosts: ProxyHostNames? = nil,
         configure: (inout ProxyConfig) -> Void = { _ in }
     ) async throws -> Int {
         var config = ProxyConfig.testFixture()
@@ -284,6 +302,7 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
             configProvider: { frozen },
             splitDNSProvider: fixedTable,
             networkResolverProvider: { servers.withLockedValue { $0 } },
+            proxyHostsProvider: proxyHosts.map { names in { @Sendable in names } },
             onResolutionRecovered: { recovery in recoveries.withLockedValue { $0.append(recovery) } },
             tuning: tuning,
             eventSink: { event in events.withLockedValue { $0.append(event) } }

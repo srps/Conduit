@@ -33,7 +33,7 @@ On the same network, 0.6.1 worked only because a manual split-DNS entry, since d
 5. **Reporting.** `dns.network_resolver_fallback` with `outcome=answered|silent|not_asked|proxy_host` and the number of network servers, never an address, rate-limited to one per outcome per minute. `dns.network_resolver_changed` when the set changes, with counts. The circuit events name the server `network-resolver`. The forwarder's counters gain `networkResolverFallbacks`.
 6. **Recovery.** When DNS answers on a path after lookups on it went unanswered, or when only the network server answered, the orchestrator retries at once what failed meanwhile: a PAC fetch past the failure backoff and, in direct mode, the upstream probe (`dns.resolution_recovered`). Once per path: the forwarder's start, or a transports reset.
 7. **The health probe.** The DNS liveness probe asks `conduit-probe.invalid`, which the forwarder answers itself, so a slow or failing upstream no longer reads as a dead relay.
-8. **Never a credential host.** The network's server is never asked for a configured upstream proxy's host or the PAC URL's host (`LocalDNSForwarder.credentialHosts`); the client gets SERVFAIL and the event says `outcome=proxy_host`. Its answer is unauthenticated plaintext, and Conduit sends `Proxy-Authorization` and answers NTLM challenges at the address an upstream's name resolves to, and connects to the proxies a PAC names. A hostile network that blocks DoH could otherwise answer those names with its own host and collect an NTLMv2 response or Basic credentials. A split-DNS entry that names the network's server for the company's domain is the explicit way to trust it for those names.
+8. **Never a credential host.** The network's server is never asked for a configured upstream proxy's host, a `PROXY` host a PAC answer named (the set decision 0051 keeps) or the PAC URL's host (`LocalDNSForwarder.credentialHosts` and the forwarder's `proxyHostsProvider`); the client gets SERVFAIL and the event says `outcome=proxy_host`. Its answer is unauthenticated plaintext, and Conduit sends `Proxy-Authorization` and answers NTLM challenges at the address an upstream's name resolves to, and connects to the proxies a PAC names. A hostile network that blocks DoH could otherwise answer those names with its own host and collect an NTLMv2 response or Basic credentials. A split-DNS entry that names the network's server for the company's domain is the explicit way to trust it for those names.
 
 ## Alternatives
 
@@ -73,6 +73,6 @@ Does not prove: behaviour on the owner's office LAN with a real DHCP server and 
 
 ## Open questions
 
-- Whether the owner's office resolves its proxy and PAC names through DoH, or needs a split-DNS entry naming the LAN's server (item 8). The proxy hosts a PAC returns are not yet excluded: the forwarder learns them in #334, which extends item 8 to them.
+- Whether the owner's office resolves its proxy and PAC names through DoH, or needs a split-DNS entry naming the LAN's server (item 8).
 
 - Whether the latency of waiting out DoH for each new name on such a network calls for B′.
