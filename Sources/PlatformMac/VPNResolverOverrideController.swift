@@ -9,6 +9,7 @@ package final class VPNResolverOverrideController {
     package struct Inputs: Sendable {
         package var manageSystemDNS: Bool
         package var relayServing: Bool
+        package var dnsStopping: Bool
         package var entriesWanted: Bool
         package var reading: PushedResolverReading
         package var serversInUse: Set<String>
@@ -16,12 +17,14 @@ package final class VPNResolverOverrideController {
         package init(
             manageSystemDNS: Bool,
             relayServing: Bool,
+            dnsStopping: Bool = false,
             entriesWanted: Bool,
             reading: PushedResolverReading,
             serversInUse: Set<String>
         ) {
             self.manageSystemDNS = manageSystemDNS
             self.relayServing = relayServing
+            self.dnsStopping = dnsStopping
             self.entriesWanted = entriesWanted
             self.reading = reading
             self.serversInUse = serversInUse
@@ -70,6 +73,7 @@ package final class VPNResolverOverrideController {
             helperSupports: support != .unsupported,
             manageSystemDNS: inputs.manageSystemDNS,
             relayServing: inputs.relayServing,
+            dnsStopping: inputs.dnsStopping,
             entriesWanted: inputs.entriesWanted,
             reading: inputs.reading,
             serversInUse: inputs.serversInUse,

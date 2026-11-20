@@ -46,6 +46,8 @@ extension RuntimeHost {
         return VPNResolverOverrideController.Inputs(
             manageSystemDNS: platformConfig.manageSystemDNS,
             relayServing: vpnDNSOverrideRelayServing,
+            // Only the Stop and the Manage-system-DNS-off clear stop the timer; both disarm right after.
+            dnsStopping: dnsHealthTimer == nil,
             entriesWanted: splitDNSGate.entriesWanted,
             reading: splitDNSDetection.lastReading,
             serversInUse: inUse

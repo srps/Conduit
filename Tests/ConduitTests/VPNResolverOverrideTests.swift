@@ -166,6 +166,7 @@ final class VPNResolverOverridePolicyTests: XCTestCase {
         let cases: [(VPNResolverOverrideDisarmReason, (inout VPNResolverOverrideInput) -> Void)] = [
             (.manageOff, { $0.manageSystemDNS = false }),
             (.relayNotServing, { $0.relayServing = false }),
+            (.stop, { $0.dnsStopping = true; $0.relayServing = false }),
             (.gate, { $0.entriesWanted = false }),
         ]
         for (reason, configure) in cases {

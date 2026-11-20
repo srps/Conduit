@@ -30,6 +30,8 @@ package struct VPNResolverOverrideInput: Sendable {
     package var helperSupports: Bool
     package var manageSystemDNS: Bool
     package var relayServing: Bool
+    /// The host is stopping DNS on purpose, so a disarm says `stop` rather than `relay_not_serving`.
+    package var dnsStopping: Bool
     package var entriesWanted: Bool
     package var reading: PushedResolverReading
     package var serversInUse: Set<String>
@@ -40,6 +42,7 @@ package struct VPNResolverOverrideInput: Sendable {
         helperSupports: Bool,
         manageSystemDNS: Bool,
         relayServing: Bool,
+        dnsStopping: Bool = false,
         entriesWanted: Bool,
         reading: PushedResolverReading,
         serversInUse: Set<String>,
@@ -48,6 +51,7 @@ package struct VPNResolverOverrideInput: Sendable {
         self.helperSupports = helperSupports
         self.manageSystemDNS = manageSystemDNS
         self.relayServing = relayServing
+        self.dnsStopping = dnsStopping
         self.entriesWanted = entriesWanted
         self.reading = reading
         self.serversInUse = serversInUse
@@ -75,6 +79,7 @@ package enum VPNResolverOverridePolicy {
     /// Every server must be in use, so internal names reach the tunnel's servers before public names leave them.
     private static func wanted(_ input: VPNResolverOverrideInput) -> Wanted {
         guard input.manageSystemDNS else { return .withheld(.manageOff) }
+        guard !input.dnsStopping else { return .withheld(.stop) }
         guard input.relayServing else { return .withheld(.relayNotServing) }
         guard input.entriesWanted else { return .withheld(.gate) }
         let fullTunnels = input.reading.resolvers.filter(\.overridesPrimary)
