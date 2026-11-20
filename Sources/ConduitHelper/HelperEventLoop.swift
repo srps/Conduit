@@ -8,6 +8,7 @@ final class HelperEventLoop {
     enum Event: Equatable {
         case connection
         case ownerExited(pid_t)
+        case storeChanged
         case tick
         case signal(Int32)
         case failed(String)
@@ -29,6 +30,7 @@ final class HelperEventLoop {
             kevent(ident: UInt(listenFD), filter: Int16(EVFILT_READ), flags: UInt16(EV_ADD), fflags: 0, data: 0, udata: nil),
             kevent(ident: UInt(SIGTERM), filter: Int16(EVFILT_SIGNAL), flags: UInt16(EV_ADD), fflags: 0, data: 0, udata: nil),
             kevent(ident: UInt(SIGINT), filter: Int16(EVFILT_SIGNAL), flags: UInt16(EV_ADD), fflags: 0, data: 0, udata: nil),
+            kevent(ident: Self.storeIdent, filter: Int16(EVFILT_USER), flags: UInt16(EV_ADD | EV_CLEAR), fflags: 0, data: 0, udata: nil),
         ]
         guard kevent(queue, &changes, Int32(changes.count), nil, 0, nil) == 0 else {
             HelperLog.error("kevent registration failed: \(Self.errnoText)")
@@ -73,20 +75,36 @@ final class HelperEventLoop {
         }
     }
 
-    /// Signals first, so stopping never waits behind a backlog; then owner exits; then one connection.
+    /// Signals first, so stopping never waits behind a backlog; then owner exits; then the store; then one connection.
     private static func ordered(_ events: ArraySlice<Darwin.kevent>) -> [Event] {
         var signals: [Event] = []
         var exits: [Event] = []
+        var store = false
         var connection = false
         for event in events {
             switch Int32(event.filter) {
             case EVFILT_SIGNAL: signals.append(.signal(Int32(event.ident)))
             case EVFILT_PROC: exits.append(.ownerExited(pid_t(event.ident)))
+            case EVFILT_USER: store = true
             case EVFILT_READ: connection = true
             default: break
             }
         }
-        return signals + exits + (connection ? [.connection] : [])
+        return signals + exits + (store ? [.storeChanged] : []) + (connection ? [.connection] : [])
+    }
+
+    private static let storeIdent: UInt = 1
+
+    /// Safe from any thread: a store notification wakes the loop, and repeats before it runs are one event.
+    var storeTrigger: @Sendable () -> Void {
+        let queue = self.queue
+        return {
+            var change = kevent(
+                ident: HelperEventLoop.storeIdent, filter: Int16(EVFILT_USER), flags: 0, fflags: UInt32(NOTE_TRIGGER),
+                data: 0, udata: nil
+            )
+            _ = kevent(queue, &change, 1, nil, 0, nil)
+        }
     }
 
     /// A pid reused after `ESRCH` cannot matter: `NOTE_EXIT` is registered only while the owner is alive.
@@ -109,12 +127,12 @@ final class HelperEventLoop {
                 alreadyGone(pid)
                 return
             }
-            HelperLog.error("vpn-dns-override: cannot watch owner pid=\(pid): \(Self.errnoText); only the probe ticks can release it")
+            HelperLog.error("vpn-dns-override: cannot watch owner pid=\(pid): \(Self.errnoText); only the probe ticks can withdraw the key")
         }
         watched = pid
     }
 
-    private static let tickNanoseconds = UInt64(VPNDNSOverrideLedger.tickSeconds) * 1_000_000_000
+    private static let tickNanoseconds = UInt64(VPNDNSOverridePublisher.tickSeconds) * 1_000_000_000
 
     private static var errnoText: String { String(cString: strerror(errno)) }
 }

@@ -70,7 +70,7 @@ enum HelperDaemon {
             exit(EXIT_FAILURE)
         }
 
-        // kqueue still records an ignored signal, so the release on SIGTERM runs on the loop, not in a handler.
+        // kqueue still records an ignored signal, so the withdrawal on SIGTERM runs on the loop, not in a handler.
         signal(SIGTERM, SIG_IGN)
         signal(SIGINT, SIG_IGN)
         guard fcntl(serverFD, F_SETFL, fcntl(serverFD, F_GETFL) | O_NONBLOCK) == 0 else {
@@ -86,33 +86,40 @@ enum HelperDaemon {
             lastConsoleUID = consoleAtStart
         }
         callerIdentity = loadCallerIdentity()
-        vpnDNSOverride.start()
+        VPNDNSOverrideLegacyRestore.run(store: SCDynamicStoreLegacyVPNDNSStore(), file: VPNDNSOverrideLegacyFile()) {
+            if $0.isFailure { HelperLog.error($0.logLine) } else { HelperLog.notice($0.logLine) }
+        }
+        vpnDNSOverride = VPNDNSOverridePublisher(
+            store: SCDynamicStoreVPNDNSStore(changed: loop.storeTrigger), relay: failoverRelay, report: logVPNDNSOverride
+        )
         HelperLog.notice("ConduitHelper daemon listening on \(socketPath)")
 
         while true {
-            let tickDue = vpnDNSOverride.status() != nil
-            switch loop.next(tickDue: tickDue) {
+            switch loop.next(tickDue: vpnDNSOverride.arm != nil) {
             case .connection:
                 serveConnection(listenFD: serverFD)
             case .ownerExited(let pid):
                 HelperLog.notice("vpn-dns-override owner pid=\(pid) exited")
-                vpnDNSOverride.release(reason: .ownerExited)
+                vpnDNSOverride.ownerExited(pid)
+            case .storeChanged:
+                vpnDNSOverride.sync()
             case .tick:
                 vpnDNSOverride.tick()
             case .signal(let number):
                 HelperLog.notice("ConduitHelper received signal \(number); stopping")
-                vpnDNSOverride.release(reason: .helperStopping)
+                vpnDNSOverride.disarm(.helperStopping)
                 unlink(HelperConstants.socketPath)
                 exit(EXIT_SUCCESS)
             case .failed(let why):
                 HelperLog.error("ConduitHelper event loop failed (\(why)); stopping")
-                vpnDNSOverride.release(reason: .helperStopping)
+                vpnDNSOverride.disarm(.helperStopping)
                 unlink(HelperConstants.socketPath)
                 exit(EXIT_FAILURE)
             }
-            loop.watchOwner(vpnDNSOverride.status() == nil ? nil : overrideOwner) {
+            restartDeadFailoverHalves()
+            loop.watchOwner(vpnDNSOverride.arm?.owner) {
                 HelperLog.notice("vpn-dns-override owner pid=\($0) already gone")
-                vpnDNSOverride.release(reason: .ownerExited)
+                vpnDNSOverride.ownerExited($0)
             }
         }
     }
@@ -246,15 +253,14 @@ enum HelperDaemon {
             var response = HelperResponse.ok()
             response.features = HelperFeature.allCases
             return (response, .ok)
-        case .vpnDNSOverrideApply:
-            return applyVPNDNSOverride(values: request.values, peerPID: peerPID)
-        case .vpnDNSOverrideRelease:
-            return releaseVPNDNSOverride()
+        case .vpnDNSOverrideArm:
+            return armVPNDNSOverride(values: request.values, peerPID: peerPID)
+        case .vpnDNSOverrideDisarm:
+            vpnDNSOverride.disarm(.disarmed)
+            return (.ok(), .ok)
         case .vpnDNSOverrideStatus:
             var response = HelperResponse.ok()
-            response.vpnDNSOverride = vpnDNSOverrideStatus()
-            response.vpnDNSOverrideLastRelease = vpnDNSOverride.lastRelease?.rawValue
-            response.vpnDNSOverrideRestorePending = vpnDNSOverride.restorePending?.rawValue
+            response.vpnDNSOverride = vpnDNSOverride.status(caller: peerPID)
             return (response, .ok)
         case .dnsRelayStatus:
             return dnsRelayStatus()
@@ -263,10 +269,10 @@ enum HelperDaemon {
                   let port = Int(portStr), (1...65535).contains(port) else {
                 return (.error("Invalid target port"), .invalidArguments)
             }
-            return relayOutcome(startDNSRelay(targetPort: port))
+            return relayOutcome(startDNSRelay(targetPort: port, caller: peerPID))
         case .stopDNSRelay:
-            // The key must never point at a relay that is gone.
-            vpnDNSOverride.release(reason: .relayStopped)
+            // The key must never name a relay that is gone.
+            vpnDNSOverride.disarm(.relayStopped)
             stopDNSRelay()
             return (.ok(), .ok)
         case .startTCPRelay:
@@ -483,7 +489,9 @@ enum HelperDaemon {
 
     static let dnsTCPRelayMaximumSessions = 64
 
-    private static func startDNSRelay(targetPort: Int) -> HelperResponse {
+    private static func startDNSRelay(targetPort: Int, caller: pid_t?) -> HelperResponse {
+        startFailoverRelay(targetPort: targetPort)
+        vpnDNSOverride.relayStarted(caller: caller)
         let udpUnchanged = relay?.isRunning == true && currentDNSRelayTarget == targetPort
         let tcpUnchanged = dnsTCPRelay?.isRunning == true && currentDNSTCPRelayTarget == targetPort
         if udpUnchanged && tcpUnchanged { return .ok() }
@@ -500,15 +508,41 @@ enum HelperDaemon {
                 HelperLog.notice("DNS relay started: 127.0.0.1:53 -> 127.0.0.1:\(targetPort)")
             } catch {
                 stopDNSTCPRelay()
-                vpnDNSOverride.relayRestarted(succeeded: false)
                 return .error(error.localizedDescription)
             }
         }
         if !tcpUnchanged {
             startDNSTCPRelay(targetPort: targetPort)
         }
-        vpnDNSOverride.relayRestarted(succeeded: dnsTCPRelay != nil)
         return .ok()
+    }
+
+    /// Never on the forwarder's own port: the key would then name the forwarder, not the relay.
+    private static func startFailoverRelay(targetPort: Int) {
+        let port = HelperConstants.vpnDNSOverrideRelayPort
+        guard targetPort != port else {
+            HelperLog.error("dns-relay failover not started: target=\(targetPort) is the relay's own port")
+            return
+        }
+        let wasRunning = failoverRelay.listeningPort != nil && failoverRelay.target == targetPort
+        let failures = failoverRelay.start(targetPort: targetPort)
+        for failure in failures {
+            HelperLog.error("dns-relay failover start_failed listen=127.0.0.1:\(port) target=127.0.0.1:\(targetPort) \(HelperAudit.bounded(failure))")
+        }
+        if failures.isEmpty, !wasRunning {
+            HelperLog.notice("DNS failover relay started: 127.0.0.1:\(port) -> 127.0.0.1:\(targetPort)")
+        }
+    }
+
+    /// A half that left on its own comes back on the VPN's servers; until it binds, the key is withdrawn.
+    private static func restartDeadFailoverHalves() {
+        let (restarted, failures) = failoverRelay.restartDeadHalves()
+        guard restarted else { return }
+        HelperLog.warning("DNS failover relay had died in place; restarting")
+        for failure in failures {
+            HelperLog.error("dns-relay failover restart_failed \(HelperAudit.bounded(failure))")
+        }
+        vpnDNSOverride.relayRestarted()
     }
 
     private static func startDNSTCPRelay(targetPort: Int) {
@@ -532,59 +566,42 @@ enum HelperDaemon {
         }
     }
 
-    nonisolated(unsafe) private static let vpnDNSOverride = VPNDNSOverrideLedger(
-        store: SCDynamicStoreVPNDNSStore(),
-        probe: RelayForwarderProbe(relay: { relay }, tcpRelay: { dnsTCPRelay }),
-        persistence: VPNDNSOverrideFile(),
-        report: logVPNDNSOverride
+    private static let failoverRelay = DNSFailoverRelay(
+        listenPort: HelperConstants.vpnDNSOverrideRelayPort,
+        maximumTCPSessions: dnsTCPRelayMaximumSessions,
+        droppedAtCapacity: { total in
+            if total == 1 || total % 100 == 0 {
+                HelperLog.warning("dns-relay udp at_capacity pending=\(DNSFailoverUDPRelay.maximumPendingQueries) dropped_total=\(total)")
+            }
+        },
+        refusedAtCapacity: { total in
+            if total == 1 || total % 100 == 0 {
+                HelperLog.warning("dns-relay failover tcp at_capacity sessions=\(dnsTCPRelayMaximumSessions) refused_total=\(total)")
+            }
+        }
     )
 
-    nonisolated(unsafe) private static var overrideOwner: pid_t?
+    /// Set in `run` once the loop exists, before the first request is served.
+    nonisolated(unsafe) private static var vpnDNSOverride: VPNDNSOverridePublisher!
 
     private static func logVPNDNSOverride(_ outcome: VPNDNSOverrideOutcome) {
         if outcome.isFailure {
             HelperLog.error(outcome.logLine)
-        } else if case .nothingToRelease = outcome {
-            HelperLog.info(outcome.logLine)
         } else {
             HelperLog.notice(outcome.logLine)
         }
     }
 
-    private static func vpnDNSOverrideStatus() -> HelperVPNDNSOverrideStatus? {
-        vpnDNSOverride.status().map { HelperVPNDNSOverrideStatus(serviceID: $0.serviceID, originals: $0.originals) }
-    }
-
-    private static func applyVPNDNSOverride(values: [String], peerPID: pid_t?) -> (HelperResponse, HelperAuditOutcome) {
-        guard (2...(1 + VPNDNSOverrideValidation.maximumServers)).contains(values.count) else {
+    private static func armVPNDNSOverride(values: [String], peerPID: pid_t?) -> (HelperResponse, HelperAuditOutcome) {
+        guard values.count >= 2,
+              vpnDNSOverride.arm(service: values[0], servers: Array(values.dropFirst()), owner: peerPID) else {
             return (.error("Invalid VPN DNS override"), .invalidArguments)
         }
-        var response: HelperResponse
-        let outcome: HelperAuditOutcome
-        switch vpnDNSOverride.apply(service: values[0], expected: Array(values.dropFirst())) {
-        case .applied:
-            overrideOwner = peerPID
-            if peerPID == nil {
-                HelperLog.warning("vpn-dns-override applied with no owner pid; only the probe ticks can release it")
-            }
-            response = .ok()
-            outcome = .ok
-        case .refused(let reason):
-            response = .error("VPN DNS override refused: \(reason.rawValue)")
-            response.vpnDNSOverrideRefusal = reason
-            outcome = reason == .invalid ? .invalidArguments : .declined
-        }
-        response.vpnDNSOverride = vpnDNSOverrideStatus()
-        return (response, outcome)
-    }
-
-    private static func releaseVPNDNSOverride() -> (HelperResponse, HelperAuditOutcome) {
-        let write = vpnDNSOverride.release(reason: .requested)
-        if write?.failed == true {
-            return (.error("VPN DNS override release could not write the key: \(write?.rawValue ?? "?")"), .commandFailed)
+        if peerPID == nil {
+            HelperLog.warning("vpn-dns-override armed with no owner pid; only the probe ticks can withdraw the key")
         }
         var response = HelperResponse.ok()
-        response.vpnDNSOverride = vpnDNSOverrideStatus()
+        response.vpnDNSOverride = vpnDNSOverride.status(caller: peerPID)
         return (response, .ok)
     }
 
@@ -620,10 +637,14 @@ enum HelperDaemon {
         return (response, .ok)
     }
 
-    /// Both halves: the key is never left on half a relay.
+    /// Every relay: the key is never left on half a relay.
     private static func stopDNSRelay() {
         stopUDPDNSRelay()
         stopDNSTCPRelay()
+        if failoverRelay.target != nil {
+            failoverRelay.stop()
+            HelperLog.notice("DNS failover relay stopped")
+        }
     }
 
     private static func stopUDPDNSRelay() {

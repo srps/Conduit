@@ -103,6 +103,11 @@ public enum HelperProtocolVersion {
     /// cannot decode it and answers "Invalid request" stamped 5, which the
     /// client reads as "no witness" and nothing else; both fields are
     /// optional, so a client that predates them ignores the keys.
+    ///
+    /// *Added* within v5 in the same way: `vpn-dns-override-arm`, `-disarm`
+    /// and `-status`, `HelperResponse.vpnDNSOverride` and the feature
+    /// `vpn-dns-override-key` (decision 0049). A helper without the feature is
+    /// never sent them.
     public static let minimumSupported = 3
 
     public static func isSupported(_ version: Int) -> Bool {
@@ -167,8 +172,9 @@ public enum HelperCommand: String, Codable, Sendable, CaseIterable {
     /// Reports what the DNS relay is doing and what a fresh query to its
     /// target found, in `HelperResponse.dnsRelay`. No values; changes nothing.
     case dnsRelayStatus = "dns-relay-status"
-    case vpnDNSOverrideApply = "vpn-dns-override-apply"
-    case vpnDNSOverrideRelease = "vpn-dns-override-release"
+    /// Values: `service, server...`. Records intent; the helper publishes its own key while it holds (decision 0049).
+    case vpnDNSOverrideArm = "vpn-dns-override-arm"
+    case vpnDNSOverrideDisarm = "vpn-dns-override-disarm"
     case vpnDNSOverrideStatus = "vpn-dns-override-status"
     case ping = "ping"
 }
@@ -178,27 +184,30 @@ public enum HelperCommand: String, Codable, Sendable, CaseIterable {
 /// that is busy by its absence here, without sending a command that fails.
 public enum HelperFeature: String, Codable, Sendable, CaseIterable {
     case dnsRelayStatus = "dns-relay-status"
-    case vpnDNSOverride = "vpn-dns-override"
+    /// Not `vpn-dns-override`: a helper that advertised that name rewrote the VPN's key and knows none of these commands.
+    case vpnDNSOverride = "vpn-dns-override-key"
 }
 
+/// The reply to `vpn-dns-override-status` while an arm is held.
 public struct HelperVPNDNSOverrideStatus: Codable, Sendable, Equatable {
     public var serviceID: String
-    public var originals: [String]
+    public var servers: [String]
+    public var published: Bool
+    /// Why the key is not published, while it is not.
+    public var reason: String?
+    /// Whether the caller asking is the one that armed it.
+    public var owned: Bool
+    /// The relay's port the key names, while it is published.
+    public var port: Int?
 
-    public init(serviceID: String, originals: [String]) {
+    public init(serviceID: String, servers: [String], published: Bool, reason: String? = nil, owned: Bool, port: Int? = nil) {
         self.serviceID = serviceID
-        self.originals = originals
+        self.servers = servers
+        self.published = published
+        self.reason = reason
+        self.owned = owned
+        self.port = port
     }
-}
-
-public enum HelperVPNDNSOverrideRefusal: String, Codable, Sendable, CaseIterable {
-    case notFound = "not_found"
-    case notFullTunnel = "not_full_tunnel"
-    case notPrimary = "not_primary"
-    case changed
-    case invalid
-    case relayNotServing = "relay_not_serving"
-    case writeFailed = "write_failed"
 }
 
 /// The reply to `dns-relay-status`.
@@ -427,10 +436,6 @@ public struct HelperResponse: Codable, Sendable, Equatable {
     /// dropped on decode.
     public var features: [HelperFeature]?
     public var vpnDNSOverride: HelperVPNDNSOverrideStatus?
-    public var vpnDNSOverrideRefusal: HelperVPNDNSOverrideRefusal?
-    public var vpnDNSOverrideLastRelease: String?
-    /// The release reason while the helper still holds the record because its restore failed.
-    public var vpnDNSOverrideRestorePending: String?
 
     public static func ok() -> HelperResponse {
         HelperResponse(protocolVersion: HelperProtocolVersion.current, success: true)
@@ -470,10 +475,7 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         refusal: HelperRefusal? = nil,
         dnsRelay: HelperDNSRelayStatus? = nil,
         features: [HelperFeature]? = nil,
-        vpnDNSOverride: HelperVPNDNSOverrideStatus? = nil,
-        vpnDNSOverrideRefusal: HelperVPNDNSOverrideRefusal? = nil,
-        vpnDNSOverrideLastRelease: String? = nil,
-        vpnDNSOverrideRestorePending: String? = nil
+        vpnDNSOverride: HelperVPNDNSOverrideStatus? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.success = success
@@ -485,9 +487,6 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         self.dnsRelay = dnsRelay
         self.features = features
         self.vpnDNSOverride = vpnDNSOverride
-        self.vpnDNSOverrideRefusal = vpnDNSOverrideRefusal
-        self.vpnDNSOverrideLastRelease = vpnDNSOverrideLastRelease
-        self.vpnDNSOverrideRestorePending = vpnDNSOverrideRestorePending
     }
 
     enum CodingKeys: String, CodingKey {
@@ -501,9 +500,6 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         case dnsRelay
         case features
         case vpnDNSOverride
-        case vpnDNSOverrideRefusal
-        case vpnDNSOverrideLastRelease
-        case vpnDNSOverrideRestorePending
     }
 
     public init(from decoder: Decoder) throws {
@@ -520,9 +516,6 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         dnsRelay = try? container.decodeIfPresent(HelperDNSRelayStatus.self, forKey: .dnsRelay)
         features = try container.decodeIfPresent([String].self, forKey: .features)?.compactMap(HelperFeature.init(rawValue:))
         vpnDNSOverride = try? container.decodeIfPresent(HelperVPNDNSOverrideStatus.self, forKey: .vpnDNSOverride)
-        vpnDNSOverrideRefusal = try? container.decodeIfPresent(HelperVPNDNSOverrideRefusal.self, forKey: .vpnDNSOverrideRefusal)
-        vpnDNSOverrideLastRelease = try? container.decodeIfPresent(String.self, forKey: .vpnDNSOverrideLastRelease)
-        vpnDNSOverrideRestorePending = try? container.decodeIfPresent(String.self, forKey: .vpnDNSOverrideRestorePending)
     }
 }
 
@@ -545,6 +538,10 @@ public enum HelperConstants {
     /// means identity is not enforced. See `HelperCallerPolicyFile`.
     package static let callerRequirementDirectory = "/Library/Application Support/io.github.srps.Conduit"
     package static let callerRequirementPath = callerRequirementDirectory + "/helper-callers.req"
-    package static let runtimeStateDirectory = "/var/run/io.github.srps.Conduit.Helper"
-    package static let vpnDNSOverrideRecordPath = runtimeStateDirectory + "/vpn-dns-override.json"
+    /// Where a helper that rewrote the VPN's key kept its originals; read once at start, then deleted.
+    package static let legacyVPNDNSOverrideRecordPath = "/var/run/io.github.srps.Conduit.Helper/vpn-dns-override.json"
+    /// Not a UUID, so no VPN client's service shares it.
+    package static let vpnDNSOverrideServiceID = "io.github.srps.Conduit.dns-relay"
+    /// The fail-safe relay the helper's own key names; the relay on `:53` serves the physical services.
+    package static let vpnDNSOverrideRelayPort = 15353
 }

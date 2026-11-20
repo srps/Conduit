@@ -25,7 +25,7 @@ enum HelperTool {
     ) throws {
         switch arguments.command {
         case .ping, .dnsRelayStatus, .startDNSRelay, .stopDNSRelay, .startTCPRelay, .stopTCPRelay,
-             .vpnDNSOverrideApply, .vpnDNSOverrideRelease, .vpnDNSOverrideStatus:
+             .vpnDNSOverrideArm, .vpnDNSOverrideDisarm, .vpnDNSOverrideStatus:
             return
 
         case .compareNetworkSettings:

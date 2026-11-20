@@ -310,7 +310,7 @@ package final class TCPRelay: @unchecked Sendable {
         thread.start()
     }
 
-    private static func relayBidirectional(fd1: Int32, fd2: Int32) {
+    static func relayBidirectional(fd1: Int32, fd2: Int32) {
         var buf1 = [UInt8](repeating: 0, count: 32_768)
         var buf2 = [UInt8](repeating: 0, count: 32_768)
 
@@ -364,7 +364,7 @@ package final class TCPRelay: @unchecked Sendable {
         return true
     }
 
-    private static func setNoDelay(_ fd: Int32) {
+    static func setNoDelay(_ fd: Int32) {
         var one: Int32 = 1
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size))
         // Defense in depth alongside the daemon-wide SIG_IGN: a peer reset

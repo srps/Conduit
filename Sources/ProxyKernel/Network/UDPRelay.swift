@@ -56,13 +56,6 @@ package final class UDPRelay: @unchecked Sendable {
         try status(asking: DNSWireFormat.livenessProbeDomain, boundMilliseconds: boundMilliseconds)
     }
 
-    /// The forwarder answers the probe itself, so only a stalled event loop is slower than this.
-    package static let forwarderProbeBoundMilliseconds = 500
-
-    package func forwarderProbe(boundMilliseconds: Int = UDPRelay.forwarderProbeBoundMilliseconds) throws -> DNSRelayStatus {
-        try status(asking: DNSWireFormat.forwarderProbeDomain, boundMilliseconds: boundMilliseconds)
-    }
-
     private func status(asking domain: String, boundMilliseconds: Int) throws -> DNSRelayStatus {
         let current = lock.withLock { listenFD >= 0 ? target : nil }
         guard let current else { return .notRunning }
@@ -72,7 +65,7 @@ package final class UDPRelay: @unchecked Sendable {
         )
     }
 
-    private static func probe(host: String, port: Int, domain: String, boundMilliseconds: Int) throws -> DNSRelayTargetVerdict {
+    static func probe(host: String, port: Int, domain: String, boundMilliseconds: Int) throws -> DNSRelayTargetVerdict {
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { throw UDPRelayError.socketCreationFailed(errnoText) }
         defer { close(fd) }
