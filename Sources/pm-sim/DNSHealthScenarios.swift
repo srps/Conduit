@@ -23,9 +23,9 @@ enum DNSHealthScenarios {
     ///
     /// | # | condition                                              | expected                                                   |
     /// |---|--------------------------------------------------------|------------------------------------------------------------|
-    /// | A | 40 lookups while the path is unsatisfied               | 40 SERVFAIL, the internal server saw none, no DoH request |
-    /// | B | after A                                                | no slot held, one `dns.unsatisfied_path_servfail`          |
-    /// | C | 8 split-DNS lookups waiting on a silent server, reset  | 8 SERVFAIL before the 20 s timeout, no slot held           |
+    /// | A | 40 lookups while the path is unsatisfied               | no reply, the internal server saw none, no DoH request     |
+    /// | B | after A                                                | no slot held, one `dns.unsatisfied_path_dropped`           |
+    /// | C | 8 split-DNS lookups waiting on a silent server, reset  | each re-run once; a second reset drops them, no slot held  |
     /// | D | the path returns, one fresh public lookup              | the DoH answer                                             |
     @RuntimeActor
     static func unsatisfiedPath(verbose: Bool) async throws -> ScenarioResult {
@@ -51,26 +51,27 @@ enum DNSHealthScenarios {
         forwarder.updateNetworkPath(satisfied: false)
         var burst = (0..<39).map { DNSWireFormat.buildQuery(domain: "public-\($0).example", txID: 0x5A00 + UInt16($0)) }
         burst.append(DNSWireFormat.buildQuery(domain: "intranet.corp.example", txID: 0x5AFF))
-        let refused = try await DNSBurstClient.ask(burst, port: port, group: group)
-        let refusedRCodes = Set(refused.map(DNSWireFormat.extractRCode))
-        notes.append("A replies=\(refused.count)/\(burst.count) rcodes=\(refusedRCodes.sorted()) internal=\(silent.queryCount) doh=\(provider.requests(naming: "example"))")
-        let passA = refused.count == burst.count && refusedRCodes == [2] && silent.queryCount == 0 && provider.requests(naming: "example") == 0
+        let refused = try await DNSBurstClient.start(group: group, sending: burst, to: port)
+        try await drain(port: port, forwarder: forwarder, client: refused, group: group)
+        notes.append("A replies=\(refused.replies().count)/\(burst.count) internal=\(silent.queryCount) doh=\(provider.requests(naming: "example"))")
+        let passA = refused.replies().isEmpty && silent.queryCount == 0 && provider.requests(naming: "example") == 0
         let inFlightAfterBurst = forwarder.inFlightQueryCount
-        notes.append("B inFlight=\(inFlightAfterBurst) events=\(count("dns.unsatisfied_path_servfail"))")
-        let passB = inFlightAfterBurst == 0 && count("dns.unsatisfied_path_servfail") == 1
+        notes.append("B inFlight=\(inFlightAfterBurst) events=\(count("dns.unsatisfied_path_dropped"))")
+        let passB = inFlightAfterBurst == 0 && count("dns.unsatisfied_path_dropped") == 1
 
         forwarder.updateNetworkPath(satisfied: true)
         let waiting = (0..<8).map { DNSWireFormat.buildQuery(domain: "host-\($0).corp.example", txID: 0x5B00 + UInt16($0)) }
         let client = try await DNSBurstClient.start(group: group, sending: waiting, to: port)
-        try await settle { forwarder.inFlightQueryCount == waiting.count }
+        try await settle { silent.queryCount == waiting.count }
         let heldBeforeReset = forwarder.inFlightQueryCount
         forwarder.resetUpstreamTransports(reason: "network_change")
-        try await settle { client.replies().count == waiting.count }
+        try await settle { silent.queryCount == 2 * waiting.count }
+        let rerun = silent.queryCount
+        forwarder.resetUpstreamTransports(reason: "network_change")
         try await settle { forwarder.inFlightQueryCount == 0 }
-        let cancelledRCodes = Set(client.replies().map(DNSWireFormat.extractRCode))
-        notes.append("C held=\(heldBeforeReset) replies=\(client.replies().count) rcodes=\(cancelledRCodes.sorted()) inFlight=\(forwarder.inFlightQueryCount) internal=\(silent.queryCount)")
-        let passC = heldBeforeReset == waiting.count && client.replies().count == waiting.count && cancelledRCodes == [2]
-            && forwarder.inFlightQueryCount == 0 && silent.queryCount == waiting.count
+        notes.append("C held=\(heldBeforeReset) rerun=\(rerun) replies=\(client.replies().count) inFlight=\(forwarder.inFlightQueryCount) internal=\(silent.queryCount)")
+        let passC = heldBeforeReset == waiting.count && rerun == 2 * waiting.count && client.replies().isEmpty
+            && forwarder.inFlightQueryCount == 0 && silent.queryCount == 2 * waiting.count
 
         let fresh = try await DNSProbe.overUDP(query: DNSWireFormat.buildQuery(domain: "fresh.example", txID: 0x5C00), port: port, timeout: 12)
         let freshIP = fresh.flatMap(DNSWireFormat.firstIPv4Answer)?.ip
@@ -78,15 +79,129 @@ enum DNSHealthScenarios {
         let passD = freshIP == publicIP
 
         let checks = [passA, passB, passC, passD]
-        notes.append(checks.allSatisfy { $0 } ? "PASS — no path answers at once, a reset frees the slots, the returned path answers" : "FAIL — see per-case lines above")
+        notes.append(checks.allSatisfy { $0 } ? "PASS — no path drops at once, a reset re-runs once and frees the slots, the returned path answers" : "FAIL — see per-case lines above")
         return result(
             name: name, start: start, notes: notes, clients: burst.count + waiting.count + 1,
-            answered: refused.count + client.replies().count + (fresh == nil ? 0 : 1),
+            answered: refused.replies().count + client.replies().count + (fresh == nil ? 0 : 1),
             assertions: [
-                .init("a burst while the path is unsatisfied gets SERVFAIL with no internal or DoH attempt", passA),
+                .init("a burst while the path is unsatisfied gets no reply and no internal or DoH attempt", passA),
                 .init("the burst holds no slot and reports one throttled event", passB),
-                .init("a transports reset cancels the lookups in flight and frees their slots", passC),
+                .init("a transports reset re-runs the lookups in flight once; a second reset drops them and frees their slots", passC),
                 .init("a fresh lookup right after the path returns is answered", passD),
+            ]
+        )
+    }
+
+    /// `pm-sim dns-reset-no-negative-answer` (decision 0049). With the
+    /// override every lookup on the Mac reaches the forwarder, and a stub
+    /// caches SERVFAIL, so a transports reset must never produce one.
+    ///
+    /// | # | condition                                                     | expected                                                     |
+    /// |---|---------------------------------------------------------------|--------------------------------------------------------------|
+    /// | A | split-DNS lookup waiting on its server, reset                 | one reply: the server's answer to the re-run, no SERVFAIL    |
+    /// | B | public lookup waiting on DoH, reset                           | one reply: the fresh transports' DoH answer                  |
+    /// | C | 4 lookups, reset, second reset during their re-runs           | no reply at all, no slot held, server saw each twice         |
+    /// | D | lookup with no time left in its window, reset                 | no reply, no re-run                                          |
+    /// | E | events                                                        | `dns.reset_lookup_rerun` rerun, answered, both drop causes   |
+    @RuntimeActor
+    static func resetNoNegativeAnswer(verbose: Bool) async throws -> ScenarioResult {
+        let name = "dnsResetNoNegativeAnswer"
+        let start = Date()
+        var notes: [String] = []
+        let group = MultiThreadedEventLoopGroup.singleton
+        let logger = RecordingConsoleLogSink(minLevel: verbose ? .debug : .warning)
+
+        let corp = try await ScriptedInternalServer.start(group: group, silentFor: 1, answering: internalIP)
+        let held = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: internalIP)
+        let provider = FakeAnsweringDoHProvider(group: group, ip: publicIP)
+        ScenarioCleanup.register { await provider.stop() }
+        try await provider.start()
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let forwarder = try await startForwarder(
+            group: group, logger: logger, provider: provider, events: events,
+            // `held.example` first: its silent server is the one internal attempt a public name makes.
+            entries: [
+                DomainDNSEntry(domain: "held.example", servers: [serverB]),
+                DomainDNSEntry(domain: "corp.example", servers: [serverA]),
+            ],
+            endpoints: [serverA: corp.port, serverB: held.port],
+            internalDomainTimeout: .seconds(20), internalAttemptTimeout: .milliseconds(50)
+        )
+        let port = forwarder.listeningPort ?? 0
+        func decisions() -> [String] {
+            events.withLockedValue { $0 }.filter { $0.event == "dns.reset_lookup_rerun" }.compactMap(\.detail)
+        }
+
+        let clientA = try await DNSBurstClient.start(group: group, sending: [DNSWireFormat.buildQuery(domain: "app.corp.example", txID: 0x5F00)], to: port)
+        try await settle { corp.queryCount == 1 }
+        forwarder.resetUpstreamTransports(reason: "network_change")
+        try await settle { clientA.replies().count == 1 && forwarder.inFlightQueryCount == 0 }
+        let rcodesA = clientA.replies().map(DNSWireFormat.extractRCode)
+        let ipA = clientA.replies().first.flatMap(DNSWireFormat.firstIPv4Answer)?.ip
+        notes.append("A replies=\(clientA.replies().count) rcodes=\(rcodesA) ip=\(ipA ?? "none") server=\(corp.queryCount)")
+        let passA = rcodesA == [0] && ipA == internalIP && corp.queryCount == 2
+
+        provider.holdResponses(true)
+        let clientB = try await DNSBurstClient.start(group: group, sending: [DNSWireFormat.buildQuery(domain: "news.example", txID: 0x5F10)], to: port)
+        try await settle { provider.requests(naming: "news.example") >= 1 }
+        let firstRequests = provider.requests(naming: "news.example")
+        provider.holdResponses(false)
+        forwarder.resetUpstreamTransports(reason: "network_change")
+        try await settle { clientB.replies().count == 1 && forwarder.inFlightQueryCount == 0 }
+        let rcodesB = clientB.replies().map(DNSWireFormat.extractRCode)
+        let ipB = clientB.replies().first.flatMap(DNSWireFormat.firstIPv4Answer)?.ip
+        notes.append("B replies=\(clientB.replies().count) rcodes=\(rcodesB) ip=\(ipB ?? "none") doh=\(firstRequests)->\(provider.requests(naming: "news.example"))")
+        let passB = rcodesB == [0] && ipB == publicIP && provider.requests(naming: "news.example") > firstRequests
+
+        let waiting = (0..<4).map { DNSWireFormat.buildQuery(domain: "host-\($0).held.example", txID: 0x5F20 + UInt16($0)) }
+        let heldBefore = held.queryCount
+        let clientC = try await DNSBurstClient.start(group: group, sending: waiting, to: port)
+        try await settle { held.queryCount == heldBefore + waiting.count }
+        forwarder.resetUpstreamTransports(reason: "network_change")
+        try await settle { held.queryCount == heldBefore + 2 * waiting.count }
+        forwarder.resetUpstreamTransports(reason: "network_change")
+        try await settle { forwarder.inFlightQueryCount == 0 }
+        try await drain(port: port, forwarder: forwarder, client: clientC, group: group)
+        let heldC = held.queryCount - heldBefore
+        notes.append("C replies=\(clientC.replies().count) inFlight=\(forwarder.inFlightQueryCount) server=\(heldC)")
+        let passC = clientC.replies().isEmpty && forwarder.inFlightQueryCount == 0 && heldC == 2 * waiting.count
+
+        let late = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: internalIP)
+        let noWindow = try await startForwarder(
+            group: group, logger: logger, provider: provider, events: events,
+            entries: [DomainDNSEntry(domain: "corp.example", servers: [serverA])],
+            endpoints: [serverA: late.port],
+            internalDomainTimeout: .seconds(20), internalAttemptTimeout: .milliseconds(50), lookupWindow: .zero
+        )
+        let noWindowPort = noWindow.listeningPort ?? 0
+        let clientD = try await DNSBurstClient.start(group: group, sending: [DNSWireFormat.buildQuery(domain: "late.corp.example", txID: 0x5F30)], to: noWindowPort)
+        try await settle { late.queryCount == 1 }
+        noWindow.resetUpstreamTransports(reason: "network_change")
+        try await settle { noWindow.inFlightQueryCount == 0 }
+        try await drain(port: noWindowPort, forwarder: noWindow, client: clientD, group: group)
+        notes.append("D replies=\(clientD.replies().count) server=\(late.queryCount)")
+        let passD = clientD.replies().isEmpty && late.queryCount == 1
+
+        let seen = decisions()
+        notes.append("E events: \(seen)")
+        func has(_ fragment: String) -> Bool { seen.contains { $0.contains(fragment) } }
+        let passE = has("name=app.corp.example outcome=rerun ") && has("name=app.corp.example outcome=answered ")
+            && has(" outcome=dropped cause=reset_again ") && has("name=late.corp.example outcome=dropped cause=no_time_left ")
+
+        let everyReply = clientA.replies() + clientB.replies() + clientC.replies() + clientD.replies()
+        let negative = everyReply.filter { DNSWireFormat.extractRCode(from: $0) != 0 }.count
+        notes.append("negative replies=\(negative)")
+        let checks = [passA, passB, passC, passD, passE, negative == 0]
+        notes.append(checks.allSatisfy { $0 } ? "PASS — a reset re-runs the lookup on the fresh transports and never answers it SERVFAIL" : "FAIL — see per-case lines above")
+        return result(
+            name: name, start: start, notes: notes, clients: 7 + waiting.count, answered: everyReply.count,
+            assertions: [
+                .init("a split-DNS lookup cancelled by a reset is answered by its re-run, with no SERVFAIL", passA),
+                .init("a public lookup cancelled during DoH is answered by the fresh transports", passB),
+                .init("a re-run cancelled by a second reset gets no reply and frees its slot", passC),
+                .init("a lookup with no time left in its window gets no reply and no re-run", passD),
+                .init("each retry and drop decision emits dns.reset_lookup_rerun", passE),
+                .init("no reply in the scenario carries a negative rcode", negative == 0),
             ]
         )
     }
@@ -303,7 +418,8 @@ enum DNSHealthScenarios {
         endpoints: [String: Int],
         internalDomainTimeout: TimeAmount,
         internalAttemptTimeout: TimeAmount,
-        defaultInternalPort: Int = 53
+        defaultInternalPort: Int = 53,
+        lookupWindow: TimeAmount? = nil
     ) async throws -> LocalDNSForwarder {
         var config = ProxyConfig.testFixture()
         config.dnsEntries = entries
@@ -317,6 +433,7 @@ enum DNSHealthScenarios {
         tuning.internalAttemptTimeout = internalAttemptTimeout
         // The production budget, widened when one attempt would not fit it.
         tuning.internalStageBudget = max(tuning.internalStageBudget, internalDomainTimeout, internalAttemptTimeout)
+        if let lookupWindow { tuning.lookupWindow = lookupWindow }
         let forwarder = LocalDNSForwarder(
             group: group, logger: logger, configProvider: { frozen }, tuning: tuning,
             eventSink: { event in events.withLockedValue { $0.append(event) } }
@@ -324,6 +441,17 @@ enum DNSHealthScenarios {
         ScenarioCleanup.register { await forwarder.stop() }
         try await forwarder.start(host: "127.0.0.1", port: 0)
         return forwarder
+    }
+
+    /// Returns once every query `client` sent before now has ended: the
+    /// forwarder probe is answered on the event loop after the earlier
+    /// datagrams were admitted, and each admitted lookup holds a slot.
+    @RuntimeActor
+    private static func drain(port: Int, forwarder: LocalDNSForwarder, client: DNSBurstClient, group: EventLoopGroup) async throws {
+        let marker = try await DNSBurstClient.start(
+            group: group, sending: [DNSWireFormat.buildQuery(domain: DNSWireFormat.forwarderProbeDomain, txID: 0x5FFF)], to: port
+        )
+        try await settle { !marker.replies().isEmpty && forwarder.inFlightQueryCount == 0 }
     }
 
     /// Polls `condition` every 10 ms for up to ten seconds; the caller's
