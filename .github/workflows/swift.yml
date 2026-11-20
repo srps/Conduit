@@ -9,9 +9,11 @@ on:
   pull_request:
     branches: [ "main" ]
   schedule:
-    # Nightly, 02:00 UTC: the VPN detection model at its full bounds. The build
-    # does not run on the schedule.
+    # Nightly, 02:00 UTC: both models' full tiers. The build does not run on
+    # the schedule.
     - cron: "0 2 * * *"
+  # By hand: the same full tiers, for example before tagging.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -125,10 +127,9 @@ jobs:
   vpn-detection-model:
     # The TLA+ models of the VPN detection chain and of the 0049 resolver
     # override (formal/vpn-detection, skills vpn-detection-model and
-    # vpn-dns-override-model), one job per spec so their full tiers run in
-    # parallel. Each run checks the spec's default tier; a change to its
-    # covered files or model runs its full tier, and the nightly run checks
-    # every full tier.
+    # vpn-dns-override-model), one job per spec. Pull requests and pushes
+    # check the default tier; the nightly and manual runs, and the release
+    # workflow on a tag, check the full tier.
     strategy:
       fail-fast: false
       matrix:
@@ -141,37 +142,17 @@ jobs:
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      with:
-        fetch-depth: 0
     - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
       with:
         distribution: temurin
         java-version: "21"
-    - name: Choose the tier from the files the change touches
-      id: tier
-      env:
-        EVENT: ${{ github.event_name }}
-        BEFORE: ${{ github.event.before }}
-        SPEC: ${{ matrix.spec }}
-      run: |
-        full="--spec $SPEC --full=$SPEC --mutants"
-        case "$EVENT" in
-          schedule) echo "args=$full" >> "$GITHUB_OUTPUT"; exit 0 ;;
-          # The merge commit's first parent is the base branch.
-          pull_request) base="HEAD^1" ;;
-          *) base="$BEFORE" ;;
-        esac
-        if [ -z "${base//0/}" ]; then
-          echo "No commit before this push; checking the full tier"
-          echo "args=$full" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        specs="$(python3 formal/vpn-detection/check.py --full-for "$base")"
-        if printf '%s' "$specs" | tr ',' '\n' | grep -qx "$SPEC"; then
-          python3 formal/vpn-detection/check.py --changed "$base"
-          echo "args=$full" >> "$GITHUB_OUTPUT"
-        else
-          echo "args=--spec $SPEC --mutants" >> "$GITHUB_OUTPUT"
-        fi
     - name: Model-check with TLC, and show each historical bug caught
-      run: python3 formal/vpn-detection/check.py ${{ steps.tier.outputs.args }}
+      env:
+        SPEC: ${{ matrix.spec }}
+        FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+      run: |
+        if [ "$FULL" = true ]; then
+          python3 formal/vpn-detection/check.py --spec "$SPEC" --full="$SPEC" --mutants
+        else
+          python3 formal/vpn-detection/check.py --spec "$SPEC" --mutants
+        fi

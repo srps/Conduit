@@ -25,7 +25,7 @@ python3 formal/vpn-detection/check.py --spec override --mutants
 
 That runs the four checks and every mutant at the default bounds (times in **Bounds**). `--full=override` runs the larger bounds; `--only <check or mutant>` runs one. It needs Java 11 or later; the first run fetches `tla2tools.jar` into `formal/.tools/`. Each run writes `formal/vpn-detection/.out/<name>/tlc.out`.
 
-CI runs it in the `vpn-model (override)` job of `.github/workflows/swift.yml`, in parallel with the detection spec's job: every run checks this spec's default tier, and its full tier when its covered or model files changed (`check.py --full-for`) or on the nightly schedule.
+CI runs it in the `vpn-model (override)` job of `.github/workflows/swift.yml`, in parallel with the detection spec's job: pull requests and pushes check this spec's default tier. The full tier runs nightly on main, when the workflow is started by hand, and in `release.yml` on a tag, where it gates the draft release. CI does not run it for a pull request, so run `--full=override` yourself when `check.py --full-for origin/main` names this spec.
 
 Read every result with the `/statechart` skill: give it the spec and the config from `.out/<name>/`, and it shows a violation as its shortest path in plain words. Replay a path against the Swift, one step per action, in a publisher test over the fake session store and probe, a relay test, or a pm-sim scenario over `FakeMachine`.
 
