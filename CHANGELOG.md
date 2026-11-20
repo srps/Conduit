@@ -12,18 +12,24 @@ privileged helper, so it needs the helper from this build: reinstall it from
 Settings → General → **Update Helper** (one admin prompt), or with
 `sudo ./install-helper.sh` from a source checkout. Helper protocol v5 is
 unchanged; an older helper keeps working, lacks the new feature, and the app
-then leaves the VPN's DNS alone.
+then leaves the resolver order alone.
 
 - On a full-tunnel VPN that takes the Mac's default resolver (seen with macOS
   27), public names resolve again. While "Manage system DNS" is on, the relay
-  serves and live split DNS has the tunnel's servers in use, the helper points
-  that VPN's published DNS servers at Conduit's relay, and internal names keep
-  going to the tunnel's servers. The helper writes only over the servers it
-  compared, gives them back when Conduit stops serving (Stop, Quit, "Manage
-  system DNS" off, the app exiting, the relay or forwarder going away, the
-  helper stopping or starting), never deletes the VPN's key, and retries a
-  restore it could not write on its next tick. The helper's DNS relay now
-  carries TCP as well as UDP (decision 0049).
+  serves and live split DNS has the tunnel's servers in use, the helper
+  publishes one DNS entry of its own that makes its relay on `127.0.0.1:15353`
+  the Mac's first resolver; internal names keep going to the tunnel's servers.
+  The helper never writes the VPN's DNS settings. Its entry is removed as soon
+  as Conduit stops serving (Stop, Quit, "Manage system DNS" off, the app
+  exiting, Conduit's forwarder refusing or not answering, the VPN changing or
+  disconnecting), and the system removes it by itself if the helper dies. While
+  the entry exists, the relay answers each lookup from Conduit, or from the
+  VPN's own DNS servers within about 1.5 s when Conduit is gone or hung, so
+  lookups are never worse off than without the override. Conduit reports when
+  macOS stops putting the entry first (`dns.vpn_override_not_first`). The
+  helper's DNS relays carry TCP as well as UDP. A helper that rewrote the VPN's
+  DNS key in an earlier build of this change has its saved servers put back once,
+  at start (decision 0049).
 - A DNS lookup in flight when a network change or VPN flap resets the DNS
   transports is now re-run once on the fresh transports within its lookup
   window, or left unanswered so the client asks again. It no longer gets

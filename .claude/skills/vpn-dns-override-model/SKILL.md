@@ -1,20 +1,18 @@
 ---
 name: vpn-dns-override-model
-description: Model-check Conduit's 0049 VPN resolver override (the helper's own temporary DNS key and its publisher, the fail-safe UDPRelay and TCPRelay, HelperDaemon's kevent loop, VPNResolverOverridePolicy and its controller, PushedResolverReading, RuntimeHostVPNDNSOverride and RuntimeHostSplitDNSDetection's ordering) with the TLA+ spec formal/vpn-detection/VPNDNSOverride.tla. Use when a change touches any file in its coverage record, or for a bug where lookups hang or fail with Conduit's key first, the key outlives Conduit or the VPN, does not come back after a flap or a configd restart, the VPN's own DNS key is written, or a lookup loops back to Conduit.
+description: Model-check Conduit's 0049 VPN resolver override (the helper's own temporary DNS key and VPNDNSOverridePublisher, the fail-safe DNSFailoverRelay, HelperDaemon's kevent loop, VPNResolverOverridePolicy and its controller, PushedResolverReading, RuntimeHostVPNDNSOverride and RuntimeHostSplitDNSDetection's ordering) with the TLA+ spec formal/vpn-detection/VPNDNSOverride.tla. Use when a change touches any file in its coverage record, or for a bug where lookups hang or fail with Conduit's key first, the key outlives Conduit or the VPN, does not come back after a flap or a configd restart, the VPN's own DNS key is written, or a lookup loops back to Conduit.
 ---
 
 # VPN DNS override model
 
 Decision 0049, as revised in #330, makes the helper's relay resolver #1 on a full-tunnel VPN through one temporary dynamic-store key of the helper's own, and never writes the VPN client's keys. The relay forwards to Conduit's forwarder and fails each lookup over to the VPN's servers, read live from the VPN's untouched key. `formal/vpn-detection/VPNDNSOverride.tla` models one VPN service: its DNS key and IPv4 key and the VPN gate; configd's restarts; Conduit's key; the helper (up or down, its arm, its probe streaks, its view of the store) and its owner watch; the relay's mode; Conduit's forwarder; and the app's reading, live split-DNS set, arm and helper calls. TLC checks every interleaving of those steps under small bounds. It is a separate spec from `VPNDetection.tla` (skill `vpn-detection-model`), which models the gate's own chain and the entry files.
 
-**The model is ahead of the code.** The Swift still implements the first design, which rewrote `ServerAddresses` in the VPN's key and restored it. `SYNC_COMMIT` stays where it was until the code follows; every row of the coverage record below names the code that will implement it, not code that does today.
-
 ## Does my change touch it?
 
 It does if it changes the behaviour of any function in the coverage record below, or adds a path that publishes or removes Conduit's key, writes any VPN key, changes where the relay forwards, feeds the override policy, or orders a disarm against a split-DNS set update.
 
 ```sh
-python3 formal/vpn-detection/check.py --full-for SYNC_COMMIT
+python3 formal/vpn-detection/check.py --full-for 11ed34ad
 ```
 
 prints `override` when a file in `OVERRIDE_COVERED` in `check.py`, the spec or this skill changed since the sync commit; `--changed REF` lists the files. `OVERRIDE_COVERED` is the one list of covered files.
@@ -29,7 +27,7 @@ That runs the four checks and every mutant at the default bounds (times in **Bou
 
 CI runs it in the `vpn-model (override)` job of `.github/workflows/swift.yml`, in parallel with the detection spec's job: every run checks this spec's default tier, and its full tier when its covered or model files changed (`check.py --full-for`) or on the nightly schedule.
 
-Read every result with the `/statechart` skill: give it the spec and the config from `.out/<name>/`, and it shows a violation as its shortest path in plain words. Once the code exists, replay a path against the Swift, one step per action, in a publisher test over the fake session store and probe, a relay test, or a pm-sim scenario over `FakeMachine`.
+Read every result with the `/statechart` skill: give it the spec and the config from `.out/<name>/`, and it shows a violation as its shortest path in plain words. Replay a path against the Swift, one step per action, in a publisher test over the fake session store and probe, a relay test, or a pm-sim scenario over `FakeMachine`.
 
 ## What it checks
 
@@ -46,7 +44,7 @@ Each property's comment in the spec says what it guarantees.
 
 ## Mutants
 
-Each must be caught. The `swift` text names the change that would break the design once it is built.
+Each must be caught. The `swift` text in `check.py` names the change in the code that it mirrors.
 
 - `ov-no-per-query-failover` (`KeyAnswered`). The relay fails over only when a tick switches its mode.
 - `ov-key-points-at-conduit` (`KeyAnswered`). The key names Conduit's forwarder instead of the relay.
@@ -82,21 +80,21 @@ Measured on a 12-core laptop: the default tier (`--spec override --mutants`) too
 
 ## Coverage record
 
-Synced at SYNC_COMMIT, for the first design; not moved for this model. Move it forward only after the code implements the combined design and you confirm, function by function, that the model describes it.
+Synced at 11ed34ad, the combined design's implementation. Move it forward only after you confirm, function by function, that the model still describes the code at the new commit.
 
-| Model | Code to implement it |
+| Model | Code |
 | --- | --- |
 | `vkey`, `svc`, `ver`, `ClientRewrite`, `ClientLoopback`, `ClientDelete`, `ClientPublishDNS`, `ClientPublishIPv4`, `ClientIPv4Flap`, `ClientIPv4Back` | the VPN client writing `State:/Network/Service/<id>/DNS` and `/IPv4` (another process) |
 | `vgate`, `GateFlap`, `GateBack` | `SplitDNSVPNGate.entriesWanted` (its chain is `VPNDetection.tla`) |
 | `okey`, `ConfigdRestart` | Conduit's temporary key in the helper's session store; configd dropping temporary keys on restart |
-| `h.armN`, `h.owner`, `h.pub`, `h.seen`, `Ready`, `HSync`, `NoticesOwnKey`, `WritesVPNKey` | the publisher in `Sources/ConduitShared/VPNDNSOverrideLedger.swift` (to be reworked): Ready, publish, withdraw, republish on its own key's notification |
-| `HAccept` | `Sources/ConduitHelper/HelperDaemon.swift` `processRequest`: arm, disarm, `startDNSRelay`, `.stopDNSRelay` (disarm, then stop) |
-| `HTick`, `h.probeOK`, `h.refused`, `h.silent` | the publisher's tick: the probe, the streaks, the relay's mode |
-| `HOwnerExit`, `ExitPending`, `HelperFree`, `WatchOwner`, `WithdrawsOnExit` | `HelperDaemon.run`'s `loop.watchOwner(...)` and `.ownerExited`; `Sources/ConduitHelper/HelperEventLoop.swift` `ordered` |
+| `h.armN`, `h.owner`, `h.pub`, `h.seen`, `Ready`, `HSync`, `NoticesOwnKey`, `WritesVPNKey` | `Sources/ConduitShared/VPNDNSOverridePublisher.swift`: `hold` (Ready), `sync` (publish, withdraw, republish when `ownKeyExists` is false), `withdraw` (a refused removal closes the session); the store in `Sources/ConduitHelper/VPNDNSOverrideAdapters.swift`, whose notifications reach `HelperEventLoop`'s `storeChanged` |
+| `HAccept` | `Sources/ConduitHelper/HelperDaemon.swift` `processRequest`: the publisher's `arm`, `disarm`, `relayStarted` from `startDNSRelay`, and `.stopDNSRelay` (`disarm(.relayStopped)`, then stop) |
+| `HTick`, `h.probeOK`, `h.refused`, `h.silent` | `VPNDNSOverridePublisher.tick`: `relay.probe()`, `refusedTicksToWithdraw`, `silentTicksToWithdraw`, `relay.setMode` |
+| `HOwnerExit`, `ExitPending`, `HelperFree`, `WatchOwner`, `WithdrawsOnExit` | `HelperDaemon.run`'s `loop.watchOwner(...)` and `.ownerExited`, calling `VPNDNSOverridePublisher.ownerExited`; `Sources/ConduitHelper/HelperEventLoop.swift` `ordered` |
 | `HelperDown`, `HStart` | the helper killed or stopped (configd's `cleanupSession` removing its key); launchd starting it |
-| `relay`, `RelayDies`, `HRelayRestart`, `FailoverTarget`, `FiltersLoopback`, `Answers`, `PerQueryFailover`, `KeyTargetsRelay` | `Sources/ProxyKernel/Network/UDPRelay.swift` and `TCPRelay.swift`: modes, per-query failover, the VPN's servers with loopback dropped; the key's `ServerPort` |
-| `ReadingOf`, `IgnoresOwnKey`, `AppRead`, `Snap` | `Sources/PlatformMac/PushedResolver.swift` `PushedResolverReading.parseResolver` (no substitution, Conduit's key skipped); `Sources/PlatformMac/PushedResolverMonitor.swift` |
-| `Want`, `ServersInUse`, `MayArm`, `ReleasesUnconfirmed`, `AppPass`, `AppPoll` | `Sources/PlatformMac/VPNResolverOverridePolicy.swift` `decide`; `Sources/PlatformMac/VPNResolverOverrideController.swift` (arm, disarm, unconfirmed arms, status) |
+| `relay`, `RelayDies`, `HRelayRestart`, `FailoverTarget`, `FiltersLoopback`, `Answers`, `PerQueryFailover`, `KeyTargetsRelay` | `Sources/ProxyKernel/Network/DNSFailoverRelay.swift`: `DNSFailoverRoute` (mode, `setServers` through `VPNDNSOverrideValidation.failoverServers`), `DNSFailoverUDPRelay` (`receiveFromConduit`, `expire`), `DNSFailoverTCPRelay.serve`, `DNSFailoverRelay.restartDeadHalves` with `HelperDaemon.restartDeadFailoverHalves` and the publisher's `relayRestarted`; the key's `ServerPort` from `ownKey(port: relay.listeningPort)` |
+| `ReadingOf`, `IgnoresOwnKey`, `AppRead`, `Snap` | `Sources/PlatformMac/PushedResolver.swift` `PushedResolverReading.parse` (Conduit's key skipped by `HelperConstants.vpnDNSOverrideServiceID`); `Sources/PlatformMac/PushedResolverMonitor.swift` |
+| `Want`, `ServersInUse`, `MayArm`, `ReleasesUnconfirmed`, `AppPass`, `AppPoll` | `Sources/PlatformMac/VPNResolverOverridePolicy.swift` `decide`, `wanted`; `Sources/PlatformMac/VPNResolverOverrideController.swift` `mayArm`, `decide` (`unconfirmed ?? armed`), `pass`, `arm`, `disarm`, `status`, `confirm` |
 | `AppTake`, `NewSet`, `HoldBeforeDisarm` | `Sources/ConduitRuntime/RuntimeHostSplitDNSDetection.swift` `applyPendingSplitDNSDetection`; `Sources/ConduitRuntime/RuntimeHostVPNDNSOverride.swift` |
 | `AppRestartRelay`, `AppStartDNS`, `AppStop`, `AppTdDisarm`, `AppTdRelay`, `AppCallFails` | `RuntimeHost.handleDNSHealthResult`, `startDNSModule`, `RuntimeHostLifecycle`'s DNS teardown; a call while the helper is down |
 | `OwnerExit`, `AppLaunch`, `ForwarderFault`, `ForwarderRecovers` | the environment |
@@ -114,7 +112,9 @@ Synced at SYNC_COMMIT, for the first design; not moved for this model. Move it f
 
 ## What it leaves out
 
-Two VPN services and split tunnels; the primary-service lag behind a reading; fields other than `ServerAddresses`; the relay's port; reboots; a hung helper; a relay that cannot re-bind; the resolver order; DoH and the forwarder's own routing.
+Two VPN services and split tunnels; the primary-service lag behind a reading; fields other than `ServerAddresses`; the relay's port; reboots; a hung helper; a relay that cannot re-bind; the resolver order and the app's `not_first` check (`Sources/PlatformMac/ResolverOrder.swift`); the one-time legacy restore at helper start (`VPNDNSOverrideLegacyRestore`), which writes the VPN's key only when a helper from the rewrite left `127.0.0.1` in it; DoH and the forwarder's own routing.
+
+One difference from `HAccept`: the model's arm takes `probeOK` from the forwarder's state at once, while the code probes through the relay, so an arm made before `start-dns-relay` publishes only after the next answered tick. It delays a publish and cannot publish a key the model would not.
 
 ## A real bug or a modeling error?
 

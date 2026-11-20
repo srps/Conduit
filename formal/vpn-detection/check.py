@@ -55,13 +55,16 @@ MODEL = ["formal/vpn-detection/VPNDetection.tla", "formal/vpn-detection/check.py
          ".claude/skills/vpn-detection-model/"]
 
 OVERRIDE_COVERED = [
-    "Sources/ConduitShared/VPNDNSOverrideLedger.swift",
+    "Sources/ConduitShared/VPNDNSOverridePublisher.swift",
+    "Sources/ConduitShared/VPNDNSOverrideValidation.swift",
+    "Sources/ConduitShared/VPNDNSOverrideLegacyRestore.swift",
     "Sources/ConduitHelper/HelperDaemon.swift",
     "Sources/ConduitHelper/HelperEventLoop.swift",
-    "Sources/ProxyKernel/Network/UDPRelay.swift",
-    "Sources/ProxyKernel/Network/TCPRelay.swift",
+    "Sources/ConduitHelper/VPNDNSOverrideAdapters.swift",
+    "Sources/ProxyKernel/Network/DNSFailoverRelay.swift",
     "Sources/PlatformMac/VPNResolverOverridePolicy.swift",
     "Sources/PlatformMac/VPNResolverOverrideController.swift",
+    "Sources/PlatformMac/ResolverOrder.swift",
     "Sources/PlatformMac/PushedResolver.swift",
     "Sources/PlatformMac/PushedResolverMonitor.swift",
     "Sources/ConduitRuntime/RuntimeHostVPNDNSOverride.swift",
@@ -314,30 +317,31 @@ OVERRIDE_LOOPBACK = dict(OVERRIDE_NONE, MaxVersions=2, MaxLoopbackLists=1, MaxFo
 OVERRIDE_CONFIGD = dict(OVERRIDE_NONE, MaxVersions=2, MaxConfigdRestarts=1)
 OVERRIDE_LOST_REPLY = dict(OVERRIDE_NONE, MaxVersions=2, MaxGateFlaps=1, MaxLostReplies=1)
 
-# The combined design (0049 as revised in #330) is ahead of the code: each `swift` text names the change
-# that would break it once it is built.
+# The combined design (0049 as revised in #330): each `swift` text names the change in the code that breaks it.
 MUTANTS += [
     override_mutant(
         "ov-no-per-query-failover",
-        "UDPRelay and TCPRelay: fail over to the VPN's servers only when the helper's tick switches the mode, "
-        "so a lookup to a forwarder that refuses or stays silent goes unanswered until the next probe",
+        "DNSFailoverUDPRelay.receiveFromConduit and .expire, DNSFailoverTCPRelay.serve: fail over to the VPN's "
+        "servers only when the publisher's tick sets the mode, so a lookup to a forwarder that refuses or stays "
+        "silent goes unanswered until the next probe",
         [("PerQueryFailover == TRUE", "PerQueryFailover == FALSE")],
         "KeyAnswered", bounds=OVERRIDE_FORWARDER_ONLY),
     override_mutant(
         "ov-key-points-at-conduit",
-        "the helper publishes its key with Conduit's forwarder port instead of the relay's, so a forwarder that "
-        "is gone or silent leaves every lookup unanswered",
+        "VPNDNSOverridePublisher.sync: publish `ownKey(port:)` with the forwarder's port instead of "
+        "`relay.listeningPort`, so a forwarder that is gone or silent leaves every lookup unanswered",
         [("KeyTargetsRelay == TRUE", "KeyTargetsRelay == FALSE")],
         "KeyAnswered", bounds=OVERRIDE_FORWARDER_ONLY),
     override_mutant(
         "ov-failover-to-loopback",
-        "the relay's failover keeps a loopback server from the VPN's key, so a failed-over lookup is sent "
-        "to a loopback address",
+        "DNSFailoverRoute.setServers: keep the loopback servers that `VPNDNSOverrideValidation.failoverServers` "
+        "drops, so a failed-over lookup is sent to a loopback address",
         [("FiltersLoopback == TRUE", "FiltersLoopback == FALSE")],
         "NoLoopbackTarget", bounds=OVERRIDE_LOOPBACK),
     override_mutant(
         "ov-key-kept-after-owner-exit",
-        "HelperDaemon.run: on the owner's NOTE_EXIT, stop watching but leave the key published",
+        "VPNDNSOverridePublisher.ownerExited: forget the arm but delete `withdraw(.ownerExited)`, so the key "
+        "stays published",
         [("WithdrawsOnExit == TRUE", "WithdrawsOnExit == FALSE")],
         "KeyWithdrawn"),
     override_mutant(
@@ -347,20 +351,20 @@ MUTANTS += [
         "KeyWithdrawn"),
     override_mutant(
         "ov-no-republish-after-configd-restart",
-        "the helper does not watch its own key, so after configd restarts and drops it the key stays gone "
-        "while the helper believes it published",
+        "VPNDNSOverridePublisher.sync: `guard !published || !store.ownKeyExists()` becomes `guard !published`, "
+        "so after configd restarts and drops the key it stays gone while the helper believes it published",
         [("NoticesOwnKey == TRUE", "NoticesOwnKey == FALSE")],
         "KeyReturns", bounds=OVERRIDE_CONFIGD),
     override_mutant(
         "ov-writes-vpn-key",
-        "the helper also writes 127.0.0.1 into the VPN's own `State:/Network/Service/<id>/DNS`, as the "
-        "rewrite did",
+        "VPNDNSOverridePublisher.sync: also write 127.0.0.1 into the VPN's own "
+        "`State:/Network/Service/<id>/DNS`, as the rewrite did",
         [("WritesVPNKey == FALSE", "WritesVPNKey == TRUE")],
         "VPNKeyUntouched"),
     override_mutant(
         "ov-reads-own-key",
-        "PushedResolverReading.parse: read Conduit's own key as a pushed resolver, so 127.0.0.1 enters the "
-        "live split-DNS set",
+        "PushedResolverReading.parse: delete `where serviceID != HelperConstants.vpnDNSOverrideServiceID`, "
+        "so Conduit's own key is read as a pushed resolver and 127.0.0.1 enters the live split-DNS set",
         [("IgnoresOwnKey == TRUE", "IgnoresOwnKey == FALSE")],
         "NoSelfReference"),
     override_mutant(
@@ -371,24 +375,26 @@ MUTANTS += [
         "InternalNamesServed"),
     override_mutant(
         "ov-set-dropped-before-disarm",
-        "RuntimeHostSplitDNSDetection.applyPendingSplitDNSDetection: apply a new set while the key may be "
-        "armed, before the disarm",
+        "RuntimeHostSplitDNSDetection.applyPendingSplitDNSDetection: apply a new set while "
+        "`vpnDNSOverrideReleases(before:)` holds, before the disarm returns",
         [("HoldBeforeDisarm == TRUE", "HoldBeforeDisarm == FALSE")],
         "InternalNamesServed"),
     override_mutant(
         "ov-unconfirmed-arm-kept",
-        "VPNResolverOverrideController.decide: decide on `record` alone, so an arm whose reply was lost is not "
-        "disarmed before the set changes",
+        "VPNResolverOverrideController.decide and .mayArm: decide on `armed` alone, so an arm whose reply was "
+        "lost is not disarmed before the set changes",
         [("ReleasesUnconfirmed == TRUE", "ReleasesUnconfirmed == FALSE")],
         "InternalNamesServed", bounds=OVERRIDE_LOST_REPLY),
     override_mutant(
         "ov-tick-ignores-refused",
-        "the helper's tick never reaches the streak of 2 refusals that withdraws the key",
+        "VPNDNSOverridePublisher.tick: a refusal never clears `probeOK`, so the streak of "
+        "`refusedTicksToWithdraw` (2) never withdraws the key",
         [("!.probeOK = @ /\\ h.refused + 1 < 2", "!.probeOK = @")],
         "EventuallyWithdrawn", bounds=OVERRIDE_FORWARDER_ONLY),
     override_mutant(
         "ov-tick-ignores-silent",
-        "the helper's tick never reaches the streak of 3 silent probes that withdraws the key",
+        "VPNDNSOverridePublisher.tick: a silence never clears `probeOK`, so the streak of "
+        "`silentTicksToWithdraw` (3) never withdraws the key",
         [("!.probeOK = @ /\\ h.silent + 1 < 3", "!.probeOK = @")],
         "EventuallyWithdrawn", bounds=OVERRIDE_FORWARDER_ONLY),
 ]
