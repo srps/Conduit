@@ -7,6 +7,47 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
+**Needs a helper update.** The full-tunnel resolver override below runs in the
+privileged helper, so it needs the helper from this build: reinstall it from
+Settings → General → **Update Helper** (one admin prompt), or with
+`sudo ./install-helper.sh` from a source checkout. Helper protocol v5 is
+unchanged; an older helper keeps working, lacks the new feature, and the app
+then leaves the resolver order alone.
+
+- On a full-tunnel VPN that takes the Mac's default resolver (seen with macOS
+  27), public names resolve again. While "Manage system DNS" is on, the relay
+  serves and live split DNS has the tunnel's servers in use, the helper
+  publishes one DNS entry of its own that makes its relay on `127.0.0.1:15353`
+  the Mac's first resolver; internal names keep going to the tunnel's servers.
+  The helper never writes the VPN's DNS settings. Its entry is removed as soon
+  as Conduit stops serving (Stop, Quit, "Manage system DNS" off, the app
+  exiting, Conduit's forwarder refusing or not answering, the VPN changing or
+  disconnecting), and the system removes it by itself if the helper dies. While
+  the entry exists, the relay answers each lookup from Conduit, or from the
+  VPN's own DNS servers within about 1.5 s when Conduit is gone or hung, so
+  lookups are never worse off than without the override. Conduit reports when
+  macOS stops putting the entry first (`dns.vpn_override_not_first`). The
+  helper's DNS relays carry TCP as well as UDP. A helper that rewrote the VPN's
+  DNS key in an earlier build of this change has its saved servers put back once,
+  at start (decision 0049).
+- A DNS lookup in flight when a network change or VPN flap resets the DNS
+  transports is now re-run once on the fresh transports within its lookup
+  window, or left unanswered so the client asks again. It no longer gets
+  SERVFAIL, which macOS caches, so a name could stay unresolvable well after
+  the reset once every lookup on the Mac goes through Conduit.
+  While the network path is unsatisfied, lookups are dropped instead of
+  answered SERVFAIL (`dns.unsatisfied_path_dropped` replaces
+  `dns.unsatisfied_path_servfail`). New event `dns.reset_lookup_rerun`.
+- Off the VPN, on a corporate LAN that blocks public DNS-over-HTTPS, lookups
+  now fall back to the network's own DNS server (the one DHCP gives the Mac)
+  when DoH gets no answer and no split-DNS server covers the name, so the PAC,
+  the upstream proxies' hostnames and public names resolve again without a
+  manual split-DNS entry. While DoH answers, or while a VPN's pushed servers
+  are in use, that server is never asked. When DNS starts answering again,
+  Conduit retries the PAC and the upstream probe at once instead of after the
+  PAC's failure backoff, and the DNS health check no longer restarts a relay
+  that only had slow upstreams (decision 0050).
+
 ## 0.7.0
 
 This release makes Conduit's VPN on/off verdict, and the split DNS that depends

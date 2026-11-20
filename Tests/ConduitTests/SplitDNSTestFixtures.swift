@@ -22,10 +22,12 @@ final class FakeSplitDNSServer: @unchecked Sendable {
         self.asked = asked
     }
 
-    static func start(domain: String, ip: String) async throws -> FakeSplitDNSServer {
+    static func start(domain: String, ip: String, matchingEverything: Bool = false) async throws -> FakeSplitDNSServer {
         let asked = NIOLockedValueBox<[String: Int]>([:])
         let channel = try await DatagramBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .channelInitializer { $0.pipeline.addHandler(Responder(domain: domain, ip: ip, asked: asked)) }
+            .channelInitializer {
+                $0.pipeline.addHandler(Responder(domain: domain, ip: ip, asked: asked, matchingEverything: matchingEverything))
+            }
             .bind(host: "127.0.0.1", port: 0)
             .get()
         return FakeSplitDNSServer(channel: channel, asked: asked)
@@ -42,11 +44,13 @@ final class FakeSplitDNSServer: @unchecked Sendable {
         private let domain: String
         private let ip: String
         private let asked: NIOLockedValueBox<[String: Int]>
+        private let matchingEverything: Bool
 
-        init(domain: String, ip: String, asked: NIOLockedValueBox<[String: Int]>) {
+        init(domain: String, ip: String, asked: NIOLockedValueBox<[String: Int]>, matchingEverything: Bool) {
             self.domain = domain
             self.ip = ip
             self.asked = asked
+            self.matchingEverything = matchingEverything
         }
 
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -55,7 +59,7 @@ final class FakeSplitDNSServer: @unchecked Sendable {
             let query = buffer.readBytes(length: buffer.readableBytes) ?? []
             let name = DNSWireFormat.extractDomainName(from: query).lowercased()
             asked.withLockedValue { $0[name, default: 0] += 1 }
-            let mine = name == domain || name.hasSuffix(".\(domain)")
+            let mine = matchingEverything || name == domain || name.hasSuffix(".\(domain)")
             let answer = mine
                 ? DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: ip)
                 : DNSWireFormat.emptyDNSResponse(originalQuery: query, rcode: 3)

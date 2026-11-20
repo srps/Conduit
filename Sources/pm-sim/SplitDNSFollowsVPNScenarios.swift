@@ -468,7 +468,7 @@ final class NoGSS: GSSTokenProvider {
 
 /// A loopback UDP DNS server that answers an A query for a name at or under `domain` with `ip`, answers NXDOMAIN
 /// for any other name, and counts the queries per name.
-private final class CountingDNSServer: @unchecked Sendable {
+final class CountingDNSServer: @unchecked Sendable {
     private let domain: String
     private let ip: String
     private let asked = NIOLockedValueBox<[String: Int]>([:])

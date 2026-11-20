@@ -25,7 +25,7 @@ package protocol PushedResolverObserving: AnyObject, Sendable {
 }
 
 /// `PushedResolverObserving` over `SCDynamicStore`, read-only. Watches the
-/// per-service DNS, IPv4 and IPv6 keys and the global DNS key, and on each
+/// per-service DNS, IPv4 and IPv6 keys and the global DNS and IPv4 keys, and on each
 /// notification takes one `SCDynamicStoreCopyMultiple` of the service keys and
 /// parses it with `PushedResolverReading.parse(store:)`. A reading equal to
 /// the last one delivered is not delivered again.
@@ -91,12 +91,14 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
         PushedResolverReading.ipv4KeyPattern,
         PushedResolverReading.ipv6KeyPattern,
         "State:/Network/Global/DNS",
+        PushedResolverReading.globalIPv4Key,
     ]
 
     private static let readPatterns = [
         PushedResolverReading.dnsKeyPattern,
         PushedResolverReading.ipv4KeyPattern,
         PushedResolverReading.ipv6KeyPattern,
+        PushedResolverReading.globalIPv4Key,
     ]
 
     package init(calls: Calls = Calls(), clock: StoreObserverClock = .continuous) {

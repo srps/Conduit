@@ -9,9 +9,12 @@ on:
   pull_request:
     branches: [ "main" ]
   schedule:
-    # Nightly, 02:00 UTC: the VPN detection model at its full bounds. The build
-    # does not run on the schedule.
+    # Nightly, 02:00 UTC: each model's full tier, when its covered or model
+    # files changed since the last green nightly run. The build does not run
+    # on the schedule.
     - cron: "0 2 * * *"
+  # By hand: the same full tiers, for example before tagging.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -121,50 +124,65 @@ jobs:
         python3 scripts/test-status-stream.py "$conduit_bin_dir/pm-proxy"
 
   vpn-detection-model:
-    # The TLA+ model of the VPN detection chain (formal/vpn-detection, skill
-    # vpn-detection-model). It needs Java and Python, not Xcode, so it runs
-    # beside the build on a Linux runner. Every run checks the default tier;
-    # a change to a covered file or to the model, and the nightly run, check
-    # the full tier (check.py --full).
+    # The TLA+ models of the VPN detection chain and of the 0049 resolver
+    # override (formal/vpn-detection, skills vpn-detection-model and
+    # vpn-dns-override-model), one job per spec. Pull requests and pushes
+    # check the default tier; the nightly and manual runs, and the release
+    # workflow on a tag, check the full tier.
+    strategy:
+      fail-fast: false
+      matrix:
+        spec: [detection, override]
+    name: vpn-model (${{ matrix.spec }})
     runs-on: ubuntu-24.04
-    # About 20 minutes for the default tier and 60 to 80 for the full tier on
-    # a 4-core runner (44 minutes with 4 TLC workers on a 12-core laptop).
-    timeout-minutes: 120
+    # Full tier on a 4-core runner: 80 to 130 minutes for detection, 15 to 55
+    # for override, depending on the runner.
+    timeout-minutes: 180
+
+    permissions:
+      contents: read
+      # The nightly run reads the last green nightly run's commit.
+      actions: read
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
-        # The commit before the push, for the changed-file check.
+        # The nightly run diffs against the last green nightly run's commit.
         fetch-depth: 0
-    - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
-      with:
-        distribution: temurin
-        java-version: "21"
-    - name: Choose the tier from the files the change touches
-      id: tier
+    - name: Skip the nightly run when this spec's files are unchanged
+      id: plan
+      if: github.event_name == 'schedule'
       env:
-        EVENT: ${{ github.event_name }}
-        BEFORE: ${{ github.event.before }}
+        GH_TOKEN: ${{ github.token }}
+        SPEC: ${{ matrix.spec }}
       run: |
-        case "$EVENT" in
-          schedule) echo "args=--full --mutants" >> "$GITHUB_OUTPUT"; exit 0 ;;
-          # The merge commit's first parent is the base branch.
-          pull_request) base="HEAD^1" ;;
-          *) base="$BEFORE" ;;
-        esac
-        # A push that creates the branch has no commit before it: check everything.
-        if [ -z "${base//0/}" ]; then
-          echo "No commit before this push; checking the full tier"
-          echo "args=--full --mutants" >> "$GITHUB_OUTPUT"
+        last="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow swift.yml --event schedule \
+          --branch main --status success --limit 1 --json headSha --jq '.[0].headSha // empty')"
+        if [ -z "$last" ] || ! git cat-file -e "$last^{commit}" 2>/dev/null; then
+          echo "No green nightly run to compare with; checking the full tier"
           exit 0
         fi
-        # check.py's COVERED list is the coverage record's files.
-        changed="$(python3 formal/vpn-detection/check.py --changed "$base")"
-        if [ -n "$changed" ]; then
-          printf 'Covered or model files changed:\n%s\n' "$changed"
-          echo "args=--full --mutants" >> "$GITHUB_OUTPUT"
+        specs="$(python3 formal/vpn-detection/check.py --full-for "$last")"
+        if printf '%s' "$specs" | tr ',' '\n' | grep -qx "$SPEC"; then
+          echo "Changed since the last green nightly run ($last):"
+          python3 formal/vpn-detection/check.py --changed "$last"
         else
-          echo "args=--mutants" >> "$GITHUB_OUTPUT"
+          echo "Nothing this spec covers changed since $last; skipping"
+          echo "skip=true" >> "$GITHUB_OUTPUT"
         fi
-    - name: Model-check VPN detection with TLC, and show each historical bug caught
-      run: python3 formal/vpn-detection/check.py ${{ steps.tier.outputs.args }}
+    - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      if: steps.plan.outputs.skip != 'true'
+      with:
+        distribution: temurin
+        java-version: "25"
+    - name: Model-check with TLC, and show each historical bug caught
+      if: steps.plan.outputs.skip != 'true'
+      env:
+        SPEC: ${{ matrix.spec }}
+        FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+      run: |
+        if [ "$FULL" = true ]; then
+          python3 formal/vpn-detection/check.py --spec "$SPEC" --full="$SPEC" --mutants
+        else
+          python3 formal/vpn-detection/check.py --spec "$SPEC" --mutants
+        fi

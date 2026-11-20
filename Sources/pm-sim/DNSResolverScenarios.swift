@@ -596,9 +596,15 @@ final class FakeAnsweringDoHProvider: @unchecked Sendable {
     private let group: EventLoopGroup
     private let ip: String
     private let requests = NIOLockedValueBox<[String]>([])
+    private let holding = NIOLockedValueBox(false)
     private var channel: Channel?
 
     var port: Int { channel?.localAddress?.port ?? 0 }
+
+    /// While held, a request is recorded and left unanswered; the fetch waits until its client gives up.
+    func holdResponses(_ hold: Bool) {
+        holding.withLockedValue { $0 = hold }
+    }
 
     /// Requests whose first read names `label`: the GET query string carries
     /// the dotted name and the POST body its wire-format labels, so a single
@@ -616,10 +622,11 @@ final class FakeAnsweringDoHProvider: @unchecked Sendable {
     func start() async throws {
         let ip = ip
         let requests = requests
+        let holding = holding
         channel = try await ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandler(DNSJSONAnswerHandler(ip: ip, requests: requests))
+                channel.pipeline.addHandler(DNSJSONAnswerHandler(ip: ip, requests: requests, holding: holding))
             }
             .bind(host: "127.0.0.1", port: 0)
             .get()
@@ -637,11 +644,13 @@ private final class DNSJSONAnswerHandler: ChannelInboundHandler, @unchecked Send
 
     private let ip: String
     private let requests: NIOLockedValueBox<[String]>
+    private let holding: NIOLockedValueBox<Bool>
     private var responded = false
 
-    init(ip: String, requests: NIOLockedValueBox<[String]>) {
+    init(ip: String, requests: NIOLockedValueBox<[String]>, holding: NIOLockedValueBox<Bool>) {
         self.ip = ip
         self.requests = requests
+        self.holding = holding
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -650,6 +659,7 @@ private final class DNSJSONAnswerHandler: ChannelInboundHandler, @unchecked Send
         var request = unwrapInboundIn(data)
         let head = String(decoding: request.readBytes(length: request.readableBytes) ?? [], as: UTF8.self)
         requests.withLockedValue { if $0.count < 64 { $0.append(head) } }
+        guard !holding.withLockedValue({ $0 }) else { return }
 
         let body = #"{"Status":0,"Answer":[{"type":1,"TTL":60,"data":"\#(ip)"}]}"#
         let response = "HTTP/1.1 200 OK\r\nContent-Type: application/dns-json\r\n" +

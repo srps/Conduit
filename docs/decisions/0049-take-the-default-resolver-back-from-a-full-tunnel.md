@@ -1,0 +1,114 @@
+# 0049: Take the default resolver back from a full-tunnel VPN through the helper
+
+- Date: 2026-11-19
+- Decision: proposed
+- Implementation: implemented
+- Validation: pending
+- Supersedes: none
+- Superseded by: none
+
+## Context
+
+Observed on the owner's machine on 2026-11-19, macOS 27.2.1, Cisco Secure Client 5.1.12 (unchanged since 2025-11-20), full-tunnel profile:
+
+- With the VPN connected, `scutil --dns` lists the tunnel's servers as resolver #1, and `State:/Network/Global/DNS` reads `Default: com.cisco.anyconnect`. Conduit's `127.0.0.1`, written on every physical service, survives only as a resolver scoped to `en0` and marked Not Reachable.
+- The tunnel's servers answer NXDOMAIN for public names (`github.com`, `example.com`). Applications that resolve through the system get `ENOTFOUND`. Applications that only go through the PAC and the proxy are unaffected.
+- On 2026-11-09, on macOS 26 with the same client and profile, the capture in [`design-live-vpn-split-dns.md`](../design-live-vpn-split-dns.md) records the opposite order: Conduit's `127.0.0.1` stayed resolver #1 and the tunnel's resolver was scoped to its `utun`. The difference is the macOS upgrade, not Conduit or the VPN client.
+- Conduit's relay and forwarder still answered correctly when asked directly. Nothing in the pipeline failed; the system stopped asking it.
+
+The owner ran three reversible experiments with the VPN connected (scripts and outputs recorded in the [design](../design-vpn-default-resolver-override.md#evidence)):
+
+- **A.** Adding `SearchOrder 0` to Conduit's DNS on the primary physical service changed nothing.
+- **B.** Rewriting `ServerAddresses` in `State:/Network/Service/com.cisco.anyconnect/DNS` to `127.0.0.1` made `127.0.0.1` the default resolver, and public names resolved. The client did not rewrite the key within 30 s. Internal names then failed, because the forwarder had no route to the tunnel's servers (0.6.2 has no live split DNS, and the owner's manual entries are disabled).
+- **C.** Publishing a Conduit-owned service with only DNS, and then with a copy of the tunnel's IPv4 dictionary and `OverridePrimary 1`, changed nothing: the client's service stayed primary for both the route and the resolver. The DNS-only key had no `SupplementalMatchDomains`, and configd takes a resolver from a DNS-only service only when it has them; that is why C1 showed nothing (see experiment 1).
+
+The first implementation (#330) took experiment B: the helper rewrote the client's key and restored it on release. On the same machine later that day the override held for 52 minutes. Then, for five minutes, the client withdrew its service and wrote its DNS key again with the same servers every 24 to 30 s; the app counted those re-applies toward a cap, suspended, and left public names on the tunnel's servers until the VPN disconnected. A `127.0.0.1` left in the client's key was harmless only if the release and its restore always completed; each case found where they did not (a restore the store refused, a client write inside release's window) added a retry or an exception, and a failed restore followed by a disconnect stayed open. The owner rejected further exceptions.
+
+Two further experiments (#330), with Cisco's full tunnel connected (primary service `com.cisco.anyconnect` on `utun6`), macOS 27.2:
+
+1. **A temporary key of Conduit's own.** A held `scutil` session added, as a temporary value, `State:/Network/Service/<a non-UUID test id>/DNS` with `ServerAddresses [127.0.0.1]`, `ServerPort 15353`, `SupplementalMatchDomains [""]` and `SupplementalMatchOrders [0]`. It became resolver #1 (flags Supplemental, port 15353), ahead of the VPN's default (order 1, now #2). Every lookup followed it: a test server answering `192.0.2.53` for every A query got every lookup for 30 s. `PrimaryService`, the default route and the VPN's own DNS key did not change. After `kill -9` of the session, configd removed the key by itself, and resolver #1 returned to the baseline.
+2. **The same key, served by a silent server** (it reads and never replies). Every lookup, public and internal, hung for the full 60 s; mDNSResponder did not fall back to resolver #2. A silent resolver #1 is fatal for as long as its key exists.
+
+configd's source (configd-1405.100.8) explains both: a DNS-only service contributes a resolver only with `SupplementalMatchDomains` (`get_dns_changes`); a `""` domain becomes a domainless supplemental resolver that sorts ahead of the default (`add_supplemental`, `compareDomain` and a stable merge sort in `dns-configuration.c`); mDNSResponder orders resolvers by search order, so `SupplementalMatchOrders 0` is required; and `cleanupSession` removes a session's temporary keys (`SCDynamicStoreAddTemporaryValue`) when the session dies. Adding one needs root and a store opened with `kSCDynamicStoreUseSessionKeys`.
+
+The owner's requirements (2026-11-19): fix it in 0.7.0, and nothing may leave DNS in a worse state than it is without the fix.
+
+## Decision
+
+While a full-tunnel VPN holds the default resolver, the helper publishes one temporary dynamic-store key of its own that makes its DNS relay resolver #1, and never writes the VPN client's keys. The relay forwards each lookup to Conduit's forwarder, and fails it over to the VPN's own servers, read live from the VPN's untouched key, whenever Conduit is gone or does not answer it within a short budget. The helper publishes the key only while Conduit is connected, its probe passes and a full tunnel is detected, and removes it as soon as any of these stops; configd removes it by itself if the helper dies. The effect the owner relies on: whenever the key exists and the helper runs, every lookup is answered by Conduit or by the VPN's own servers, never worse than without the override. The [design](../design-vpn-default-resolver-override.md) holds the details; these are the boundaries.
+
+1. **Scope.** Only while a service whose `State:/Network/Service/<id>/IPv4` has `OverridePrimary` 1, whose DNS key has `ServerAddresses` and no `SupplementalMatchDomains`, is the primary service in `State:/Network/Global/IPv4`. A split tunnel does not take the default resolver and gets no key.
+2. **The VPN client's keys are never written.** The helper reads the VPN's DNS key and never writes, restores or deletes it, nor any other key of the client.
+3. **The key.** One temporary value at `State:/Network/Service/<Conduit's fixed, non-UUID id>/DNS`: `ServerAddresses [127.0.0.1]`, `ServerPort` the relay's listening port, `SupplementalMatchDomains [""]`, `SupplementalMatchOrders [0]`. The id is `io.github.srps.Conduit.dns-relay` (`HelperConstants.vpnDNSOverrideServiceID`). The relay listens on its own fixed port, 15353 (`HelperConstants.vpnDNSOverrideRelayPort`), neither 53 nor 5353; the relay on `127.0.0.1:53` that the physical services' DNS names is unchanged. It is added through the helper's own store session (root, `kSCDynamicStoreUseSessionKeys`), so configd removes it when that session dies. Withdrawal is removing that key, which needs no compare and no ordering against anything; a removal the store refuses is completed by closing the session. The id is not a UUID, so the 0044 reader, which takes VPN services by UUID, ignores it; the reader also ignores the id by name.
+4. **The key points at the helper's relay, not at Conduit.** Experiment 2 shows a silent resolver #1 hangs every lookup, so the key never names Conduit's forwarder directly.
+5. **The fail-safe relay.** The relay on `127.0.0.1` forwards to Conduit's forwarder while the key's owner is connected and its last probe answered, and otherwise to the VPN's servers.
+   - **Per-query failover.** A query Conduit's forward socket refuses goes to the VPN's servers at once. When a query to Conduit has waited 1 s with no reply from Conduit since it was sent, the relay sends Conduit the reserved probe name; if that is not answered within 500 ms, the relay switches to the VPN's servers and sends them every query still pending for Conduit. A hung Conduit costs a lookup at most about 1.5 s plus the VPN's reply. The relay does not race each slow query: Conduit legitimately takes longer than 1.5 s on a name it sends from the tunnel to DoH, and the tunnel's NXDOMAIN for a public name would win and be cached by the system resolver.
+   - **Bounds and duplicates.** One pending entry per client query, at most 1,024 per UDP relay (`maximumPendingQueries`); at the cap a new query is dropped unanswered for the resolver to retry, logged on the first drop and every 100th. A failed-over query keeps its entry and relay transaction ID, so failover adds no entries. The VPN's servers are tried one at a time, 1 s apart, at most three per query. An entry ends at the first matching reply from a target it was sent to, or after 10 s, so any later reply finds no entry and is dropped. TCP sessions take the mode at connect, a connect Conduit refuses goes to the VPN's servers, and a session to Conduit is closed when the relay switches, so the resolver's retry reaches them; the 64-session cap stays.
+   - **Never loopback.** The relay takes the VPN's servers from the VPN's key at each change and drops every loopback or unspecified address (`127/8`, `::1`, `0.0.0.0`, `::`). With none left, it has no failover target, and the helper withdraws the key.
+6. **When the key is published.** Conduit arms the override with the VPN service and the servers its live split-DNS set (0044) holds for it; arming is intent, and the helper publishes only while all of these hold: armed, the owner connected (watched with `EVFILT_PROC NOTE_EXIT` on the pid from the caller's audit token), the probe passing, the relay running on both UDP and TCP, and the VPN's key a full tunnel with exactly the armed servers.
+7. **When it is withdrawn.** The helper removes the key on the owner's exit, on two consecutive refused or three silent 10 s probes, when the VPN's key stops matching (disconnect, a flap that withdraws its IPv4 key, new servers), on `stop-dns-relay`, on disarm, and on `SIGTERM`. While conditions hold again it republishes at once: a VPN republish, the end of a flap or a configd restart that dropped the key costs one store call, and the helper watches its own key to notice that it is gone.
+8. **Conduit's side.** Conduit arms only once its live set holds the VPN's servers, and disarms before it applies a set without them; an arm whose reply was lost counts as armed until a status shows otherwise. It disarms on DNS Stop, on Quit and when "Manage system DNS" is turned off; turning that off is the user's way out. Readings are truthful: the VPN's key always holds the client's own servers, so the reading's substitution and its handling of `127.0.0.1` in the VPN's key are no longer needed.
+9. **Policy retired.** The caps (`maximumApplies`, `cap=applied`), suspensions and their lifetime, the apply spacing, the same-server rewrite detection, the hold of the override through a flap and the re-apply backoff all existed because the helper wrote into the client's key and could fight the client. Publishing Conduit's own key is no fight: the helper republishes it whenever the conditions hold. The probe streaks remain the only hysteresis.
+10. **Resolver order is verified.** The order that puts a domainless supplemental resolver first is undocumented. With the key published, Conduit reads the resolver order and emits an event when resolver #1 is not its own.
+11. **Decision 0002's narrow helper.** The helper holds one piece of state on the app's behalf: the armed VPN service and servers and the owner pid, in memory only, and it forwards DNS to the VPN's servers while it fails over. This is the bounded exception the owner accepted; #274 remains the general design for system DNS.
+
+**Residual risks.** The key outlives safety only in these cases: the helper alive but hung with its key published (lookups hang, as in experiment 2, until it is killed); a relay thread that dies and cannot bind again, until the helper withdraws; and a macOS change to the undocumented resolver order (Conduit's check reports it). Lookups scoped to the tunnel's interface bypass resolver #1 and Conduit.
+
+## Alternatives
+
+How the default resolver is taken back while Conduit may fail (#330):
+
+- **A, rewrite the client's key with a complete release protocol.** Implemented first. Rejected by the owner: safety depended on every restore completing, each case found needed one more exception, and a failed restore followed by a disconnect still left `127.0.0.1` in the client's key with nothing behind it.
+- **B, a fail-safe relay over the rewrite.** Keeps the client's key at `127.0.0.1` but serves it from the saved originals when Conduit cannot. Not chosen: it still writes into the client's live state, still needs the restore, the record file and its retries, and still fights the client's rewrites.
+- **C, Conduit's own key alone, pointing at the forwarder.** Rejected by experiment 2: a silent forwarder as resolver #1 hangs every lookup.
+- **D, an `NEDNSProxyProvider`.** Not chosen for 0.7.0: it needs the Network Extension DNS proxy entitlement and a user-approved system extension, a new signing, distribution and review path.
+
+Tested and rejected earlier:
+
+- **Experiment A, priority on Conduit's own service.** macOS 27 ignores it for the default resolver.
+- **Experiment C, a Conduit-owned primary service.** The client's service keeps the primary role. Winning it would also move the default route, so even a working variant would risk all traffic, not only DNS.
+- **Next launch restores** instead of the helper. Rejected by the owner: DNS on the VPN would stay broken from a crash until the next launch.
+- **Leave it, document it.** Rejected: system-resolved public names fail on every full-tunnel VPN on macOS 27.
+- **Rewrite `State:/Network/Global/DNS`.** configd computes it from the services and overwrites it.
+
+## Consequences
+
+- Public names resolve again on a full-tunnel VPN; internal names go to the tunnel's servers through the live split-DNS set.
+- Conduit never writes another vendor's state. Its own key disappears with the helper's session, so a crash leaves nothing behind.
+- The helper sends DNS queries to the VPN's servers itself while it fails over, from root, through the tunnel's route.
+- 0.7.0 needs a helper update and reinstall. A 0.7.0 app with an older helper detects the missing feature (`HelperFeature.vpnDNSOverride`) and leaves the resolver order alone, as today.
+- The helper's accept loop is a `kevent` loop, so it can watch an owner process and the dynamic store without a thread.
+- With every lookup on the Mac going to the forwarder, a SERVFAIL the forwarder makes up is cached by the system resolver as that name's answer. A lookup cancelled by a transports reset is therefore re-run once on the fresh transports within its lookup window, or gets no reply; a lookup while the path is unsatisfied gets no reply either (#330, `dns.reset_lookup_rerun`, `dns.unsatisfied_path_dropped`).
+- The helper relays DNS over TCP as well as UDP, to the forwarder's TCP listener. With every lookup on the Mac going to the relay, a resolver's TCP retry of an answer too large for UDP (on the owner's machine, an internal name with about 67 A records) otherwise failed with "network down" and returned nothing. A TCP relay that cannot bind leaves UDP serving and the key unpublished.
+
+## Invariants and verification
+
+- **The key is answered.** Whenever Conduit's key exists, the helper and its relay run and the VPN publishes servers, every lookup is answered by Conduit or by the VPN's servers.
+- **The client's keys are never written.**
+- **Never loops.** The relay never sends a lookup to a loopback address, and the forwarder never takes `127.0.0.1` as a tunnel server.
+- **The key goes with its reasons.** Once the helper has handled every event, the key exists only while its owner is alive and the VPN publishes usable servers; under fairness of the helper's steps, a key Conduit does not serve is withdrawn.
+- **The key comes back.** While Conduit serves, the VPN's key matches and the probe passes, a key dropped by a flap or a configd restart is published again.
+- **Internal names served.** While the relay sends the key's lookups to Conduit, Conduit's live set has the VPN's current servers.
+
+The failure that would disprove the design: a lookup that goes unanswered while Conduit's key exists and the helper runs, beyond the per-query failover's bound (about 1.5 s plus the VPN's reply).
+
+The evidence for the combined design is the owner's experiments above, a TLA+ spec with mutants, and the publisher, relay, policy and controller tests and pm-sim scenarios listed below; the owner's real-VPN checks listed in the design are still to come.
+
+## Implementation evidence
+
+Implemented in #330, which first shipped the rewrite (alternative A) and then replaced it with the combined design:
+
+- The helper's key and its conditions: [`VPNDNSOverridePublisher.swift`](../../Sources/ConduitShared/VPNDNSOverridePublisher.swift) (publish, republish, withdraw, the probe streaks, removal refused closes the session) and [`VPNDNSOverrideValidation.swift`](../../Sources/ConduitShared/VPNDNSOverrideValidation.swift) (no loopback or unspecified server); the session-keys store and its notifications: [`VPNDNSOverrideAdapters.swift`](../../Sources/ConduitHelper/VPNDNSOverrideAdapters.swift); the commands, the `kevent` loop with the owner watch and the store trigger: [`HelperDaemon.swift`](../../Sources/ConduitHelper/HelperDaemon.swift), [`HelperEventLoop.swift`](../../Sources/ConduitHelper/HelperEventLoop.swift); the contract: [`HelperContract.swift`](../../Sources/ConduitShared/HelperContract.swift).
+- The fail-safe relay on UDP and TCP, with its per-query failover and bounds: [`DNSFailoverRelay.swift`](../../Sources/ProxyKernel/Network/DNSFailoverRelay.swift).
+- The one-time restore of a record left by a helper that rewrote the VPN's key: [`VPNDNSOverrideLegacyRestore.swift`](../../Sources/ConduitShared/VPNDNSOverrideLegacyRestore.swift).
+- The app side: [`VPNResolverOverridePolicy.swift`](../../Sources/PlatformMac/VPNResolverOverridePolicy.swift), [`VPNResolverOverrideController.swift`](../../Sources/PlatformMac/VPNResolverOverrideController.swift), the order check in [`ResolverOrder.swift`](../../Sources/PlatformMac/ResolverOrder.swift), the parser ignoring the own key in [`PushedResolver.swift`](../../Sources/PlatformMac/PushedResolver.swift), and the host's ordering in [`RuntimeHostVPNDNSOverride.swift`](../../Sources/ConduitRuntime/RuntimeHostVPNDNSOverride.swift) and [`RuntimeHostSplitDNSDetection.swift`](../../Sources/ConduitRuntime/RuntimeHostSplitDNSDetection.swift).
+- Tests: [`VPNDNSOverridePublisherTests.swift`](../../Tests/ConduitTests/VPNDNSOverridePublisherTests.swift), [`DNSFailoverRelayTests.swift`](../../Tests/ConduitTests/DNSFailoverRelayTests.swift), [`VPNDNSOverrideLegacyRestoreTests.swift`](../../Tests/ConduitTests/VPNDNSOverrideLegacyRestoreTests.swift), [`PushedResolverOwnKeyTests.swift`](../../Tests/ConduitTests/PushedResolverOwnKeyTests.swift), [`VPNResolverOverrideTests.swift`](../../Tests/ConduitTests/VPNResolverOverrideTests.swift), [`HelperVPNDNSOverrideTests.swift`](../../Tests/ConduitTests/HelperVPNDNSOverrideTests.swift), [`RuntimeHostVPNDNSOverrideTests.swift`](../../Tests/ConduitTests/RuntimeHostVPNDNSOverrideTests.swift), [`TCPRelayDNSTests.swift`](../../Tests/ConduitTests/TCPRelayDNSTests.swift).
+- pm-sim, in [`VPNDNSOverrideScenarios.swift`](../../Sources/pm-sim/VPNDNSOverrideScenarios.swift): `dns-own-key-conduit-gone`, `dns-own-key-conduit-hung`, `dns-own-key-helper-dies` and `dns-own-key-configd-restart`, each shown to fail with its fix reverted, and `dns-vpn-override-publishes`, `-disconnect`, `-stop`, `-split-tunnel`, `-flap` and `-tcp-bind-fails`.
+- Kept from the first implementation: no negative answer from a reset (#330), in [`LocalDNSForwarder.swift`](../../Sources/ProxyKernel/Network/LocalDNSForwarder.swift) (`DNSResolutionCore.resolve(query:ticket:)`), [`DNSForwarderHealthTests.swift`](../../Tests/ConduitTests/DNSForwarderHealthTests.swift), [`DNSTCPListenerTests.swift`](../../Tests/ConduitTests/DNSTCPListenerTests.swift) and pm-sim `dns-reset-no-negative-answer` in [`DNSHealthScenarios.swift`](../../Sources/pm-sim/DNSHealthScenarios.swift); the TCP relay on `:53`; the `kevent` loop and its owner watch.
+- The model: [`VPNDNSOverride.tla`](../../formal/vpn-detection/VPNDNSOverride.tla), run by [`check.py`](../../formal/vpn-detection/check.py) with its mutants, describes this code.
+
+Does not prove: behaviour with a real Cisco client beyond experiments 1 and 2; the owner's real-VPN checks listed in the design, which are still to come.
+
+## Open questions
+
+- None. The relay's port is the dedicated 15353 (item 3). How long a hung helper with its key published may last stays a residual risk; a watchdog for it is out of scope.

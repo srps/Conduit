@@ -102,7 +102,8 @@ enum PMSim {
               dns-upstream-spoof      DNS: wrong-ID and QR-clear replies are dropped, never answered or cached
               dns-internal-unreachable-falls-back  DNS: a split-DNS name whose server is silent resolves through DoH
               dns-ephemeral-pair-rebind  DNS: a taken TCP twin moves the port-0 UDP+TCP pair to a fresh port
-              dns-unsatisfied-path    DNS: no network path answers SERVFAIL at once, a reset cancels lookups in flight, the returned path answers (#292)
+              dns-unsatisfied-path    DNS: no network path drops a lookup at once, a reset re-runs lookups in flight once, the returned path answers (#292)
+              dns-reset-no-negative-answer  DNS: a reset during a lookup re-runs it on the fresh transports and never answers SERVFAIL (0049)
               dns-no-split-entries    DNS: with no enabled split-DNS entry a public name makes no internal attempt (#296)
               dns-internal-server-circuit  DNS: a silent internal server's circuit opens, is skipped, probed closed and reset; servers in order; longest suffix (#290)
               dns-internal-stage-budget  DNS: six silent servers under one entry still answer inside the relay window; unasked servers see nothing (#290)
@@ -110,6 +111,17 @@ enum PMSim {
               dns-split-flap-holds    DNS: a VPN flap with the DNS key withdrawn keeps the pushed server answering; a disconnect stops it (0044)
               dns-split-detection-failed DNS: a pushed-resolver store that cannot be read drops the detected set; the next reading restores it (0044)
               dns-split-detection-retries DNS: a pushed-resolver store that cannot be created or subscribed to is retried on the read schedule until it reads (0048, #304)
+              dns-offvpn-network-resolver DNS: off the VPN with DoH blocked, the network's own DNS server answers; routing and the PAC recover (0050)
+              dns-vpn-override-publishes DNS: a full tunnel gets the helper's own key once the set is live; the VPN's key is never written (0049)
+              dns-vpn-override-disconnect DNS: a removed VPN key withdraws the own key at once; a disconnect disarms; a reconnect publishes again (0049)
+              dns-vpn-override-stop DNS: Manage system DNS off and a Stop each disarm before the relay stops (0049)
+              dns-vpn-override-split-tunnel DNS: a split tunnel gets no key (0049)
+              dns-vpn-override-flap DNS: each flap withdraws the own key and the VPN's republish brings it back; a changed resolver order is reported (0049)
+              dns-vpn-override-tcp-bind-fails DNS: a relay without its TCP half keeps the own key unpublished (0049)
+              dns-own-key-conduit-gone DNS: with Conduit gone the relay fails each lookup over to the VPN at once; the owner's exit withdraws the key (0049)
+              dns-own-key-conduit-hung DNS: a hung Conduit's lookup is answered by the VPN within the probe budget; three silent ticks withdraw the key (0049)
+              dns-own-key-helper-dies DNS: configd removes a dead helper's key; the app re-arms the fresh helper and the key returns (0049)
+              dns-own-key-configd-restart DNS: a configd restart that drops the key is answered by one republish, with no new arm (0049)
               observable-target-redaction  Query/fragment privacy across observations
               private-config-boundary  Private configuration frame: cap, read schedules, redaction and refusals
               private-editor-codec  Private editor read and reply: correlation, admission, observation, reply cap and kinds
@@ -313,6 +325,7 @@ enum PMSim {
         "dns-internal-unreachable-falls-back",
         "dns-ephemeral-pair-rebind",
         "dns-unsatisfied-path",
+        "dns-reset-no-negative-answer",
         "dns-no-split-entries",
         "dns-internal-server-circuit",
         "dns-internal-stage-budget",
@@ -320,6 +333,17 @@ enum PMSim {
         "dns-split-flap-holds",
         "dns-split-detection-failed",
         "dns-split-detection-retries",
+        "dns-offvpn-network-resolver",
+        "dns-vpn-override-publishes",
+        "dns-vpn-override-disconnect",
+        "dns-vpn-override-stop",
+        "dns-vpn-override-split-tunnel",
+        "dns-vpn-override-flap",
+        "dns-vpn-override-tcp-bind-fails",
+        "dns-own-key-conduit-gone",
+        "dns-own-key-conduit-hung",
+        "dns-own-key-helper-dies",
+        "dns-own-key-configd-restart",
         "observable-target-redaction",
         "private-config-boundary",
         "private-editor-codec",
@@ -529,6 +553,8 @@ enum PMSim {
             return [try await DNSResolverScenarios.ephemeralPairRebind(verbose: verbose)]
         case "dns-unsatisfied-path":
             return [try await DNSHealthScenarios.unsatisfiedPath(verbose: verbose)]
+        case "dns-reset-no-negative-answer":
+            return [try await DNSHealthScenarios.resetNoNegativeAnswer(verbose: verbose)]
         case "dns-no-split-entries":
             return [try await DNSHealthScenarios.noSplitEntries(verbose: verbose)]
         case "dns-internal-server-circuit":
@@ -543,6 +569,28 @@ enum PMSim {
             return [try await SplitDNSFollowsVPNScenarios.detectionFailed()]
         case "dns-split-detection-retries":
             return [try await SplitDNSFollowsVPNScenarios.detectionRetries()]
+        case "dns-offvpn-network-resolver":
+            return [try await NetworkResolverScenarios.offVPNNetworkResolver()]
+        case "dns-vpn-override-publishes":
+            return [try await VPNDNSOverrideScenarios.publishes()]
+        case "dns-vpn-override-disconnect":
+            return [try await VPNDNSOverrideScenarios.disconnect()]
+        case "dns-vpn-override-stop":
+            return [try await VPNDNSOverrideScenarios.stop()]
+        case "dns-vpn-override-split-tunnel":
+            return [try await VPNDNSOverrideScenarios.splitTunnel()]
+        case "dns-vpn-override-flap":
+            return [try await VPNDNSOverrideScenarios.flap()]
+        case "dns-vpn-override-tcp-bind-fails":
+            return [try await VPNDNSOverrideScenarios.tcpBindFails()]
+        case "dns-own-key-conduit-gone":
+            return [try await VPNDNSOverrideScenarios.ownKeyConduitGone()]
+        case "dns-own-key-conduit-hung":
+            return [try await VPNDNSOverrideScenarios.ownKeyConduitHung()]
+        case "dns-own-key-helper-dies":
+            return [try await VPNDNSOverrideScenarios.ownKeyHelperDies()]
+        case "dns-own-key-configd-restart":
+            return [try await VPNDNSOverrideScenarios.ownKeyConfigdRestart()]
         case "observable-target-redaction":
             return [try await ObservableTargetScenarios.redaction()]
         case "private-config-boundary":

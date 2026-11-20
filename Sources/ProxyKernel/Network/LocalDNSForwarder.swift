@@ -42,6 +42,11 @@ package struct DNSForwarderTuning: Sendable {
     /// is asked only while a whole attempt fits what is left, and one left
     /// unasked records no silence. Each attempt keeps its own timeout.
     package var internalStageBudget: TimeAmount = .milliseconds(Int64(UDPRelay.staleTimeoutSeconds * 1000) / 2)
+    package var dohRequestTimeout: TimeInterval = DoHSessionFactory.requestTimeout
+    package var networkResolverTimeout: TimeAmount = .milliseconds(1500)
+    package var lookupWindow: TimeAmount = .milliseconds(Int64(UDPRelay.staleTimeoutSeconds * 1000))
+    /// Waits out what is left of `lookupWindow` for a lookup re-run after a transports reset; throws when cancelled.
+    package var sleep: @Sendable (TimeAmount) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64(max(0, $0.nanoseconds))) }
     /// How long a DNS-over-TCP connection with nothing outstanding may stay
     /// silent (see `DNSTCPHandler`).
     package var tcpIdleTimeout: TimeAmount = .seconds(10)
@@ -59,6 +64,8 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
     private let splitDNSProvider: (@Sendable () -> SplitDNSTable)?
+    private let networkResolverProvider: (@Sendable () -> [String])?
+    private let onResolutionRecovered: (@Sendable (DNSResolutionRecovery) -> Void)?
     private let preferProxyPathForDoH: @Sendable () -> Bool
     private let localProxyPort: @Sendable () -> Int?
     private let onMetrics: (@Sendable () -> Void)?
@@ -100,6 +107,9 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         configProvider: @escaping () -> ProxyConfig,
         // The split-DNS table each query consults. Nil reads the manual entries from `configProvider`.
         splitDNSProvider: (@Sendable () -> SplitDNSTable)? = nil,
+        networkResolverProvider: (@Sendable () -> [String])? = nil,
+        // Called at most once per path, from any thread.
+        onResolutionRecovered: (@Sendable (DNSResolutionRecovery) -> Void)? = nil,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool = { false },
         localProxyPort: @escaping @Sendable () -> Int? = { nil },
         onMetrics: (@Sendable () -> Void)? = nil,
@@ -117,6 +127,8 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         self.logger = logger
         self.configProvider = configProvider
         self.splitDNSProvider = splitDNSProvider
+        self.networkResolverProvider = networkResolverProvider
+        self.onResolutionRecovered = onResolutionRecovered
         self.preferProxyPathForDoH = preferProxyPathForDoH
         self.localProxyPort = localProxyPort
         self.onMetrics = onMetrics
@@ -188,6 +200,8 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             logger: logger,
             configProvider: configProvider,
             splitDNSProvider: splitDNSProvider,
+            networkResolverProvider: networkResolverProvider,
+            onResolutionRecovered: onResolutionRecovered,
             preferProxyPathForDoH: preferProxyPathForDoH,
             localProxyPort: localProxyPort,
             pathSatisfied: { [pathSatisfied] in pathSatisfied.withLockedValue { $0 } },
@@ -356,8 +370,8 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     }
 
     /// Records whether the network path is satisfied. While it is not, every lookup that neither an intercept rule nor the cache
-    /// answers gets SERVFAIL at once instead of an internal or DoH attempt that cannot succeed and would hold its slot for the
-    /// whole attempt (#292). The orchestrator calls this for every material path change it sees, running or not; the lookups
+    /// answers is dropped at once, with no reply a stub could cache, instead of an internal or DoH attempt that cannot succeed and
+    /// would hold its slot for the whole attempt (#292). The orchestrator calls this for every material path change it sees, running or not; the lookups
     /// already in flight are cancelled by the transports reset that follows the same change.
     package func updateNetworkPath(satisfied: Bool) {
         pathSatisfied.withLockedValue { $0 = satisfied }
@@ -403,6 +417,12 @@ struct DNSMetricCounts: Equatable {
     var queries: Int
     var dohFallbacks: Int
     var cacheHits: Int
+    var networkResolverFallbacks: Int = 0
+}
+
+package struct DNSResolutionRecovery: Equatable, Sendable {
+    package let unansweredBefore: Int
+    package let viaNetworkResolver: Bool
 }
 
 /// Container for the DoH-fetch `URLSession` pair. Held inside a lock so we
@@ -419,11 +439,11 @@ private struct DoHTransports: @unchecked Sendable {
     let localProxy: URLSession?
     let localProxyPort: Int?
 
-    init(config: ProxyConfig, boundPort: Int?, delegate: ProxyChallengeRefusingDelegate) {
-        self.direct = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil), delegate: delegate)
+    init(config: ProxyConfig, boundPort: Int?, delegate: ProxyChallengeRefusingDelegate, timeout: TimeInterval) {
+        self.direct = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil), delegate: delegate, timeout: timeout)
         let localRoute = DoHSessionFactory.localProxyRoute(config: config, boundPort: boundPort)
         self.localProxyPort = localRoute?.proxy?.port
-        self.localProxy = localRoute.map { DoHSessionFactory.session(for: $0, delegate: delegate) }
+        self.localProxy = localRoute.map { DoHSessionFactory.session(for: $0, delegate: delegate, timeout: timeout) }
     }
 
     var all: [URLSession] { [direct] + (localProxy.map { [$0] } ?? []) }
@@ -530,14 +550,18 @@ private final class DoHTransportsHandle: @unchecked Sendable {
 /// would give a TCP retry a cold cache and its own `URLSession` pool, and would
 /// make `resetUpstreamTransports` reset only half the forwarder.
 ///
-/// `resolve(query:)` always answers when it possibly can: it returns SERVFAIL
-/// rather than nil for lookups that failed, and returns nil only for a query so
-/// malformed that no well-formed response can echo its question.
+/// `resolve(query:ticket:)` answers when it possibly can: it returns SERVFAIL
+/// rather than nil for lookups that failed. It returns nil, no reply, only for
+/// a query so malformed that no well-formed response can echo its question, and
+/// for a lookup that this forwarder's own state left unanswered (a transports
+/// reset, or no network path): a stub caches SERVFAIL, and retries silence.
 private final class DNSResolutionCore: @unchecked Sendable {
     private let group: EventLoopGroup
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
     private let splitDNSProvider: (@Sendable () -> SplitDNSTable)?
+    private let networkResolverProvider: (@Sendable () -> [String])?
+    private let onResolutionRecovered: (@Sendable (DNSResolutionRecovery) -> Void)?
     private let preferProxyPathForDoH: @Sendable () -> Bool
     private let localProxyPort: @Sendable () -> Int?
     private let pathSatisfied: @Sendable () -> Bool
@@ -552,10 +576,22 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// Holds `dns.internal_server_circuit_opened` and `_closed` to one per
     /// server and direction per minute.
     private let circuitEventGate = RuntimeEventRepeatGate()
-    /// Holds `dns.unsatisfied_path_servfail` to one per 5 s: a wake with no
-    /// network brings a burst of lookups, and every one of them is refused.
+    /// Holds `dns.unsatisfied_path_dropped` to one per 5 s: a wake with no
+    /// network brings a burst of lookups, and every one of them is dropped.
     private let unsatisfiedPathGate = RuntimeEventRepeatGate(repeatInterval: 5)
+    /// One `dns.reset_lookup_rerun` per outcome and cause per minute: a reset cancels every lookup in flight at once.
+    private let resetLookupGate = RuntimeEventRepeatGate()
+    /// One `dns.network_resolver_fallback` per outcome per minute: with DoH blocked, every new name falls back.
+    private let networkFallbackGate = RuntimeEventRepeatGate()
+    /// What circuit events and logs call a network server, never its address.
+    static let networkResolverLabel = "network-resolver"
     private let serverHealth = InternalServerHealth()
+    private let resolutionWatch = NIOLockedValueBox(ResolutionWatch())
+
+    private struct ResolutionWatch {
+        var armed = true
+        var unanswered = 0
+    }
     /// A split-DNS name's DoH fallback answer is a public stand-in for an
     /// internal answer, so its TTL is cut to what the intercept path uses:
     /// once the VPN is up, the OS and browser caches let the internal answer
@@ -565,6 +601,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private var queryCount = 0
     private var dohCount = 0
     private var cacheHitCount = 0
+    private var networkFallbackCount = 0
     /// Caps concurrent in-flight resolutions.
     ///
     /// A plain counter behind a lock, not a `DispatchSemaphore`: acquisition is
@@ -577,13 +614,13 @@ private final class DNSResolutionCore: @unchecked Sendable {
 
     private struct AdmissionState {
         /// Admitted resolutions that have not yet released their slot, by
-        /// ticket, with the task running each once `attach` has it. Bounded
-        /// by `maximumInFlightQueries`.
-        var inFlight: [Int: Task<Void, Never>?] = [:]
+        /// ticket, with the task running each one's current attempt once
+        /// `track` has it. Bounded by `maximumInFlightQueries`.
+        var inFlight: [Int: Task<AttemptOutcome, Never>?] = [:]
         var nextTicket = 0
-        /// Advanced by every `cancelInFlightQueries`. A ticket admitted under
-        /// an older generation whose task attaches afterwards is cancelled at
-        /// once, so a reset between admission and attach misses nothing.
+        /// Advanced by every `cancelInFlightQueries`. An attempt started under
+        /// an older generation that is tracked afterwards is cancelled at
+        /// once, so a reset between its start and `track` misses nothing.
         var generation = 0
         /// Every admission decision ever taken, granted or refused. Monotonic,
         /// and that is the point: `inFlight` is a gauge, so a resolution that
@@ -596,6 +633,12 @@ private final class DNSResolutionCore: @unchecked Sendable {
     struct QueryTicket: Sendable {
         fileprivate let id: Int
         fileprivate let generation: Int
+    }
+
+    /// How one attempt at a lookup ended: with what to send (nil sends nothing), or cancelled by a reset or its deadline.
+    fileprivate enum AttemptOutcome: Sendable {
+        case finished([UInt8]?)
+        case cancelled
     }
     /// A DoH outage is not per-query, but the warning that reports it is: one
     /// browser page load asks for dozens of public names, and every one of them
@@ -621,6 +664,8 @@ private final class DNSResolutionCore: @unchecked Sendable {
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
         splitDNSProvider: (@Sendable () -> SplitDNSTable)? = nil,
+        networkResolverProvider: (@Sendable () -> [String])? = nil,
+        onResolutionRecovered: (@Sendable (DNSResolutionRecovery) -> Void)? = nil,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool,
         localProxyPort: @escaping @Sendable () -> Int?,
         pathSatisfied: @escaping @Sendable () -> Bool,
@@ -634,6 +679,8 @@ private final class DNSResolutionCore: @unchecked Sendable {
         self.logger = logger
         self.configProvider = configProvider
         self.splitDNSProvider = splitDNSProvider
+        self.networkResolverProvider = networkResolverProvider
+        self.onResolutionRecovered = onResolutionRecovered
         self.preferProxyPathForDoH = preferProxyPathForDoH
         self.localProxyPort = localProxyPort
         self.pathSatisfied = pathSatisfied
@@ -648,7 +695,9 @@ private final class DNSResolutionCore: @unchecked Sendable {
         }
         self.proxyChallengeDelegate = delegate
         self.transportsBox = NIOLockedValueBox(
-            DoHTransportsHandle(transports: DoHTransports(config: configProvider(), boundPort: localProxyPort(), delegate: delegate))
+            DoHTransportsHandle(transports: DoHTransports(
+                config: configProvider(), boundPort: localProxyPort(), delegate: delegate, timeout: tuning.dohRequestTimeout
+            ))
         )
     }
 
@@ -683,13 +732,15 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// The lookups in flight are cancelled too (#292): what they were waiting
     /// on belongs to the path that just went away, and each one held a slot
     /// for up to the internal timeout plus the DoH resource timeout. A
-    /// cancelled lookup answers SERVFAIL, so the client retries on the new
-    /// path. The internal-server circuits close as well: silence on the old
-    /// path says nothing about the new one. Returns the lookups cancelled.
+    /// cancelled lookup is re-run once on the fresh transports, or dropped
+    /// (see `resolve`). The internal-server circuits close as well: silence
+    /// on the old path says nothing about the new one. Returns the lookups
+    /// cancelled.
     @discardableResult
     func resetUpstreamTransports() -> Int {
         let fresh = DoHTransportsHandle(transports: DoHTransports(
-            config: configProvider(), boundPort: localProxyPort(), delegate: proxyChallengeDelegate
+            config: configProvider(), boundPort: localProxyPort(), delegate: proxyChallengeDelegate,
+            timeout: tuning.dohRequestTimeout
         ))
         let old = transportsBox.withLockedValue { current -> DoHTransportsHandle in
             let captured = current
@@ -706,13 +757,14 @@ private final class DNSResolutionCore: @unchecked Sendable {
         old.retire()
         responseCache.clear()
         serverHealth.reset()
+        resolutionWatch.withLockedValue { $0 = ResolutionWatch() }
         return cancelInFlightQueries()
     }
 
-    /// Cancels every admitted lookup's task. Each one answers SERVFAIL as
-    /// soon as its current attempt notices and releases its slot.
+    /// Cancels every admitted lookup's current attempt. Each one ends as soon
+    /// as it notices, and its lookup re-runs or drops it (see `resolve`).
     private func cancelInFlightQueries() -> Int {
-        let tasks = admission.withLockedValue { state -> [Task<Void, Never>] in
+        let tasks = admission.withLockedValue { state -> [Task<AttemptOutcome, Never>] in
             state.generation += 1
             return state.inFlight.values.compactMap { $0 }
         }
@@ -747,24 +799,27 @@ private final class DNSResolutionCore: @unchecked Sendable {
             state.decisions += 1
             guard state.inFlight.count < Self.maximumInFlightQueries else { return nil }
             state.nextTicket &+= 1
-            // The slot counts from here; `attach` brings the task. A reset in
-            // between has nothing to cancel yet, and `attach` makes up for
+            // The slot counts from here; `track` brings the attempt. A reset
+            // in between has nothing to cancel yet, and `track` makes up for
             // it through the generation.
             state.inFlight.updateValue(nil, forKey: state.nextTicket)
             return QueryTicket(id: state.nextTicket, generation: state.generation)
         }
     }
 
-    /// Registers the task resolving `ticket`'s query, so a transports reset
-    /// can cancel it. A ticket already released (the task finished first) is
-    /// left alone; one admitted before a reset is cancelled now.
-    func attach(_ task: Task<Void, Never>, to ticket: QueryTicket) {
+    /// Registers `task` as `ticket`'s current attempt, so a transports reset
+    /// can cancel it. An attempt started before a reset is cancelled now.
+    private func track(_ task: Task<AttemptOutcome, Never>, for ticket: QueryTicket, startedIn generation: Int) {
         let cancelNow = admission.withLockedValue { state -> Bool in
             guard state.inFlight.index(forKey: ticket.id) != nil else { return false }
             state.inFlight[ticket.id] = task
-            return state.generation != ticket.generation
+            return state.generation != generation
         }
         if cancelNow { task.cancel() }
+    }
+
+    private var resetGeneration: Int {
+        admission.withLockedValue { $0.generation }
     }
 
     func releaseQuery(_ ticket: QueryTicket) {
@@ -819,7 +874,12 @@ private final class DNSResolutionCore: @unchecked Sendable {
 
     /// This core's counters, read together under their lock.
     var metricCounts: DNSMetricCounts {
-        lock.withLock { DNSMetricCounts(queries: queryCount, dohFallbacks: dohCount, cacheHits: cacheHitCount) }
+        lock.withLock {
+            DNSMetricCounts(
+                queries: queryCount, dohFallbacks: dohCount, cacheHits: cacheHitCount,
+                networkResolverFallbacks: networkFallbackCount
+            )
+        }
     }
 
     /// Counts the query, then signals that the counters moved. The signal carries no values: its reader takes the current counters
@@ -833,24 +893,81 @@ private final class DNSResolutionCore: @unchecked Sendable {
         onMetrics?()
     }
 
+    /// Asked on the event loop before admission: the probe never waits on a slot, the cache or DoH, and is not counted.
+    func forwarderProbeResponse(for query: [UInt8]) -> [UInt8]? {
+        guard DNSWireFormat.isForwarderProbe(query) else { return nil }
+        return DNSWireFormat.emptyDNSResponse(originalQuery: query, rcode: 3)
+    }
+
     /// Resolves one query. Never throws, and answers whenever a well-formed
-    /// answer is possible — see the type doc for why nil is so narrow.
+    /// answer is possible — see the type doc for when it returns nil.
     ///
-    /// The ladder, after an intercept rule and the cache: an unsatisfied
-    /// network path answers SERVFAIL at once (#292); a split-DNS name asks its
+    /// A lookup cancelled by `resetUpstreamTransports` is re-run once on the
+    /// fresh transports, within what is left of `tuning.lookupWindow` since
+    /// it began. With nothing left, or when the re-run is cancelled too (a
+    /// second reset, or the window runs out), the lookup gets no reply: the
+    /// stub asks again, where SERVFAIL would be cached as a failure of the
+    /// name. Each decision emits `dns.reset_lookup_rerun`.
+    ///
+    /// - Precondition: the caller holds `ticket` from `admitQuery()` and
+    ///   releases it with `releaseQuery(_:)` once this returns.
+    func resolve(query queryBytes: [UInt8], ticket: QueryTicket) async -> [UInt8]? {
+        guard queryBytes.count >= 12 else { return nil }
+        let began = NIODeadline.now()
+        let first = await startAttempt(query: queryBytes, began: began, ticket: ticket, generation: ticket.generation).value
+        guard case .cancelled = first else {
+            if case .finished(let reply) = first { return reply }
+            return nil
+        }
+
+        let domain = DNSWireFormat.extractDomainName(from: queryBytes)
+        let generation = resetGeneration
+        let remaining = tuning.lookupWindow - (NIODeadline.now() - began)
+        guard remaining > .zero else {
+            recordQuery(doh: false, cacheHit: false)
+            reportResetLookup(name: domain, outcome: "dropped", cause: "no_time_left", remaining: .zero)
+            return nil
+        }
+        reportResetLookup(name: domain, outcome: "rerun", cause: nil, remaining: remaining)
+        let rerun = startAttempt(query: queryBytes, began: began, ticket: ticket, generation: generation)
+        let windowElapsed = NIOLockedValueBox(false)
+        let deadline = Task { [sleep = tuning.sleep] in
+            // Throws only when cancelled, which means the re-run ended first.
+            do { try await sleep(remaining) } catch { return }
+            windowElapsed.withLockedValue { $0 = true }
+            rerun.cancel()
+        }
+        let outcome = await rerun.value
+        deadline.cancel()
+        switch outcome {
+        case .finished(let reply):
+            if reply != nil { reportResetLookup(name: domain, outcome: "answered", cause: nil, remaining: nil) }
+            return reply
+        case .cancelled:
+            recordQuery(doh: false, cacheHit: false)
+            let cause = windowElapsed.withLockedValue { $0 } ? "window_elapsed" : "reset_again"
+            reportResetLookup(name: domain, outcome: "dropped", cause: cause, remaining: nil)
+            return nil
+        }
+    }
+
+    /// Runs one attempt in its own task, so a reset cancels the attempt and not the lookup that may re-run it.
+    private func startAttempt(query: [UInt8], began: NIODeadline, ticket: QueryTicket, generation: Int) -> Task<AttemptOutcome, Never> {
+        let task = Task { [self] in await attempt(query: query, began: began) }
+        track(task, for: ticket, startedIn: generation)
+        return task
+    }
+
+    /// One pass down the ladder. After an intercept rule and the cache: an
+    /// unsatisfied network path drops the lookup at once (#292); a split-DNS name asks its
     /// entry's servers in order, skipping open circuits and stopping when
     /// the next attempt would not fit `tuning.internalStageBudget`, and
     /// falls back to DoH on silence (decision 0043); any other name asks the
     /// first internal server whose circuit is closed, if there is one
-    /// (#296), then DoH. A
-    /// cancelled lookup (`resetUpstreamTransports`) answers SERVFAIL as soon
-    /// as its attempt returns and starts no further one.
-    ///
-    /// - Precondition: the caller holds a slot from `admitQuery()` and releases
-    ///   it with `releaseQuery(_:)` once this returns.
-    func resolve(query queryBytes: [UInt8]) async -> [UInt8]? {
-        guard queryBytes.count >= 12 else { return nil }
-
+    /// (#296), then DoH; a name the table has no server for then gets one network-server attempt unless pushed servers are in use (decision 0050). A
+    /// cancelled attempt ends as soon as its current step returns, starts no
+    /// further one and counts nothing.
+    private func attempt(query queryBytes: [UInt8], began: NIODeadline) async -> AttemptOutcome {
         let domain = DNSWireFormat.extractDomainName(from: queryBytes)
         let config = configProvider()
         let table = splitDNSProvider?() ?? SplitDNSTable(manual: config.dnsEntries, detected: [])
@@ -863,7 +980,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
             recordQuery(doh: false, cacheHit: false)
             if let synth = DNSWireFormat.synthesizeDirectResponse(originalQuery: queryBytes, ip: interceptIP) {
                 logger.log(.debug, "DNS intercept: \(domain) → \(interceptIP)", category: .network)
-                return synth
+                return .finished(synth)
             }
             // Synthesis rejects queries it cannot echo faithfully (multi-question
             // packets, malformed questions). Answering SERVFAIL beats the silent
@@ -874,22 +991,24 @@ private final class DNSResolutionCore: @unchecked Sendable {
                 "DNS: could not synthesize an intercept answer for \(domain); replying SERVFAIL.",
                 category: .network
             )
-            return DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes)
+            return .finished(DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes))
         }
 
         if !isInternal, let cachedResponse = responseCache.lookup(for: cacheKey, query: queryBytes) {
             recordQuery(doh: false, cacheHit: true)
-            return cachedResponse
+            return .finished(cachedResponse)
         }
 
         guard pathSatisfied() else {
             reportUnsatisfiedPath(name: domain)
             recordQuery(doh: false, cacheHit: false)
-            return DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes)
+            return .finished(nil)
         }
 
         var response: [UInt8]?
         var usedDoH = false
+        var answered = false
+        var viaNetworkResolver = false
 
         if isInternal {
             // A `.local` name under no entry is asked of the first servers,
@@ -897,6 +1016,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
             let servers = rule?.servers ?? table.firstServers
             let attempt = await askInternalServers(servers, query: queryBytes, timeout: tuning.internalDomainTimeout)
             response = attempt.response
+            answered = response != nil
             // Off the VPN the internal server cannot be reached, and the VPN
             // gateway's own hostname is often under a split-DNS domain: asking
             // only that server would keep the VPN from ever coming up. So
@@ -911,7 +1031,14 @@ private final class DNSResolutionCore: @unchecked Sendable {
                 let doh = await resolveViaDoH(query: queryBytes, config: config)
                 response = doh.response.map { DNSWireFormat.responseByClampingTTL($0, to: Self.splitDNSFallbackTTL) }
                 usedDoH = doh.isProviderAnswer
+                answered = doh.isProviderAnswer
                 reportSplitDNSFallback(entryDomain: rule.domain, name: domain, servers: attempt.asked, outcome: doh)
+                if case .unanswered = doh, rule.servers.isEmpty,
+                   let network = await askNetworkResolver(query: queryBytes, name: domain, table: table, config: config, began: began) {
+                    response = network
+                    answered = true
+                    viaNetworkResolver = true
+                }
             }
         } else {
             // One internal attempt for a public name, on the first server
@@ -920,6 +1047,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
             let internalResponse = await askInternalServers(
                 table.firstServers, query: queryBytes, timeout: tuning.internalAttemptTimeout, askingAtMost: 1
             ).response
+            answered = internalResponse != nil
             if Task.isCancelled {
                 response = nil
             } else if DNSWireFormat.shouldFallbackToPublicDoH(internalResponse: internalResponse) {
@@ -931,6 +1059,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
                     // this name", not authoritative.
                     response = dohResponse
                     usedDoH = true
+                    answered = true
                 case .notAsked(let refusal):
                     response = refusal ?? internalResponse
                 case .cancelled:
@@ -948,22 +1077,37 @@ private final class DNSResolutionCore: @unchecked Sendable {
                     // the *next* DoH lookup succeeds; this fallback keeps
                     // the current one useful in the meantime.
                     response = internalResponse
+                    if table.firstServers.isEmpty,
+                       let network = await askNetworkResolver(query: queryBytes, name: domain, table: table, config: config, began: began) {
+                        response = network
+                        answered = true
+                        viaNetworkResolver = true
+                    }
                 }
             } else {
                 response = internalResponse
             }
         }
 
+        if Task.isCancelled {
+            logger.log(.debug, "DNS: lookup for \(domain) cancelled; no reply from this attempt.", category: .network)
+            return .cancelled
+        }
+
         recordQuery(doh: usedDoH, cacheHit: false)
 
-        if Task.isCancelled {
-            logger.log(.debug, "DNS: lookup for \(domain) cancelled by a transports reset; replying SERVFAIL.", category: .network)
-            return DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes)
+        // A `.local` name under no entry says nothing about the path: it never leaves for public DNS.
+        if rule != nil || !DNSWireFormat.isMulticastDNSName(domain) {
+            if answered {
+                noteAnswered(viaNetworkResolver: viaNetworkResolver)
+            } else if response?.isEmpty ?? true {
+                resolutionWatch.withLockedValue { if $0.armed { $0.unanswered += 1 } }
+            }
         }
 
         guard let responseBytes = response, !responseBytes.isEmpty else {
             logger.log(.warning, "DNS: failed to resolve \(domain); replying SERVFAIL.", category: .network)
-            return DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes)
+            return .finished(DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes))
         }
 
         guard DNSWireFormat.responseQuestionMatches(query: queryBytes, response: responseBytes) else {
@@ -974,14 +1118,14 @@ private final class DNSResolutionCore: @unchecked Sendable {
                 "DNS: discarded mismatched response for \(domain); replying SERVFAIL.",
                 category: .network
             )
-            return DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes)
+            return .finished(DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes))
         }
 
         if !isInternal {
             cacheResponse(responseBytes, for: cacheKey, matching: queryBytes)
         }
 
-        return responseBytes
+        return .finished(responseBytes)
     }
 
     /// What asking the internal servers produced: the first reply, and the
@@ -998,21 +1142,24 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// detached probe; its reply closes the circuit. Each silence counts
     /// towards the server's circuit, each reply resets it; a server the
     /// budget left unasked records nothing. Stops at a cancellation.
+    ///
+    /// `label`, when given, stands in for every server's address in events and logs.
     private func askInternalServers(
-        _ servers: [String], query: [UInt8], timeout: TimeAmount, askingAtMost: Int = .max
+        _ servers: [String], query: [UInt8], timeout: TimeAmount, askingAtMost: Int = .max,
+        budget: TimeAmount? = nil, label: String? = nil
     ) async -> InternalAttempt {
         var attempt = InternalAttempt()
-        var remaining = tuning.internalStageBudget
+        var remaining = budget ?? tuning.internalStageBudget
         var unasked: [String] = []
         for server in servers where !Task.isCancelled && attempt.asked.count < askingAtMost {
             if serverHealth.isOpen(server) {
                 if let generation = serverHealth.beginProbe(server) {
-                    probe(server: server, query: query, timeout: timeout, startedIn: generation)
+                    probe(server: server, query: query, timeout: timeout, startedIn: generation, label: label)
                 }
                 continue
             }
             guard timeout <= remaining else {
-                unasked.append(server)
+                unasked.append(label ?? server)
                 continue
             }
             attempt.asked.append(server)
@@ -1020,7 +1167,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
             let response = await forwardUDP(query: query, server: server, timeout: timeout)
             remaining = remaining - (NIODeadline.now() - began)
             guard !Task.isCancelled else { return attempt }
-            report(serverHealth.record(replied: response != nil, from: server), server: server)
+            report(serverHealth.record(replied: response != nil, from: server), server: label ?? server)
             if let response {
                 attempt.response = response
                 return attempt
@@ -1029,7 +1176,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         if !unasked.isEmpty {
             logger.log(
                 .debug,
-                "DNS: the \(tuning.internalStageBudget.nanoseconds / 1_000_000) ms internal budget for " +
+                "DNS: the \((budget ?? tuning.internalStageBudget).nanoseconds / 1_000_000) ms budget for " +
                     "\(DNSWireFormat.extractDomainName(from: query)) left no room for \(unasked.joined(separator: ",")); " +
                     "not asked, no silence counted.",
                 category: .network
@@ -1041,11 +1188,86 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// Sends `query` to a server whose circuit is open, outside the lookup
     /// that skipped it, so the lookup does not wait on it. At most one probe
     /// per server is in flight; the UDP timeout bounds it.
-    private func probe(server: String, query: [UInt8], timeout: TimeAmount, startedIn generation: Int) {
+    private func probe(server: String, query: [UInt8], timeout: TimeAmount, startedIn generation: Int, label: String?) {
         Task.detached { [self] in
             let response = await forwardUDP(query: query, server: server, timeout: timeout)
-            report(serverHealth.endProbe(server, startedIn: generation, replied: response != nil), server: server)
+            report(serverHealth.endProbe(server, startedIn: generation, replied: response != nil), server: label ?? server)
         }
+    }
+
+    /// Events carry how many servers the network names, never which.
+    private func askNetworkResolver(
+        query: [UInt8], name: String, table: SplitDNSTable, config: ProxyConfig, began: NIODeadline
+    ) async -> [UInt8]? {
+        guard !Task.isCancelled, !table.usesPushedServers, splitDNSProvider?().usesPushedServers != true,
+              let servers = networkResolverProvider?(), !servers.isEmpty else { return nil }
+        // Its answer is unauthenticated, and Conduit sends credentials to its upstreams and takes them from the PAC.
+        if Self.credentialHosts(config).contains(Self.normalizedHost(name)) {
+            reportNetworkResolverFallback(name: name, servers: servers.count, outcome: "proxy_host")
+            return nil
+        }
+        let remaining = tuning.lookupWindow - (NIODeadline.now() - began)
+        let attempt = await askInternalServers(
+            servers, query: query, timeout: tuning.networkResolverTimeout, askingAtMost: 1,
+            budget: remaining, label: Self.networkResolverLabel
+        )
+        guard !Task.isCancelled else { return nil }
+        if !attempt.asked.isEmpty {
+            lock.withLock { networkFallbackCount += 1 }
+        }
+        let outcome = attempt.response != nil ? "answered" : attempt.asked.isEmpty ? "not_asked" : "silent"
+        reportNetworkResolverFallback(name: name, servers: servers.count, outcome: outcome)
+        return attempt.response
+    }
+
+    /// The upstream proxies' hosts and the PAC file's host, whichever are configured.
+    static func credentialHosts(_ config: ProxyConfig) -> Set<String> {
+        var hosts = Set(config.upstreams.map { normalizedHost($0.host) })
+        if let pacHost = URL(string: config.routing.pacURL)?.host {
+            hosts.insert(normalizedHost(pacHost))
+        }
+        hosts.remove("")
+        return hosts
+    }
+
+    static func normalizedHost(_ host: String) -> String {
+        var host = host.lowercased()
+        while host.hasSuffix(".") { host.removeLast() }
+        return host
+    }
+
+    private func reportNetworkResolverFallback(name: String, servers: Int, outcome: String) {
+        let what = switch outcome {
+        case "answered": "the network's DNS server answered"
+        case "silent": "the network's DNS server did not answer either"
+        case "proxy_host": "the network's DNS server was not asked: the name is an upstream proxy's or the PAC file's host"
+        default: "the network's DNS server was not asked (its circuit is open, or no attempt fits the relay window)"
+        }
+        guard let suppressed = networkFallbackGate.admit(host: Self.networkResolverLabel, reason: outcome) else {
+            logger.log(.debug, "DNS: DoH gave no answer for \(name); \(what).", category: .network)
+            return
+        }
+        eventSink?(RuntimeEvent(
+            kind: .routing,
+            event: "dns.network_resolver_fallback",
+            detail: "name=\(name) servers=\(servers) outcome=\(outcome) suppressed=\(suppressed)"
+        ))
+        let held = suppressed > 0 ? " \(suppressed) more with this outcome were not logged since the last line." : ""
+        logger.log(
+            outcome == "answered" ? .info : .warning,
+            "DNS: DoH gave no answer for \(name) and no split-DNS server could be asked; \(what).\(held)",
+            category: .network
+        )
+    }
+
+    private func noteAnswered(viaNetworkResolver: Bool) {
+        let recovery = resolutionWatch.withLockedValue { watch -> DNSResolutionRecovery? in
+            guard watch.armed else { return nil }
+            watch.armed = false
+            guard watch.unanswered > 0 || viaNetworkResolver else { return nil }
+            return DNSResolutionRecovery(unansweredBefore: watch.unanswered, viaNetworkResolver: viaNetworkResolver)
+        }
+        if let recovery { onResolutionRecovered?(recovery) }
     }
 
     private func report(_ transition: InternalServerHealth.Transition?, server: String) {
@@ -1072,18 +1294,42 @@ private final class DNSResolutionCore: @unchecked Sendable {
         logger.log(opened ? .warning : .notice, what, category: .network)
     }
 
-    /// Emits `dns.unsatisfied_path_servfail` unless `unsatisfiedPathGate`
+    /// Emits `dns.unsatisfied_path_dropped` unless `unsatisfiedPathGate`
     /// holds it back, then logs the line derived from it.
     private func reportUnsatisfiedPath(name: String) {
         guard let suppressed = unsatisfiedPathGate.admit(host: "path", reason: "unsatisfied") else {
-            logger.log(.debug, "DNS: no network path; replying SERVFAIL for \(name) without an attempt.", category: .network)
+            logger.log(.debug, "DNS: no network path; dropped \(name) without an attempt or a reply.", category: .network)
             return
         }
-        eventSink?(RuntimeEvent(kind: .routing, event: "dns.unsatisfied_path_servfail", detail: "name=\(name) suppressed=\(suppressed)"))
-        let held = suppressed > 0 ? " \(suppressed) more were refused since the last line." : ""
+        eventSink?(RuntimeEvent(kind: .routing, event: "dns.unsatisfied_path_dropped", detail: "name=\(name) suppressed=\(suppressed)"))
+        let held = suppressed > 0 ? " \(suppressed) more were dropped since the last line." : ""
         logger.log(
             .info,
-            "DNS: no network path; replying SERVFAIL for \(name) without an internal or DoH attempt.\(held)",
+            "DNS: no network path; dropped \(name) without an internal or DoH attempt or a reply.\(held)",
+            category: .network
+        )
+    }
+
+    /// Emits `dns.reset_lookup_rerun` unless `resetLookupGate` holds it back, then logs the line derived from it.
+    private func reportResetLookup(name: String, outcome: String, cause: String?, remaining: TimeAmount?) {
+        let what = switch cause {
+        case "no_time_left": "nothing was left of its lookup window, so it gets no reply"
+        case "reset_again": "its re-run was cancelled by another transports reset, so it gets no reply"
+        case "window_elapsed": "its re-run did not finish inside its lookup window, so it gets no reply"
+        default: outcome == "rerun" ? "re-running it once on the fresh transports" : "its re-run on the fresh transports answered"
+        }
+        guard let suppressed = resetLookupGate.admit(host: "reset", reason: "\(outcome)/\(cause ?? "")") else {
+            logger.log(.debug, "DNS: a transports reset cancelled the lookup for \(name); \(what).", category: .network)
+            return
+        }
+        var detail = "name=\(name) outcome=\(outcome)"
+        if let cause { detail += " cause=\(cause)" }
+        if let remaining { detail += " remaining_ms=\(remaining.nanoseconds / 1_000_000)" }
+        eventSink?(RuntimeEvent(kind: .routing, event: "dns.reset_lookup_rerun", detail: detail + " suppressed=\(suppressed)"))
+        let held = suppressed > 0 ? " \(suppressed) more with this outcome were not logged since the last line." : ""
+        logger.log(
+            outcome == "dropped" ? .notice : .info,
+            "DNS: a transports reset cancelled the lookup for \(name); \(what).\(held)",
             category: .network
         )
     }
@@ -1454,6 +1700,11 @@ private final class DNSUDPHandler: ChannelInboundHandler, @unchecked Sendable {
         // length-prefix framing rejects malformed input earlier still.
         guard queryBytes.count >= 12 else { return }
 
+        if let probeReply = core.forwarderProbeResponse(for: queryBytes) {
+            write(probeReply, to: clientAddress, on: channel)
+            return
+        }
+
         // Admission first, on the event loop: a flood must be turned away
         // before it can allocate a task each. See `admitQuery()`.
         guard let ticket = core.admitQuery() else {
@@ -1463,15 +1714,14 @@ private final class DNSUDPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        let task = Task { @Sendable in
-            let response = await core.resolve(query: queryBytes)
+        Task { @Sendable in
+            let response = await core.resolve(query: queryBytes, ticket: ticket)
             core.releaseQuery(ticket)
             guard let response else { return }
             eventLoop.execute {
                 Self.write(response, to: clientAddress, on: channel)
             }
         }
-        core.attach(task, to: ticket)
     }
 
     private func write(_ response: [UInt8], to address: SocketAddress, on channel: Channel) {
@@ -1616,6 +1866,8 @@ private final class DNSTCPHandler: ChannelInboundHandler, @unchecked Sendable {
     /// Event-loop confined: incremented in `respond` (reached from
     /// `channelRead`) and decremented in the write hop, both on the loop.
     private var outstandingQueries = 0
+    /// Set when a query got no reply: the connection closes once nothing else is outstanding, so the client asks again.
+    private var closeWhenIdle = false
     private var idleTask: Scheduled<Void>?
 
     init(core: DNSResolutionCore, logger: any LogSink, idleTimeout: TimeAmount) {
@@ -1695,6 +1947,11 @@ private final class DNSTCPHandler: ChannelInboundHandler, @unchecked Sendable {
         let core = self.core
         let logger = self.logger
 
+        if let probeReply = core.forwarderProbeResponse(for: queryBytes) {
+            Self.write(probeReply, on: channel, logger: logger)
+            return
+        }
+
         // Admission first, on the event loop. See `DNSResolutionCore.admitQuery()`.
         guard let ticket = core.admitQuery() else {
             if let servfail = core.overLimitResponse(for: queryBytes) {
@@ -1704,17 +1961,24 @@ private final class DNSTCPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         outstandingQueries += 1
-        let task = Task { @Sendable [weak self] in
-            let response = await core.resolve(query: queryBytes)
+        Task { @Sendable [weak self] in
+            let response = await core.resolve(query: queryBytes, ticket: ticket)
             core.releaseQuery(ticket)
             eventLoop.execute { [weak self] in
-                self?.outstandingQueries -= 1
-                self?.armIdleTimer(on: eventLoop, channel: channel)
-                guard let response else { return }
-                Self.write(response, on: channel, logger: logger)
+                guard let self else { return }
+                outstandingQueries -= 1
+                if let response {
+                    Self.write(response, on: channel, logger: logger)
+                } else {
+                    closeWhenIdle = true
+                }
+                if closeWhenIdle, outstandingQueries == 0 {
+                    channel.close(promise: nil)
+                } else {
+                    armIdleTimer(on: eventLoop, channel: channel)
+                }
             }
         }
-        core.attach(task, to: ticket)
     }
 
     private static func write(_ response: [UInt8], on channel: Channel, logger: any LogSink) {
@@ -1870,18 +2134,20 @@ private final class UDPResponseCollector: ChannelInboundHandler, @unchecked Send
     }
 
     private func complete(with bytes: [UInt8]) {
-        lock.withLock {
-            continuation?.resume(returning: bytes)
-            continuation = nil
-        }
+        takeContinuation()?.resume(returning: bytes)
     }
 
     /// Ends the wait with `error`, unless something already ended it. The
     /// one path to the continuation's failure, from any thread.
     func fail(with error: Error) {
+        takeContinuation()?.resume(throwing: error)
+    }
+
+    /// Resumed outside the lock: a task cancel runs `cancel()` under the task's status lock, which a resume also takes.
+    private func takeContinuation() -> CheckedContinuation<[UInt8], Error>? {
         lock.withLock {
-            continuation?.resume(throwing: error)
-            continuation = nil
+            defer { continuation = nil }
+            return continuation
         }
     }
 }

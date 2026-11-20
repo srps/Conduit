@@ -1080,6 +1080,54 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         XCTAssertEqual(splitDNSFallbackEvents().count, 0)
     }
 
+    @MainActor
+    func testForwarderProbeNameIsAnsweredLocallyWithEveryUpstreamBlackholed() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let doh = try await AnsweringDoHProvider.start(group: group, ip: "203.0.113.7", silent: true)
+        defer { doh.channel.close(promise: nil) }
+        let silentServer = try await Self.silentInternalServer(group: group)
+        defer { silentServer.close(promise: nil) }
+        var tuning = DNSForwarderTuning()
+        tuning.internalServerPort = try XCTUnwrap(silentServer.localAddress?.port)
+
+        let port = try await startForwarder(internalDomain: "invalid", dohPort: doh.port, tuning: tuning)
+        for (index, qtype) in [UInt16(1), 28, 16].enumerated() {
+            let query = DNSWireFormat.buildQuery(domain: "Conduit-Probe.invalid", txID: 0x7000 + UInt16(index), qtype: qtype)
+            let started = DispatchTime.now().uptimeNanoseconds
+            let reply = try await Self.ask(query, port: port, group: group)
+            let response = try XCTUnwrap(reply, "qtype \(qtype) must be answered")
+            let elapsedMilliseconds = (DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+
+            XCTAssertTrue(DNSWireFormat.isResponse(response, to: query))
+            XCTAssertTrue(DNSWireFormat.responseQuestionMatches(query: query, response: response))
+            XCTAssertEqual(DNSWireFormat.extractRCode(from: response), 3, "NXDOMAIN")
+            XCTAssertLessThan(elapsedMilliseconds, 1_500, "answered before the internal attempt could have ended")
+        }
+        XCTAssertEqual(doh.requestCount(), 0)
+        XCTAssertEqual(ownedForwarder?.metricCounts?.queries, 0, "the probe is not a lookup")
+        XCTAssertEqual(ownedForwarder?.cachedResponseCount, 0)
+    }
+
+    @MainActor
+    func testRelayForwarderProbeReadsALiveForwarderAsAnswered() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let doh = try await AnsweringDoHProvider.start(group: group, ip: "203.0.113.7", silent: true)
+        defer { doh.channel.close(promise: nil) }
+        let silentServer = try await Self.silentInternalServer(group: group)
+        defer { silentServer.close(promise: nil) }
+        let port = try await startForwarder(
+            internalDomain: "corp.internal.test", dohPort: doh.port,
+            tuning: try Self.quickInternalAttempt(against: silentServer)
+        )
+        let relay = DNSFailoverRelay(listenPort: 0, maximumTCPSessions: 4)
+        XCTAssertEqual(relay.start(targetPort: port), [])
+        defer { relay.stop() }
+
+        XCTAssertEqual(relay.probe(), .answered)
+        await stopOwnedForwarder()
+        XCTAssertEqual(relay.probe(), .refused)
+    }
+
     /// Starts the owned forwarder with one split-DNS domain on the loopback
     /// internal server `tuning` names and one cleartext DoH provider on
     /// `dohPort`, and returns its UDP port.
