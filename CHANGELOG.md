@@ -35,6 +35,10 @@ then leaves the resolver order alone.
   helper's DNS relays carry TCP as well as UDP. A helper that rewrote the VPN's
   DNS key in an earlier build of this change has its saved servers put back once,
   at start (decision 0049).
+- The DNS forwarder serves up to 256 lookups at once, up from 64. With the
+  full-tunnel override every lookup on the Mac reaches it, and a reconnect
+  burst went past 64 and was answered SERVFAIL (#328). Past the limit a lookup
+  is still answered SERVFAIL, never queued.
 - A DNS lookup in flight when a network change or VPN flap resets the DNS
   transports is now re-run once on the fresh transports within its lookup
   window, or left unanswered so the client asks again. It no longer gets
