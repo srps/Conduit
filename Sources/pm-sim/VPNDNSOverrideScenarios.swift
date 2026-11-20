@@ -3,6 +3,7 @@ import ConduitRuntime
 import ConduitShared
 import Foundation
 import NIOConcurrencyHelpers
+import NIOCore
 import NIOPosix
 import PlatformMac
 import ProxyKernel
@@ -10,90 +11,43 @@ import ProxyKernel
 enum VPNDNSOverrideScenarios {
     private static let corpIP = "198.51.100.10"
     private static let publicIP = "203.0.113.7"
+    private static let vpnAnswerIP = "198.51.100.20"
     private static let internalName = "host.corp.example"
+    private static let publicName = "www.example.com"
     private static let service = "com.cisco.anyconnect"
     private static let tunnelServers = ["192.0.2.53"]
-    private static let relay = ["127.0.0.1"]
     private static let overrideEvents: Set<String> = [
-        "dns.vpn_override_applied", "dns.vpn_override_released", "dns.vpn_override_refused",
-        "dns.vpn_override_suspended", "dns.vpn_override_failed", "dns.vpn_override_restore_pending",
+        "dns.vpn_override_armed", "dns.vpn_override_disarmed", "dns.vpn_override_published",
+        "dns.vpn_override_withdrawn", "dns.vpn_override_failed", "dns.vpn_override_not_first",
     ]
 
     @RuntimeActor
-    static func applies() async throws -> ScenarioResult {
-        try await run(name: "dns-vpn-override-applies") { stage, check in
+    static func publishes() async throws -> ScenarioResult {
+        try await run(name: "dns-vpn-override-publishes") { stage, check in
             try await stage.connect()
-            check("the helper points the tunnel's key at the relay", try await stage.until { stage.key == relay })
-            check("the helper holds the tunnel's own servers", stage.machine.vpnDNSRecordFile.bytes != nil)
+            check("the helper publishes its own key once the set is live", try await stage.until { stage.ownKey != nil })
+            check("the key names the relay's port as a domainless supplemental resolver",
+                  stage.ownKey == VPNDNSOverridePublisher.ownKey(port: HelperConstants.vpnDNSOverrideRelayPort))
+            check("the VPN's key keeps its servers", stage.machine.vpnDNSStore.serverAddresses(service) == tunnelServers)
             stage.publish()
-            let substituted = stage.pushed.substitutions()
-            check("the observer reads the key through the host's substitution", substituted == [service: tunnelServers])
-            check("with the key at the relay, the tunnel's server answers internal names",
+            try await stage.pass()
+            check("with the own key in the store, the tunnel's server still answers internal names",
                   try await stage.resolve(internalName) == corpIP)
-            check("the forwarder never asked loopback as a tunnel server", stage.corp.count(internalName) == 1)
-            check("one apply, against the servers the client published",
-                  stage.applies == [.apply(service: service, expected: tunnelServers)])
+            check("one arm, with the servers the client published",
+                  stage.arms == [.arm(service: service, servers: tunnelServers)])
         } verify: { events, check in
             let lines = names(events)
             let set = lines.firstIndex { $0.hasPrefix("dns.split_table_changed detected_domains=1") }
-            let applied = lines.firstIndex { $0 == "dns.vpn_override_applied service=\(service) servers=1" }
-            check("the set is in use before the override lands", set != nil && applied != nil && set! < applied!)
-            check("the reading of the helper's write is not a rejection",
-                  !lines.contains { $0.contains("reason=self_referential") })
-            check("the overridden reading changes nothing in the set",
+            let armed = lines.firstIndex { $0 == "dns.vpn_override_armed service=\(service) servers=1" }
+            let published = lines.firstIndex { $0 == "dns.vpn_override_published service=\(service)" }
+            check("the set is in use before the arm, and the arm before the key",
+                  set != nil && armed != nil && published != nil && set! < armed! && armed! < published!)
+            check("the parser ignored the own key: the set never changed",
                   events.filter { $0.event == "dns.split_detected" }.compactMap(\.detail)
                       == ["interface=utun6 domains=corp.example servers=1 outcome=applied",
                           "interface=utun6 domains=corp.example servers=1 outcome=cleared"])
-            check("no override was refused or failed", !lines.contains { $0.hasPrefix("dns.vpn_override_refused") || $0.hasPrefix("dns.vpn_override_failed") })
-        }
-    }
-
-    @RuntimeActor
-    static func clientRewrite() async throws -> ScenarioResult {
-        try await run(name: "dns-vpn-override-client-rewrite") { stage, check in
-            try await stage.connect()
-            check("the first apply lands", try await stage.until { stage.key == relay })
-            stage.publish()
-            try await stage.pass()
-            for (index, servers) in [["192.0.2.54"], ["192.0.2.55"]].enumerated() {
-                stage.clock.advance(.seconds(120))
-                stage.machine.vpnDNSStore.clientRewrite(service, servers: servers)
-                stage.publish()
-                check("rewrite \(index + 1) is applied against the client's new servers",
-                      try await stage.until { stage.key == relay && stage.applies.last == .apply(service: service, expected: servers) })
-                stage.publish()
-                try await stage.pass()
-            }
-            stage.clock.advance(.seconds(120))
-            stage.machine.vpnDNSStore.clientRewrite(service, servers: ["192.0.2.56"])
-            stage.publish()
-            check("the third rewrite in ten minutes is not applied: the client's value stays",
-                  try await stage.until { stage.events.contains { $0.event == "dns.vpn_override_suspended" } })
-            check("the key holds the client's newest servers", stage.key == ["192.0.2.56"])
-            stage.clock.advance(.seconds(599))
-            stage.publish()
-            try await stage.pass()
-            check("just before its lifetime ends the suspension holds", stage.applies.count == 3 && stage.key == ["192.0.2.56"])
-            stage.clock.advance(.seconds(1))
-            check("when its lifetime ends the suspension expires and the app applies against the newest servers",
-                  try await stage.until { stage.key == relay && stage.applies.last == .apply(service: service, expected: ["192.0.2.56"]) })
-            stage.publish()
-
-            stage.clock.advance(.seconds(30))
-            try await stage.report(.disconnected(reason: .userInitiated), live: [])
-            try await stage.connect(servers: ["192.0.2.56"])
-            check("a reconnect applies again",
-                  try await stage.until { stage.key == relay && stage.applies.count == 5 })
-        } verify: { events, check in
-            let lines = names(events)
-            check("three applies, a fourth when the suspension expires, a fifth after the reconnect",
-                  lines.filter { $0.hasPrefix("dns.vpn_override_applied") }.count == 5)
-            check("one suspension", lines.filter { $0.hasPrefix("dns.vpn_override_suspended") } == ["dns.vpn_override_suspended service=\(service) cap=applied"])
-            let suspended = lines.firstIndex { $0.hasPrefix("dns.vpn_override_suspended") }
-            let expired = lines.firstIndex { $0 == "dns.vpn_override_suspension_expired service=\(service)" }
-            check("the suspension's end is reported once, after it",
-                  suspended != nil && expired != nil && suspended! < expired!
-                      && lines.filter { $0.hasPrefix("dns.vpn_override_suspension_expired") }.count == 1)
+            check("resolver #1 is the helper's", !lines.contains { $0.hasPrefix("dns.vpn_override_not_first") })
+            check("nothing failed", !lines.contains { $0.hasPrefix("dns.vpn_override_failed") })
         }
     }
 
@@ -101,35 +55,32 @@ enum VPNDNSOverrideScenarios {
     static func disconnect() async throws -> ScenarioResult {
         try await run(name: "dns-vpn-override-disconnect") { stage, check in
             try await stage.connect()
-            check("the override lands", try await stage.until { stage.key == relay })
+            check("the key lands", try await stage.until { stage.ownKey != nil })
             stage.publish()
 
+            check("the app has seen it", try await stage.landed())
             stage.machine.vpnDNSStore.clientRemove(service)
-            let writesBefore = stage.machine.vpnDNSStore.writes.count
+            check("a removed VPN key withdraws the own key at once", stage.ownKey == nil)
             stage.publish()
-            try await stage.pass()
-            check("a key removed while connected is held with the set", stage.released.isEmpty)
+            check("the reading without the tunnel disarms", try await stage.until { stage.disarms == 1 })
             try await stage.report(.disconnected(reason: .userInitiated), live: [])
-            check("the disconnect releases it", try await stage.until { stage.released.count == 1 })
-            check("the release found the key gone and wrote nothing",
-                  stage.released.last == .keyGone && stage.machine.vpnDNSStore.writes.count == writesBefore)
-            check("no key is left behind", stage.machine.vpnDNSStore.tunnel(service) == nil)
+            try await stage.pass()
+            check("the disconnect has nothing left to disarm", stage.disarms == 1)
 
-            stage.clock.advance(.seconds(30))
             try await stage.connect()
-            check("a reconnect applies again", try await stage.until { stage.key == relay })
+            check("a reconnect publishes again", try await stage.landed(2))
             stage.publish()
             try await stage.report(.disconnected(reason: .networkLost), live: [])
-            check("the gate turning off releases", try await stage.until { stage.released.count == 2 })
-            check("the release restored the client's servers", stage.released.last == .restored && stage.key == tunnelServers)
+            check("the gate turning off disarms and withdraws", try await stage.until { stage.disarms == 2 && stage.ownKey == nil })
         } verify: { events, check in
             let lines = names(events)
-            let releases = lines.filter { $0.hasPrefix("dns.vpn_override_released") }
-            check("each disconnect releases once, for the gate",
-                  releases == ["dns.vpn_override_released reason=gate", "dns.vpn_override_released reason=gate"])
-            let gate = lines.lastIndex { $0 == "dns.vpn_override_released reason=gate" }
+            check("the removed key disarms as not_in_use, the gate as gate",
+                  lines.filter { $0.hasPrefix("dns.vpn_override_disarmed") }
+                      == ["dns.vpn_override_disarmed reason=not_in_use", "dns.vpn_override_disarmed reason=gate"])
+            check("resolver #1 was the helper's while the app read it", !lines.contains { $0.hasPrefix("dns.vpn_override_not_first") })
+            let gate = lines.lastIndex { $0 == "dns.vpn_override_disarmed reason=gate" }
             let dropped = lines.lastIndex { $0.hasPrefix("dns.split_table_changed detected_domains=0") && $0.hasSuffix("reason=vpn_disconnected") }
-            check("the gate's release lands before the set drops", gate != nil && dropped != nil && gate! < dropped!)
+            check("the gate's disarm lands before the set drops", gate != nil && dropped != nil && gate! < dropped!)
         }
     }
 
@@ -137,61 +88,28 @@ enum VPNDNSOverrideScenarios {
     static func stop() async throws -> ScenarioResult {
         try await run(name: "dns-vpn-override-stop") { stage, check in
             try await stage.connect()
-            check("the override lands", try await stage.until { stage.key == relay })
+            check("the key lands", try await stage.until { stage.ownKey != nil })
             stage.publish()
 
             try await stage.setManageSystemDNS(false)
-            check("turning Manage system DNS off restores the tunnel's servers",
-                  try await stage.until { stage.key == tunnelServers && !stage.machine.dnsRelayRunning })
-            check("the app's release comes before the relay stops", stage.releaseThenRelayStop(since: 0))
+            check("turning Manage system DNS off withdraws the key and stops the relay",
+                  try await stage.until { stage.ownKey == nil && !stage.machine.dnsRelayRunning })
+            check("the disarm comes before the relay stops", stage.disarmThenRelayStop(since: 0))
             stage.publish()
 
-            stage.clock.advance(.seconds(30))
             try await stage.setManageSystemDNS(true)
-            check("turning it back on applies again after the relay starts",
-                  try await stage.until { stage.key == relay && stage.machine.dnsRelayRunning })
+            check("turning it back on publishes again after the relay starts",
+                  try await stage.until { stage.ownKey != nil && stage.machine.dnsRelayRunning })
             stage.publish()
             let mark = stage.machine.vpnDNSOverrideOutcomes.count
             await stage.host.stopRuntime()
-            check("a Stop restores the tunnel's servers", try await stage.until { stage.key == tunnelServers })
-            check("the Stop's release comes before the relay stops", stage.releaseThenRelayStop(since: mark))
+            check("a Stop withdraws the key", try await stage.until { stage.ownKey == nil })
+            check("the Stop's disarm comes before the relay stops", stage.disarmThenRelayStop(since: mark))
         } verify: { events, check in
-            let releases = names(events).filter { $0.hasPrefix("dns.vpn_override_released") }
-            check("the toggle releases as manage_off, the Stop as stop",
-                  releases == ["dns.vpn_override_released reason=manage_off", "dns.vpn_override_released reason=stop"])
-        }
-    }
-
-    @RuntimeActor
-    static func helperRelease() async throws -> ScenarioResult {
-        try await run(name: "dns-vpn-override-helper-release") { stage, check in
-            try await stage.connect()
-            check("the override lands", try await stage.until { stage.key == relay })
-            // The helper's tick comes seconds after its write, so the app has read the key at the relay by then.
-            stage.publish()
-            try await stage.pass()
-
-            stage.machine.vpnDNSProbe.verdict = .refused
-            stage.machine.tickVPNDNSOverride()
-            check("one refused tick keeps the override", stage.key == relay && stage.released.isEmpty)
-            stage.machine.tickVPNDNSOverride()
-            check("the second refused tick releases and restores the servers",
-                  stage.released == [.restored] && stage.key == tunnelServers)
-
-            stage.machine.vpnDNSProbe.verdict = .answered
-            stage.publish()
-            check("the app sees the helper's release",
-                  try await stage.until { stage.events.contains { $0.event == "dns.vpn_override_released" } })
-            stage.clock.advance(.seconds(59))
-            stage.publish()
-            try await stage.pass()
-            check("inside the backoff nothing is applied", stage.applies.count == 1 && stage.key == tunnelServers)
-            stage.clock.advance(.seconds(1))
-            stage.publish()
-            check("once the backoff ends the app applies again", try await stage.until { stage.key == relay && stage.applies.count == 2 })
-        } verify: { events, check in
-            let releases = names(events).filter { $0.hasPrefix("dns.vpn_override_released") }
-            check("the release carries the helper's reason", releases.first == "dns.vpn_override_released reason=helper:target_refused")
+            let disarms = names(events).filter { $0.hasPrefix("dns.vpn_override_disarmed") }
+            // A pass that saw the relay stop may disarm again after the Stop's disarm; it lands after it.
+            check("the toggle disarms first as manage_off, the Stop as stop",
+                  Array(disarms.prefix(2)) == ["dns.vpn_override_disarmed reason=manage_off", "dns.vpn_override_disarmed reason=stop"])
         }
     }
 
@@ -200,76 +118,12 @@ enum VPNDNSOverrideScenarios {
         try await run(name: "dns-vpn-override-tcp-bind-fails", prepare: { $0.dnsTCPRelayBindFails = true }) { stage, check in
             check("the UDP relay serves without the TCP one", stage.machine.dnsRelayRunning && !stage.machine.dnsTCPRelayRunning)
             try await stage.connect()
-            check("the app asks for the override", try await stage.until { stage.applies.count == 1 })
-            check("the helper refuses it, relay_not_serving",
-                  stage.machine.vpnDNSOverrideOutcomes.contains(.refused(service: service, reason: .relayNotServing)))
-            check("the tunnel's key keeps its servers", stage.key == tunnelServers && stage.machine.vpnDNSStore.writes.isEmpty)
+            check("the app arms", try await stage.until { stage.arms.count == 1 })
+            try await stage.pass()
+            check("the helper holds the key back while its relay has no TCP half", stage.ownKey == nil)
             check("internal names still reach the tunnel's servers", try await stage.resolve(internalName) == corpIP)
         } verify: { events, check in
-            check("the app reports the refusal",
-                  names(events).contains("dns.vpn_override_refused reason=relay_not_serving"))
-            check("nothing was applied", !names(events).contains { $0.hasPrefix("dns.vpn_override_applied") })
-        }
-    }
-
-    @RuntimeActor
-    static func tcpRelayDies() async throws -> ScenarioResult {
-        try await run(name: "dns-vpn-override-tcp-relay-dies") { stage, check in
-            try await stage.connect()
-            check("the override lands with both relays up",
-                  try await stage.until { stage.key == relay } && stage.machine.dnsTCPRelayRunning)
-            stage.publish()
-            try await stage.pass()
-
-            stage.machine.killDNSTCPRelay()
-            stage.machine.tickVPNDNSOverride()
-            check("the next tick releases and restores the servers", stage.released == [.restored] && stage.key == tunnelServers)
-            check("the release says the relay stopped", stage.machine.vpnDNSOverrideOutcomes.contains {
-                if case .released(_, .relayStopped, _) = $0 { true } else { false }
-            })
-            stage.publish()
-            check("the app sees the helper's release",
-                  try await stage.until { stage.events.contains { $0.event == "dns.vpn_override_released" } })
-        } verify: { events, check in
-            let releases = names(events).filter { $0.hasPrefix("dns.vpn_override_released") }
-            check("the release carries the helper's reason", releases.first == "dns.vpn_override_released reason=helper:relay_stopped")
-        }
-    }
-
-    @RuntimeActor
-    static func restoreRetry() async throws -> ScenarioResult {
-        try await run(name: "dns-vpn-override-restore-retry") { stage, check in
-            try await stage.connect()
-            check("the override lands", try await stage.until { stage.key == relay })
-            stage.publish()
-            try await stage.pass()
-
-            stage.machine.vpnDNSStore.failsWrites = true
-            stage.machine.vpnDNSProbe.verdict = .refused
-            stage.machine.tickVPNDNSOverride()
-            stage.machine.tickVPNDNSOverride()
-            check("the release could not write the key", stage.released == [.restoreFailed] && stage.key == relay)
-            check("the record is kept, on disk, for a retry",
-                  stage.machine.vpnDNSRecordFile.bytes != nil
-                      && stage.machine.vpnDNSOverrideOutcomes.last?.logLine.hasSuffix("restore_pending=next_tick") == true)
-
-            stage.machine.tickVPNDNSOverride()
-            check("each tick retries once", stage.released == [.restoreFailed, .restoreFailed])
-
-            stage.machine.vpnDNSStore.failsWrites = false
-            stage.machine.tickVPNDNSOverride()
-            check("the next tick's retry restores the servers",
-                  stage.released == [.restoreFailed, .restoreFailed, .restored] && stage.key == tunnelServers)
-            check("the record is gone", stage.machine.vpnDNSRecordFile.bytes == nil)
-
-            stage.machine.vpnDNSProbe.verdict = .answered
-            stage.publish()
-            check("the app sees the helper's release",
-                  try await stage.until { stage.events.contains { $0.event == "dns.vpn_override_released" } })
-        } verify: { events, check in
-            let releases = names(events).filter { $0.hasPrefix("dns.vpn_override_released") }
-            check("the release carries the reason of the release that failed",
-                  releases.first == "dns.vpn_override_released reason=helper:target_refused")
+            check("nothing was published", !names(events).contains { $0.hasPrefix("dns.vpn_override_published") })
         }
     }
 
@@ -284,9 +138,8 @@ enum VPNDNSOverrideScenarios {
             try await stage.report(.connected, live: ["utun3"])
             check("the split tunnel's server answers its domain", try await stage.resolve(internalName) == corpIP)
             try await stage.pass()
-            check("the helper is never asked to apply", stage.applies.isEmpty)
-            check("the split tunnel's key keeps its servers", stage.machine.vpnDNSStore.serverAddresses("split") == tunnelServers)
-            check("the store was never written", stage.machine.vpnDNSStore.writes.isEmpty)
+            check("the helper is never asked to arm", stage.arms.isEmpty)
+            check("no own key", stage.ownKey == nil)
         } verify: { events, check in
             check("no override event", !events.contains { overrideEvents.contains($0.event) })
         }
@@ -296,181 +149,115 @@ enum VPNDNSOverrideScenarios {
     static func flap() async throws -> ScenarioResult {
         try await run(name: "dns-vpn-override-flap") { stage, check in
             try await stage.connect()
-            check("the override lands", try await stage.until { stage.key == relay })
+            check("the key lands", try await stage.until { stage.ownKey != nil })
             stage.publish()
             try await stage.pass()
 
-            stage.clock.advance(.seconds(66))
-            try await stage.withdrawIPv4()
-            check("a reading with no full tunnel keeps the override",
-                  stage.key == relay && stage.released.isEmpty && stage.machine.vpnDNSRecordFile.bytes != nil)
-            check("the parser ignored the key and 0044 held the set", try await stage.until { stage.events.contains {
-                $0.event == "dns.split_resolver_ignored" && $0.detail?.hasSuffix("reason=no_match_domains") == true
-            } && stage.events.contains { $0.event == "dns.split_detected" && $0.detail?.hasSuffix("outcome=held") == true } })
-            try await stage.report(.reasserting, live: ["utun6"])
-            try await stage.report(.connected, live: ["utun6"])
-            stage.clock.advance(.seconds(5))
-            try await stage.republishDNS()
-            check("the DNS key alone, with the client's servers, keeps the override", stage.released.isEmpty)
-            try await stage.republish(primary: false)
-            check("the client's own servers before its service is primary: refused, not released",
-                  try await stage.until { stage.events.contains { $0.event == "dns.vpn_override_refused" } } && stage.released.isEmpty)
-            stage.clock.advance(.seconds(1))
-            try await stage.withdrawIPv4()
-            stage.clock.advance(.seconds(1))
-            try await stage.republish(primary: true)
-            check("republished as primary: the relay is back", try await stage.until { stage.key == relay && stage.applies.count == 3 })
-            stage.publish()
-            try await stage.pass()
-
-            stage.clock.advance(.seconds(25 * 60))
-            for index in 0...1 {
+            for round in 1...5 {
                 try await stage.withdrawIPv4()
-                check("withdrawal \(index + 1) keeps the override", stage.key == relay && stage.released.isEmpty)
-                if index == 0 {
+                check("withdrawal \(round) withdraws the key at once", stage.ownKey == nil)
+                if round == 1 {
                     try await stage.report(.reasserting, live: ["utun6"])
                     try await stage.report(.connected, live: ["utun6"])
                 }
-                stage.clock.advance(.seconds(2))
                 try await stage.republishDNS()
+                try await stage.republish(primary: false)
+                check("flap \(round): no key while the VPN's service is not primary", stage.ownKey == nil)
                 try await stage.republish(primary: true)
-                if index == 1 {
-                    check("a republish inside the spacing waits for it",
-                          stage.applies.count == 4 && stage.key == tunnelServers)
-                    stage.clock.advance(.seconds(3))
-                }
-                check("republish \(index + 1) puts the relay back",
-                      try await stage.until { stage.key == relay && stage.applies.count == 4 + index })
-                stage.publish()
-                try await stage.pass()
-                stage.clock.advance(.seconds(5))
+                check("flap \(round): the key is back once the VPN republishes", try await stage.until { stage.ownKey != nil })
             }
-
-            for minute in 1...2 {
-                stage.clock.advance(.seconds(120))
-                try await stage.withdrawIPv4()
-                try await stage.republishDNS()
-                try await stage.republish(primary: true)
-                check("flap \(minute + 3) puts the relay back", try await stage.until { stage.key == relay && stage.applies.count == 5 + minute })
-                stage.publish()
-                try await stage.pass()
-            }
-            check("nothing was released while connected", stage.released.isEmpty)
-            check("no flap suspends the override", !stage.events.contains { $0.event == "dns.vpn_override_suspended" })
             check("the internal name still resolves through the tunnel's server", try await stage.resolve(internalName) == corpIP)
+
+            stage.machine.resolverOrderIgnoresOwnKey = true
+            try await stage.withdrawIPv4()
+            try await stage.republish(primary: true)
+            check("a resolver order that skips the own key is reported",
+                  try await stage.until { stage.events.contains { $0.event == "dns.vpn_override_not_first" } })
         } verify: { events, check in
             let lines = names(events)
-            check("one refusal, not_primary", lines.filter { $0.hasPrefix("dns.vpn_override_refused") } == ["dns.vpn_override_refused reason=not_primary"])
-            check("the only release is the Stop's", lines.filter { $0.hasPrefix("dns.vpn_override_released") } == ["dns.vpn_override_released reason=stop"])
+            check("nothing failed", !lines.contains { $0.hasPrefix("dns.vpn_override_failed") })
+            check("the order is reported once", lines.filter { $0.hasPrefix("dns.vpn_override_not_first") }
+                == ["dns.vpn_override_not_first service=\(service)"])
         }
     }
 
     @RuntimeActor
-    static func republishBurst() async throws -> ScenarioResult {
-        try await run(name: "dns-vpn-override-republish-burst") { stage, check in
+    static func ownKeyHelperDies() async throws -> ScenarioResult {
+        try await run(name: "dns-own-key-helper-dies") { stage, check in
             try await stage.connect()
-            check("the override lands", try await stage.until { stage.key == relay })
+            check("the key lands", try await stage.until { stage.ownKey != nil })
             stage.publish()
             try await stage.pass()
 
-            let flaps = 48
-            var reapplied = 0
-            for flap in 1...flaps {
-                stage.clock.advance(.seconds(25))
-                try await stage.withdrawIPv4()
-                try await stage.republishDNS()
-                try await stage.republish(primary: true)
-                guard try await stage.until({ stage.key == relay && stage.applies.count == 1 + flap }) else { break }
-                reapplied = flap
-                stage.publish()
-                try await stage.pass()
-            }
-            check("every same-server rewrite is applied again at once (\(reapplied) of \(flaps))", reapplied == flaps)
-            check("no rewrite suspends the override", !stage.events.contains { $0.event == "dns.vpn_override_suspended" })
-            check("nothing was released", stage.released.isEmpty)
-
-            stage.clock.advance(.seconds(3))
-            try await stage.withdrawIPv4()
-            try await stage.republishDNS()
-            try await stage.republish(primary: true)
-            check("a rewrite inside the spacing waits",
-                  stage.applies.count == 1 + flaps && stage.key == tunnelServers)
-            stage.clock.advance(.seconds(6))
-            try await stage.pass()
-            check("it still waits just before the spacing ends", stage.applies.count == 1 + flaps && stage.key == tunnelServers)
-            stage.clock.advance(.seconds(1))
-            check("the wake applies it once the spacing ends",
-                  try await stage.until { stage.key == relay && stage.applies.count == 2 + flaps })
-            stage.publish()
-            check("the internal name still resolves through the tunnel's server", try await stage.resolve(internalName) == corpIP)
+            stage.machine.killVPNDNSOverrideHelper()
+            check("configd removes the dead session's key", stage.ownKey == nil)
+            check("the VPN's key was never written", stage.machine.vpnDNSStore.vpnKeyWrites.isEmpty)
+            check("the app restarts the relay, re-arms the fresh helper and the key returns",
+                  try await stage.until(seconds: 60) { stage.ownKey != nil && stage.arms.count == 2 })
+            check("lookups resolve again", try await stage.resolve(internalName) == corpIP)
         } verify: { events, check in
             let lines = names(events)
-            check("every rewrite and the first apply are applied",
-                  lines.filter { $0.hasPrefix("dns.vpn_override_applied") }.count == 50)
-            check("nothing suspended, nothing refused", !lines.contains {
-                $0.hasPrefix("dns.vpn_override_suspended") || $0.hasPrefix("dns.vpn_override_refused")
-            })
-            check("the only release is the Stop's", lines.filter { $0.hasPrefix("dns.vpn_override_released") } == ["dns.vpn_override_released reason=stop"])
+            check("the app saw the key go with the helper", lines.contains("dns.vpn_override_withdrawn reason=helper_stopping"))
+            check("and published again", lines.filter { $0.hasPrefix("dns.vpn_override_published") }.count == 2)
         }
     }
 
-    final class ManualClock: @unchecked Sendable {
-        struct Overused: Error {}
+    @RuntimeActor
+    static func ownKeyConfigdRestart() async throws -> ScenarioResult {
+        try await run(name: "dns-own-key-configd-restart") { stage, check in
+            try await stage.connect()
+            check("the key lands", try await stage.until { stage.ownKey != nil })
+            stage.publish()
+            try await stage.pass()
+            let arms = stage.arms.count
 
-        private struct Sleeper {
-            let id: UInt64
-            let deadline: ContinuousClock.Instant
-            let waiter: CheckedContinuation<Void, any Error>
+            stage.machine.vpnDNSStore.configdRestart()
+            check("the helper republishes the key a configd restart dropped", stage.ownKey != nil)
+            check("on its own, with no new arm", stage.arms.count == arms)
+            check("the VPN's key was never written", stage.machine.vpnDNSStore.vpnKeyWrites.isEmpty)
+            let published = stage.machine.vpnDNSOverrideOutcomes.filter { if case .published = $0 { true } else { false } }
+            check("two publishes, one store call each", published.count == 2)
+        } verify: { events, check in
+            check("nothing failed", !names(events).contains { $0.hasPrefix("dns.vpn_override_failed") })
         }
+    }
 
-        static let capacity = 2
-
-        private let lock = NSLock()
-        private var instant = ContinuousClock.now
-        private var sleepers: [Sleeper] = []
-        private var issued: UInt64 = 0
-        private var overflowed = false
-
-        var now: ContinuousClock.Instant { lock.withLock { instant } }
-        var overused: Bool { lock.withLock { overflowed } }
-
-        func advance(_ by: Duration) {
-            let due = lock.withLock { () -> [Sleeper] in
-                instant += by
-                let due = sleepers.filter { $0.deadline <= instant }
-                sleepers.removeAll { $0.deadline <= instant }
-                return due
-            }
-            for sleeper in due { sleeper.waiter.resume() }
+    @RuntimeActor
+    static func ownKeyConduitGone() async throws -> ScenarioResult {
+        try await rig(name: "dns-own-key-conduit-gone") { rig, check in
+            check("Conduit answers through the relay", try await rig.lookup().answer == publicIP)
+            await rig.conduit.stop()
+            let gone = try await rig.lookup()
+            check("with Conduit gone and the key still up, the VPN answers", gone.answer == vpnAnswerIP && rig.machine.vpnDNSStore.ownKey != nil)
+            check("at once, on the refusal", gone.seconds < 1.0)
+            rig.machine.vpnDNSOverrideOwnerExited()
+            check("the owner's exit withdraws the key", rig.machine.vpnDNSStore.ownKey == nil)
+            check("and leaves the relay on the VPN's servers", rig.relay.mode == .vpn)
+            check("a lookup still in flight to the relay is answered", try await rig.lookup().answer == vpnAnswerIP)
         }
+    }
 
-        func sleep(until deadline: ContinuousClock.Instant) async throws {
-            let id = lock.withLock { () -> UInt64 in
-                issued += 1
-                return issued
-            }
-            try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, any Error>) in
-                    // One locked step with the cancellation check, so a cancel between them is not missed.
-                    let outcome = lock.withLock { () -> Result<Void, any Error>? in
-                        if Task.isCancelled { return .failure(CancellationError()) }
-                        if deadline <= instant { return .success(()) }
-                        guard sleepers.count < Self.capacity else {
-                            overflowed = true
-                            return .failure(Overused())
-                        }
-                        sleepers.append(Sleeper(id: id, deadline: deadline, waiter: waiter))
-                        return nil
-                    }
-                    if let outcome { waiter.resume(with: outcome) }
-                }
-            } onCancel: {
-                let cancelled = lock.withLock { () -> Sleeper? in
-                    guard let index = sleepers.firstIndex(where: { $0.id == id }) else { return nil }
-                    return sleepers.remove(at: index)
-                }
-                cancelled?.waiter.resume(throwing: CancellationError())
-            }
+    @RuntimeActor
+    static func ownKeyConduitHung() async throws -> ScenarioResult {
+        try await rig(name: "dns-own-key-conduit-hung") { rig, check in
+            check("Conduit answers through the relay", try await rig.lookup().answer == publicIP)
+            rig.conduit.silent = true
+            let hung = try await rig.lookup()
+            check("a hung Conduit's lookup is answered by the VPN", hung.answer == vpnAnswerIP)
+            check("within the probe's budget", hung.seconds >= 1.0 && hung.seconds < 2.5)
+            check("the relay switched to the VPN's servers", rig.relay.mode == .vpn)
+            check("the next lookup goes to them at once", try await rig.lookup().seconds < 0.5)
+            rig.machine.tickVPNDNSOverride()
+            rig.machine.tickVPNDNSOverride()
+            check("two silent ticks keep the key", rig.machine.vpnDNSStore.ownKey != nil)
+            rig.machine.tickVPNDNSOverride()
+            check("the third withdraws it", rig.machine.vpnDNSStore.ownKey == nil
+                && rig.machine.vpnDNSOverrideOutcomes.contains(.withdrawn(service: service, reason: .targetSilent)))
+            rig.conduit.silent = false
+            rig.machine.tickVPNDNSOverride()
+            check("an answered probe brings the key and Conduit back",
+                  rig.machine.vpnDNSStore.ownKey != nil && rig.relay.mode == .conduit)
+            check("Conduit answers again", try await rig.lookup().answer == publicIP)
         }
     }
 
@@ -482,14 +269,11 @@ enum VPNDNSOverrideScenarios {
         let vpn: FakeVPNStatusObserver
         let pushed: FakePushedResolverObserver
         let corp: CountingDNSServer
-        let clock: ManualClock
         let environment: RuntimeEnvironment
-        let config: ProxyConfig
 
         init(
             host: RuntimeHost, control: any RuntimeClient, machine: FakeMachine, vpn: FakeVPNStatusObserver,
-            pushed: FakePushedResolverObserver, corp: CountingDNSServer, clock: ManualClock,
-            environment: RuntimeEnvironment, config: ProxyConfig
+            pushed: FakePushedResolverObserver, corp: CountingDNSServer, environment: RuntimeEnvironment
         ) {
             self.host = host
             self.control = control
@@ -497,19 +281,17 @@ enum VPNDNSOverrideScenarios {
             self.vpn = vpn
             self.pushed = pushed
             self.corp = corp
-            self.clock = clock
             self.environment = environment
-            self.config = config
         }
 
-        var key: [String]? { machine.vpnDNSStore.serverAddresses(service) }
+        var ownKey: [String: VPNDNSValue]? { machine.vpnDNSStore.ownKey }
 
-        var applies: [VPNDNSOverrideRequest] {
-            machine.privilege.vpnDNSOverrideRequests.filter { if case .apply = $0 { true } else { false } }
+        var arms: [VPNDNSOverrideRequest] {
+            machine.privilege.vpnDNSOverrideRequests.filter { if case .arm = $0 { true } else { false } }
         }
 
-        var released: [VPNDNSReleaseWrite] {
-            machine.vpnDNSOverrideOutcomes.compactMap { if case .released(_, _, let write) = $0 { write } else { nil } }
+        var disarms: Int {
+            machine.privilege.vpnDNSOverrideRequests.filter { $0 == .disarm }.count
         }
 
         var events: [RuntimeEvent] {
@@ -518,12 +300,11 @@ enum VPNDNSOverrideScenarios {
             } ?? []
         }
 
-        func releaseThenRelayStop(since mark: Int) -> Bool {
+        func disarmThenRelayStop(since mark: Int) -> Bool {
             let log = Array(machine.vpnDNSOverrideOutcomes.dropFirst(mark))
-            let release = log.firstIndex { if case .released(_, .requested, _) = $0 { true } else { false } }
-            let stop = log.firstIndex { $0 == .nothingToRelease(reason: .relayStopped) }
-            let stopReleased = log.contains { if case .released(_, .relayStopped, _) = $0 { true } else { false } }
-            return release != nil && stop != nil && release! < stop! && !stopReleased
+            return log.contains(.withdrawn(service: service, reason: .disarmed))
+                && !log.contains(.withdrawn(service: service, reason: .relayStopped))
+                && !machine.dnsRelayRunning
         }
 
         func connect(servers: [String] = tunnelServers) async throws {
@@ -562,6 +343,7 @@ enum VPNDNSOverrideScenarios {
             try await pass()
         }
 
+        /// The store as the monitor reads it, the helper's own key included.
         func publish() {
             var keys: [String: Any] = [:]
             for (id, interface) in [(service, "utun6"), ("split", "utun3")] {
@@ -574,7 +356,10 @@ enum VPNDNSOverrideScenarios {
                     keys["State:/Network/Service/\(id)/IPv4"] = ipv4
                 }
             }
-            pushed.emit(PushedResolverReading.parse(store: keys, substitutions: pushed.substitutions()))
+            if let own = machine.vpnDNSStore.ownKey {
+                keys["State:/Network/Service/\(HelperConstants.vpnDNSOverrideServiceID)/DNS"] = own.mapValues(Self.plist)
+            }
+            pushed.emit(PushedResolverReading.parse(store: keys))
         }
 
         private static func plist(_ value: VPNDNSValue) -> Any {
@@ -591,8 +376,17 @@ enum VPNDNSOverrideScenarios {
             await host.settleObserverDeliveries()
         }
 
-        func until(_ condition: () -> Bool) async throws -> Bool {
-            for _ in 0..<1000 {
+        /// The key is up and the app has confirmed its `count`th publish.
+        func landed(_ count: Int = 1) async throws -> Bool {
+            let seen = try await until {
+                ownKey != nil && events.filter { $0.event == "dns.vpn_override_published" }.count >= count
+            }
+            try await pass()
+            return seen
+        }
+
+        func until(seconds: Int = 10, _ condition: () -> Bool) async throws -> Bool {
+            for _ in 0..<(seconds * 100) {
                 if condition() { return true }
                 try await Task.sleep(for: .milliseconds(10))
             }
@@ -684,7 +478,6 @@ enum VPNDNSOverrideScenarios {
         prepare(machine)
         let vpn = FakeVPNStatusObserver()
         let pushed = FakePushedResolverObserver()
-        let clock = ManualClock()
         var tuning = DNSForwarderTuning()
         let corpPort = corp.port
         tuning.internalServerEndpoint = { _ in ("127.0.0.1", corpPort) }
@@ -704,7 +497,7 @@ enum VPNDNSOverrideScenarios {
                 portHolderProbe: FakeListenerPortHolderProbe(),
                 loopbackPortProbe: FakeLoopbackPortProbe().liveness(port:),
                 commandRunner: { try machine.run($0, $1) },
-                dnsProbe: FakeDNSProbe().liveness(onPort:),
+                dnsProbe: { _ in machine.dnsRelayRunning ? .live : .notLive },
                 relayRecheckPause: { _ in },
                 networkPath: FakeNetworkPathObserver(),
                 networkLocation: FakeNetworkLocationObserver(),
@@ -716,9 +509,7 @@ enum VPNDNSOverrideScenarios {
                 resolverDirectory: machine.resolverDirectory.path,
                 stateFiles: StateFileAccess.operatingSystem()
             ),
-            dnsForwarderTuning: tuning,
-            vpnDNSOverrideClock: { clock.now },
-            vpnDNSOverrideSleep: { try await clock.sleep(until: $0) }
+            dnsForwarderTuning: tuning
         )
 
         do {
@@ -729,8 +520,8 @@ enum VPNDNSOverrideScenarios {
             )
             check("the helper's relay runs once DNS is managed", machine.dnsRelayRunning)
             let stage = Stage(
-                host: host, control: clients.control, machine: machine, vpn: vpn, pushed: pushed, corp: corp, clock: clock,
-                environment: environment, config: config
+                host: host, control: clients.control, machine: machine, vpn: vpn, pushed: pushed, corp: corp,
+                environment: environment
             )
             try await body(stage, check)
         } catch {
@@ -742,8 +533,8 @@ enum VPNDNSOverrideScenarios {
         let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
         let flush = await host.flushEvents()
         check("the host settles and flushes", settled == .settled && flush.allConfirmed)
-        check("no key is left at the relay", machine.vpnDNSStore.serverAddresses(service) != relay)
-        check("the override armed at most one wake at a time", !clock.overused)
+        check("no own key is left after the Stop", machine.vpnDNSStore.ownKey == nil)
+        check("the VPN's keys were never written", machine.vpnDNSStore.vpnKeyWrites.isEmpty)
         do {
             let events = try String(contentsOf: environment.eventsFile, encoding: .utf8).split(separator: "\n").map {
                 try CanonicalJSON.decoder().decode(RuntimeEvent.self, from: Data($0.utf8))
@@ -763,7 +554,83 @@ enum VPNDNSOverrideScenarios {
         } else {
             notes.append("shutdown not confirmed: scratch kept at \(scratch.path)")
         }
-        notes.append("helper override calls: \(machine.privilege.vpnDNSOverrideRequests.count); ledger outcomes: \(machine.vpnDNSOverrideOutcomes.count)")
+        notes.append("helper override calls: \(machine.privilege.vpnDNSOverrideRequests.count); publisher outcomes: \(machine.vpnDNSOverrideOutcomes.count)")
+        return result(name: name, began: began, assertions: assertions, notes: notes)
+    }
+
+    /// The helper's half alone: a real fail-safe relay between a stand-in forwarder and a stand-in VPN server.
+    final class Rig: @unchecked Sendable {
+        let machine: FakeMachine
+        let relay: DNSFailoverRelay
+        let conduit: StandInDNSServer
+        let vpnServer: StandInDNSServer
+
+        init(machine: FakeMachine, relay: DNSFailoverRelay, conduit: StandInDNSServer, vpnServer: StandInDNSServer) {
+            self.machine = machine
+            self.relay = relay
+            self.conduit = conduit
+            self.vpnServer = vpnServer
+        }
+
+        func lookup() async throws -> (answer: String?, seconds: Double) {
+            guard let port = relay.listeningPort else { return (nil, 0) }
+            let began = ContinuousClock.now
+            let reply = try await DNSProbe.overUDP(
+                query: DNSWireFormat.buildQuery(domain: publicName, txID: UInt16.random(in: 1...UInt16.max)), port: port, timeout: 5
+            )
+            let elapsed = ContinuousClock.now - began
+            let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+            return (reply.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, seconds)
+        }
+    }
+
+    @RuntimeActor
+    private static func rig(
+        name: String,
+        _ body: @RuntimeActor (Rig, (String, Bool) -> Void) async throws -> Void
+    ) async throws -> ScenarioResult {
+        let began = Date()
+        var assertions: [ScenarioAssertion] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+        var notes: [String] = []
+
+        let group = MultiThreadedEventLoopGroup.singleton
+        let conduit = StandInDNSServer(ip: publicIP)
+        try await conduit.start(group: group)
+        ScenarioCleanup.register { await conduit.stop() }
+        let vpnServer = StandInDNSServer(ip: vpnAnswerIP)
+        try await vpnServer.start(group: group)
+        ScenarioCleanup.register { await vpnServer.stop() }
+        let vpnPort = vpnServer.port
+        // Every VPN server the relay may try is the loopback stand-in; nothing leaves the Mac.
+        let relay = DNSFailoverRelay(listenPort: 0, maximumTCPSessions: 64, serverEndpoint: { _ in
+            DNSFailoverEndpoint(host: "127.0.0.1", port: vpnPort)
+        })
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("pm-\(name)-\(UUID().uuidString)", isDirectory: true)
+        let machine = FakeMachine(resolverDirectory: scratch, failoverRelay: relay)
+        defer {
+            relay.stop()
+            do { try FileManager.default.removeItem(at: scratch) } catch { fputs("scratch kept at \(scratch.path)\n", stderr) }
+        }
+
+        do {
+            machine.vpnDNSStore.connectFullTunnel(service, servers: tunnelServers)
+            try machine.execute(.startDNSRelay, values: ["\(conduit.port)"])
+            check("both halves of the relay listen", relay.listeningPort != nil)
+            _ = try machine.vpnDNSOverride(.arm(service: service, servers: tunnelServers))
+            check("the key is published, naming the relay's port",
+                  relay.listeningPort.map { machine.vpnDNSStore.ownKey == VPNDNSOverridePublisher.ownKey(port: $0) } ?? false)
+            try await body(Rig(machine: machine, relay: relay, conduit: conduit, vpnServer: vpnServer), check)
+        } catch {
+            notes.append("failed: \(error)")
+            check("the scenario ran to its end", false)
+        }
+        check("the VPN's key was never written", machine.vpnDNSStore.vpnKeyWrites.isEmpty)
+        notes.append("conduit asked: \(conduit.total); vpn asked: \(vpnServer.total)")
+        return result(name: name, began: began, assertions: assertions, notes: notes)
+    }
+
+    private static func result(name: String, began: Date, assertions: [ScenarioAssertion], notes: [String]) -> ScenarioResult {
         let passed = assertions.filter(\.passed).count
         return ScenarioResult(
             name: name, clientCount: assertions.count, clientsOpened: assertions.count, clientsWithFirstByte: passed,
@@ -771,5 +638,65 @@ enum VPNDNSOverrideScenarios {
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
             assertions: assertions, notes: notes
         )
+    }
+}
+
+/// A DNS server that answers every A query with one address, and can be made silent.
+final class StandInDNSServer: @unchecked Sendable {
+    private let ip: String
+    private let state = NIOLockedValueBox((silent: false, asked: 0))
+    private let channel = NIOLockedValueBox<Channel?>(nil)
+
+    init(ip: String) {
+        self.ip = ip
+    }
+
+    var port: Int { channel.withLockedValue { $0?.localAddress?.port } ?? 0 }
+    var total: Int { state.withLockedValue { $0.asked } }
+
+    var silent: Bool {
+        get { state.withLockedValue { $0.silent } }
+        set { state.withLockedValue { $0.silent = newValue } }
+    }
+
+    func start(group: EventLoopGroup) async throws {
+        let handler = Responder(ip: ip, state: state)
+        let bound = try await DatagramBootstrap(group: group)
+            .channelInitializer { $0.pipeline.addHandler(handler) }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        channel.withLockedValue { $0 = bound }
+    }
+
+    func stop() async {
+        guard let bound = channel.withLockedValue({ current in defer { current = nil }; return current }) else { return }
+        do { try await bound.close() } catch { fputs("stand-in DNS server close failed: \(error)\n", stderr) }
+    }
+
+    private final class Responder: ChannelInboundHandler, @unchecked Sendable {
+        typealias InboundIn = AddressedEnvelope<ByteBuffer>
+        typealias OutboundOut = AddressedEnvelope<ByteBuffer>
+
+        private let ip: String
+        private let state: NIOLockedValueBox<(silent: Bool, asked: Int)>
+
+        init(ip: String, state: NIOLockedValueBox<(silent: Bool, asked: Int)>) {
+            self.ip = ip
+            self.state = state
+        }
+
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+            let envelope = unwrapInboundIn(data)
+            var buffer = envelope.data
+            let query = buffer.readBytes(length: buffer.readableBytes) ?? []
+            let silent = state.withLockedValue { current in
+                current.asked += 1
+                return current.silent
+            }
+            guard !silent, let answer = DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: ip) else { return }
+            var out = context.channel.allocator.buffer(capacity: answer.count)
+            out.writeBytes(answer)
+            context.writeAndFlush(wrapOutboundOut(AddressedEnvelope(remoteAddress: envelope.remoteAddress, data: out)), promise: nil)
+        }
     }
 }
