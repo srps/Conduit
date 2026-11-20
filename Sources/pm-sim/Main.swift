@@ -102,7 +102,8 @@ enum PMSim {
               dns-upstream-spoof      DNS: wrong-ID and QR-clear replies are dropped, never answered or cached
               dns-internal-unreachable-falls-back  DNS: a split-DNS name whose server is silent resolves through DoH
               dns-ephemeral-pair-rebind  DNS: a taken TCP twin moves the port-0 UDP+TCP pair to a fresh port
-              dns-unsatisfied-path    DNS: no network path answers SERVFAIL at once, a reset cancels lookups in flight, the returned path answers (#292)
+              dns-unsatisfied-path    DNS: no network path drops a lookup at once, a reset re-runs lookups in flight once, the returned path answers (#292)
+              dns-reset-no-negative-answer  DNS: a reset during a lookup re-runs it on the fresh transports and never answers SERVFAIL (0049)
               dns-no-split-entries    DNS: with no enabled split-DNS entry a public name makes no internal attempt (#296)
               dns-internal-server-circuit  DNS: a silent internal server's circuit opens, is skipped, probed closed and reset; servers in order; longest suffix (#290)
               dns-internal-stage-budget  DNS: six silent servers under one entry still answer inside the relay window; unasked servers see nothing (#290)
@@ -325,6 +326,7 @@ enum PMSim {
         "dns-internal-unreachable-falls-back",
         "dns-ephemeral-pair-rebind",
         "dns-unsatisfied-path",
+        "dns-reset-no-negative-answer",
         "dns-no-split-entries",
         "dns-internal-server-circuit",
         "dns-internal-stage-budget",
@@ -553,6 +555,8 @@ enum PMSim {
             return [try await DNSResolverScenarios.ephemeralPairRebind(verbose: verbose)]
         case "dns-unsatisfied-path":
             return [try await DNSHealthScenarios.unsatisfiedPath(verbose: verbose)]
+        case "dns-reset-no-negative-answer":
+            return [try await DNSHealthScenarios.resetNoNegativeAnswer(verbose: verbose)]
         case "dns-no-split-entries":
             return [try await DNSHealthScenarios.noSplitEntries(verbose: verbose)]
         case "dns-internal-server-circuit":
