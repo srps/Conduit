@@ -49,6 +49,7 @@ package final class VPNResolverOverrideController {
     private let emit: @RuntimeActor (RuntimeEvent, LogLevel) -> Void
     private var armsInFlight = 0
     private var notFirstReported = false
+    private var orderUnreadableReported = false
     private var issued: UInt64 = 0
     private var settled: UInt64 = 0
 
@@ -183,7 +184,19 @@ package final class VPNResolverOverrideController {
     /// The order that puts a domainless supplemental resolver first is undocumented; this reports it changing.
     private func checkOrder(service: String, port: Int?) async {
         let reader = resolverOrder
-        guard let first = await work.run({ reader.firstResolver() }) else { return }
+        let first: FirstResolver
+        switch await work.run({ reader.firstResolver() }) {
+        case .success(let read):
+            first = read
+            orderUnreadableReported = false
+        case .failure(let error):
+            if !orderUnreadableReported {
+                orderUnreadableReported = true
+                emit(RuntimeEvent(kind: .health, event: "dns.vpn_override_order_unreadable",
+                                  detail: "service=\(service) reason=\(error.reason)"), .warning)
+            }
+            return
+        }
         let ours = first.nameserver == "127.0.0.1" && first.port == (port ?? HelperConstants.vpnDNSOverrideRelayPort)
         if ours {
             notFirstReported = false
@@ -218,6 +231,7 @@ package final class VPNResolverOverrideController {
         unconfirmed = nil
         published = false
         notFirstReported = false
+        orderUnreadableReported = false
     }
 
     private func markUnsupported() {

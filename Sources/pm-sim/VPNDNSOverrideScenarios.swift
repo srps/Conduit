@@ -19,6 +19,7 @@ enum VPNDNSOverrideScenarios {
     private static let overrideEvents: Set<String> = [
         "dns.vpn_override_armed", "dns.vpn_override_disarmed", "dns.vpn_override_published",
         "dns.vpn_override_withdrawn", "dns.vpn_override_failed", "dns.vpn_override_not_first",
+        "dns.vpn_override_order_unreadable",
     ]
 
     @RuntimeActor
@@ -46,7 +47,7 @@ enum VPNDNSOverrideScenarios {
                   events.filter { $0.event == "dns.split_detected" }.compactMap(\.detail)
                       == ["interface=utun6 domains=corp.example servers=1 outcome=applied",
                           "interface=utun6 domains=corp.example servers=1 outcome=cleared"])
-            check("resolver #1 is the helper's", !lines.contains { $0.hasPrefix("dns.vpn_override_not_first") })
+            check("resolver #1 is the helper's", !lines.contains { $0.hasPrefix("dns.vpn_override_not_first") || $0.hasPrefix("dns.vpn_override_order_unreadable") })
             check("nothing failed", !lines.contains { $0.hasPrefix("dns.vpn_override_failed") })
         }
     }
@@ -77,7 +78,7 @@ enum VPNDNSOverrideScenarios {
             check("the removed key disarms as not_in_use, the gate as gate",
                   lines.filter { $0.hasPrefix("dns.vpn_override_disarmed") }
                       == ["dns.vpn_override_disarmed reason=not_in_use", "dns.vpn_override_disarmed reason=gate"])
-            check("resolver #1 was the helper's while the app read it", !lines.contains { $0.hasPrefix("dns.vpn_override_not_first") })
+            check("resolver #1 was the helper's while the app read it", !lines.contains { $0.hasPrefix("dns.vpn_override_not_first") || $0.hasPrefix("dns.vpn_override_order_unreadable") })
             let gate = lines.lastIndex { $0 == "dns.vpn_override_disarmed reason=gate" }
             let dropped = lines.lastIndex { $0.hasPrefix("dns.split_table_changed detected_domains=0") && $0.hasSuffix("reason=vpn_disconnected") }
             check("the gate's disarm lands before the set drops", gate != nil && dropped != nil && gate! < dropped!)

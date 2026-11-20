@@ -289,12 +289,12 @@ final class HelperVPNDNSOverrideTests: XCTestCase {
     func testFakeMachineAnswersScutilFromTheOwnKey() throws {
         let machine = machine()
         let order = ScutilResolverOrder(run: { try machine.run($0, $1) })
-        XCTAssertEqual(order.firstResolver(), FirstResolver(nameserver: servers[0], port: nil))
+        XCTAssertEqual(order.firstResolver(), .success(FirstResolver(nameserver: servers[0], port: nil)))
         try machine.execute(.startDNSRelay, values: ["5053"])
         _ = try machine.vpnDNSOverride(.arm(service: service, servers: servers))
-        XCTAssertEqual(order.firstResolver(), FirstResolver(nameserver: "127.0.0.1", port: HelperConstants.vpnDNSOverrideRelayPort))
+        XCTAssertEqual(order.firstResolver(), .success(FirstResolver(nameserver: "127.0.0.1", port: HelperConstants.vpnDNSOverrideRelayPort)))
         machine.resolverOrderIgnoresOwnKey = true
-        XCTAssertEqual(order.firstResolver(), FirstResolver(nameserver: servers[0], port: nil))
+        XCTAssertEqual(order.firstResolver(), .success(FirstResolver(nameserver: servers[0], port: nil)))
     }
 
     func testTheRelayStatusCarriesTCPAndAnOlderReplyHasNone() throws {

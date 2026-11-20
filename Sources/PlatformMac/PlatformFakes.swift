@@ -905,6 +905,7 @@ package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked S
 package final class FakeResolverOrder: ResolverOrderReading, @unchecked Sendable {
     private let lock = NSLock()
     private var _first: FirstResolver?
+    private var _failure: ResolverOrderError?
     private var _reads = 0
 
     package init(first: FirstResolver? = nil) {
@@ -916,12 +917,18 @@ package final class FakeResolverOrder: ResolverOrderReading, @unchecked Sendable
         set { lock.withLock { _first = newValue } }
     }
 
+    package var failure: ResolverOrderError? {
+        get { lock.withLock { _failure } }
+        set { lock.withLock { _failure = newValue } }
+    }
+
     package var reads: Int { lock.withLock { _reads } }
 
-    package func firstResolver() -> FirstResolver? {
+    package func firstResolver() -> Result<FirstResolver, ResolverOrderError> {
         lock.withLock {
             _reads += 1
-            return _first
+            if let failure = _failure { return .failure(failure) }
+            return _first.map { .success($0) } ?? .failure(.noFirstResolver)
         }
     }
 }

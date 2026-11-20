@@ -349,6 +349,24 @@ final class VPNResolverOverrideControllerTests: XCTestCase {
         XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_not_first") }.count, 2, "the :53 relay first is not the key")
     }
 
+    @RuntimeActor func testAnUnreadableResolverOrderIsReportedOncePerChange() async {
+        let client = ScriptedVPNDNSOverrideClient()
+        let controller = controller(client)
+        order.failure = .exitStatus(1)
+
+        await controller.pass({ self.inputs() }, pollStatus: false)
+        await controller.pass({ self.inputs() }, pollStatus: true)
+        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_order_unreadable") },
+                       ["dns.vpn_override_order_unreadable service=com.cisco.anyconnect reason=exit_status_1"])
+        XCTAssertFalse(events.contains { $0.hasPrefix("dns.vpn_override_not_first") }, "an unread order is not a wrong one")
+
+        order.failure = nil
+        await controller.pass({ self.inputs() }, pollStatus: true)
+        order.failure = .noFirstResolver
+        await controller.pass({ self.inputs() }, pollStatus: true)
+        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_order_unreadable") }.count, 2, "a good read rearms the report")
+    }
+
     @RuntimeActor func testTheOrderIsNotReadWhileTheKeyIsWithdrawn() async {
         let client = ScriptedVPNDNSOverrideClient()
         client.withdrawOnItsOwn(reason: "vpn_changed")
@@ -431,14 +449,18 @@ final class ScutilResolverOrderTests: XCTestCase {
     func testAFailedRunIsUnreadable() {
         let published = self.published
         let failed = ScutilResolverOrder(run: { _, _ in CommandResult(exitCode: 1, standardOutput: published, standardError: "") })
-        XCTAssertNil(failed.firstResolver())
+        XCTAssertEqual(failed.firstResolver(), .failure(.exitStatus(1)))
         struct Boom: Error {}
-        XCTAssertNil(ScutilResolverOrder(run: { _, _ in throw Boom() }).firstResolver())
+        guard case .failure(.runFailed) = ScutilResolverOrder(run: { _, _ in throw Boom() }).firstResolver() else {
+            return XCTFail("a run that throws is unreadable")
+        }
+        let empty = ScutilResolverOrder(run: { _, _ in CommandResult(exitCode: 0, standardOutput: "", standardError: "") })
+        XCTAssertEqual(empty.firstResolver(), .failure(.noFirstResolver))
         let ran = ScutilResolverOrder(run: { path, arguments in
             XCTAssertEqual(path, "/usr/sbin/scutil")
             XCTAssertEqual(arguments, ["--dns"])
             return CommandResult(exitCode: 0, standardOutput: published, standardError: "")
         })
-        XCTAssertEqual(ran.firstResolver(), FirstResolver(nameserver: "127.0.0.1", port: 15353))
+        XCTAssertEqual(ran.firstResolver(), .success(FirstResolver(nameserver: "127.0.0.1", port: 15353)))
     }
 }
