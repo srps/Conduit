@@ -555,7 +555,7 @@ private final class DoHTransportsHandle: @unchecked Sendable {
 /// a query so malformed that no well-formed response can echo its question, and
 /// for a lookup that this forwarder's own state left unanswered (a transports
 /// reset, or no network path): a stub caches SERVFAIL, and retries silence.
-private final class DNSResolutionCore: @unchecked Sendable {
+final class DNSResolutionCore: @unchecked Sendable {
     private let group: EventLoopGroup
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
@@ -604,12 +604,15 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private var networkFallbackCount = 0
     /// Caps concurrent in-flight resolutions.
     ///
+    /// Sized for a reconnect burst while the 0049 override sends every lookup
+    /// on the Mac here (#328). A slot holds at most one upstream request at a time.
+    ///
     /// A plain counter behind a lock, not a `DispatchSemaphore`: acquisition is
     /// a non-blocking try (an over-limit query is answered SERVFAIL, never
     /// queued), so the semaphore bought nothing, and `DispatchSemaphore.wait`
     /// is unavailable from async contexts under Swift 6 — blocking a
     /// cooperative-pool thread is exactly what it would do.
-    private static let maximumInFlightQueries = 64
+    static let maximumInFlightQueries = 256
     private let admission = NIOLockedValueBox(AdmissionState())
 
     private struct AdmissionState {

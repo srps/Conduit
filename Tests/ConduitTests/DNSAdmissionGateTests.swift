@@ -29,7 +29,7 @@ import XCTest
 /// by `ParkingConfigProvider` — never under a network timeout.
 final class DNSAdmissionGateTests: XCTestCase {
 
-    /// Well under the 64-slot cap per iteration, far past it in aggregate: if
+    /// Well under the slot cap per iteration, far past it in aggregate: if
     /// runts took slots, this many would exhaust the gate outright.
     private static let floodSize = 500
 
@@ -158,7 +158,7 @@ final class DNSAdmissionGateTests: XCTestCase {
     ///
     /// This is the regression the guard exists for. With the length check inside
     /// `resolve` instead, every runt reached the gate and spawned a task that
-    /// immediately did nothing, so a flood could occupy all 64 slots with no-op
+    /// immediately did nothing, so a flood could occupy every slot with no-op
     /// work and push real queries onto the over-limit SERVFAIL path.
     func testMalformedDatagramNeverReachesTheAdmissionGate() async throws {
         let gate = await makeGate()
@@ -253,6 +253,32 @@ final class DNSAdmissionGateTests: XCTestCase {
         )
 
         try await gate.tearDown()
+    }
+
+    /// A reconnect burst under the 0049 override (170 lookups, #328) is admitted
+    /// whole; past the cap the gate still refuses, and a released slot is granted again.
+    func testReconnectBurstFitsAndTheCapStillHolds() {
+        let core = DNSResolutionCore(
+            group: MultiThreadedEventLoopGroup.singleton,
+            logger: RecordingLogSink(minLevel: .debug),
+            configProvider: { ProxyConfig.testFixture() },
+            preferProxyPathForDoH: { false },
+            localProxyPort: { nil },
+            pathSatisfied: { true },
+            onMetrics: nil,
+            tuning: DNSForwarderTuning()
+        )
+        let observedBurst = 170
+        let burst = (0..<observedBurst).compactMap { _ in core.admitQuery() }
+        XCTAssertEqual(burst.count, observedBurst, "A reconnect-sized burst must be admitted whole")
+
+        let rest = (burst.count..<max(burst.count, DNSResolutionCore.maximumInFlightQueries)).compactMap { _ in core.admitQuery() }
+        XCTAssertEqual(burst.count + rest.count, DNSResolutionCore.maximumInFlightQueries)
+        XCTAssertNil(core.admitQuery(), "Past the cap the gate must refuse")
+
+        core.releaseQuery(burst[0])
+        XCTAssertNotNil(core.admitQuery(), "A released slot must be granted again")
+        XCTAssertEqual(core.inFlightQueryCount, DNSResolutionCore.maximumInFlightQueries)
     }
 
     private func pollUntil(timeoutSeconds: Int, _ condition: () -> Bool) async -> Bool {
