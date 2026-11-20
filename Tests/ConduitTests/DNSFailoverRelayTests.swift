@@ -51,16 +51,23 @@ private final class StandInDNS: @unchecked Sendable {
     var total: Int { lock.withLock { _asked.values.reduce(0, +) } }
     func asked(_ name: String) -> Int { lock.withLock { _asked[name] ?? 0 } }
 
+    /// dup2, not close: a closed number can be reused by another test's socket while the serving threads still read it.
     func stop() {
         lock.withLock {
             guard !stopped else { return }
             stopped = true
-            close(udp)
-            if let tcp { close(tcp) }
+            let dead = socket(AF_INET, SOCK_STREAM, 0)
+            dup2(dead, udp)
+            if let tcp { dup2(dead, tcp) }
+            close(dead)
         }
     }
 
-    deinit { stop() }
+    deinit {
+        stop()
+        close(udp)
+        if let tcp { close(tcp) }
+    }
 
     private func start() {
         Thread { [self] in serveUDP() }.start()
