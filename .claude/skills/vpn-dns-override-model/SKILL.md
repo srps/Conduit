@@ -1,15 +1,17 @@
 ---
 name: vpn-dns-override-model
-description: Model-check Conduit's 0049 VPN resolver override (VPNDNSOverrideLedger in the helper, HelperDaemon's kevent loop, VPNResolverOverridePolicy and its controller, PushedResolverReading's substitution, RuntimeHostVPNDNSOverride and RuntimeHostSplitDNSDetection's ordering) with the TLA+ spec formal/vpn-detection/VPNDNSOverride.tla. Use when a change touches any file in its coverage record, or for a bug where Cisco's or another VPN's DNS key is left at 127.0.0.1, clobbered, deleted, lost after a flap, suspended, or loops back to Conduit.
+description: Model-check Conduit's 0049 VPN resolver override (the helper's own temporary DNS key and its publisher, the fail-safe UDPRelay and TCPRelay, HelperDaemon's kevent loop, VPNResolverOverridePolicy and its controller, PushedResolverReading, RuntimeHostVPNDNSOverride and RuntimeHostSplitDNSDetection's ordering) with the TLA+ spec formal/vpn-detection/VPNDNSOverride.tla. Use when a change touches any file in its coverage record, or for a bug where lookups hang or fail with Conduit's key first, the key outlives Conduit or the VPN, does not come back after a flap or a configd restart, the VPN's own DNS key is written, or a lookup loops back to Conduit.
 ---
 
 # VPN DNS override model
 
-Decision 0049 lets the helper point a full-tunnel VPN's `State:/Network/Service/<id>/DNS` at the relay (`127.0.0.1`) and give it back. `formal/vpn-detection/VPNDNSOverride.tla` models one such service: the client's DNS and IPv4 keys and the VPN gate, the helper's ledger record, its relay and forwarder probe and its kevent loop, the owner process, the helper's restarts, and the app's monitor reading, substitution box, policy, controller, live and held split-DNS sets and helper calls. TLC checks every interleaving of those steps under small bounds. It is a separate spec from `VPNDetection.tla` (skill `vpn-detection-model`), which models the gate's own chain and the entry files.
+Decision 0049, as revised in #330, makes the helper's relay resolver #1 on a full-tunnel VPN through one temporary dynamic-store key of the helper's own, and never writes the VPN client's keys. The relay forwards to Conduit's forwarder and fails each lookup over to the VPN's servers, read live from the VPN's untouched key. `formal/vpn-detection/VPNDNSOverride.tla` models one VPN service: its DNS key and IPv4 key and the VPN gate; configd's restarts; Conduit's key; the helper (up or down, its arm, its probe streaks, its view of the store) and its owner watch; the relay's mode; Conduit's forwarder; and the app's reading, live split-DNS set, arm and helper calls. TLC checks every interleaving of those steps under small bounds. It is a separate spec from `VPNDetection.tla` (skill `vpn-detection-model`), which models the gate's own chain and the entry files.
+
+**The model is ahead of the code.** The Swift still implements the first design, which rewrote `ServerAddresses` in the VPN's key and restored it. `SYNC_COMMIT` stays where it was until the code follows; every row of the coverage record below names the code that will implement it, not code that does today.
 
 ## Does my change touch it?
 
-It does if it changes the behaviour of any function in the coverage record below, or adds a path that writes the tunnel's DNS key, feeds the override policy, or orders a release against a split-DNS set update.
+It does if it changes the behaviour of any function in the coverage record below, or adds a path that publishes or removes Conduit's key, writes any VPN key, changes where the relay forwards, feeds the override policy, or orders a disarm against a split-DNS set update.
 
 ```sh
 python3 formal/vpn-detection/check.py --full-for SYNC_COMMIT
@@ -23,141 +25,105 @@ prints `override` when a file in `OVERRIDE_COVERED` in `check.py`, the spec or t
 python3 formal/vpn-detection/check.py --spec override --mutants
 ```
 
-That runs the four checks, every mutant, the open bugs and the witnesses at the default bounds (times in **Bounds**). `--full=override` runs the larger bounds; `--only <check or mutant>` runs one. It needs Java 11 or later; the first run fetches `tla2tools.jar` into `formal/.tools/`. Each run writes `formal/vpn-detection/.out/<name>/tlc.out`.
+That runs the four checks and every mutant at the default bounds (times in **Bounds**). `--full=override` runs the larger bounds; `--only <check or mutant>` runs one. It needs Java 11 or later; the first run fetches `tla2tools.jar` into `formal/.tools/`. Each run writes `formal/vpn-detection/.out/<name>/tlc.out`.
 
 CI runs it in the `vpn-model (override)` job of `.github/workflows/swift.yml`, in parallel with the detection spec's job: every run checks this spec's default tier, and its full tier when its covered or model files changed (`check.py --full-for`) or on the nightly schedule.
 
-Read every result with the `/statechart` skill: give it the spec and the config from `.out/<name>/`, and it shows a violation as its shortest path in plain words. Before you trust a path, replay it against the Swift, one step per action, in a ledger test over the fake `VPNDNSStore` and `VPNDNSForwarderProbe`, or a pm-sim scenario over `FakeMachine`.
+Read every result with the `/statechart` skill: give it the spec and the config from `.out/<name>/`, and it shows a violation as its shortest path in plain words. Once the code exists, replay a path against the Swift, one step per action, in a publisher test over the fake session store and probe, a relay test, or a pm-sim scenario over `FakeMachine`.
 
 ## What it checks
 
-Each property's comment in the spec says what it guarantees and the harm if it breaks.
+Each property's comment in the spec says what it guarantees.
 
-- `NoClobber`. A helper write replaces only what it compared and meant to replace, or the value it wrote itself, or a client value written between its compare-read and its write (the documented window). A write with no compare-read before it gets no window. Harm: the client's current servers are overwritten.
-- `NoSelfReference`. The reading, the live set and a held set never carry `127.0.0.1` as a tunnel server. Harm: the forwarder queries itself.
-- `NoServerlessDefault`. The key holds `127.0.0.1` only while the helper holds a record. Harm: nothing can give the key back.
-- `ReleaseBeforeUnset`. While the key holds `127.0.0.1` and the relay and forwarder serve it, the live set has the tunnel's servers, except between the owner's exit and the helper handling it. After a client write inside apply's window, a restore that landed over a client write inside release's window (until the client's next write), or a reading parsed with a box replaced since (all self-correcting), any list the client published counts. It does not hold while a restore is pending: the store refused the restoring write, nothing can give the key back, and each tick retries it. Harm: internal names fail.
-- `LandedNoted`. The record the app holds is the last landed apply it noted (`lastN`, with `spaced` and the cap set in the same step), whether its reply or a later status showed it. Harm: an apply that a status confirms is neither spaced nor capped.
-- `NoLoopbackWithoutService`. A key at `127.0.0.1` exists without the IPv4 key, other than during an IPv4 flap, only while the helper holds a record and is inside an operation or down. Harm: a `127.0.0.1` key outlives the removed service.
-- `ClientKeyKept`. A service that is up or only flapping always has its DNS key; the helper never deletes it. Harm: the client does not republish a deleted key, so the Mac has no default resolver (the owner's machine, 2026-11-19).
-- `OneRefusalPerTrigger`. A refused apply is not sent again until a store reading, a tick or a wake. Harm: a refusal that asks for its own pass spins the helper with no client change.
-- `EventuallyReleased` (liveness, under weak fairness of the helper's steps, ticks, NOTE_EXIT and restart; the app and the client are not assumed fair). A key at `127.0.0.1` that nothing serves is released, unless the relay and the forwarder come back. Harm: every system-resolved name fails.
+- `KeyAnswered`. Whenever Conduit's key is in the store, the helper and its relay run and the VPN publishes usable servers, every lookup is answered by Conduit or by the VPN's servers. Harm: every system-resolved name hangs (experiment 2 in the decision).
+- `VPNKeyUntouched`. Nothing Conduit does writes the VPN's DNS key. Harm: Conduit fights the client over its own state, as the rewrite did.
+- `NoLoopbackTarget`. The relay never fails a lookup over to a loopback server taken from the VPN's key. Harm: the lookup loops or reaches a server that is not the VPN's.
+- `KeyWithdrawn`. Once the helper has handled every pending event (the owner's exit, the VPN's store notifications), Conduit's key exists only while its owner is alive and the VPN publishes usable servers. Harm: resolver #1 outlives Conduit or the VPN.
+- `InternalNamesServed`. While the relay sends the key's lookups to a serving Conduit, and the helper has handled the VPN's last change, Conduit's live set is the VPN's current servers. Harm: internal names fail.
+- `NoSelfReference`. The reading, the live set and a held set never hold `127.0.0.1`. Harm: the forwarder queries itself.
+- `EventuallyWithdrawn` (liveness, under weak fairness of the helper's steps; the app and the client are not assumed fair). A key that a live, serving Conduit does not stand behind is withdrawn, unless Conduit serves again. Harm: the key lasts on failover alone.
+- `KeyReturns` (liveness). While Conduit could serve (owner alive, armed servers matching the VPN's key, relay up, probe passing), a key that is gone, after a flap or a configd restart, is published again. Harm: the override silently stops.
 
-- `NeverSuspended`, under `override-flaps` (three IPv4 flaps) and `override-same-endless` (same-server rewrites and refused flaps with no bound). Neither flaps nor a client writing its own servers back bring `decide` to `.suspend`. Harm: public names fail for the suspension's lifetime.
-- `SuspensionEnds` (liveness, under weak fairness of `SuspensionExpires`), under `override-suspension-expires` (three lists, cap 1) and in `override-liveness`. A suspension ends. Harm: the override stays off until the VPN disconnects.
-- `NeverLost`, under `override-same-rewrite` (one same-server rewrite and one IPv4 flap). The override is never gone while both sides hold its record and `decide` returns `.none` even after a status call. Harm: the tunnel's DNS stays the default resolver.
+## Mutants
 
-## Bugs fixed on claude/vpn-override-flap
+Each must be caught. The `swift` text names the change that would break the design once it is built.
 
-Each was an open bug or a witness at the sync commit and is now a mutant that must stay caught:
+- `ov-no-per-query-failover` (`KeyAnswered`). The relay fails over only when a tick switches its mode.
+- `ov-key-points-at-conduit` (`KeyAnswered`). The key names Conduit's forwarder instead of the relay.
+- `ov-failover-to-loopback` (`NoLoopbackTarget`). The relay keeps a loopback server from the VPN's key.
+- `ov-key-kept-after-owner-exit` (`KeyWithdrawn`). `NOTE_EXIT` stops the watch but leaves the key.
+- `ov-no-note-exit` (`KeyWithdrawn`). No owner watch.
+- `ov-no-republish-after-configd-restart` (`KeyReturns`). The helper does not watch its own key.
+- `ov-writes-vpn-key` (`VPNKeyUntouched`). Publishing also writes `127.0.0.1` into the VPN's key.
+- `ov-reads-own-key` (`NoSelfReference`). The parser reads Conduit's key as a pushed resolver.
+- `ov-arm-before-live-set` (`InternalNamesServed`). The policy arms before the live set has the VPN's servers.
+- `ov-set-dropped-before-disarm` (`InternalNamesServed`). A new set is applied while the key may be armed.
+- `ov-unconfirmed-arm-kept` (`InternalNamesServed`). An arm whose reply was lost is not treated as armed.
+- `ov-tick-ignores-refused`, `ov-tick-ignores-silent` (`EventuallyWithdrawn`). The probe streaks never withdraw.
 
-- `ov-held-set-applied-unchecked` (`ReleaseBeforeUnset`). `runVPNDNSOverride` applied `vpnDNSOverrideHeldSet` after the pass without asking `vpnDNSOverrideReleases(before:)` again: an apply out, the gate off, the empty set held, the apply landing, the set applied with the key at `127.0.0.1`. It now asks, runs one more pass with the set held, and after a failed release leaves the set held for the next request.
-- `ov-refusals-count-as-applies` (`NeverSuspended`). Every apply sent counted toward `maximumApplies`. Now only applies that landed do.
+Retired with the rewrite, because the combined design has no write to the client's key, no restore and no record file: `ov-release-no-compare`, `ov-apply-gone-no-compare`, `ov-removes-key-without-ipv4`, `ov-apply-no-service-check`, `ov-failed-restore-forgotten`, `ov-record-kept-at-start` (no record survives the helper); `ov-parser-no-substitution` (no substitution); `ov-same-servers-capped`, `ov-refusals-capped`, `ov-refusal-retries-at-once`, `ov-suspension-never-expires`, `ov-refusals-count-as-applies`, `ov-same-rewrite-kept`, `ov-confirmed-apply-uncounted`, `ov-hold-reads-live-set` (the caps, spacing, suspensions, rewrite detection and override hold are retired); `ov-held-set-applied-unchecked` and `ov-apply-before-status` (the app's pass is one step here, and a disarm is idempotent); `ov-exits-after-connection` (a relaunched app's arm replaces the owner, so the order no longer matters). Retired with them: the properties `NoClobber`, `NoServerlessDefault`, `ReleaseBeforeUnset`, `NoLoopbackWithoutService`, `ClientKeyKept` (now `VPNKeyUntouched`, which is stronger), `LandedNoted`, `OneRefusalPerTrigger`, `NeverSuspended`, `NeverLost` and `SuspensionEnds`, and the checks `override-flaps`, `override-same-rewrite`, `override-same-endless`, `override-suspension-expires`, `override-store-faults` and `override-store-faults-liveness`. A relay-stop mutant (`stop-dns-relay` leaving the key) is not kept: the app always disarms before it stops the relay, so no path reaches the helper's own withdrawal on stop.
 
-## Bugs fixed on claude/vpn-override-republish
+## Residual risk
 
-- `ov-same-servers-capped` (`NeverSuspended`, at `OVERRIDE_ENDLESS`). Applies against the servers of the last landed apply counted toward a cap (`maximumRepublishApplies`, classified by a withdrawn service), so a client re-asserting its servers suspended the override. Now they count toward no cap; `minimumApplySpacing` alone bounds them, modelled as `spaced` and `SpacingElapses`.
-- `ov-refusals-capped` (`NeverSuspended`, at `OVERRIDE_ENDLESS`). Refusals counted toward a cap (`maximumRefusedApplies`), so a client that flaps without end and is refused each time suspended the override. Refusals now count toward nothing. `refusals` exists only for this mutant.
-- `ov-refusal-retries-at-once` (`OneRefusalPerTrigger`, at `OVERRIDE_MUTANT`). A refused apply leaves `fresh` set, so the app sends it again with no reading, tick or wake in between. In the Swift a refusal arms no wake and requests no pass; `tries` counts refusals since the last trigger.
-- `ov-suspension-never-expires` (`SuspensionEnds`, at `OVERRIDE_SUSPENSION`). A suspension lasted until the gate turned off or DNS restarted. It now ends after `suspensionLifetime`.
-- `ov-same-rewrite-kept` (`NeverLost`). The client writing the same servers back over `127.0.0.1` left `decide` matching the record. `confirm` now sets `keyRewritten` when the helper still holds the record and the key reads with the client's servers, once a reading of the helper's write was seen or `readingSettle` passed since the apply.
-- `ov-hold-reads-live-set` (`ReleaseBeforeUnset`). The hold rule is safe only on the `serversInUse` `decide` is handed; on the orchestrator's live set it breaks.
-
-`BoxBothSides` (the monitor's box taken on both sides of the store read) has no mutant: no property here fails with the box taken before the read only, because the hold makes the spurious no-full-tunnel reading harmless. The Swift test `testAReadThatSpansTheBoxChangingReadsThroughEitherSide` covers it.
-
-## Store faults and lost replies
-
-- `ov-failed-restore-forgotten` (`NoServerlessDefault`, at `OVERRIDE_WRITE_FAILS`). `release` forgot the record whatever `restore` returned, so a restore the store refused left the key at `127.0.0.1` with nothing to retry it. It now keeps the record pending, and each tick retries before probing.
-- `ov-confirmed-apply-uncounted` (`LandedNoted`, at `OVERRIDE_LOST_REPLY`). `confirm` adopted an unconfirmed apply without `noteLanded`, the cap or the event.
-- `ov-unconfirmed-apply-kept` (`ReleaseBeforeUnset`). With its reply lost, an apply held by the helper was not released when the gate turned off, because `decide` looked at `record` only; the set without the tunnel's servers was applied over a key at `127.0.0.1` until the next status call. Found by the lost-reply action; `decide` now releases such an apply.
-- `ov-apply-before-status` (`ReleaseBeforeUnset`, at `OVERRIDE_FAULTS`). An apply sent without the status call `pass` makes first while an apply may be unconfirmed.
+`KeyAnswered` assumes the helper is up, not hung, and its relay thread alive. A hung helper with its key published hangs every lookup until it is killed; the model has no hung helper. A dead relay thread (`relay = "dead"`) is exempt until the helper restarts it; a restart that cannot bind is left out. The resolver order itself is assumed: Conduit's key is resolver #1 while it exists (experiment 1 and configd's source), and a macOS change to it is reported by Conduit's check, not modelled. Lookups scoped to the tunnel's interface are outside the model.
 
 ## Bounds
 
-Every check starts from `OVERRIDE_NONE` (one list, no fault, cap 3) and adds one class of trouble, because all of them at once ran past 7 GB of TLC state in five minutes:
+Every check starts from `OVERRIDE_NONE` (one server list, no fault) and adds one class of trouble:
 
-- `override-safety-client` (`OVERRIDE_CLIENT`): three lists, a disconnect, a gate flap, an IPv4 flap, a DNS Stop.
-- `override-safety-process` (`OVERRIDE_PROCESS`): two lists, a disconnect, an IPv4 flap, an app exit, a helper crash or SIGTERM, a DNS Stop.
-- `override-safety-relay` (`OVERRIDE_RELAY`): two lists, a disconnect, a gate flap, a relay death, a forwarder fault, a DNS Stop.
-- `override-liveness` (`OVERRIDE_LIVE`): see `check.py` for its bounds.
-- `override-flaps` (`OVERRIDE_FLAPS`): three IPv4 flaps; adds `NeverSuspended`.
-- `override-same-rewrite` (`OVERRIDE_SAME_REWRITE`): one same-server rewrite and one IPv4 flap; adds `NeverLost`.
-- `override-same-endless` (`OVERRIDE_ENDLESS`): same-server rewrites and IPv4 flaps that spend no budget (`Endless`), each flap able to cost a refusal; adds `NeverSuspended` and `NeverLost`.
-- `override-suspension-expires` (`OVERRIDE_SUSPENSION`): three lists at cap 1; checks `SuspensionEnds`.
-- `override-store-faults` (`OVERRIDE_FAULTS`): two lists, a gate flap, an app exit, a forwarder fault, a DNS Stop, one failed store write and one lost apply reply; the safety properties. No disconnect: with one, TLC finds a path in which the helper's restore recreates a key the client deleted inside release's window and the client then republishes only its IPv4 key, which the model allows but a real client does not do (it writes DNS before IPv4 on reconnect); that path is open and needs a design look before disconnects are added. `--full` allows two write failures.
-- `override-store-faults-liveness` (`OVERRIDE_FAULTS_LIVE`): two lists, a relay death, a forwarder fault, one failed write and one lost reply; checks `EventuallyReleased`. `--full` allows two write failures.
+- `override-safety-client` (`OVERRIDE_CLIENT`): three lists, a disconnect, a gate flap, an IPv4 flap, a loopback list, a configd restart, a DNS Stop.
+- `override-safety-process` (`OVERRIDE_PROCESS`): two lists, a disconnect, an IPv4 flap, an app exit, a helper crash or SIGTERM, a DNS Stop, a lost arm reply.
+- `override-safety-relay` (`OVERRIDE_RELAY`): two lists, a disconnect, a gate flap, a loopback list, a relay death, a forwarder fault, a DNS Stop.
+- `override-liveness` (`OVERRIDE_LIVE`): two lists, a disconnect, an IPv4 flap, a configd restart, an app exit, a relay death, a forwarder fault; checks both liveness properties.
 
-`--full` adds a list to each safety check and an IPv4 flap to liveness. Safety mutants run at `OVERRIDE_MUTANT`, the tick mutants with only a forwarder fault (`OVERRIDE_FORWARDER_ONLY`).
+`--full` adds a list to each safety check and an app exit or a configd restart; the liveness check adds a gate flap and a lost reply. Safety mutants run at `OVERRIDE_MUTANT`; the others at the bound named in `check.py`.
 
-Measured on a 12-core laptop: client 11.3M distinct states in 40 s, process 14.5M in 54 s, relay 15.5M in 52 s, liveness 2.6M in 75 s; every mutant, bug and witness 1 to 2 s. The full liveness bounds took 13.8M states and 521 s. With the store faults, the full tier (`--full=override --mutants`) took 30 min wall on the same laptop: client 31.4M distinct in 135 s, process 59.9M in 253 s, relay 90.8M in 523 s, liveness 7.7M in 485 s, store faults 25.0M in 320 s, store-faults liveness 0.7M in 45 s, every mutant at most 12 s.
+Measured on a 12-core laptop: the default tier (`--spec override --mutants`) took 81 s wall: client 1.4M distinct states in 8 s, process 0.4M in 3 s, relay 3.1M in 17 s, liveness 1.0M in 40 s, every mutant 1 s. The full tier (`--full=override --mutants`) took 16 min wall: client 7.9M in 30 s, process 3.2M in 13 s, relay 25.2M in 146 s, liveness 9.8M in 768 s, every mutant 1 s.
 
 ## Coverage record
 
-Synced at SYNC_COMMIT. Move it forward only after you confirm, function by function, that the model still describes the code.
+Synced at SYNC_COMMIT, for the first design; not moved for this model. Move it forward only after the code implements the combined design and you confirm, function by function, that the model describes it.
 
-| Model | Code |
+| Model | Code to implement it |
 | --- | --- |
-| `key`, `svc`, `ver`, `ClientRewrite`, `ClientRewriteSame`, `ClientDelete`, `ClientPublishDNS`, `ClientPublishIPv4`, `ClientRepublish`, `ClientIPv4Flap`, `ClientIPv4Back` | the VPN client writing `State:/Network/Service/<id>/DNS` and `/IPv4` (another process) |
+| `vkey`, `svc`, `ver`, `ClientRewrite`, `ClientLoopback`, `ClientDelete`, `ClientPublishDNS`, `ClientPublishIPv4`, `ClientIPv4Flap`, `ClientIPv4Back` | the VPN client writing `State:/Network/Service/<id>/DNS` and `/IPv4` (another process) |
 | `vgate`, `GateFlap`, `GateBack` | `SplitDNSVPNGate.entriesWanted` (its chain is `VPNDetection.tla`) |
-| `rec` | `Sources/ConduitShared/VPNDNSOverrideLedger.swift` `record` and `persistence` |
-| `HAccept` (apply) | `VPNDNSOverrideLedger.apply`: `check()` (one `dns(service:)` read, `ipv4Exists`, `primaryService`, `servers == expected`, `probe.tcpListening()`, `probe.probe()`), the release of another service's record, `persistence.save`, and the second `dns(service:)` read that must equal the first (the model's one read is this one) |
-| `HApplyWrite` | `apply`: `store.setDNS(overridden)` |
-| `HApplyIPv4`, `ApplyChecksService`, `WatchOwner` | `apply`: `guard store.ipv4Exists(service:)`, `record = replacement`, `resetProbeStreaks`; `Sources/ConduitHelper/HelperDaemon.swift` `applyVPNDNSOverride` (`overrideOwner = peerPID`) and `run`'s `loop.watchOwner(...)`, `ESRCH` releasing `.ownerExited` |
-| `HApplyGoneRead`, `HApplyGoneWrite`, `ApplyGoneCompares` | `apply`'s no-IPv4 path: `store.dns(service:) == overridden`, `setDNS` of the originals, `forgetRecord`, refused `not_found` |
-| `HRelRead`, `HRelWrite`, `ReleaseCompares`, `FinishRelease` | `VPNDNSOverrideLedger.release` -> `restore`: `dns(service:)`, `guard ... == .strings(Self.relayServers)`, `setDNS` of the originals; `forgetRecord`, `lastRelease` |
-| `HRelWriteFails`, `FailRelease`, `KeepsFailedRestore`, `rec.pending`, `MaxWriteFails` | `restore`'s `setDNS` returning false (`restoreFailed`): `release` keeps the record and its file and sets `restorePending`; `HelperDaemon`'s `.stopDNSRelay` stops the relay and replies ok anyway, `releaseVPNDNSOverride` replies an error |
-| `HApplyWriteFails` | `apply`'s `setDNS` returning false: `forgetRecord`, refused `write_failed`, which the controller keeps as `unconfirmedApply` |
-| `HApplyReplyLost`, `MaxLostReplies` | an apply the helper landed whose reply the app never got (a timeout or a dropped connection): the controller's `.failure` branch, `unconfirmedApply` |
-| `HRelIPv4`, `HRelRemove`, `RemovesGoneKey` | the ledger before 276eebd5 (`ipv4Exists`, `removeDNS`), run only by `ov-removes-key-without-ipv4` |
-| `HTick` | `VPNDNSOverrideLedger.tick`: a pending restore retried first, before any probe; `probe.tcpListening()` false or `.notRunning` -> `relayStopped`, two `.refused`, three `.silent`; `HelperEventLoop.next(tickDue:)` |
-| `HOwnerExit`, `ExitPending`, `HelperFree`, `ExitsFirst` | `Sources/ConduitHelper/HelperEventLoop.swift` `ordered` (signals, owner exits, one connection) and `next`; `HelperDaemon.run` `.ownerExited` -> `release(.ownerExited)` |
-| `HSignal` | `HelperDaemon.run` `.signal` -> `release(.helperStopping)`, exit |
-| `HAccept` (other requests) | `HelperDaemon.processRequest`: `releaseVPNDNSOverride` (`.requested`), `startDNSRelay` (both halves, idempotent; a restart keeps the record only if TCP binds too, and a TCP bind failure is `HAccept` then `RelayDies`; `relayRestarted(succeeded:)`), `.stopDNSRelay` (`release(.relayStopped)` then both stop) |
-| `HelperCrash`, `HStart`, `ReleaseAtStart` | the helper killed (relay, watch, `overrideOwner` lost); launchd starting it: `VPNDNSOverrideLedger.start` -> `release(.helperStart)` |
-| `Parse`, `ParseLoopback`, `Overridden` | `Sources/PlatformMac/PushedResolver.swift` `PushedResolverReading.parseResolver`: `overridden`, the substitution, `selfReferential` |
-| `AppReadBox`, `AppReadStore`, `snapBox`, `snapKey`, `BoxBothSides` | `Sources/PlatformMac/PushedResolverMonitor.swift` `read(_:_:)` (the box taken before and after `copyMultiple`, the later winning), `deliver`, `storeChanged`; `LiveSplitDNSDetection.lastReading` |
-| `box` | `VPNResolverOverrideController.substitutions`, read by the monitor through `RuntimeHost.swift`'s `setSubstitutions` provider |
-| `DecisionOf`, `WantedOf`, `UseSetOf`, `ServersInUse`, `HoldRule`, `KeepsThroughFlap` | `Sources/PlatformMac/VPNResolverOverridePolicy.swift` `decide`, `wanted`; `Sources/ConduitRuntime/RuntimeHostVPNDNSOverride.swift` `vpnDNSOverrideInputs`; `HoldRule`, `HoldOnSetInUse`: `VPNResolverOverridePolicy.holds`; `CapReached`, `SameServers`, `SameServersUncapped`: the cap and `lastApplies`' servers |
-| `MayHoldOf`, `known`, `unApply`, `unRel`, `applies`, `refusals`, `lastN`, `spaced`, `susp`, `rewritten`, `fresh`, `tries`, `RefusalsSeparate`, `RefusalsCapped`, `RefusalRetriesAtOnce`, `SuspensionsExpire` | `Sources/PlatformMac/VPNResolverOverrideController.swift` `mayHoldRecord`, `record`, `unconfirmedApply`, `unconfirmedRelease`, `applies` (`note(_:in:)`), `lastApplies` (`noteLanded`), `wakeAt`, `suspended`, `keyRewritten`, `observe` |
-| `SpacingElapses`, `SuspensionExpires` | controller `armWake(at:)` and `onWake` (`RuntimeHost.requestVPNDNSOverrideRun`); `observe`'s expiry of `suspended` past `suspensionLifetime` |
-| `AppPoll`, `Polled`, `SameRewriteReapplies` | controller `pass`'s `status(_:)` and `confirm(_:lastRelease:restorePending:reading:)` (`keyRewritten` once `writeSeen` or `readingSettle`; an adopted `unconfirmedApply` counted through `landed`) |
-| `AppPass`, `ApplyOK`, `ApplyRefused`, `ApplyFailed`, `ReleaseOK`, `ReleaseFailed`, `AfterCall`, `StatusBeforeApply` | controller `pass` (`statusDue` before an apply while `mayHoldRecord`), `apply`, `release`; `RuntimeHostVPNDNSOverride.runVPNDNSOverride` (the held set after the pass, `HeldSetRechecked`) |
-| `ReleasesUnconfirmed` (in `DecisionOf`) | controller `decide`: with no `record`, an `unconfirmedApply` that `decide` would release is released |
-| `AdoptCounts` (in `Polled`), `LandedNoted` | controller `confirm`'s adoption of `unconfirmedApply` through `landed(...)`: `note`, `noteLanded`, the backoff reset, `confirmed=status` |
-| `AppTake`, `NewSet`, `HoldBeforeRelease`, `FlapHold` | `Sources/ConduitRuntime/RuntimeHostSplitDNSDetection.swift` `applyPendingSplitDNSDetection`, `vpnDNSOverrideReleases(before:)`; `LiveSplitDNSDetection.take`; `Sources/PlatformMac/LiveSplitDNSPolicy.swift` `heldThroughFlap` (added to the model on claude/vpn-override-flap: without it every flap dropped the set) |
-| `AppRestartRelay`, `AppStartDNS` | `RuntimeHost.handleDNSHealthResult` (a relay restart); `startDNSModule` and `SystemDNSManager.startRelay` |
-| `AppStop`, `AppTdRelease`, `AppTdClear` | `RuntimeHostLifecycle`'s DNS teardown: `stopDNSHealthTimer`, `await vpnDNSOverride.release(.stop)`, `dnsStopped()`, `SystemDNSManager.clear` -> `stopRelay` |
-| `AppCallFails` | a privileged call while the helper is down |
-| `relay`, `RelayDies` | both of the helper's relays on `127.0.0.1:53`, `UDPRelay` and the DNS `TCPRelay`; `check()` requires `probe.tcpListening()` and an answered probe; `RelayDies` is either one dying |
+| `okey`, `ConfigdRestart` | Conduit's temporary key in the helper's session store; configd dropping temporary keys on restart |
+| `h.armN`, `h.owner`, `h.pub`, `h.seen`, `Ready`, `HSync`, `NoticesOwnKey`, `WritesVPNKey` | the publisher in `Sources/ConduitShared/VPNDNSOverrideLedger.swift` (to be reworked): Ready, publish, withdraw, republish on its own key's notification |
+| `HAccept` | `Sources/ConduitHelper/HelperDaemon.swift` `processRequest`: arm, disarm, `startDNSRelay`, `.stopDNSRelay` (disarm, then stop) |
+| `HTick`, `h.probeOK`, `h.refused`, `h.silent` | the publisher's tick: the probe, the streaks, the relay's mode |
+| `HOwnerExit`, `ExitPending`, `HelperFree`, `WatchOwner`, `WithdrawsOnExit` | `HelperDaemon.run`'s `loop.watchOwner(...)` and `.ownerExited`; `Sources/ConduitHelper/HelperEventLoop.swift` `ordered` |
+| `HelperDown`, `HStart` | the helper killed or stopped (configd's `cleanupSession` removing its key); launchd starting it |
+| `relay`, `RelayDies`, `HRelayRestart`, `FailoverTarget`, `FiltersLoopback`, `Answers`, `PerQueryFailover`, `KeyTargetsRelay` | `Sources/ProxyKernel/Network/UDPRelay.swift` and `TCPRelay.swift`: modes, per-query failover, the VPN's servers with loopback dropped; the key's `ServerPort` |
+| `ReadingOf`, `IgnoresOwnKey`, `AppRead`, `Snap` | `Sources/PlatformMac/PushedResolver.swift` `PushedResolverReading.parseResolver` (no substitution, Conduit's key skipped); `Sources/PlatformMac/PushedResolverMonitor.swift` |
+| `Want`, `ServersInUse`, `MayArm`, `ReleasesUnconfirmed`, `AppPass`, `AppPoll` | `Sources/PlatformMac/VPNResolverOverridePolicy.swift` `decide`; `Sources/PlatformMac/VPNResolverOverrideController.swift` (arm, disarm, unconfirmed arms, status) |
+| `AppTake`, `NewSet`, `HoldBeforeDisarm` | `Sources/ConduitRuntime/RuntimeHostSplitDNSDetection.swift` `applyPendingSplitDNSDetection`; `Sources/ConduitRuntime/RuntimeHostVPNDNSOverride.swift` |
+| `AppRestartRelay`, `AppStartDNS`, `AppStop`, `AppTdDisarm`, `AppTdRelay`, `AppCallFails` | `RuntimeHost.handleDNSHealthResult`, `startDNSModule`, `RuntimeHostLifecycle`'s DNS teardown; a call while the helper is down |
 | `OwnerExit`, `AppLaunch`, `ForwarderFault`, `ForwarderRecovers` | the environment |
-
-The atomicity of each step, and the code it relies on, is in the spec's header.
 
 ## Semantic choices
 
-1. A healthy monitor reads only on a store notification: a read follows a change of the keys since the last one began; two changes between reads are one notification.
-2. A refused apply is sent again after a new reading or at the health tick's status call (`fresh`, `Polled`): the key change that refused it usually notifies at once, but a flap can end before the monitor reads it, and only the tick then retries. The model's tick re-arms only with the service present: ticks are 30 s apart and a flap lasts well under one, so the model leaves out at most one refusal per flap.
-3. Two different server lists share no server, so a live set and a held set either agree or have nothing in common.
-4. The caps have no 10-minute window: every apply counts toward its cap until the gate turns off or DNS stops. The backoff, which only delays, is left out.
-5. `relayServing` reads the relay and the forwarder as they are, not through the 30 s health timer.
-6. A helper reply is applied by the app instance that sent it, and dropped if it exited.
-7. The pid watch, the reply and the held set's application join the step that ends their event or turn; no key is touched between them.
-8. `readingSettle` is abstracted as the reading being the key as it is: the status call that finds a same-server rewrite comes after the reading has caught up.
-9. A store write fails at most `MaxWriteFails` times a run, on apply or on the restore; a status call and a release never fail on their own, only through `HelperCrash`.
-10. `relwin` marks a restore that landed over a client write made after release's read (the design's release window); the client's next write of the key clears it.
+1. Each helper event is one step: the helper serves one event at a time, and each store call is atomic. The model's helper never interleaves with itself.
+2. configd removes a dead session's temporary key as the session's port dies, in the same step as the helper going down. A gap between the two is left out; launchd's restart throttle is longer than it.
+3. A removal of Conduit's key always succeeds: the publisher closes its session when the store refuses one.
+4. The VPN's servers answer while the VPN publishes them (`VPNUsable`): its service is up and its key holds a list that is not loopback. A disconnect, a flap or a loopback-only list is the baseline's problem as much as the override's, so `KeyAnswered` does not ask for an answer then.
+5. Per-query failover is abstracted to `Answers`: a lookup the relay sends to a Conduit that refuses or is silent is answered by the VPN's servers. Its timing (1 s, a 500 ms probe) and caps (1,024 pending queries, three servers) belong to the relay tests.
+6. A healthy monitor reads only on a store notification; two changes between reads are one notification. Conduit's own key notifies it only in `ov-reads-own-key`.
+7. Arming is intent: the helper accepts every arm, and publishing is its own decision. A lost arm reply leaves the app's arm unconfirmed (`unArm`) until a status.
+8. The app's pass is one step, and a set that arrives while the key may be armed is held until the disarm returns.
 
 ## What it leaves out
 
-Two VPN services and split tunnels; the primary-service lag behind `not_primary`; fields other than `ServerAddresses`; the relay's target port and a restart onto a new one; reboots; an undecodable record file; the backoff; the forwarder's own routing.
+Two VPN services and split tunnels; the primary-service lag behind a reading; fields other than `ServerAddresses`; the relay's port; reboots; a hung helper; a relay that cannot re-bind; the resolver order; DoH and the forwarder's own routing.
 
 ## A real bug or a modeling error?
 
 When a check fails, read the path with `/statechart`, then:
 
-1. Map each step to the code through the coverage record. If a step does something the code cannot do (two helper operations interleaved, a monitor read with no store change, a reading parsed with a box the monitor could not have taken), the model is wrong: fix the action and say why in the commit.
-2. If every step is possible, replay it in a ledger test or a pm-sim scenario. A replay that shows the harm is a bug: report it with the path in the code's words, and record it as a `bug-` entry with its fix in `OVERRIDE.fixes`. Do not weaken the property or the model to make it pass, and do not fix product code as part of a model change.
+1. Map each step to the code through the coverage record. If a step does something the code cannot do, the model is wrong: fix the action and say why in the commit.
+2. If every step is possible, replay it in a publisher test, a relay test or a pm-sim scenario. A replay that shows the harm is a bug: report it with the path in the code's words, and record it as a `bug-` entry with its fix in `OVERRIDE.fixes`. Do not weaken the property or the model to make it pass, and do not fix product code as part of a model change.
 3. A path that is possible but harmless means the property is too strong for what the owner decided; ask the owner before changing it.
 
 ## When the code changes on purpose
 
-Change the action that stands for the code, keep the property, and run `check.py --spec override --mutants`. Every mutant must still be caught, every open bug still fail, every witness still be reached; a mutant whose text no longer matches the spec makes `check.py` stop with the text it looked for. Each mutant's `swift` text in `check.py` names the scratch change it mirrors, by function. Add a mutant for each bug you fix: the Swift change that reintroduces it, the same change in the spec, and the property that catches it. Then update the coverage record and move the sync commit.
+Change the action that stands for the code, keep the property, and run `check.py --spec override --mutants`. Every mutant must still be caught; a mutant whose text no longer matches the spec makes `check.py` stop with the text it looked for. Each mutant's `swift` text in `check.py` names the change it mirrors, by function. Add a mutant for each bug you fix. Then update the coverage record and move the sync commit.

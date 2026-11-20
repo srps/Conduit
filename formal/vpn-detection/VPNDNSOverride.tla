@@ -1,9 +1,9 @@
 --------------------------- MODULE VPNDNSOverride ---------------------------
 (***************************************************************************)
-(* Decision 0049's resolver override; SKILL.md maps actions to the Swift.  *)
-(* Atomicity: an event is a run of helper steps (h.pc # "idle"); each      *)
-(* helper call on the dynamic store is its own step, since the VPN client  *)
-(* writes between them; the monitor's box read and store read are two.     *)
+(* Decision 0049's resolver override: the helper's own temporary key in   *)
+(* front of a full-tunnel VPN's resolver, served by a fail-safe relay.    *)
+(* SKILL.md maps actions to the Swift. Each helper event is one step: the *)
+(* helper serves one event at a time, and each store call is atomic.      *)
 (***************************************************************************)
 EXTENDS Naturals
 
@@ -11,244 +11,169 @@ CONSTANTS
     MaxVersions,
     MaxDisconnects,
     MaxGateFlaps,
-    MaxRepublishes,
     MaxIPv4Flaps,
-    MaxSameRewrites,
+    MaxLoopbackLists,
+    MaxConfigdRestarts,
     MaxOwnerExits,
     MaxHelperCrashes,
     MaxRelayDeaths,
     MaxForwarderFaults,
     MaxDNSStops,
-    MaxWriteFails,
-    MaxLostReplies,
-    ApplyCap,
-    Endless
+    MaxLostReplies
 
 ABSENT == 0
 NONE == 0
 LO == 100
-NOHELD == 101
-NOBOX == 102
-NEVER == <<NOBOX, FALSE>>
+LB == 101
+NOHELD == 102
 Versions == 1..MaxVersions
-Keys == {ABSENT, LO} \cup Versions
-Views == {NONE, LO} \cup Versions
+NEVER == <<ABSENT, FALSE, FALSE>>
 
-ReleaseCompares == TRUE
-KeepsFailedRestore == TRUE
-AdoptCounts == TRUE
-ReleasesUnconfirmed == TRUE
-StatusBeforeApply == TRUE
-ApplyChecksService == TRUE
-ApplyGoneCompares == TRUE
-RemovesGoneKey == FALSE
-ServersInUse == TRUE
+KeyTargetsRelay == TRUE
+PerQueryFailover == TRUE
+FiltersLoopback == TRUE
+NoticesOwnKey == TRUE
+WritesVPNKey == FALSE
+WithdrawsOnExit == TRUE
 WatchOwner == TRUE
-ExitsFirst == TRUE
-ReleaseAtStart == TRUE
-HoldBeforeRelease == TRUE
-FlapHold == TRUE
-HeldSetRechecked == TRUE
-HoldRule == TRUE
-HoldOnSetInUse == TRUE
-SameRewriteReapplies == TRUE
-RefusalsSeparate == TRUE
-RefusalsCapped == FALSE
-RefusalRetriesAtOnce == FALSE
-SameServersUncapped == TRUE
-SuspensionsExpire == TRUE
-BoxBothSides == TRUE
-
-ParseLoopback(box) == box
-Parse(k, box) == IF k = LO THEN (IF box # NONE THEN ParseLoopback(box) ELSE NONE) ELSE k
-Overridden(k, box) == k = LO /\ box # NONE
+IgnoresOwnKey == TRUE
+ServersInUse == TRUE
+HoldBeforeDisarm == TRUE
+ReleasesUnconfirmed == TRUE
 
 VARIABLES
-    key,
+    vkey,
     svc,
     ver,
     vgate,
-    rec,
+    okey,
     h,
     watch,
     relay,
+    rwant,
     fwd,
     app,
     budget,
     ghost
 
-vars == <<key, svc, ver, vgate, rec, h, watch, relay, fwd, app, budget, ghost>>
+vars == <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, fwd, app, budget, ghost>>
 
-NoRec == [has |-> FALSE, n |-> NONE, owner |-> 0, pending |-> FALSE]
-HIdle(up) == [up |-> up, pc |-> "idle", basis |-> ABSENT, cmp |-> FALSE, then |-> "none",
-              from |-> 0, expected |-> NONE, refused |-> 0, silent |-> 0]
-FreshApp(id, dns) == [alive |-> TRUE, id |-> id, dns |-> dns, box |-> NONE, known |-> NONE,
-                      unApply |-> NONE, unRel |-> FALSE, snapBox |-> NOBOX, snapKey |-> NEVER,
-                      vstale |-> FALSE, lstale |-> FALSE, hstale |-> FALSE,
-                      view |-> NONE, ovr |-> FALSE, live |-> NONE, held |-> NOHELD, taken |-> NONE,
-                      applies |-> 0, refusals |-> 0, lastN |-> NONE, spaced |-> FALSE, susp |-> FALSE, rewritten |-> FALSE,
-                      fresh |-> TRUE, tries |-> 0, req |-> "none", reqExp |-> NONE, pass |-> FALSE]
+HFresh(up, seen) == [up |-> up, pub |-> FALSE, armN |-> NONE, owner |-> 0, seen |-> seen,
+                     probeOK |-> FALSE, refused |-> 0, silent |-> 0]
+FreshApp(id, dns) == [alive |-> TRUE, id |-> id, dns |-> dns, view |-> NONE, snap |-> NEVER,
+                      live |-> NONE, held |-> NOHELD, taken |-> NONE, known |-> NONE, unArm |-> NONE,
+                      req |-> "none", reqN |-> NONE]
 
 Init ==
-    /\ key = 1 /\ svc = TRUE /\ ver = 1 /\ vgate = TRUE
-    /\ rec = NoRec /\ h = HIdle(TRUE) /\ watch = FALSE
-    /\ relay = TRUE /\ fwd = "answers"
+    /\ vkey = 1 /\ svc = TRUE /\ ver = 1 /\ vgate = TRUE /\ okey = FALSE
+    /\ h = HFresh(TRUE, <<1, TRUE>>) /\ watch = FALSE
+    /\ relay = "conduit" /\ rwant = TRUE /\ fwd = "answers"
     /\ app = FreshApp(1, "on")
-    /\ budget = [disc |-> MaxDisconnects, flaps |-> MaxGateFlaps, repub |-> MaxRepublishes,
-                 v4flaps |-> MaxIPv4Flaps, inflap |-> FALSE, same |-> MaxSameRewrites, exits |-> MaxOwnerExits,
+    /\ budget = [disc |-> MaxDisconnects, flaps |-> MaxGateFlaps, v4flaps |-> MaxIPv4Flaps, inflap |-> FALSE,
+                 lb |-> MaxLoopbackLists, cfg |-> MaxConfigdRestarts, exits |-> MaxOwnerExits,
                  crashes |-> MaxHelperCrashes, relay |-> MaxRelayDeaths, fwd |-> MaxForwarderFaults,
-                 stops |-> MaxDNSStops, wfail |-> MaxWriteFails, lost |-> MaxLostReplies]
-    /\ ghost = [clobber |-> FALSE, served |-> FALSE, window |-> FALSE, relwin |-> FALSE]
+                 stops |-> MaxDNSStops, lost |-> MaxLostReplies]
+    /\ ghost = [vwritten |-> FALSE]
 
-OwnerAlive == app.alive /\ app.id = rec.owner
+OwnerAlive == app.alive /\ app.id = h.owner
 ExitPending == watch /\ ~OwnerAlive
-HelperFree == h.up /\ h.pc = "idle" /\ (~ExitsFirst \/ ~ExitPending)
-Served == ghost.served \/ (rec.has /\ ~OwnerAlive)
-Serving == h.up /\ relay /\ fwd = "answers"
+HelperFree == h.up /\ ~ExitPending
+HelperCurrent == h.seen = <<vkey, svc>>
+RelayUp == relay \in {"conduit", "vpn"}
+ConduitServes == fwd = "answers"
+VPNUsable == svc /\ vkey \in Versions
+\* The relay reads the VPN's servers live from its key and drops loopback ones.
+FailoverTarget ==
+    IF vkey \in Versions THEN vkey ELSE IF ~FiltersLoopback /\ vkey = LB THEN LB ELSE NONE
+Failover == "vpn"
+ToFailover == relay' = IF RelayUp THEN Failover ELSE relay
+\* A query the relay sends to a Conduit that refuses or stays silent goes to the VPN's servers instead.
+UsingFailover ==
+    \/ relay = "vpn"
+    \/ (relay = "conduit" /\ ~ConduitServes /\ PerQueryFailover)
+Answers ==
+    IF ~KeyTargetsRelay THEN ConduitServes
+    ELSE CASE relay = "vpn" -> FailoverTarget \in Versions
+           [] relay = "conduit" -> ConduitServes \/ (PerQueryFailover /\ FailoverTarget \in Versions)
+           [] OTHER -> FALSE
+Serving == h.up /\ relay = "conduit" /\ ConduitServes
+Ready == h.armN \in Versions /\ vkey = h.armN /\ svc /\ RelayUp /\ h.probeOK
+Snap == IF IgnoresOwnKey THEN <<vkey, svc, FALSE>> ELSE <<vkey, svc, okey>>
 AppAwake == app.alive /\ fwd # "silent"
 
-Clobbers(v, sanctioned) ==
-    IF v = h.basis THEN v # sanctioned ELSE ~h.cmp /\ v # ABSENT
-
 -----------------------------------------------------------------------------
 
-RelayServingOf(a) == a.dns = "on" /\ relay /\ fwd = "answers"
-\* The live set intersected with a held set; two different lists share no server here.
-UseSetOf(a) == IF a.held = NOHELD \/ a.held = a.live THEN a.live ELSE NONE
-WantedOf(a, set) == RelayServingOf(a) /\ vgate /\ a.view \in Versions /\ (set = a.view \/ ~ServersInUse)
-KeepsThroughFlap(a, set) ==
-    HoldRule /\ RelayServingOf(a) /\ vgate /\ a.view \notin Versions /\ a.known # NONE
-    /\ (IF HoldOnSetInUse THEN set ELSE a.live) = a.known
-SameServers(a) == SameServersUncapped /\ a.view = a.lastN
-CapReached(a) ==
-    IF RefusalsSeparate
-    THEN (~SameServers(a) /\ a.applies >= ApplyCap) \/ (RefusalsCapped /\ a.refusals >= 2)
-    ELSE a.applies >= ApplyCap
-DecisionOf(a, set) ==
-    IF KeepsThroughFlap(a, set) THEN "none"
-    ELSE IF ~WantedOf(a, set)
-         THEN (IF a.known # NONE \/ (ReleasesUnconfirmed /\ a.unApply # NONE) THEN "release" ELSE "none")
-    ELSE IF a.known = a.view /\ ~(SameRewriteReapplies /\ a.rewritten) THEN "none"
-    ELSE IF a.ovr THEN "none"
-    ELSE IF a.susp \/ ~a.fresh THEN "none"
-    ELSE IF CapReached(a) THEN "suspend"
-    ELSE IF a.spaced THEN "none"
-    ELSE "apply"
-MayHoldOf(a) == a.known # NONE \/ a.unApply # NONE \/ a.unRel \/ a.req = "apply"
+MayArm(a) == a.known # NONE \/ (ReleasesUnconfirmed /\ a.unArm # NONE) \/ a.req = "arm"
+Want(a) ==
+    /\ a.dns = "on" /\ vgate /\ a.view \in Versions /\ (a.live = a.view \/ ~ServersInUse)
+    /\ relay = "conduit" /\ fwd = "answers" /\ a.held = NOHELD
 
------------------------------------------------------------------------------
-
-Forget(a) == [a EXCEPT !.known = NONE, !.unApply = NONE, !.unRel = FALSE, !.box = NONE,
-                       !.rewritten = FALSE]
-AfterCall(a) ==
-    LET b == [a EXCEPT !.req = "none", !.reqExp = NONE, !.pass = FALSE]
-        keep == HeldSetRechecked /\ MayHoldOf(b) /\ DecisionOf(b, a.held) = "release"
-    IN CASE a.pass /\ a.held # NOHELD /\ ~keep -> [b EXCEPT !.live = a.held, !.lstale = a.hstale, !.held = NOHELD]
-         [] a.req = "release" /\ a.dns = "stop_wait_release" -> [b EXCEPT !.dns = "stop_clear"]
-         [] a.req = "stopRelay" ->
-              [b EXCEPT !.dns = "off", !.live = NONE, !.lstale = FALSE, !.held = NOHELD, !.taken = NONE]
-         [] OTHER -> b
-ApplyOK(a) == AfterCall([a EXCEPT !.known = a.reqExp, !.unApply = NONE, !.box = a.reqExp, !.spaced = TRUE,
-                                   !.applies = IF RefusalsSeparate /\ ~(SameServersUncapped /\ a.reqExp = a.lastN)
-                                               THEN @ + 1 ELSE @,
-                                   !.lastN = a.reqExp, !.rewritten = FALSE])
-NotLanded(a) == IF RefusalsCapped THEN [a EXCEPT !.refusals = @ + 1] ELSE a
-ApplyRefused(a) == AfterCall([NotLanded(a) EXCEPT !.box = a.known, !.fresh = RefusalRetriesAtOnce,
-                                                  !.tries = @ + 1])
-ApplyFailed(a) == AfterCall([NotLanded(a) EXCEPT !.unApply = a.reqExp])
-ReleaseOK(a) == AfterCall(Forget(a))
-ReleaseFailed(a) == AfterCall([a EXCEPT !.unRel = TRUE])
-Done(a) == AfterCall(a)
-Failed(a) == CASE a.req = "apply" -> ApplyFailed(a)
-               [] a.req = "release" -> ReleaseFailed(a)
+Done(a) == [a EXCEPT !.req = "none", !.reqN = NONE]
+ArmOK(a) == Done([a EXCEPT !.known = a.reqN, !.unArm = NONE])
+ArmUnknown(a) == Done([a EXCEPT !.unArm = a.reqN])
+DisarmOK(a) == Done([a EXCEPT !.known = NONE, !.unArm = NONE,
+                              !.dns = IF @ = "stop_wait_disarm" THEN "stop_relay" ELSE @])
+RelayStopped(a) == Done([a EXCEPT !.dns = "off", !.live = NONE, !.held = NOHELD, !.taken = NONE, !.view = NONE])
+Failed(a) == CASE a.req = "arm" -> ArmUnknown(a)
+               [] a.req = "disarm" -> Done([a EXCEPT !.dns = IF @ = "stop_wait_disarm" THEN "stop_relay" ELSE @])
+               [] a.req = "stopRelay" -> RelayStopped(a)
                [] OTHER -> Done(a)
 
-ReplyApp(f(_)) == IF app.alive /\ app.id = h.from /\ h.from # 0 THEN f(app) ELSE app
-StopsForwarder == h.then = "stop" /\ app.alive /\ app.id = h.from
-
-StartRelease(then, from) ==
-    h' = [h EXCEPT !.pc = "rel_read", !.then = then, !.from = from]
-
-\* relwin: the restore landed over a client write made after release's read; cleared by the client's next write.
-FinishRelease(clobber, relwin) ==
-    /\ rec' = NoRec /\ watch' = FALSE
-    /\ h' = IF h.then = "exit" THEN HIdle(FALSE) ELSE HIdle(TRUE)
-    /\ relay' = IF h.then \in {"stop", "exit"} THEN FALSE ELSE relay
-    /\ app' = IF h.then \in {"reply", "stop"} THEN ReplyApp(ReleaseOK) ELSE app
-    /\ fwd' = IF StopsForwarder THEN "refuses" ELSE fwd
-    /\ ghost' = [ghost EXCEPT !.served = FALSE, !.window = FALSE, !.clobber = clobber, !.relwin = @ \/ relwin]
-
-\* The store refused the restoring write: the record and its file stay, pending, for the next tick.
-FailRelease ==
-    /\ rec' = IF KeepsFailedRestore THEN [rec EXCEPT !.pending = TRUE] ELSE NoRec
-    /\ watch' = FALSE
-    /\ h' = IF h.then = "exit" THEN HIdle(FALSE) ELSE HIdle(TRUE)
-    /\ relay' = IF h.then \in {"stop", "exit"} THEN FALSE ELSE relay
-    /\ app' = CASE h.then = "reply" -> ReplyApp(ReleaseFailed)
-              [] h.then = "stop" -> ReplyApp(ReleaseOK)
-              [] OTHER -> app
-    /\ fwd' = IF StopsForwarder THEN "refuses" ELSE fwd
-    /\ budget' = [budget EXCEPT !.wfail = @ - 1]
-    /\ UNCHANGED ghost
+Withdrawn(hh) == [hh EXCEPT !.armN = NONE, !.owner = 0, !.pub = FALSE]
 
 -----------------------------------------------------------------------------
 
 ClientRewrite ==
-    /\ svc /\ key # ABSENT /\ ver < MaxVersions
-    /\ ver' = ver + 1 /\ key' = ver + 1
-    /\ UNCHANGED <<svc, vgate, rec, h, watch, relay, fwd, app, budget>>
-    /\ ghost' = [ghost EXCEPT !.relwin = FALSE]
+    /\ svc /\ vkey # ABSENT /\ ver < MaxVersions
+    /\ ver' = ver + 1 /\ vkey' = ver + 1
+    /\ UNCHANGED <<svc, vgate, okey, h, watch, relay, rwant, fwd, app, budget, ghost>>
 
-ClientRewriteSame ==
-    /\ svc /\ key = LO /\ budget.same > 0
-    /\ key' = ver /\ budget' = IF Endless THEN budget ELSE [budget EXCEPT !.same = @ - 1]
-    /\ UNCHANGED <<svc, ver, vgate, rec, h, watch, relay, fwd, app>>
-    /\ ghost' = [ghost EXCEPT !.relwin = FALSE]
+ClientLoopback ==
+    /\ svc /\ vkey \in Versions /\ budget.lb > 0
+    /\ vkey' = LB /\ budget' = [budget EXCEPT !.lb = @ - 1]
+    /\ UNCHANGED <<svc, ver, vgate, okey, h, watch, relay, rwant, fwd, app, ghost>>
 
 ClientDelete ==
     /\ svc /\ budget.disc > 0
-    /\ svc' = FALSE /\ key' = ABSENT /\ vgate' = FALSE
+    /\ svc' = FALSE /\ vkey' = ABSENT /\ vgate' = FALSE
     /\ budget' = [budget EXCEPT !.disc = @ - 1]
-    /\ UNCHANGED <<ver, rec, h, watch, relay, fwd, app>>
-    /\ ghost' = [ghost EXCEPT !.relwin = FALSE]
+    /\ UNCHANGED <<ver, okey, h, watch, relay, rwant, fwd, app, ghost>>
 
 ClientPublishDNS ==
-    /\ ~svc /\ ~budget.inflap /\ key = ABSENT /\ ver < MaxVersions
-    /\ ver' = ver + 1 /\ key' = ver + 1
-    /\ UNCHANGED <<svc, vgate, rec, h, watch, relay, fwd, app, budget>>
-    /\ ghost' = [ghost EXCEPT !.relwin = FALSE]
+    /\ ~svc /\ ~budget.inflap /\ vkey = ABSENT /\ ver < MaxVersions
+    /\ ver' = ver + 1 /\ vkey' = ver + 1
+    /\ UNCHANGED <<svc, vgate, okey, h, watch, relay, rwant, fwd, app, budget, ghost>>
 
 ClientPublishIPv4 ==
-    /\ ~svc /\ ~budget.inflap /\ key \in Versions
+    /\ ~svc /\ ~budget.inflap /\ vkey \in Versions
     /\ svc' = TRUE /\ vgate' = TRUE
-    /\ UNCHANGED <<key, ver, rec, h, watch, relay, fwd, app, budget, ghost>>
-
-ClientRepublish ==
-    /\ svc /\ key # ABSENT /\ ver < MaxVersions /\ budget.repub > 0
-    /\ ver' = ver + 1 /\ key' = ver + 1 /\ svc' = FALSE
-    /\ budget' = [budget EXCEPT !.repub = @ - 1]
-    /\ UNCHANGED <<vgate, rec, h, watch, relay, fwd, app>>
-    /\ ghost' = [ghost EXCEPT !.relwin = FALSE]
+    /\ UNCHANGED <<vkey, ver, okey, h, watch, relay, rwant, fwd, app, budget, ghost>>
 
 ClientIPv4Flap ==
-    /\ svc /\ key # ABSENT /\ budget.v4flaps > 0
-    /\ svc' = FALSE /\ budget' = [budget EXCEPT !.v4flaps = IF Endless THEN @ ELSE @ - 1, !.inflap = TRUE]
-    /\ UNCHANGED <<key, ver, vgate, rec, h, watch, relay, fwd, app, ghost>>
+    /\ svc /\ vkey # ABSENT /\ budget.v4flaps > 0
+    /\ svc' = FALSE /\ budget' = [budget EXCEPT !.v4flaps = @ - 1, !.inflap = TRUE]
+    /\ UNCHANGED <<vkey, ver, vgate, okey, h, watch, relay, rwant, fwd, app, ghost>>
 
 ClientIPv4Back ==
     /\ budget.inflap
     /\ svc' = TRUE /\ budget' = [budget EXCEPT !.inflap = FALSE]
-    /\ UNCHANGED <<key, ver, vgate, rec, h, watch, relay, fwd, app, ghost>>
+    /\ UNCHANGED <<vkey, ver, vgate, okey, h, watch, relay, rwant, fwd, app, ghost>>
 
 GateFlap ==
     /\ vgate /\ budget.flaps > 0
     /\ vgate' = FALSE /\ budget' = [budget EXCEPT !.flaps = @ - 1]
-    /\ UNCHANGED <<key, svc, ver, rec, h, watch, relay, fwd, app, ghost>>
+    /\ UNCHANGED <<vkey, svc, ver, okey, h, watch, relay, rwant, fwd, app, ghost>>
 
 GateBack ==
     /\ ~vgate /\ svc
     /\ vgate' = TRUE
-    /\ UNCHANGED <<key, svc, ver, rec, h, watch, relay, fwd, app, budget, ghost>>
+    /\ UNCHANGED <<vkey, svc, ver, okey, h, watch, relay, rwant, fwd, app, budget, ghost>>
+
+\* configd drops every temporary key when it restarts; the client writes its own keys back unchanged.
+ConfigdRestart ==
+    /\ okey /\ budget.cfg > 0
+    /\ okey' = FALSE /\ budget' = [budget EXCEPT !.cfg = @ - 1]
+    /\ UNCHANGED <<vkey, svc, ver, vgate, h, watch, relay, rwant, fwd, app, ghost>>
 
 -----------------------------------------------------------------------------
 
@@ -256,317 +181,195 @@ OwnerExit ==
     /\ app.alive /\ budget.exits > 0
     /\ app' = [FreshApp(app.id, "off") EXCEPT !.alive = FALSE]
     /\ fwd' = "refuses" /\ budget' = [budget EXCEPT !.exits = @ - 1]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, ghost>>
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, ghost>>
 
 AppLaunch ==
     /\ ~app.alive
     /\ app' = FreshApp(app.id + 1, "off")
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, fwd, budget, ghost>>
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, fwd, budget, ghost>>
 
-HelperCrash ==
+\* A crash or SIGTERM. configd removes a dead session's temporary keys as the session's port dies.
+HelperDown ==
     /\ h.up /\ budget.crashes > 0
-    /\ h' = HIdle(FALSE) /\ relay' = FALSE /\ watch' = FALSE
+    /\ h' = HFresh(FALSE, h.seen) /\ okey' = FALSE /\ relay' = "off" /\ rwant' = FALSE /\ watch' = FALSE
     /\ budget' = [budget EXCEPT !.crashes = @ - 1]
     /\ app' = IF app.alive /\ app.req # "none" THEN Failed(app) ELSE app
     /\ fwd' = IF app.alive /\ app.req = "stopRelay" THEN "refuses" ELSE fwd
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, ghost>>
+    /\ UNCHANGED <<vkey, svc, ver, vgate, ghost>>
 
 RelayDies ==
-    /\ relay /\ budget.relay > 0
-    /\ relay' = FALSE /\ budget' = [budget EXCEPT !.relay = @ - 1]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, fwd, app, ghost>>
+    /\ RelayUp /\ budget.relay > 0
+    /\ relay' = "dead" /\ budget' = [budget EXCEPT !.relay = @ - 1]
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, rwant, fwd, app, ghost>>
 
 ForwarderFault(f) ==
     /\ app.alive /\ app.dns # "off" /\ fwd = "answers" /\ budget.fwd > 0
     /\ fwd' = f /\ budget' = [budget EXCEPT !.fwd = @ - 1]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, app, ghost>>
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, app, ghost>>
 
 ForwarderRecovers ==
     /\ app.alive /\ app.dns # "off" /\ fwd # "answers"
     /\ fwd' = "answers"
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, app, budget, ghost>>
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, app, budget, ghost>>
 
 -----------------------------------------------------------------------------
 
-HAccept ==
+\* Arming records intent only; the helper publishes in HSync once Ready holds.
+HAccept(lost) ==
     /\ HelperFree /\ app.alive /\ app.req # "none"
-    /\ ghost' = [ghost EXCEPT !.served = Served]
-    /\ CASE app.req = "apply" ->
-              IF svc /\ key = app.reqExp /\ app.reqExp \in Versions /\ relay /\ fwd = "answers"
-              THEN /\ rec' = [has |-> TRUE, n |-> app.reqExp, owner |-> app.id, pending |-> FALSE]
-                   /\ h' = [h EXCEPT !.pc = "apply_write", !.basis = key, !.cmp = TRUE,
-                                     !.from = app.id, !.expected = app.reqExp]
-                   /\ UNCHANGED <<key, watch, relay, app, fwd>>
-              ELSE /\ app' = ApplyRefused(app)
-                   /\ UNCHANGED <<key, rec, h, watch, relay, fwd>>
-         [] app.req = "release" ->
-              IF rec.has THEN StartRelease("reply", app.id) /\ UNCHANGED <<key, rec, watch, relay, app, fwd>>
-              ELSE app' = ReleaseOK(app) /\ UNCHANGED <<key, rec, h, watch, relay, fwd>>
+    /\ lost => (app.req = "arm" /\ budget.lost > 0)
+    /\ budget' = IF lost THEN [budget EXCEPT !.lost = @ - 1] ELSE budget
+    /\ CASE app.req = "arm" ->
+              /\ h' = [h EXCEPT !.armN = app.reqN, !.owner = app.id, !.probeOK = (fwd = "answers"),
+                                !.refused = 0, !.silent = 0]
+              /\ watch' = WatchOwner
+              /\ app' = IF lost THEN ArmUnknown(app) ELSE ArmOK(app)
+              /\ UNCHANGED <<okey, relay, rwant, fwd>>
+         [] app.req = "disarm" ->
+              /\ h' = Withdrawn(h) /\ okey' = FALSE /\ watch' = FALSE /\ app' = DisarmOK(app)
+              /\ UNCHANGED <<relay, rwant, fwd>>
          [] app.req = "startRelay" ->
-              /\ relay' = TRUE /\ app' = Done(app)
-              /\ h' = IF relay THEN h ELSE [h EXCEPT !.refused = 0, !.silent = 0]
-              /\ UNCHANGED <<key, rec, watch, fwd>>
+              /\ relay' = IF h.armN # NONE /\ h.owner # app.id THEN Failover ELSE "conduit"
+              /\ rwant' = TRUE /\ app' = Done(app)
+              /\ UNCHANGED <<okey, h, watch, fwd>>
          [] app.req = "stopRelay" ->
-              IF rec.has THEN StartRelease("stop", app.id) /\ UNCHANGED <<key, rec, watch, relay, app, fwd>>
-              ELSE relay' = FALSE /\ app' = Done(app) /\ fwd' = "refuses" /\ UNCHANGED <<key, rec, h, watch>>
-    /\ UNCHANGED <<svc, ver, vgate, budget>>
+              /\ relay' = "off" /\ rwant' = FALSE /\ app' = RelayStopped(app) /\ fwd' = "refuses"
+              /\ h' = Withdrawn(h) /\ okey' = FALSE /\ watch' = FALSE
+    /\ UNCHANGED <<vkey, svc, ver, vgate, ghost>>
 
-HApplyWrite ==
-    /\ h.up /\ h.pc = "apply_write"
-    /\ key' = LO
-    /\ ghost' = [ghost EXCEPT !.clobber = @ \/ Clobbers(key, h.expected), !.window = key # h.basis]
-    /\ h' = [h EXCEPT !.pc = "apply_ipv4", !.basis = LO, !.cmp = FALSE]
-    /\ UNCHANGED <<svc, ver, vgate, rec, watch, relay, fwd, app, budget>>
+\* A store notification, or any event that changes Ready: publish, republish or withdraw the own key.
+HSync ==
+    /\ HelperFree
+    /\ \/ ~HelperCurrent
+       \/ h.pub # Ready
+       \/ (NoticesOwnKey /\ h.pub /\ ~okey)
+    /\ h' = [h EXCEPT !.seen = <<vkey, svc>>, !.pub = Ready]
+    /\ okey' = CASE Ready /\ (~h.pub \/ NoticesOwnKey) -> TRUE
+                 [] Ready -> okey
+                 [] OTHER -> FALSE
+    /\ vkey' = IF WritesVPNKey /\ Ready /\ ~h.pub THEN LO ELSE vkey
+    /\ ghost' = [ghost EXCEPT !.vwritten = @ \/ (WritesVPNKey /\ Ready /\ ~h.pub)]
+    /\ UNCHANGED <<svc, ver, vgate, watch, relay, rwant, fwd, app, budget>>
 
-HApplyWriteFails ==
-    /\ h.up /\ h.pc = "apply_write" /\ budget.wfail > 0
-    /\ rec' = NoRec /\ h' = HIdle(TRUE) /\ app' = ReplyApp(ApplyFailed)
-    /\ budget' = [budget EXCEPT !.wfail = @ - 1]
-    /\ ghost' = [ghost EXCEPT !.served = FALSE, !.window = FALSE]
-    /\ UNCHANGED <<key, svc, ver, vgate, watch, relay, fwd>>
-
-\* The apply landed but its reply never reached the app, which reads it as a failure.
-HApplyReplyLost ==
-    /\ h.up /\ h.pc = "apply_ipv4" /\ (svc \/ ~ApplyChecksService) /\ budget.lost > 0
-    /\ app' = ReplyApp(ApplyFailed)
-    /\ budget' = [budget EXCEPT !.lost = @ - 1]
-    /\ IF ~WatchOwner \/ OwnerAlive
-       THEN watch' = WatchOwner /\ h' = HIdle(TRUE)
-       ELSE watch' = FALSE /\ StartRelease("none", 0)
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, relay, fwd, ghost>>
-
-HApplyIPv4 ==
-    /\ h.up /\ h.pc = "apply_ipv4"
-    /\ IF svc \/ ~ApplyChecksService
-       THEN /\ app' = ReplyApp(ApplyOK)
-            /\ IF ~WatchOwner \/ OwnerAlive
-               THEN watch' = WatchOwner /\ h' = HIdle(TRUE)
-               ELSE watch' = FALSE /\ StartRelease("none", 0)
-       ELSE /\ h' = [h EXCEPT !.pc = "apply_gone_read"]
-            /\ UNCHANGED <<watch, app>>
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, relay, fwd, budget, ghost>>
-
-HApplyGoneRead ==
-    /\ h.up /\ h.pc = "apply_gone_read"
-    /\ IF key = LO \/ ~ApplyGoneCompares
-       THEN /\ h' = [h EXCEPT !.pc = "apply_gone_write", !.basis = IF ApplyGoneCompares THEN key ELSE h.basis,
-                                                         !.cmp = ApplyGoneCompares]
-            /\ UNCHANGED <<rec, app, ghost>>
-       ELSE
-            /\ rec' = NoRec /\ h' = HIdle(TRUE) /\ app' = ReplyApp(ApplyRefused)
-            /\ ghost' = [ghost EXCEPT !.served = FALSE, !.window = FALSE]
-    /\ UNCHANGED <<key, svc, ver, vgate, watch, relay, fwd, budget>>
-
-HApplyGoneWrite ==
-    /\ h.up /\ h.pc = "apply_gone_write"
-    /\ key' = IF RemovesGoneKey THEN ABSENT ELSE h.expected
-    /\ ghost' = [ghost EXCEPT !.clobber = @ \/ Clobbers(key, LO), !.served = FALSE, !.window = FALSE]
-    /\ rec' = NoRec /\ h' = HIdle(TRUE) /\ app' = ReplyApp(ApplyRefused)
-    /\ UNCHANGED <<svc, ver, vgate, watch, relay, fwd, budget>>
-
-HRelRead ==
-    /\ h.up /\ h.pc = "rel_read"
-    /\ h' = [h EXCEPT !.pc = "rel_write", !.basis = key, !.cmp = TRUE]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, watch, relay, fwd, app, budget, ghost>>
-
-HRelWrite ==
-    /\ h.up /\ h.pc = "rel_write"
-    /\ IF (h.basis = LO \/ ~ReleaseCompares) /\ h.basis # ABSENT
-       THEN /\ key' = rec.n
-            /\ IF RemovesGoneKey
-               THEN /\ h' = [h EXCEPT !.pc = "rel_ipv4", !.basis = rec.n, !.cmp = FALSE]
-                    /\ ghost' = [ghost EXCEPT !.clobber = @ \/ Clobbers(key, LO)]
-                    /\ UNCHANGED <<rec, watch, relay, app, fwd>>
-               ELSE FinishRelease(ghost.clobber \/ Clobbers(key, LO), key # h.basis /\ key \in Versions)
-       ELSE /\ FinishRelease(ghost.clobber, FALSE) /\ UNCHANGED key
-    /\ UNCHANGED <<svc, ver, vgate, budget>>
-
-HRelWriteFails ==
-    /\ h.up /\ h.pc = "rel_write" /\ budget.wfail > 0
-    /\ (h.basis = LO \/ ~ReleaseCompares) /\ h.basis # ABSENT
-    /\ FailRelease
-    /\ UNCHANGED <<key, svc, ver, vgate>>
-
-HRelIPv4 ==
-    /\ h.up /\ h.pc = "rel_ipv4"
-    /\ IF svc
-       THEN FinishRelease(ghost.clobber, FALSE) /\ UNCHANGED key
-       ELSE /\ h' = [h EXCEPT !.pc = "rel_remove"]
-            /\ UNCHANGED <<key, rec, watch, relay, app, fwd, ghost>>
-    /\ UNCHANGED <<svc, ver, vgate, budget>>
-
-HRelRemove ==
-    /\ h.up /\ h.pc = "rel_remove"
-    /\ key' = ABSENT
-    /\ FinishRelease(ghost.clobber \/ Clobbers(key, h.basis), FALSE)
-    /\ UNCHANGED <<svc, ver, vgate, budget>>
-
+\* The relay's mode follows each probe; the key is withdrawn after two refused or three silent ticks.
 HTick ==
-    /\ h.up /\ h.pc = "idle" /\ rec.has
-    /\ CASE rec.pending -> StartRelease("none", 0)
-         [] ~relay -> StartRelease("none", 0)
-         [] fwd = "refuses" ->
-              IF h.refused + 1 >= 2 THEN StartRelease("none", 0)
-              ELSE h' = [h EXCEPT !.refused = @ + 1, !.silent = 0]
+    /\ HelperFree /\ h.armN # NONE
+    /\ CASE fwd = "refuses" ->
+              /\ h' = [h EXCEPT !.refused = IF @ < 2 THEN @ + 1 ELSE 2, !.silent = 0,
+                                !.probeOK = @ /\ h.refused + 1 < 2]
+              /\ ToFailover
          [] fwd = "silent" ->
-              IF h.silent + 1 >= 3 THEN StartRelease("none", 0)
-              ELSE h' = [h EXCEPT !.silent = @ + 1, !.refused = 0]
-         [] OTHER -> h' = [h EXCEPT !.refused = 0, !.silent = 0]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, watch, relay, fwd, app, budget, ghost>>
+              /\ h' = [h EXCEPT !.silent = IF @ < 3 THEN @ + 1 ELSE 3, !.refused = 0,
+                                !.probeOK = @ /\ h.silent + 1 < 3]
+              /\ ToFailover
+         [] OTHER ->
+              /\ h' = [h EXCEPT !.refused = 0, !.silent = 0, !.probeOK = TRUE]
+              /\ relay' = IF RelayUp THEN "conduit" ELSE relay
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, watch, rwant, fwd, app, budget, ghost>>
+
+HRelayRestart ==
+    /\ h.up /\ relay = "dead"
+    /\ relay' = IF h.armN # NONE THEN Failover ELSE IF rwant THEN "conduit" ELSE "off"
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, rwant, fwd, app, budget, ghost>>
 
 HOwnerExit ==
-    /\ h.up /\ h.pc = "idle" /\ ExitPending
-    /\ StartRelease("none", 0) /\ watch' = FALSE
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, relay, fwd, app, budget, ghost>>
-
-HSignal ==
-    /\ h.up /\ h.pc = "idle" /\ budget.crashes > 0
-    /\ budget' = [budget EXCEPT !.crashes = @ - 1]
-    /\ IF rec.has
-       THEN StartRelease("exit", 0) /\ UNCHANGED <<relay, watch>>
-       ELSE h' = HIdle(FALSE) /\ relay' = FALSE /\ watch' = FALSE
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, fwd, app, ghost>>
+    /\ h.up /\ ExitPending
+    /\ watch' = FALSE
+    /\ IF WithdrawsOnExit
+       THEN h' = Withdrawn(h) /\ okey' = FALSE /\ ToFailover
+       ELSE UNCHANGED <<h, okey, relay>>
+    /\ UNCHANGED <<vkey, svc, ver, vgate, rwant, fwd, app, budget, ghost>>
 
 HStart ==
     /\ ~h.up
-    /\ IF rec.has /\ ReleaseAtStart
-       THEN h' = [HIdle(TRUE) EXCEPT !.pc = "rel_read"]
-       ELSE h' = HIdle(TRUE)
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, watch, relay, fwd, app, budget, ghost>>
+    /\ h' = HFresh(TRUE, <<vkey, svc>>)
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, watch, relay, rwant, fwd, app, budget, ghost>>
 
 -----------------------------------------------------------------------------
 
-AppReadBox ==
-    /\ AppAwake /\ app.dns # "off" /\ app.snapBox = NOBOX /\ <<key, svc>> # app.snapKey
-    /\ app' = [app EXCEPT !.snapBox = app.box, !.snapKey = <<key, svc>>]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, fwd, budget, ghost>>
+\* The monitor reads the VPN's own key as it is; the parser ignores Conduit's key by its service id.
+ReadingOf ==
+    IF ~IgnoresOwnKey /\ okey THEN LO
+    ELSE IF svc /\ vkey \in Versions THEN vkey ELSE NONE
 
-AppReadStore ==
-    /\ AppAwake /\ app.snapBox # NOBOX
-    /\ LET b == IF BoxBothSides /\ app.box # NONE THEN app.box ELSE app.snapBox
-           v == IF svc THEN Parse(key, b) ELSE NONE
-           o == svc /\ Overridden(key, b)
-       IN app' = [app EXCEPT !.snapBox = NOBOX, !.view = v, !.ovr = o, !.fresh = TRUE, !.tries = 0,
-                                  !.vstale = o /\ b # app.box /\ <<key, svc>> # app.snapKey,
-                                  !.rewritten = IF o THEN FALSE ELSE @]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, fwd, budget, ghost>>
+AppRead ==
+    /\ AppAwake /\ app.dns # "off" /\ app.snap # Snap
+    /\ app' = [app EXCEPT !.view = ReadingOf, !.snap = Snap]
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, fwd, budget, ghost>>
 
-UseSet == UseSetOf(app)
-Decision(set) == DecisionOf(app, set)
-MayHold == MayHoldOf(app)
-PassRunning == app.req # "none" /\ app.pass
+NewSet == IF app.dns # "on" \/ ~vgate THEN NONE
+          ELSE IF app.view # NONE THEN app.view
+          ELSE app.taken
 
-NewSet == IF app.dns = "off" \/ ~vgate THEN NONE
-          ELSE IF app.view \in Versions THEN app.view
-          ELSE IF FlapHold THEN app.taken
-          ELSE NONE
-
+\* While the own key may be armed, a new set waits for the disarm.
 AppTake ==
     /\ AppAwake /\ NewSet # app.taken
-    /\ LET hold == PassRunning \/ (HoldBeforeRelease /\ MayHold /\ Decision(NewSet) = "release")
+    /\ LET hold == HoldBeforeDisarm /\ MayArm(app)
        IN app' = [app EXCEPT !.taken = NewSet,
-                             !.held = IF hold THEN NewSet ELSE @, !.hstale = IF hold THEN app.vstale ELSE @,
-                             !.live = IF hold THEN @ ELSE NewSet, !.lstale = IF hold THEN @ ELSE app.vstale,
-                             !.applies = IF vgate THEN @ ELSE 0, !.refusals = IF vgate THEN @ ELSE 0,
-                             !.susp = vgate /\ @]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, fwd, budget, ghost>>
-
-\* A flap lasts well under a tick, so a tick re-arms only once the service is back.
-\* A status that adopts an unconfirmed apply counts it as ApplyOK does.
-Polled(a) ==
-    IF rec.has /\ rec.n \in {a.known, a.unApply} \ {NONE}
-    THEN LET adopt == AdoptCounts /\ rec.n # a.known
-         IN [a EXCEPT !.known = rec.n, !.box = rec.n, !.unApply = NONE, !.unRel = FALSE, !.fresh = @ \/ svc, !.tries = 0,
-                      !.rewritten = @ \/ (SameRewriteReapplies /\ svc /\ a.view = key /\ key \in Versions
-                                          /\ ~a.ovr),
-                      !.applies = IF adopt /\ RefusalsSeparate /\ ~(SameServersUncapped /\ rec.n = a.lastN)
-                                  THEN @ + 1 ELSE @,
-                      !.lastN = IF adopt THEN rec.n ELSE @, !.spaced = @ \/ adopt]
-    ELSE [Forget(a) EXCEPT !.fresh = @ \/ svc, !.tries = 0]
-
-AppPoll ==
-    /\ AppAwake /\ app.req = "none" /\ MayHold /\ HelperFree
-    /\ ghost' = [ghost EXCEPT !.served = Served]
-    /\ app' = Polled(app)
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, fwd, budget>>
+                             !.held = IF hold THEN NewSet ELSE @,
+                             !.live = IF hold THEN @ ELSE NewSet]
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, fwd, budget, ghost>>
 
 AppPass ==
     /\ AppAwake /\ app.req = "none"
-    /\ LET d == Decision(UseSet)
-       IN CASE d = "release" ->
-                 app' = [app EXCEPT !.req = "release", !.pass = TRUE]
-            [] d = "apply" ->
-                 \* pass asks the helper's status before an apply while one may be unconfirmed.
-                 /\ app.unApply = NONE \/ ~StatusBeforeApply
-                 /\ app' = [app EXCEPT !.box = app.view, !.req = "apply", !.reqExp = app.view,
-                                    !.pass = TRUE,
-                                    !.applies = IF RefusalsSeparate THEN @ ELSE @ + 1]
-            [] d = "suspend" ->
-                 app' = [app EXCEPT !.susp = TRUE]
-            [] OTHER ->
-                 /\ app.held # NOHELD
-                 /\ ~(HeldSetRechecked /\ MayHold /\ Decision(app.held) = "release")
-                 /\ app' = [app EXCEPT !.live = app.held, !.lstale = app.hstale, !.held = NOHELD]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, fwd, budget, ghost>>
+    /\ CASE Want(app) /\ app.known # app.view ->
+              app' = [app EXCEPT !.req = "arm", !.reqN = app.view]
+         [] ~Want(app) /\ MayArm(app) ->
+              app' = [app EXCEPT !.req = "disarm"]
+         [] OTHER ->
+              /\ ~MayArm(app) /\ app.held # NOHELD
+              /\ app' = [app EXCEPT !.live = app.held, !.held = NOHELD]
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, fwd, budget, ghost>>
+
+AppPoll ==
+    /\ AppAwake /\ app.req = "none" /\ MayArm(app) /\ HelperFree
+    /\ app' = [app EXCEPT !.known = IF h.owner = app.id /\ h.armN \in {app.known, app.unArm} \ {NONE}
+                                    THEN h.armN ELSE NONE,
+                          !.unArm = NONE]
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, fwd, budget, ghost>>
 
 AppCallFails ==
     /\ app.alive /\ app.req # "none" /\ ~h.up
     /\ app' = Failed(app)
     /\ fwd' = IF app.req = "stopRelay" THEN "refuses" ELSE fwd
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, budget, ghost>>
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, budget, ghost>>
 
 AppRestartRelay ==
-    /\ AppAwake /\ app.dns = "on" /\ ~relay /\ app.req = "none"
+    /\ AppAwake /\ app.dns = "on" /\ (~rwant \/ ~RelayUp) /\ app.req = "none"
     /\ app' = [app EXCEPT !.req = "startRelay"]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, fwd, budget, ghost>>
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, fwd, budget, ghost>>
 
 AppStartDNS ==
     /\ AppAwake /\ app.dns = "off" /\ app.req = "none"
-    /\ app' = [app EXCEPT !.dns = "on", !.req = "startRelay", !.snapKey = NEVER]
+    /\ app' = [app EXCEPT !.dns = "on", !.req = "startRelay", !.snap = NEVER]
     /\ fwd' = "answers"
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, budget, ghost>>
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, budget, ghost>>
 
 AppStop ==
     /\ AppAwake /\ app.dns = "on" /\ budget.stops > 0
-    /\ app' = [app EXCEPT !.dns = "stop_release"] /\ budget' = [budget EXCEPT !.stops = @ - 1]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, fwd, ghost>>
+    /\ app' = [app EXCEPT !.dns = "stop_disarm"] /\ budget' = [budget EXCEPT !.stops = @ - 1]
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, fwd, ghost>>
 
-AppTdRelease ==
-    /\ AppAwake /\ app.dns = "stop_release" /\ app.req = "none"
-    /\ app' = IF MayHold
-              THEN [app EXCEPT !.dns = "stop_wait_release", !.req = "release", !.pass = FALSE,
-                               !.applies = 0, !.refusals = 0, !.susp = FALSE]
-              ELSE [app EXCEPT !.dns = "stop_clear", !.applies = 0, !.refusals = 0, !.susp = FALSE]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, fwd, budget, ghost>>
+AppTdDisarm ==
+    /\ AppAwake /\ app.dns = "stop_disarm" /\ app.req = "none"
+    /\ app' = IF MayArm(app) THEN [app EXCEPT !.dns = "stop_wait_disarm", !.req = "disarm"]
+              ELSE [app EXCEPT !.dns = "stop_relay"]
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, fwd, budget, ghost>>
 
-AppTdClear ==
-    /\ AppAwake /\ app.dns = "stop_clear" /\ app.req = "none"
-    /\ app' = [app EXCEPT !.dns = "stop_wait_clear", !.req = "stopRelay", !.pass = FALSE]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, fwd, budget, ghost>>
-
-SpacingElapses ==
-    /\ app.alive /\ app.spaced
-    /\ app' = [app EXCEPT !.spaced = FALSE, !.fresh = TRUE, !.tries = 0]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, fwd, budget, ghost>>
-
-SuspensionExpires ==
-    /\ SuspensionsExpire /\ app.alive /\ app.susp
-    /\ app' = [app EXCEPT !.susp = FALSE, !.applies = 0, !.refusals = 0, !.fresh = TRUE, !.tries = 0]
-    /\ UNCHANGED <<key, svc, ver, vgate, rec, h, watch, relay, fwd, budget, ghost>>
+AppTdRelay ==
+    /\ AppAwake /\ app.dns = "stop_relay" /\ app.req = "none"
+    /\ app' = [app EXCEPT !.dns = "stop_wait_relay", !.req = "stopRelay"]
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, fwd, budget, ghost>>
 
 -----------------------------------------------------------------------------
 
-ClientNext == ClientRewrite \/ ClientDelete \/ ClientPublishDNS \/ ClientPublishIPv4 \/ ClientRepublish
-              \/ ClientIPv4Flap \/ ClientIPv4Back \/ ClientRewriteSame
-              \/ GateFlap \/ GateBack
-EnvNext == HApplyWriteFails \/ HApplyReplyLost \/ HRelWriteFails \/ OwnerExit \/ AppLaunch \/ HelperCrash \/ RelayDies \/ ForwarderRecovers
+ClientNext == ClientRewrite \/ ClientLoopback \/ ClientDelete \/ ClientPublishDNS \/ ClientPublishIPv4
+              \/ ClientIPv4Flap \/ ClientIPv4Back \/ GateFlap \/ GateBack \/ ConfigdRestart
+EnvNext == OwnerExit \/ AppLaunch \/ HelperDown \/ RelayDies \/ ForwarderRecovers
            \/ ForwarderFault("refuses") \/ ForwarderFault("silent")
-HelperSteps == HApplyWrite \/ HApplyIPv4 \/ HApplyGoneRead \/ HApplyGoneWrite
-               \/ HRelRead \/ HRelWrite \/ HRelIPv4 \/ HRelRemove
-HelperNext == HAccept \/ HelperSteps \/ HTick \/ HOwnerExit \/ HSignal \/ HStart
-AppNext == AppReadBox \/ AppReadStore \/ AppTake \/ AppPoll \/ AppPass \/ AppCallFails
-           \/ AppRestartRelay \/ AppStartDNS \/ AppStop \/ AppTdRelease \/ AppTdClear
-           \/ SpacingElapses \/ SuspensionExpires
+HelperNext == HAccept(FALSE) \/ HAccept(TRUE) \/ HSync \/ HTick \/ HRelayRestart \/ HOwnerExit \/ HStart
+AppNext == AppRead \/ AppTake \/ AppPass \/ AppPoll \/ AppCallFails \/ AppRestartRelay
+           \/ AppStartDNS \/ AppStop \/ AppTdDisarm \/ AppTdRelay
 
 Terminal == ~ENABLED (ClientNext \/ EnvNext \/ HelperNext \/ AppNext) /\ UNCHANGED vars
 
@@ -574,64 +377,42 @@ Next == ClientNext \/ EnvNext \/ HelperNext \/ AppNext \/ Terminal
 
 \* Only the helper is fair: a crashed or stalled app may never act.
 Fairness ==
-    /\ WF_vars(HApplyWrite) /\ WF_vars(HApplyIPv4) /\ WF_vars(HApplyGoneRead) /\ WF_vars(HApplyGoneWrite)
-    /\ WF_vars(HRelRead) /\ WF_vars(HRelWrite) /\ WF_vars(HRelIPv4) /\ WF_vars(HRelRemove)
-    /\ WF_vars(HTick) /\ WF_vars(HOwnerExit) /\ WF_vars(HStart)
-    /\ WF_vars(SuspensionExpires)
+    /\ WF_vars(HSync) /\ WF_vars(HTick) /\ WF_vars(HRelayRestart) /\ WF_vars(HOwnerExit) /\ WF_vars(HStart)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
 -----------------------------------------------------------------------------
 
 TypeOK ==
-    /\ key \in Keys /\ svc \in BOOLEAN /\ ver \in Versions /\ vgate \in BOOLEAN
-    /\ rec.has \in BOOLEAN /\ rec.n \in {NONE} \cup Versions /\ rec.pending \in BOOLEAN
-    /\ rec.pending => rec.has
-    /\ h.pc \in {"idle", "apply_write", "apply_ipv4", "apply_gone_read", "apply_gone_write",
-                 "rel_read", "rel_write", "rel_ipv4", "rel_remove"}
-    /\ h.refused \in 0..1 /\ h.silent \in 0..2
-    /\ relay \in BOOLEAN /\ fwd \in {"answers", "refuses", "silent"}
-    /\ app.dns \in {"on", "stop_release", "stop_wait_release", "stop_clear", "stop_wait_clear", "off"}
-    /\ app.view \in Views /\ app.live \in Views /\ app.held \in Views \cup {NOHELD}
-    /\ app.lastN \in {NONE} \cup Versions /\ app.spaced \in BOOLEAN /\ app.susp \in BOOLEAN
-    /\ app.box \in {NONE} \cup Versions
-    /\ app.req \in {"none", "apply", "release", "startRelay", "stopRelay"}
+    /\ vkey \in {ABSENT, LB} \cup Versions /\ svc \in BOOLEAN /\ ver \in Versions /\ vgate \in BOOLEAN
+    /\ okey \in BOOLEAN /\ h.up \in BOOLEAN /\ h.pub \in BOOLEAN /\ h.armN \in {NONE} \cup Versions
+    /\ h.refused \in 0..2 /\ h.silent \in 0..3
+    /\ relay \in {"off", "conduit", "vpn", "dead"} /\ rwant \in BOOLEAN
+    /\ fwd \in {"answers", "refuses", "silent"}
+    /\ app.dns \in {"on", "stop_disarm", "stop_wait_disarm", "stop_relay", "stop_wait_relay", "off"}
+    /\ app.req \in {"none", "arm", "disarm", "startRelay", "stopRelay"}
 
-NoClobber == ~ghost.clobber
+\* Whenever the own key is in the store, the helper and its relay run and the VPN publishes servers,
+\* every lookup is answered by Conduit or by the VPN's servers. A dead relay is the helper's fault, like a crash.
+KeyAnswered == (okey /\ h.up /\ relay # "dead" /\ VPNUsable) => Answers
 
-\* The record the app holds is the last landed apply it noted, however it learned of it, so the spacing and the cap count it.
-LandedNoted == app.known # NONE => app.lastN = app.known
+VPNKeyUntouched == ~ghost.vwritten
 
-NoSelfReference == app.live # LO /\ app.view # LO /\ app.held # LO
+NoLoopbackTarget == (okey /\ UsingFailover) => FailoverTarget # LB
 
-NoServerlessDefault == key = LO => rec.has
+\* Once the helper has handled every event, its key is in the store only for a live owner and a usable VPN.
+KeyWithdrawn == (h.up /\ HelperCurrent /\ ~ExitPending /\ okey) => (OwnerAlive /\ VPNUsable)
 
-ExitWindow == rec.has /\ ~OwnerAlive /\ ~ghost.served
-\* While the store refuses the restore nothing can give the key back; each tick retries it.
-ReleaseBeforeUnset ==
-    (Serving /\ key = LO /\ ~ExitWindow /\ ~rec.pending)
-        => (app.live = rec.n \/ ((ghost.window \/ ghost.relwin \/ app.lstale) /\ app.live \in Versions))
+\* While the relay sends the key's lookups to Conduit, Conduit's set in use has the VPN's servers.
+InternalNamesServed == (okey /\ Serving /\ HelperCurrent /\ ~ExitPending) => app.live = vkey
 
-NoLoopbackWithoutService == (key = LO /\ ~svc /\ ~budget.inflap) => (rec.has /\ (~h.up \/ h.pc # "idle"))
+NoSelfReference == app.view # LO /\ app.live # LO /\ app.held # LO
 
-ClientKeyKept == (svc \/ budget.inflap) => key # ABSENT
+EventuallyWithdrawn == (okey /\ ~(ConduitServes /\ OwnerAlive)) ~> (~okey \/ (ConduitServes /\ OwnerAlive))
 
-Suspends == AppAwake /\ app.req = "none" /\ Decision(UseSet) = "suspend"
-NeverSuspended == ~Suspends /\ ~app.susp
-
-\* tries counts refusals since the last reading, tick or wake.
-OneRefusalPerTrigger == app.tries <= 1
-
-SuspensionEnds == app.susp ~> ~app.susp
-
-OverrideLost ==
-    /\ rec.has /\ key = rec.n /\ app.known = rec.n /\ app.view = rec.n /\ ~app.ovr
-    /\ Serving /\ vgate /\ svc /\ app.alive /\ app.dns = "on" /\ app.req = "none" /\ h.pc = "idle"
-    /\ app.snapBox = NOBOX /\ <<key, svc>> = app.snapKey
-    /\ ~app.spaced /\ ~app.susp
-    /\ DecisionOf(Polled(app), UseSet) = "none"
-NeverLost == ~OverrideLost
-
-EventuallyReleased == (key = LO /\ ~Serving) ~> (key # LO \/ Serving)
+CanServe ==
+    /\ h.up /\ OwnerAlive /\ h.armN \in Versions /\ vkey = h.armN /\ svc /\ RelayUp /\ h.probeOK
+    /\ fwd = "answers"
+KeyReturns == CanServe ~> (okey \/ ~CanServe)
 
 =============================================================================
