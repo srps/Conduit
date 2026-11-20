@@ -12,9 +12,22 @@ package struct FirstResolver: Equatable, Sendable {
     }
 }
 
+package enum ResolverOrderError: Error, Equatable, Sendable {
+    case runFailed(String)
+    case exitStatus(Int32)
+    case noFirstResolver
+
+    package var reason: String {
+        switch self {
+        case .runFailed(let message): return "run_failed: \(message)"
+        case .exitStatus(let status): return "exit_status_\(status)"
+        case .noFirstResolver: return "no_first_resolver"
+        }
+    }
+}
+
 package protocol ResolverOrderReading: Sendable {
-    /// Nil when the configuration could not be read.
-    func firstResolver() -> FirstResolver?
+    func firstResolver() -> Result<FirstResolver, ResolverOrderError>
 }
 
 /// Reads `scutil --dns`, which prints the order mDNSResponder uses.
@@ -25,15 +38,15 @@ package struct ScutilResolverOrder: ResolverOrderReading {
         self.run = run
     }
 
-    package func firstResolver() -> FirstResolver? {
+    package func firstResolver() -> Result<FirstResolver, ResolverOrderError> {
         let result: CommandResult
         do {
             result = try run("/usr/sbin/scutil", ["--dns"])
         } catch {
-            return nil
+            return .failure(.runFailed(error.localizedDescription))
         }
-        guard result.exitCode == 0 else { return nil }
-        return Self.parse(result.standardOutput)
+        guard result.exitCode == 0 else { return .failure(.exitStatus(result.exitCode)) }
+        return Self.parse(result.standardOutput).map { .success($0) } ?? .failure(.noFirstResolver)
     }
 
     package static func parse(_ output: String) -> FirstResolver? {
