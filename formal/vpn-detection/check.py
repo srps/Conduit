@@ -95,7 +95,7 @@ SAFETY = ["TypeOK", "NoEntryFilesOffVPN", "GateFollowsLastPublished", "NothingPu
           "OrchestratorFollowsLastPublished", "ApplyOnlyFromCurrentSession"]
 LIVENESS = ["NoStuckUnknown", "FilesFollowVPN", "VPNReconnects"]
 OVERRIDE_SAFETY = ["TypeOK", "NoClobber", "NoSelfReference", "NoServerlessDefault", "ReleaseBeforeUnset",
-                   "NoLoopbackWithoutService", "ClientKeyKept", "OneRefusalPerTrigger"]
+                   "NoLoopbackWithoutService", "ClientKeyKept", "OneRefusalPerTrigger", "LandedNoted"]
 OVERRIDE_LIVENESS = ["EventuallyReleased", "SuspensionEnds"]
 TEMPORAL = set(LIVENESS) | set(OVERRIDE_LIVENESS)
 
@@ -156,7 +156,8 @@ CHECKS = [
 # Each override safety check takes one class of trouble: all of them at once exhausts TLC's memory.
 OVERRIDE_NONE = dict(MaxVersions=1, MaxDisconnects=0, MaxGateFlaps=0, MaxRepublishes=0, MaxIPv4Flaps=0,
                      MaxSameRewrites=0, MaxOwnerExits=0, MaxHelperCrashes=0, MaxRelayDeaths=0,
-                     MaxForwarderFaults=0, MaxDNSStops=0, ApplyCap=3, Endless="FALSE")
+                     MaxForwarderFaults=0, MaxDNSStops=0, MaxWriteFails=0, MaxLostReplies=0, ApplyCap=3,
+                     Endless="FALSE")
 OVERRIDE_CLIENT = dict(OVERRIDE_NONE, MaxVersions=3, MaxDisconnects=1, MaxGateFlaps=1, MaxIPv4Flaps=1,
                        MaxDNSStops=1)
 OVERRIDE_PROCESS = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxIPv4Flaps=1, MaxOwnerExits=1,
@@ -171,6 +172,10 @@ OVERRIDE_FLAPS = dict(OVERRIDE_NONE, MaxIPv4Flaps=3)
 OVERRIDE_SAME_REWRITE = dict(OVERRIDE_NONE, MaxSameRewrites=1, MaxIPv4Flaps=1)
 OVERRIDE_ENDLESS = dict(OVERRIDE_NONE, MaxSameRewrites=1, MaxIPv4Flaps=1, Endless="TRUE")
 OVERRIDE_SUSPENSION = dict(OVERRIDE_NONE, MaxVersions=3, ApplyCap=1)
+OVERRIDE_FAULTS = dict(OVERRIDE_NONE, MaxVersions=2, MaxGateFlaps=1, MaxOwnerExits=1,
+                       MaxForwarderFaults=1, MaxDNSStops=1, MaxWriteFails=1, MaxLostReplies=1)
+OVERRIDE_FAULTS_LIVE = dict(OVERRIDE_NONE, MaxVersions=2, MaxRelayDeaths=1, MaxForwarderFaults=1,
+                            MaxWriteFails=1, MaxLostReplies=1)
 CHECKS += [
     Check("override-safety-client", OVERRIDE_CLIENT, invariants=OVERRIDE_SAFETY,
           full=dict(OVERRIDE_CLIENT, MaxVersions=4), spec=OVERRIDE),
@@ -188,6 +193,10 @@ CHECKS += [
           full=dict(OVERRIDE_ENDLESS, MaxVersions=2), spec=OVERRIDE),
     Check("override-suspension-expires", OVERRIDE_SUSPENSION, invariants=["TypeOK"], properties=["SuspensionEnds"],
           full=dict(OVERRIDE_SUSPENSION, MaxIPv4Flaps=1), spec=OVERRIDE),
+    Check("override-store-faults", OVERRIDE_FAULTS, invariants=OVERRIDE_SAFETY,
+          full=dict(OVERRIDE_FAULTS, MaxWriteFails=2), spec=OVERRIDE),
+    Check("override-store-faults-liveness", OVERRIDE_FAULTS_LIVE, invariants=["TypeOK"],
+          properties=["EventuallyReleased"], full=dict(OVERRIDE_FAULTS_LIVE, MaxWriteFails=2), spec=OVERRIDE),
 ]
 
 CHECK_NAMED = {check.name: check for check in CHECKS}
@@ -320,6 +329,8 @@ def override_mutant(name, swift, edits, expect, bounds=None):
 
 
 OVERRIDE_FORWARDER_ONLY = dict(OVERRIDE_NONE, MaxVersions=2, MaxForwarderFaults=1)
+OVERRIDE_WRITE_FAILS = dict(OVERRIDE_NONE, MaxVersions=2, MaxForwarderFaults=1, MaxWriteFails=1)
+OVERRIDE_LOST_REPLY = dict(OVERRIDE_NONE, MaxVersions=2, MaxLostReplies=1)
 
 
 MUTANTS += [
@@ -447,6 +458,30 @@ MUTANTS += [
         "servers back over 127.0.0.1 leaves decide matching the record, and nothing re-applies",
         [("SameRewriteReapplies == TRUE", "SameRewriteReapplies == FALSE")],
         "NeverLost", bounds=OVERRIDE_SAME_REWRITE),
+    override_mutant(
+        "ov-failed-restore-forgotten",
+        "VPNDNSOverrideLedger.release: `forgetRecord()` whatever `restore` returned, so a restore the store "
+        "refused leaves the key at 127.0.0.1 with no record and nothing to retry it",
+        [("KeepsFailedRestore == TRUE", "KeepsFailedRestore == FALSE")],
+        "NoServerlessDefault", bounds=OVERRIDE_WRITE_FAILS),
+    override_mutant(
+        "ov-confirmed-apply-uncounted",
+        "VPNResolverOverrideController.confirm: adopt an unconfirmed apply the status holds without "
+        "`landed(...)`, so it skips noteLanded, the cap and the spacing",
+        [("AdoptCounts == TRUE", "AdoptCounts == FALSE")],
+        "LandedNoted", bounds=OVERRIDE_LOST_REPLY),
+    override_mutant(
+        "ov-unconfirmed-apply-kept",
+        "VPNResolverOverrideController.decide: decide on `record` alone, so an apply whose reply was lost is not "
+        "released when it stops being wanted, and the set without the tunnel's servers is applied over it",
+        [("ReleasesUnconfirmed == TRUE", "ReleasesUnconfirmed == FALSE")],
+        "ReleaseBeforeUnset", bounds=dict(OVERRIDE_LOST_REPLY, MaxGateFlaps=1)),
+    override_mutant(
+        "ov-apply-before-status",
+        "VPNResolverOverrideController.pass: apply without asking the helper's status first while an apply may "
+        "be unconfirmed, so a stale reading re-applies over a record the helper already holds",
+        [("StatusBeforeApply == TRUE", "StatusBeforeApply == FALSE")],
+        "ReleaseBeforeUnset", bounds=OVERRIDE_FAULTS),
 ]
 
 

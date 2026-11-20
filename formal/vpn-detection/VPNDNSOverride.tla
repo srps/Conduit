@@ -19,6 +19,8 @@ CONSTANTS
     MaxRelayDeaths,
     MaxForwarderFaults,
     MaxDNSStops,
+    MaxWriteFails,
+    MaxLostReplies,
     ApplyCap,
     Endless
 
@@ -33,6 +35,10 @@ Keys == {ABSENT, LO} \cup Versions
 Views == {NONE, LO} \cup Versions
 
 ReleaseCompares == TRUE
+KeepsFailedRestore == TRUE
+AdoptCounts == TRUE
+ReleasesUnconfirmed == TRUE
+StatusBeforeApply == TRUE
 ApplyChecksService == TRUE
 ApplyGoneCompares == TRUE
 RemovesGoneKey == FALSE
@@ -73,7 +79,7 @@ VARIABLES
 
 vars == <<key, svc, ver, vgate, rec, h, watch, relay, fwd, app, budget, ghost>>
 
-NoRec == [has |-> FALSE, n |-> NONE, owner |-> 0]
+NoRec == [has |-> FALSE, n |-> NONE, owner |-> 0, pending |-> FALSE]
 HIdle(up) == [up |-> up, pc |-> "idle", basis |-> ABSENT, cmp |-> FALSE, then |-> "none",
               from |-> 0, expected |-> NONE, refused |-> 0, silent |-> 0]
 FreshApp(id, dns) == [alive |-> TRUE, id |-> id, dns |-> dns, box |-> NONE, known |-> NONE,
@@ -91,8 +97,8 @@ Init ==
     /\ budget = [disc |-> MaxDisconnects, flaps |-> MaxGateFlaps, repub |-> MaxRepublishes,
                  v4flaps |-> MaxIPv4Flaps, inflap |-> FALSE, same |-> MaxSameRewrites, exits |-> MaxOwnerExits,
                  crashes |-> MaxHelperCrashes, relay |-> MaxRelayDeaths, fwd |-> MaxForwarderFaults,
-                 stops |-> MaxDNSStops]
-    /\ ghost = [clobber |-> FALSE, served |-> FALSE, window |-> FALSE]
+                 stops |-> MaxDNSStops, wfail |-> MaxWriteFails, lost |-> MaxLostReplies]
+    /\ ghost = [clobber |-> FALSE, served |-> FALSE, window |-> FALSE, relwin |-> FALSE]
 
 OwnerAlive == app.alive /\ app.id = rec.owner
 ExitPending == watch /\ ~OwnerAlive
@@ -120,7 +126,8 @@ CapReached(a) ==
     ELSE a.applies >= ApplyCap
 DecisionOf(a, set) ==
     IF KeepsThroughFlap(a, set) THEN "none"
-    ELSE IF ~WantedOf(a, set) THEN (IF a.known # NONE THEN "release" ELSE "none")
+    ELSE IF ~WantedOf(a, set)
+         THEN (IF a.known # NONE \/ (ReleasesUnconfirmed /\ a.unApply # NONE) THEN "release" ELSE "none")
     ELSE IF a.known = a.view /\ ~(SameRewriteReapplies /\ a.rewritten) THEN "none"
     ELSE IF a.ovr THEN "none"
     ELSE IF a.susp \/ ~a.fresh THEN "none"
@@ -162,36 +169,54 @@ StopsForwarder == h.then = "stop" /\ app.alive /\ app.id = h.from
 StartRelease(then, from) ==
     h' = [h EXCEPT !.pc = "rel_read", !.then = then, !.from = from]
 
-FinishRelease(clobber) ==
+\* relwin: the restore landed over a client write made after release's read; cleared by the client's next write.
+FinishRelease(clobber, relwin) ==
     /\ rec' = NoRec /\ watch' = FALSE
     /\ h' = IF h.then = "exit" THEN HIdle(FALSE) ELSE HIdle(TRUE)
     /\ relay' = IF h.then \in {"stop", "exit"} THEN FALSE ELSE relay
     /\ app' = IF h.then \in {"reply", "stop"} THEN ReplyApp(ReleaseOK) ELSE app
     /\ fwd' = IF StopsForwarder THEN "refuses" ELSE fwd
-    /\ ghost' = [ghost EXCEPT !.served = FALSE, !.window = FALSE, !.clobber = clobber]
+    /\ ghost' = [ghost EXCEPT !.served = FALSE, !.window = FALSE, !.clobber = clobber, !.relwin = @ \/ relwin]
+
+\* The store refused the restoring write: the record and its file stay, pending, for the next tick.
+FailRelease ==
+    /\ rec' = IF KeepsFailedRestore THEN [rec EXCEPT !.pending = TRUE] ELSE NoRec
+    /\ watch' = FALSE
+    /\ h' = IF h.then = "exit" THEN HIdle(FALSE) ELSE HIdle(TRUE)
+    /\ relay' = IF h.then \in {"stop", "exit"} THEN FALSE ELSE relay
+    /\ app' = CASE h.then = "reply" -> ReplyApp(ReleaseFailed)
+              [] h.then = "stop" -> ReplyApp(ReleaseOK)
+              [] OTHER -> app
+    /\ fwd' = IF StopsForwarder THEN "refuses" ELSE fwd
+    /\ budget' = [budget EXCEPT !.wfail = @ - 1]
+    /\ UNCHANGED ghost
 
 -----------------------------------------------------------------------------
 
 ClientRewrite ==
     /\ svc /\ key # ABSENT /\ ver < MaxVersions
     /\ ver' = ver + 1 /\ key' = ver + 1
-    /\ UNCHANGED <<svc, vgate, rec, h, watch, relay, fwd, app, budget, ghost>>
+    /\ UNCHANGED <<svc, vgate, rec, h, watch, relay, fwd, app, budget>>
+    /\ ghost' = [ghost EXCEPT !.relwin = FALSE]
 
 ClientRewriteSame ==
     /\ svc /\ key = LO /\ budget.same > 0
     /\ key' = ver /\ budget' = IF Endless THEN budget ELSE [budget EXCEPT !.same = @ - 1]
-    /\ UNCHANGED <<svc, ver, vgate, rec, h, watch, relay, fwd, app, ghost>>
+    /\ UNCHANGED <<svc, ver, vgate, rec, h, watch, relay, fwd, app>>
+    /\ ghost' = [ghost EXCEPT !.relwin = FALSE]
 
 ClientDelete ==
     /\ svc /\ budget.disc > 0
     /\ svc' = FALSE /\ key' = ABSENT /\ vgate' = FALSE
     /\ budget' = [budget EXCEPT !.disc = @ - 1]
-    /\ UNCHANGED <<ver, rec, h, watch, relay, fwd, app, ghost>>
+    /\ UNCHANGED <<ver, rec, h, watch, relay, fwd, app>>
+    /\ ghost' = [ghost EXCEPT !.relwin = FALSE]
 
 ClientPublishDNS ==
     /\ ~svc /\ ~budget.inflap /\ key = ABSENT /\ ver < MaxVersions
     /\ ver' = ver + 1 /\ key' = ver + 1
-    /\ UNCHANGED <<svc, vgate, rec, h, watch, relay, fwd, app, budget, ghost>>
+    /\ UNCHANGED <<svc, vgate, rec, h, watch, relay, fwd, app, budget>>
+    /\ ghost' = [ghost EXCEPT !.relwin = FALSE]
 
 ClientPublishIPv4 ==
     /\ ~svc /\ ~budget.inflap /\ key \in Versions
@@ -202,7 +227,8 @@ ClientRepublish ==
     /\ svc /\ key # ABSENT /\ ver < MaxVersions /\ budget.repub > 0
     /\ ver' = ver + 1 /\ key' = ver + 1 /\ svc' = FALSE
     /\ budget' = [budget EXCEPT !.repub = @ - 1]
-    /\ UNCHANGED <<vgate, rec, h, watch, relay, fwd, app, ghost>>
+    /\ UNCHANGED <<vgate, rec, h, watch, relay, fwd, app>>
+    /\ ghost' = [ghost EXCEPT !.relwin = FALSE]
 
 ClientIPv4Flap ==
     /\ svc /\ key # ABSENT /\ budget.v4flaps > 0
@@ -267,7 +293,7 @@ HAccept ==
     /\ ghost' = [ghost EXCEPT !.served = Served]
     /\ CASE app.req = "apply" ->
               IF svc /\ key = app.reqExp /\ app.reqExp \in Versions /\ relay /\ fwd = "answers"
-              THEN /\ rec' = [has |-> TRUE, n |-> app.reqExp, owner |-> app.id]
+              THEN /\ rec' = [has |-> TRUE, n |-> app.reqExp, owner |-> app.id, pending |-> FALSE]
                    /\ h' = [h EXCEPT !.pc = "apply_write", !.basis = key, !.cmp = TRUE,
                                      !.from = app.id, !.expected = app.reqExp]
                    /\ UNCHANGED <<key, watch, relay, app, fwd>>
@@ -291,6 +317,23 @@ HApplyWrite ==
     /\ ghost' = [ghost EXCEPT !.clobber = @ \/ Clobbers(key, h.expected), !.window = key # h.basis]
     /\ h' = [h EXCEPT !.pc = "apply_ipv4", !.basis = LO, !.cmp = FALSE]
     /\ UNCHANGED <<svc, ver, vgate, rec, watch, relay, fwd, app, budget>>
+
+HApplyWriteFails ==
+    /\ h.up /\ h.pc = "apply_write" /\ budget.wfail > 0
+    /\ rec' = NoRec /\ h' = HIdle(TRUE) /\ app' = ReplyApp(ApplyFailed)
+    /\ budget' = [budget EXCEPT !.wfail = @ - 1]
+    /\ ghost' = [ghost EXCEPT !.served = FALSE, !.window = FALSE]
+    /\ UNCHANGED <<key, svc, ver, vgate, watch, relay, fwd>>
+
+\* The apply landed but its reply never reached the app, which reads it as a failure.
+HApplyReplyLost ==
+    /\ h.up /\ h.pc = "apply_ipv4" /\ (svc \/ ~ApplyChecksService) /\ budget.lost > 0
+    /\ app' = ReplyApp(ApplyFailed)
+    /\ budget' = [budget EXCEPT !.lost = @ - 1]
+    /\ IF ~WatchOwner \/ OwnerAlive
+       THEN watch' = WatchOwner /\ h' = HIdle(TRUE)
+       ELSE watch' = FALSE /\ StartRelease("none", 0)
+    /\ UNCHANGED <<key, svc, ver, vgate, rec, relay, fwd, ghost>>
 
 HApplyIPv4 ==
     /\ h.up /\ h.pc = "apply_ipv4"
@@ -334,14 +377,20 @@ HRelWrite ==
                THEN /\ h' = [h EXCEPT !.pc = "rel_ipv4", !.basis = rec.n, !.cmp = FALSE]
                     /\ ghost' = [ghost EXCEPT !.clobber = @ \/ Clobbers(key, LO)]
                     /\ UNCHANGED <<rec, watch, relay, app, fwd>>
-               ELSE FinishRelease(ghost.clobber \/ Clobbers(key, LO))
-       ELSE /\ FinishRelease(ghost.clobber) /\ UNCHANGED key
+               ELSE FinishRelease(ghost.clobber \/ Clobbers(key, LO), key # h.basis /\ key \in Versions)
+       ELSE /\ FinishRelease(ghost.clobber, FALSE) /\ UNCHANGED key
     /\ UNCHANGED <<svc, ver, vgate, budget>>
+
+HRelWriteFails ==
+    /\ h.up /\ h.pc = "rel_write" /\ budget.wfail > 0
+    /\ (h.basis = LO \/ ~ReleaseCompares) /\ h.basis # ABSENT
+    /\ FailRelease
+    /\ UNCHANGED <<key, svc, ver, vgate>>
 
 HRelIPv4 ==
     /\ h.up /\ h.pc = "rel_ipv4"
     /\ IF svc
-       THEN FinishRelease(ghost.clobber) /\ UNCHANGED key
+       THEN FinishRelease(ghost.clobber, FALSE) /\ UNCHANGED key
        ELSE /\ h' = [h EXCEPT !.pc = "rel_remove"]
             /\ UNCHANGED <<key, rec, watch, relay, app, fwd, ghost>>
     /\ UNCHANGED <<svc, ver, vgate, budget>>
@@ -349,12 +398,13 @@ HRelIPv4 ==
 HRelRemove ==
     /\ h.up /\ h.pc = "rel_remove"
     /\ key' = ABSENT
-    /\ FinishRelease(ghost.clobber \/ Clobbers(key, h.basis))
+    /\ FinishRelease(ghost.clobber \/ Clobbers(key, h.basis), FALSE)
     /\ UNCHANGED <<svc, ver, vgate, budget>>
 
 HTick ==
     /\ h.up /\ h.pc = "idle" /\ rec.has
-    /\ CASE ~relay -> StartRelease("none", 0)
+    /\ CASE rec.pending -> StartRelease("none", 0)
+         [] ~relay -> StartRelease("none", 0)
          [] fwd = "refuses" ->
               IF h.refused + 1 >= 2 THEN StartRelease("none", 0)
               ELSE h' = [h EXCEPT !.refused = @ + 1, !.silent = 0]
@@ -425,7 +475,7 @@ AppTake ==
 \* A status that adopts an unconfirmed apply counts it as ApplyOK does.
 Polled(a) ==
     IF rec.has /\ rec.n \in {a.known, a.unApply} \ {NONE}
-    THEN LET adopt == rec.n # a.known
+    THEN LET adopt == AdoptCounts /\ rec.n # a.known
          IN [a EXCEPT !.known = rec.n, !.box = rec.n, !.unApply = NONE, !.unRel = FALSE, !.fresh = @ \/ svc, !.tries = 0,
                       !.rewritten = @ \/ (SameRewriteReapplies /\ svc /\ a.view = key /\ key \in Versions
                                           /\ ~a.ovr),
@@ -446,7 +496,9 @@ AppPass ==
        IN CASE d = "release" ->
                  app' = [app EXCEPT !.req = "release", !.pass = TRUE]
             [] d = "apply" ->
-                 app' = [app EXCEPT !.box = app.view, !.req = "apply", !.reqExp = app.view,
+                 \* pass asks the helper's status before an apply while one may be unconfirmed.
+                 /\ app.unApply = NONE \/ ~StatusBeforeApply
+                 /\ app' = [app EXCEPT !.box = app.view, !.req = "apply", !.reqExp = app.view,
                                     !.pass = TRUE,
                                     !.applies = IF RefusalsSeparate THEN @ ELSE @ + 1]
             [] d = "suspend" ->
@@ -507,7 +559,7 @@ SuspensionExpires ==
 ClientNext == ClientRewrite \/ ClientDelete \/ ClientPublishDNS \/ ClientPublishIPv4 \/ ClientRepublish
               \/ ClientIPv4Flap \/ ClientIPv4Back \/ ClientRewriteSame
               \/ GateFlap \/ GateBack
-EnvNext == OwnerExit \/ AppLaunch \/ HelperCrash \/ RelayDies \/ ForwarderRecovers
+EnvNext == HApplyWriteFails \/ HApplyReplyLost \/ HRelWriteFails \/ OwnerExit \/ AppLaunch \/ HelperCrash \/ RelayDies \/ ForwarderRecovers
            \/ ForwarderFault("refuses") \/ ForwarderFault("silent")
 HelperSteps == HApplyWrite \/ HApplyIPv4 \/ HApplyGoneRead \/ HApplyGoneWrite
                \/ HRelRead \/ HRelWrite \/ HRelIPv4 \/ HRelRemove
@@ -533,7 +585,8 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 
 TypeOK ==
     /\ key \in Keys /\ svc \in BOOLEAN /\ ver \in Versions /\ vgate \in BOOLEAN
-    /\ rec.has \in BOOLEAN /\ rec.n \in {NONE} \cup Versions
+    /\ rec.has \in BOOLEAN /\ rec.n \in {NONE} \cup Versions /\ rec.pending \in BOOLEAN
+    /\ rec.pending => rec.has
     /\ h.pc \in {"idle", "apply_write", "apply_ipv4", "apply_gone_read", "apply_gone_write",
                  "rel_read", "rel_write", "rel_ipv4", "rel_remove"}
     /\ h.refused \in 0..1 /\ h.silent \in 0..2
@@ -546,14 +599,18 @@ TypeOK ==
 
 NoClobber == ~ghost.clobber
 
+\* The record the app holds is the last landed apply it noted, however it learned of it, so the spacing and the cap count it.
+LandedNoted == app.known # NONE => app.lastN = app.known
+
 NoSelfReference == app.live # LO /\ app.view # LO /\ app.held # LO
 
 NoServerlessDefault == key = LO => rec.has
 
 ExitWindow == rec.has /\ ~OwnerAlive /\ ~ghost.served
+\* While the store refuses the restore nothing can give the key back; each tick retries it.
 ReleaseBeforeUnset ==
-    (Serving /\ key = LO /\ ~ExitWindow)
-        => (app.live = rec.n \/ ((ghost.window \/ app.lstale) /\ app.live \in Versions))
+    (Serving /\ key = LO /\ ~ExitWindow /\ ~rec.pending)
+        => (app.live = rec.n \/ ((ghost.window \/ ghost.relwin \/ app.lstale) /\ app.live \in Versions))
 
 NoLoopbackWithoutService == (key = LO /\ ~svc /\ ~budget.inflap) => (rec.has /\ (~h.up \/ h.pc # "idle"))
 
