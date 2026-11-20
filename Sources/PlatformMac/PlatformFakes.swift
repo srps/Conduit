@@ -767,6 +767,10 @@ package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked 
         lock.withLock { _services[service]?.dns }
     }
 
+    package func legacyDNS(service: String) -> VPNDNSLegacyRead {
+        dns(service: service).map(VPNDNSLegacyRead.value) ?? .absent
+    }
+
     package func overridesPrimary(service: String) -> Bool {
         lock.withLock { _services[service].map { $0.ipv4 && $0.overridePrimary } ?? false }
     }

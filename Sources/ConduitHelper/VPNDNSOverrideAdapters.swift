@@ -101,17 +101,20 @@ final class SCDynamicStoreVPNDNSStore: VPNDNSStore {
 struct SCDynamicStoreLegacyVPNDNSStore: VPNDNSLegacyStore {
     private let store = SCDynamicStoreCreate(nil, "io.github.srps.Conduit.Helper.vpn-dns-override-legacy" as CFString, nil, nil)
 
-    func dns(service: String) -> [String: VPNDNSValue]? {
-        guard let store,
-              let raw = SCDynamicStoreCopyValue(store, "State:/Network/Service/\(service)/DNS" as CFString) as? [String: Any]
-        else { return nil }
+    func legacyDNS(service: String) -> VPNDNSLegacyRead {
+        guard let store else { return .unreadable("store: \(SCDynamicStoreVPNDNSStore.lastError)") }
+        guard let copied = SCDynamicStoreCopyValue(store, "State:/Network/Service/\(service)/DNS" as CFString) else {
+            let status = SCError()
+            return status == kSCStatusNoKey ? .absent : .unreadable("copy: \(String(cString: SCErrorString(status)))")
+        }
+        guard let raw = copied as? [String: Any] else { return .unreadable("not a dictionary") }
         var value: [String: VPNDNSValue] = [:]
         for (field, item) in raw {
             // A field this type cannot write back makes the key unreadable, so nothing is written over it.
-            guard let converted = VPNDNSPropertyList.value(item) else { return nil }
+            guard let converted = VPNDNSPropertyList.value(item) else { return .unreadable("field \(field) cannot be written back") }
             value[field] = converted
         }
-        return value
+        return .value(value)
     }
 
     func setDNS(_ value: [String: VPNDNSValue], service: String) -> Bool {
