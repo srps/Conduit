@@ -169,7 +169,7 @@ final class RuntimeHostVPNDNSOverrideTests: XCTestCase {
         running.harness.vpn.liveInterfaceNames = ["utun6"]
         running.harness.vpn.connectedInterfaceName = "utun6"
         running.harness.vpn.emit(.connected)
-        await Task.detached { Self.block(on: applying) }.value
+        await Self.block(on: applying)
 
         running.harness.vpn.liveInterfaceNames = []
         running.harness.vpn.connectedInterfaceName = nil
@@ -191,7 +191,11 @@ final class RuntimeHostVPNDNSOverrideTests: XCTestCase {
     }
 
     /// Off the RuntimeActor: the host's pass runs while this waits.
-    nonisolated private static func block(on semaphore: DispatchSemaphore) {
+    nonisolated private static func block(on semaphore: DispatchSemaphore) async {
+        await Task.detached { wait(on: semaphore) }.value
+    }
+
+    nonisolated private static func wait(on semaphore: DispatchSemaphore) {
         semaphore.wait()
     }
 
