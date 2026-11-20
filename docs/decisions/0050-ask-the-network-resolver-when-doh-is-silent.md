@@ -3,7 +3,7 @@
 - Date: 2026-11-19
 - Decision: proposed
 - Implementation: implemented
-- Validation: none
+- Validation: pending
 - Supersedes: none
 - Superseded by: none
 

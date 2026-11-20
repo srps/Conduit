@@ -72,5 +72,5 @@ Each record carries three statuses, because merged does not mean it works:
 | [0046](0046-bound-what-grows.md) | Bound what grows, validate what a trusted local source replaces | accepted | implemented | none |
 | [0047](0047-vpn-blind-gap-and-local-captures.md) | A blind gap is measured from the last good VPN reading, and store captures stay local | accepted | implemented | none |
 | [0048](0048-store-read-schedule.md) | Retry a failed store reading with backoff, audit a healthy one every 60 s, and withhold split DNS while blind | accepted | implemented | none |
-| [0049](0049-take-the-default-resolver-back-from-a-full-tunnel.md) | Take the default resolver back from a full-tunnel VPN through the helper | proposed | implemented | none |
-| [0050](0050-ask-the-network-resolver-when-doh-is-silent.md) | Ask the network's own DNS server once when DoH is silent and no internal server can be asked | proposed | implemented | none |
+| [0049](0049-take-the-default-resolver-back-from-a-full-tunnel.md) | Take the default resolver back from a full-tunnel VPN through the helper | proposed | implemented | pending |
+| [0050](0050-ask-the-network-resolver-when-doh-is-silent.md) | Ask the network's own DNS server once when DoH is silent and no internal server can be asked | proposed | implemented | pending |
