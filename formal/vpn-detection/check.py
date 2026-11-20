@@ -34,7 +34,7 @@ TLA_VERSION = "1.7.4"
 TLA_URL = f"https://github.com/tlaplus/tlaplus/releases/download/v{TLA_VERSION}/tla2tools.jar"
 TLA_SHA256 = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
 
-# A change to any covered or model file runs that spec's full tier in CI (`--full-for`).
+# A change to any covered or model file needs that spec's full tier (`--full-for`); CI runs the full tiers nightly and on a tag.
 COVERED = [
     "Sources/PlatformMac/VPNStatusMonitor.swift",
     "Sources/PlatformMac/ObserverStopBarrier.swift",
