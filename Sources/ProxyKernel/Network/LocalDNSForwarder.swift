@@ -1221,7 +1221,7 @@ final class DNSResolutionCore: @unchecked Sendable {
         guard !Task.isCancelled, !table.usesPushedServers, splitDNSProvider?().usesPushedServers != true,
               let servers = networkResolverProvider?(), !servers.isEmpty else { return nil }
         // Its answer is unauthenticated, and Conduit sends credentials to its upstreams and takes them from the PAC.
-        if Self.credentialHosts(config).contains(Self.normalizedHost(name)) {
+        if Self.credentialHosts(config).contains(Self.normalizedHost(name)) || proxyHostsProvider?().contains(name) == true {
             reportNetworkResolverFallback(name: name, servers: servers.count, outcome: "proxy_host")
             return nil
         }
