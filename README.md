@@ -33,7 +33,7 @@ brew install --cask srps/tap/conduit
 
 **Disk image.** Download the arm64 `.dmg` from [Releases](https://github.com/srps/Conduit/releases/latest), open it, and drag **Conduit** into **Applications**. No Xcode or Swift install is needed.
 
-**From source.** You need Xcode 26 (Swift 6.2). `bundle-app.sh` uses Xcode by default; a bare `swift build` also works with the Command Line Tools.
+**From source.** You need Xcode 26.6 or later, the version CI builds and releases with. `bundle-app.sh` uses Xcode by default; a bare `swift build` also works with the Command Line Tools.
 
 ```bash
 git clone https://github.com/srps/Conduit.git && cd Conduit

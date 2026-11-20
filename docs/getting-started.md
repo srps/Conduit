@@ -5,7 +5,7 @@ This guide walks you through building Conduit from source and getting a working 
 ## Prerequisites
 
 - **macOS 26** (Tahoe) or later
-- A **Swift 6.2+ toolchain** — the Command Line Tools are enough to build; running the test suite additionally needs **Xcode 26+** (XCTest ships with Xcode)
+- The **Xcode 26.6+ toolchain**, the version CI builds with — its Command Line Tools are enough to build; running the test suite needs **Xcode 26.6+** itself (XCTest ships with Xcode)
 - An upstream proxy to authenticate against (or just use it as a local forwarding proxy)
 
 ## Build from Source

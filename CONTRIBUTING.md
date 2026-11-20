@@ -28,7 +28,7 @@ Every change is measured against these pillars. A proposed feature either lands 
 ## Prerequisites
 
 - macOS 26 (Tahoe) or later on Apple Silicon
-- A Swift 6.2 or later toolchain. The Command Line Tools are enough for `swift build`; `bundle-app.sh` uses Xcode unless you set `DEVELOPER_DIR`. **Running the test suite** also needs Xcode 26 or later, because XCTest ships with Xcode rather than the Command Line Tools.
+- The Xcode 26.6 or later toolchain, the version CI builds with. Its Command Line Tools are enough for `swift build`; `bundle-app.sh` uses Xcode unless you set `DEVELOPER_DIR`. **Running the test suite** also needs Xcode 26.6 or later, because XCTest ships with Xcode rather than the Command Line Tools.
 - Git
 
 ## Build

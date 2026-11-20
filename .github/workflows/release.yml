@@ -21,6 +21,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # The oldest Xcode the README supports; raise it on purpose.
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+
 jobs:
   build:
     # Apple Silicon only: Conduit no longer ships Intel builds.
@@ -34,7 +38,6 @@ jobs:
     # of the optimized PAC build before packaging, so 30 min ran out (#325).
     timeout-minutes: 50
     env:
-      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       # NIO misuse crashes the run instead of warning (see swift.yml).
       SWIFTNIO_STRICT: "1"
     steps:

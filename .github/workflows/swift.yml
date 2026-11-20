@@ -17,6 +17,8 @@ permissions:
   contents: read
 
 env:
+  # The oldest Xcode the README supports; raise it on purpose.
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
   # Fail on NIO threading and lifecycle misuse, including subprocesses.
   SWIFTNIO_STRICT: "1"
 
@@ -36,10 +38,8 @@ jobs:
       # A clean build takes about three minutes; a compiler that stops
       # making progress would otherwise hold the runner for six hours.
       timeout-minutes: 30
-      run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift build -v
+      run: xcrun swift build -v
     - name: Kernel import and process fence
-      env:
-        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       run: |
         python3 scripts/check-kernel-imports.py
         python3 scripts/test-kernel-imports.py
@@ -56,15 +56,11 @@ jobs:
         python3 scripts/check-decisions.py --require-history
         python3 scripts/test-decisions.py
     - name: Run tests
-      run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift test -v
+      run: xcrun swift test -v
     - name: App entry sequencing (stand-in modules, child processes)
       timeout-minutes: 15
-      env:
-        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       run: python3 scripts/test-app-entry.py
     - name: Kerberos worker entry points
-      env:
-        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       run: |
         conduit_bin_dir="$(xcrun swift build --show-bin-path)"
         python3 scripts/test-kerberos-worker.py "$conduit_bin_dir/Conduit" "$conduit_bin_dir/ConduitDaemon"
@@ -76,22 +72,16 @@ jobs:
       run: bash ./scripts/test-create-signing-identity.sh
     - name: Self-update end to end (stand-in host, local feed)
       timeout-minutes: 10
-      env:
-        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       run: |
         zsh ./scripts/test-updater-e2e.sh
         # Release-style signing: hardened runtime everywhere, library
         # validation off for the updater only.
         zsh ./scripts/test-updater-e2e.sh --signed
     - name: Release identity script keeps the keys secret
-      env:
-        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       run: bash ./scripts/test-create-release-identity.sh
     - name: Update feed release notes render
       run: python3 scripts/test-appcast-notes.py
     - name: Security boundary regressions
-      env:
-        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       run: |
         conduit_bin_dir="$(xcrun swift build --show-bin-path)"
         "$conduit_bin_dir/pm-sim" observable-target-redaction
@@ -107,29 +97,21 @@ jobs:
       run: bash ./scripts/perf-gate.sh
     - name: Simulator outcomes and full scenario suite
       timeout-minutes: 10
-      env:
-        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       run: |
         conduit_bin_dir="$(xcrun swift build --show-bin-path)"
         python3 scripts/test-sim-outcomes.py "$conduit_bin_dir/pm-sim"
         "$conduit_bin_dir/pm-sim" all
     - name: HTTP request-target preservation
-      env:
-        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       run: |
         conduit_bin_dir="$(xcrun swift build --show-bin-path)"
         python3 scripts/test-http-wire-target.py "$conduit_bin_dir/pm-proxy"
     - name: Forced routing regression
-      env:
-        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       run: |
         conduit_bin_dir="$(xcrun swift build --show-bin-path)"
         "$conduit_bin_dir/pm-sim" forced-proxy-precedence
         "$conduit_bin_dir/pm-sim" pac-unsupported-only
         "$conduit_bin_dir/pm-sim" strict-direct-reachable
     - name: Resource bounds and standalone shutdown regressions
-      env:
-        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       run: |
         conduit_bin_dir="$(xcrun swift build --show-bin-path)"
         "$conduit_bin_dir/pm-sim" shared-inbound-budget
