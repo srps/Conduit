@@ -51,7 +51,9 @@ enum NetworkResolverScenarios {
         config.localPACEnabled = false
         config.pacRoutingEnabled = true
         config.pacURL = "http://\(pacName)/proxy.pac"
-        config.upstreams = [upstream.proxy]
+        var egress = upstream.proxy
+        egress.host = upstreamName
+        config.upstreams = [egress]
         config.dnsForwarderEnabled = true
         config.dnsForwarderPort = 0
         config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.80"], enabled: false)]
@@ -145,13 +147,19 @@ enum NetworkResolverScenarios {
             ]))
             try await Task.sleep(for: .milliseconds(100))
 
+            let probesBefore = probes.withLockedValue { $0 }
+            let attemptsBefore = pac.attempts
             check("a public name resolves through the network's server", await ForwarderLookup.a(publicName, port: port) == stubIP)
-            check("an upstream's hostname resolves through it", await ForwarderLookup.a(upstreamName, port: port) == stubIP)
-            check("routing returns to the upstream once the probe resolves it", try await settles {
-                $0.directModeCause == .none && $0.activeUpstream != "DIRECT"
-            })
-            for _ in 0..<1500 where pac.loaded == 0 { try await Task.sleep(for: .milliseconds(10)) }
-            check("a PAC whose host only the network's server knows loads", pac.loaded > 0)
+            check("an upstream's hostname is not resolved by the network's unauthenticated answer",
+                  await ForwarderLookup.a(upstreamName, port: port) == nil)
+            for _ in 0..<1500 where probes.withLockedValue({ $0 }) == probesBefore || pac.attempts == attemptsBefore {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            check("the recovery re-probes and refetches the PAC", probes.withLockedValue { $0 } > probesBefore && pac.attempts > attemptsBefore)
+            check("routing stays direct: credentials never follow that answer", try await snapshot().directModeCause == .vpnDisconnected)
+            check("the PAC, whose host only the network's server knows, does not load", pac.loaded == 0)
+            check("the network's server was never asked for the upstream's or the PAC's host",
+                  stub.counts[upstreamName] == nil && stub.counts[pacName] == nil)
             notes.append("PAC fetches \(pac.attempts) (loaded \(pac.loaded)), probes \(probes.withLockedValue { $0 }), stub saw \(stub.counts)")
         } catch {
             notes.append("failed: \(error)")
@@ -176,6 +184,7 @@ enum NetworkResolverScenarios {
                 "the fallback event fires, answered, with a count and no address",
                 fallbacks.contains { $0.contains(" servers=1 outcome=answered ") } && !fallbacks.contains { $0.contains(networkServer) }
             )
+            check("the proxy's and the PAC's host are reported as proxy_host", fallbacks.contains { $0.contains(" outcome=proxy_host ") })
             let recovered = details("dns.resolution_recovered")
             notes.append("dns.resolution_recovered: \(recovered)")
             check(

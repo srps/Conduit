@@ -1034,7 +1034,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
                 answered = doh.isProviderAnswer
                 reportSplitDNSFallback(entryDomain: rule.domain, name: domain, servers: attempt.asked, outcome: doh)
                 if case .unanswered = doh, rule.servers.isEmpty,
-                   let network = await askNetworkResolver(query: queryBytes, name: domain, table: table, began: began) {
+                   let network = await askNetworkResolver(query: queryBytes, name: domain, table: table, config: config, began: began) {
                     response = network
                     answered = true
                     viaNetworkResolver = true
@@ -1078,7 +1078,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
                     // the current one useful in the meantime.
                     response = internalResponse
                     if table.firstServers.isEmpty,
-                       let network = await askNetworkResolver(query: queryBytes, name: domain, table: table, began: began) {
+                       let network = await askNetworkResolver(query: queryBytes, name: domain, table: table, config: config, began: began) {
                         response = network
                         answered = true
                         viaNetworkResolver = true
@@ -1196,9 +1196,16 @@ private final class DNSResolutionCore: @unchecked Sendable {
     }
 
     /// Events carry how many servers the network names, never which.
-    private func askNetworkResolver(query: [UInt8], name: String, table: SplitDNSTable, began: NIODeadline) async -> [UInt8]? {
+    private func askNetworkResolver(
+        query: [UInt8], name: String, table: SplitDNSTable, config: ProxyConfig, began: NIODeadline
+    ) async -> [UInt8]? {
         guard !Task.isCancelled, !table.usesPushedServers, splitDNSProvider?().usesPushedServers != true,
               let servers = networkResolverProvider?(), !servers.isEmpty else { return nil }
+        // Its answer is unauthenticated, and Conduit sends credentials to its upstreams and takes them from the PAC.
+        if Self.credentialHosts(config).contains(Self.normalizedHost(name)) {
+            reportNetworkResolverFallback(name: name, servers: servers.count, outcome: "proxy_host")
+            return nil
+        }
         let remaining = tuning.lookupWindow - (NIODeadline.now() - began)
         let attempt = await askInternalServers(
             servers, query: query, timeout: tuning.networkResolverTimeout, askingAtMost: 1,
@@ -1213,10 +1220,27 @@ private final class DNSResolutionCore: @unchecked Sendable {
         return attempt.response
     }
 
+    /// The upstream proxies' hosts and the PAC file's host, whichever are configured.
+    static func credentialHosts(_ config: ProxyConfig) -> Set<String> {
+        var hosts = Set(config.upstreams.map { normalizedHost($0.host) })
+        if let pacHost = URL(string: config.routing.pacURL)?.host {
+            hosts.insert(normalizedHost(pacHost))
+        }
+        hosts.remove("")
+        return hosts
+    }
+
+    static func normalizedHost(_ host: String) -> String {
+        var host = host.lowercased()
+        while host.hasSuffix(".") { host.removeLast() }
+        return host
+    }
+
     private func reportNetworkResolverFallback(name: String, servers: Int, outcome: String) {
         let what = switch outcome {
         case "answered": "the network's DNS server answered"
         case "silent": "the network's DNS server did not answer either"
+        case "proxy_host": "the network's DNS server was not asked: the name is an upstream proxy's or the PAC file's host"
         default: "the network's DNS server was not asked (its circuit is open, or no attempt fits the relay window)"
         }
         guard let suppressed = networkFallbackGate.admit(host: Self.networkResolverLabel, reason: outcome) else {
