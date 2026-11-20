@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+import ConduitShared
 import Foundation
 import XCTest
 @testable import PlatformMac
 @testable import ProxyKernel
 
+/// A helper that holds one arm, with what it would say about its key scripted.
 final class ScriptedVPNDNSOverrideClient: PrivilegeClient, @unchecked Sendable {
     struct Unreachable: LocalizedError {
         var errorDescription: String? { "helper_unreachable" }
@@ -15,10 +17,11 @@ final class ScriptedVPNDNSOverrideClient: PrivilegeClient, @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private var held: VPNDNSOverrideState?
-    private var lastRelease: String?
-    private var restorePending: String?
-    private var losesApplyReplies = false
+    private var held: VPNResolverOverrideArm?
+    private var published = true
+    private var reason: String?
+    private var owned = true
+    private var losesArmReplies = false
     private var script: [Scripted] = []
     private var log: [VPNDNSOverrideRequest] = []
     private var onCall: (@Sendable (VPNDNSOverrideRequest) -> Void)?
@@ -29,7 +32,7 @@ final class ScriptedVPNDNSOverrideClient: PrivilegeClient, @unchecked Sendable {
     }
 
     var requests: [VPNDNSOverrideRequest] { lock.withLock { log } }
-    var record: VPNDNSOverrideState? { lock.withLock { held } }
+    var arm: VPNResolverOverrideArm? { lock.withLock { held } }
 
     func script(_ replies: Scripted...) {
         lock.withLock { script.append(contentsOf: replies) }
@@ -39,20 +42,33 @@ final class ScriptedVPNDNSOverrideClient: PrivilegeClient, @unchecked Sendable {
         lock.withLock { onCall = hook }
     }
 
-    func releaseOnItsOwn(reason: String? = nil) {
+    /// The helper withdrawing its key by itself, keeping the arm.
+    func withdrawOnItsOwn(reason: String) {
         lock.withLock {
-            held = nil
-            lastRelease = reason
-            restorePending = nil
+            published = false
+            self.reason = reason
         }
     }
 
-    func failRestore(reason: String) {
-        lock.withLock { restorePending = reason }
+    func publishAgain() {
+        lock.withLock {
+            published = true
+            reason = nil
+        }
     }
 
-    func loseApplyReplies() {
-        lock.withLock { losesApplyReplies = true }
+    /// A fresh helper: the arm is gone.
+    func restart() {
+        lock.withLock { held = nil }
+    }
+
+    /// Another process armed it.
+    func disown() {
+        lock.withLock { owned = false }
+    }
+
+    func loseArmReplies() {
+        lock.withLock { losesArmReplies = true }
     }
 
     func execute(_ operation: PrivilegedOperation, values: [String]) throws {}
@@ -72,14 +88,20 @@ final class ScriptedVPNDNSOverrideClient: PrivilegeClient, @unchecked Sendable {
         guard supported else { return .unsupported }
         let (reply, lost) = lock.withLock { () -> (VPNDNSOverrideReply, Bool) in
             switch request {
-            case .apply(let service, let expected):
-                held = VPNDNSOverrideState(serviceID: service, originals: expected)
-                return (.applied, losesApplyReplies)
-            case .release:
+            case .arm(let service, let servers):
+                held = VPNResolverOverrideArm(service: service, servers: servers)
+                owned = true
+                return (.armed, losesArmReplies)
+            case .disarm:
                 held = nil
-                return (.released, false)
+                return (.disarmed, false)
             case .status:
-                return (.status(held, lastRelease: lastRelease, restorePending: restorePending), false)
+                return (.status(held.map {
+                    VPNDNSOverrideState(
+                        serviceID: $0.service, servers: $0.servers, published: published,
+                        reason: published ? nil : reason, owned: owned, port: published ? HelperConstants.vpnDNSOverrideRelayPort : nil
+                    )
+                }), false)
             }
         }
         if lost { throw Unreachable() }
@@ -89,13 +111,12 @@ final class ScriptedVPNDNSOverrideClient: PrivilegeClient, @unchecked Sendable {
 
 private let service = "com.cisco.anyconnect"
 private let tunnelServers = ["192.0.2.53", "198.51.100.53"]
+private let target = VPNResolverOverrideArm(service: service, servers: tunnelServers)
+private let ours = FirstResolver(nameserver: "127.0.0.1", port: HelperConstants.vpnDNSOverrideRelayPort)
 
-private func fullTunnel(
-    _ id: String = service, servers: [String] = tunnelServers, interface: String = "utun6", overridden: Bool = false
-) -> PushedResolver {
+private func fullTunnel(_ id: String = service, servers: [String] = tunnelServers, interface: String = "utun6") -> PushedResolver {
     PushedResolver(
-        serviceID: id, searchOrder: 1, interface: interface, domains: ["corp.example"], servers: servers,
-        overridesPrimary: true, overridden: overridden
+        serviceID: id, searchOrder: 1, interface: interface, domains: ["corp.example"], servers: servers, overridesPrimary: true
     )
 }
 
@@ -104,226 +125,82 @@ private func splitTunnel() -> PushedResolver {
 }
 
 final class VPNResolverOverridePolicyTests: XCTestCase {
-    private let t0 = ContinuousClock.now
-
     private func input(
         _ resolvers: [PushedResolver] = [fullTunnel()],
         inUse: Set<String> = Set(tunnelServers),
-        record: VPNDNSOverrideState? = nil,
-        at offset: Duration = .zero,
-        applies: [Duration] = [],
-        backoffUntil: Duration? = nil,
+        armed: VPNResolverOverrideArm? = nil,
         configure: (inout VPNResolverOverrideInput) -> Void = { _ in }
     ) -> VPNResolverOverrideInput {
         var input = VPNResolverOverrideInput(
             helperSupports: true, manageSystemDNS: true, relayServing: true, entriesWanted: true,
-            reading: PushedResolverReading(resolvers: resolvers), serversInUse: inUse, record: record,
-            now: t0 + offset, applies: applies.isEmpty ? [:] : [service: applies.map { t0 + $0 }],
-            backoffUntil: backoffUntil.map { t0 + $0 }
+            reading: PushedResolverReading(resolvers: resolvers), serversInUse: inUse, armed: armed
         )
         configure(&input)
         return input
     }
 
-    private let held = VPNDNSOverrideState(serviceID: service, originals: tunnelServers)
-
-    func testAFullTunnelWhoseServersAreInUseIsApplied() {
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input()), .apply(service: service, expected: tunnelServers))
+    func testAFullTunnelWhoseServersAreInUseIsArmed() {
+        XCTAssertEqual(VPNResolverOverridePolicy.decide(input()), .arm(target))
     }
 
-    func testASplitTunnelIsNeverApplied() {
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input([splitTunnel()], inUse: ["192.0.2.10"])), .none)
+    func testASplitTunnelIsNeverArmed() {
+        XCTAssertEqual(VPNResolverOverridePolicy.decide(input([splitTunnel()])), .none)
     }
 
-    func testTwoFullTunnelsAreNeitherAppliedNorKept() {
-        let two = [fullTunnel(), fullTunnel("other", servers: ["192.0.2.99"], interface: "utun7")]
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input(two, inUse: Set(tunnelServers + ["192.0.2.99"]))), .none)
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input(two, inUse: Set(tunnelServers + ["192.0.2.99"]), record: held)),
-            .release(.notInUse)
-        )
+    func testTwoFullTunnelsAreNeitherArmedNorKept() {
+        let two = [fullTunnel(), fullTunnel("other", servers: ["203.0.113.53"], interface: "utun7")]
+        XCTAssertEqual(VPNResolverOverridePolicy.decide(input(two)), .none)
+        XCTAssertEqual(VPNResolverOverridePolicy.decide(input(two, armed: target)), .disarm(.notInUse))
     }
 
-    func testALiveSetWithoutEveryTunnelServerWaitsAndReleases() {
+    func testALiveSetWithoutEveryTunnelServerWaitsAndDisarms() {
         XCTAssertEqual(VPNResolverOverridePolicy.decide(input(inUse: [tunnelServers[0]])), .none)
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input(inUse: [], record: held)), .release(.notInUse))
+        XCTAssertEqual(VPNResolverOverridePolicy.decide(input(inUse: [tunnelServers[0]], armed: target)), .disarm(.notInUse))
     }
 
-    func testEachPreconditionReleasesWithItsReason() {
-        let cases: [(WritableKeyPath<VPNResolverOverrideInput, Bool>, VPNResolverOverrideReleaseReason)] = [
-            (\.manageSystemDNS, .manageOff), (\.relayServing, .relayNotServing), (\.entriesWanted, .gate),
+    func testAReadingWithNoFullTunnelDisarms() {
+        XCTAssertEqual(VPNResolverOverridePolicy.decide(input([], armed: target)), .disarm(.notInUse))
+    }
+
+    func testEachPreconditionDisarmsWithItsReason() {
+        let cases: [(VPNResolverOverrideDisarmReason, (inout VPNResolverOverrideInput) -> Void)] = [
+            (.manageOff, { $0.manageSystemDNS = false }),
+            (.relayNotServing, { $0.relayServing = false }),
+            (.gate, { $0.entriesWanted = false }),
         ]
-        for (field, reason) in cases {
-            XCTAssertEqual(VPNResolverOverridePolicy.decide(input { $0[keyPath: field] = false }), .none, "\(reason)")
-            XCTAssertEqual(VPNResolverOverridePolicy.decide(input(record: held) { $0[keyPath: field] = false }), .release(reason))
+        for (reason, configure) in cases {
+            XCTAssertEqual(VPNResolverOverridePolicy.decide(input(armed: target, configure: configure)), .disarm(reason))
+            XCTAssertEqual(VPNResolverOverridePolicy.decide(input(configure: configure)), .none, "nothing armed, nothing sent")
         }
     }
 
-    func testAMatchingRecordIsKeptAndARewrittenKeyIsAppliedAgain() {
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input(record: held)), .none)
-        let rewritten = [fullTunnel(servers: ["203.0.113.53"])]
+    func testAMatchingArmIsKeptAndNewServersAreArmedAgain() {
+        XCTAssertEqual(VPNResolverOverridePolicy.decide(input(armed: target)), .none)
+        let moved = ["203.0.113.53"]
         XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input(rewritten, inUse: ["203.0.113.53"], record: held)),
-            .apply(service: service, expected: ["203.0.113.53"])
+            VPNResolverOverridePolicy.decide(input([fullTunnel(servers: moved)], inUse: Set(moved), armed: target)),
+            .arm(VPNResolverOverrideArm(service: service, servers: moved))
         )
     }
 
-    func testAnUnsupportedHelperIsNeverAsked() {
+    func testAnUnsupportedHelperIsNeverAskedToArm() {
         XCTAssertEqual(VPNResolverOverridePolicy.decide(input { $0.helperSupports = false }), .none)
-    }
-
-    func testAnOverriddenReadingWithNoRecordSendsNothing() {
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input([fullTunnel(overridden: true)])), .none)
-    }
-
-    func testABackoffHoldsTheApplyUntilItEnds() {
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input(at: .seconds(59), backoffUntil: .seconds(60))), .none)
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input(at: .seconds(60), backoffUntil: .seconds(60))),
-            .apply(service: service, expected: tunnelServers)
-        )
-        XCTAssertEqual(
-            (1...6).map(VPNResolverOverridePolicy.backoff(step:)),
-            [.seconds(60), .seconds(120), .seconds(240), .seconds(480), .seconds(600), .seconds(600)]
-        )
-    }
-
-    func testTheThirdApplyInTenMinutesIsTheLastAndThenItSuspends() {
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input(at: .seconds(300), applies: [.zero, .seconds(100)])),
-            .apply(service: service, expected: tunnelServers)
-        )
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input(at: .seconds(300), applies: [.zero, .seconds(100), .seconds(200)])),
-            .suspend(service: service, cap: .applied)
-        )
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input(at: .seconds(601), applies: [.zero, .seconds(100), .seconds(200)])),
-            .apply(service: service, expected: tunnelServers),
-            "an apply older than the window no longer counts"
-        )
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input { $0.suspended = [service: self.t0] }), .none)
-    }
-
-    func testASuspensionHoldsForItsLifetimeAndThenTheCapsDecideAfresh() {
-        let suspended: (inout VPNResolverOverrideInput) -> Void = { $0.suspended = [service: self.t0] }
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input(at: .seconds(599), configure: suspended)), .none)
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input(at: .seconds(600), configure: suspended)),
-            .apply(service: service, expected: tunnelServers)
-        )
-    }
-
-    func testAReadingWithNoFullTunnelKeepsTheOverrideWhileTheHeldSetHasItsServers() {
-        let ignored = PushedResolverReading(rejections: [
-            .init(serviceID: service, interface: "utun6", reason: .noMatchDomains),
-        ])
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input([], record: held) { $0.reading = ignored }), .none)
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input([], record: held)), .none, "the service left out entirely")
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input([splitTunnel()], inUse: Set(tunnelServers + ["192.0.2.10"]), record: held)),
-            .none, "another service's split tunnel says nothing about this one"
-        )
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input([])), .none, "nothing held, nothing to keep")
-    }
-
-    func testTheHoldEndsWhenTheSetTheGateTheToggleOrTheRelayDoes() {
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input([], inUse: [tunnelServers[0]], record: held)), .release(.notInUse))
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input([], inUse: [], record: held)), .release(.notInUse))
-        let cases: [(WritableKeyPath<VPNResolverOverrideInput, Bool>, VPNResolverOverrideReleaseReason)] = [
-            (\.manageSystemDNS, .manageOff), (\.relayServing, .relayNotServing), (\.entriesWanted, .gate),
-        ]
-        for (field, reason) in cases {
-            XCTAssertEqual(VPNResolverOverridePolicy.decide(input([], record: held) { $0[keyPath: field] = false }), .release(reason))
-        }
-    }
-
-    func testAReadingOfAnotherFullTunnelOrOfTheServiceAsASplitTunnelReleases() {
-        let other = fullTunnel("other", servers: ["192.0.2.99"], interface: "utun7")
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input([other], record: held)), .release(.notInUse),
-            "another full tunnel, its servers not in use yet"
-        )
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input([other], inUse: Set(tunnelServers + ["192.0.2.99"]), record: held)),
-            .apply(service: "other", expected: ["192.0.2.99"]), "once they are, the override moves to it"
-        )
-        let split = PushedResolver(serviceID: service, interface: "utun6", domains: ["corp.example"], servers: tunnelServers)
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input([split], record: held)), .release(.notInUse))
-    }
-
-    func testAKeyTheClientRewroteWithTheSameServersIsAppliedAgain() {
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(input(record: held)), .none)
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input(record: held) { $0.keyRewritten = true }),
-            .apply(service: service, expected: tunnelServers)
-        )
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input([fullTunnel(overridden: true)], record: held) { $0.keyRewritten = true }),
-            .none, "a reading of the relay is a release in flight or the helper's own write"
-        )
-    }
-
-
-    func testASameServerRewriteCountsTowardNoCapAndWaitsOnlyForTheSpacing() {
-        let capped: (inout VPNResolverOverrideInput) -> Void = {
-            $0.applies = [service: [self.t0, self.t0 + .seconds(100), self.t0 + .seconds(200)]]
-            $0.keyRewritten = true
-            $0.lastApplies = [service: .init(at: self.t0 + .seconds(200), servers: tunnelServers)]
-        }
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input(record: held, at: .seconds(300), configure: capped)),
-            .apply(service: service, expected: tunnelServers)
-        )
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input(record: held, at: .seconds(203), configure: capped)),
-            .wait(until: t0 + .seconds(210))
-        )
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input(record: held, at: .seconds(210), configure: capped)),
-            .apply(service: service, expected: tunnelServers)
-        )
-        XCTAssertEqual(
-            VPNResolverOverridePolicy.decide(input(
-                [fullTunnel(servers: ["203.0.113.53"])], inUse: ["203.0.113.53"], record: held, at: .seconds(300), configure: capped
-            )),
-            .suspend(service: service, cap: .applied)
-        )
-    }
-
-    func testAReleaseIsDecidedAgainstTheSetAboutToBeApplied() {
-        let applied = input(record: held)
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(applied), .none, "the set in use has the tunnel's servers")
-        var next = applied
-        next.serversInUse = []
-        XCTAssertEqual(VPNResolverOverridePolicy.decide(next), .release(.notInUse))
     }
 }
 
 final class VPNResolverOverrideControllerTests: XCTestCase {
-    private final class Clock: @unchecked Sendable {
-        private let lock = NSLock()
-        private var instant = ContinuousClock.now
-        var now: ContinuousClock.Instant { lock.withLock { instant } }
-        func advance(_ by: Duration) { lock.withLock { instant += by } }
-    }
-
     @RuntimeActor private final class Events {
         var lines: [String] = []
     }
 
-    private let clock = Clock()
     @RuntimeActor private let recorded = Events()
-    @RuntimeActor private var events: [String] {
-        get { recorded.lines }
-        set { recorded.lines = newValue }
-    }
+    @RuntimeActor private var events: [String] { recorded.lines }
+    private let order = FakeResolverOrder(first: ours)
 
     @RuntimeActor private func controller(_ client: ScriptedVPNDNSOverrideClient) -> VPNResolverOverrideController {
-        let clock = self.clock
         let recorded = self.recorded
         return VPNResolverOverrideController(
-            client: client, work: PlatformWork(label: "test.vpn-override"), now: { clock.now }
+            client: client, work: PlatformWork(label: "test.vpn-override"), resolverOrder: order
         ) { event, _ in
             recorded.lines.append("\(event.event) \(event.detail ?? "")")
         }
@@ -338,465 +215,229 @@ final class VPNResolverOverrideControllerTests: XCTestCase {
         )
     }
 
-    @RuntimeActor func testTheFirstApplyAsksTheHelperFirstAndSetsTheSubstitutionBeforeItIsSent() async {
+    @RuntimeActor func testAnArmIsConfirmedByTheHelpersStatus() async {
         let client = ScriptedVPNDNSOverrideClient()
         let controller = controller(client)
-        let seen = LockedLog<[String: [String]]>()
-        client.onEachCall { [substitutions = controller.substitutions] request in
-            if case .apply = request { seen.append(substitutions.current) }
-        }
 
-        await controller.pass({ self.inputs() }, pollStatus: false)
+        await controller.pass({ self.inputs() }, pollStatus: true)
 
-        XCTAssertEqual(client.requests, [.status, .apply(service: service, expected: tunnelServers)])
-        XCTAssertEqual(seen.values, [[service: tunnelServers]], "set before the helper writes")
-        XCTAssertEqual(controller.substitutions.current, [service: tunnelServers])
-        XCTAssertEqual(controller.record, VPNDNSOverrideState(serviceID: service, originals: tunnelServers))
-        XCTAssertEqual(events, ["dns.vpn_override_applied service=com.cisco.anyconnect servers=2"])
+        XCTAssertEqual(client.requests, [.arm(service: service, servers: tunnelServers), .status])
+        XCTAssertEqual(controller.armed, target)
+        XCTAssertTrue(controller.published)
+        XCTAssertEqual(events, [
+            "dns.vpn_override_armed service=com.cisco.anyconnect servers=2",
+            "dns.vpn_override_published service=com.cisco.anyconnect",
+        ])
         XCTAssertFalse(events.joined().contains("192.0.2"), "no server address in an event")
 
-        await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: false)
-        XCTAssertEqual(client.requests.count, 2, "a matching record sends nothing")
+        await controller.pass({ self.inputs() }, pollStatus: false)
+        XCTAssertEqual(client.requests.count, 2, "a matching arm sends nothing")
     }
 
     @RuntimeActor func testAHelperWithoutTheFeatureIsAskedOnceAndLeftAlone() async {
         let client = ScriptedVPNDNSOverrideClient(supported: false)
         let controller = controller(client)
 
-        await controller.pass({ self.inputs() }, pollStatus: false)
+        await controller.pass({ self.inputs() }, pollStatus: true)
         await controller.pass({ self.inputs() }, pollStatus: true)
 
-        XCTAssertEqual(client.requests, [.status])
+        XCTAssertEqual(client.requests, [.arm(service: service, servers: tunnelServers)])
         XCTAssertEqual(controller.support, .unsupported)
+        XCTAssertFalse(controller.mayArm)
         XCTAssertEqual(events, [])
     }
 
-    @RuntimeActor func testARelayNotServingRefusalBacksOffAndRestoresTheSubstitutions() async {
+    @RuntimeActor func testAPolicyDisarmCarriesItsReason() async {
         let client = ScriptedVPNDNSOverrideClient()
         let controller = controller(client)
-        client.script(.reply(.status(nil)), .reply(.refused(.relayNotServing)))
-
         await controller.pass({ self.inputs() }, pollStatus: false)
-        XCTAssertEqual(events, ["dns.vpn_override_refused reason=relay_not_serving"])
-        XCTAssertEqual(controller.substitutions.current, [:])
 
-        clock.advance(.seconds(59))
-        await controller.pass({ self.inputs() }, pollStatus: false)
-        XCTAssertEqual(client.requests.count, 2, "still backing off")
+        await controller.pass({ self.inputs(entriesWanted: false) }, pollStatus: false)
 
-        clock.advance(.seconds(1))
-        await controller.pass({ self.inputs() }, pollStatus: false)
-        XCTAssertEqual(client.requests.last, .apply(service: service, expected: tunnelServers))
-        XCTAssertNotNil(controller.record)
+        XCTAssertEqual(client.requests.last, .disarm)
+        XCTAssertNil(client.arm)
+        XCTAssertFalse(controller.mayArm)
+        XCTAssertEqual(Array(events.suffix(2)), ["dns.vpn_override_disarmed reason=gate", "dns.vpn_override_withdrawn reason=disarmed"])
     }
 
-    @RuntimeActor func testAReleaseTheHelperMadeIsSeenThroughStatusAndBacksOff() async {
+    @RuntimeActor func testAWithdrawalTheHelperMadeIsSeenThroughStatusAndTheArmIsKept() async {
         let client = ScriptedVPNDNSOverrideClient()
         let controller = controller(client)
         await controller.pass({ self.inputs() }, pollStatus: false)
-        events = []
 
-        client.releaseOnItsOwn()
+        client.withdrawOnItsOwn(reason: "target_silent")
         await controller.pass({ self.inputs() }, pollStatus: true)
 
-        XCTAssertEqual(events, ["dns.vpn_override_released reason=helper:unknown"])
-        XCTAssertNil(controller.record)
-        XCTAssertEqual(controller.substitutions.current, [:])
-        XCTAssertEqual(client.requests.last, .status, "backing off: no apply straight after")
+        XCTAssertEqual(events.last, "dns.vpn_override_withdrawn reason=target_silent")
+        XCTAssertEqual(controller.armed, target, "the helper keeps the arm and republishes by itself")
+        XCTAssertEqual(client.requests.filter { if case .arm = $0 { true } else { false } }.count, 1)
 
-        clock.advance(.seconds(60))
-        await controller.pass({ self.inputs() }, pollStatus: false)
-        XCTAssertEqual(client.requests.last, .apply(service: service, expected: tunnelServers))
-    }
-
-    @RuntimeActor func testTheHelpersReleaseReasonReachesTheEventAndAnUnknownOneDoesNot() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        await controller.pass({ self.inputs() }, pollStatus: false)
-
-        client.releaseOnItsOwn(reason: "target_refused")
+        client.publishAgain()
         await controller.pass({ self.inputs() }, pollStatus: true)
-        XCTAssertEqual(events.last, "dns.vpn_override_released reason=helper:target_refused")
+        XCTAssertEqual(events.last, "dns.vpn_override_published service=com.cisco.anyconnect")
+    }
 
-        clock.advance(.seconds(60))
+    @RuntimeActor func testAFreshHelperIsArmedAgain() async {
+        let client = ScriptedVPNDNSOverrideClient()
+        let controller = controller(client)
         await controller.pass({ self.inputs() }, pollStatus: false)
-        client.releaseOnItsOwn(reason: "a reason from later 192.0.2.53")
+
+        client.restart()
         await controller.pass({ self.inputs() }, pollStatus: true)
-        XCTAssertEqual(events.last, "dns.vpn_override_released reason=helper:unknown")
+
+        XCTAssertTrue(events.contains("dns.vpn_override_withdrawn reason=helper_stopping"))
+        XCTAssertEqual(client.arm, target)
+        XCTAssertEqual(client.requests.filter { if case .arm = $0 { true } else { false } }.count, 2)
+        XCTAssertTrue(controller.published)
     }
 
-    @RuntimeActor func testAKeyThatLeavesTheOverrideAsksTheHelperWithoutATick() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        await controller.pass({ self.inputs() }, pollStatus: false)
-        await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: false)
-        let sent = client.requests.count
-
-        client.releaseOnItsOwn()
-        await controller.pass({ self.inputs([fullTunnel(overridden: false)]) }, pollStatus: false)
-
-        XCTAssertEqual(client.requests.count, sent + 1)
-        XCTAssertEqual(client.requests.last, .status)
-        XCTAssertEqual(events.last, "dns.vpn_override_released reason=helper:unknown")
-    }
-
-    @RuntimeActor func testAnExplicitReleaseClearsTheSubstitutionsOnlyAfterItReturns() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        await controller.pass({ self.inputs() }, pollStatus: false)
-        let seen = LockedLog<[String: [String]]>()
-        client.onEachCall { [substitutions = controller.substitutions] request in
-            if case .release = request { seen.append(substitutions.current) }
-        }
-
-        await controller.release(.stop)
-        await controller.release(.stop)
-
-        XCTAssertEqual(seen.values, [[service: tunnelServers]], "one release, sent while the substitution still holds")
-        XCTAssertEqual(controller.substitutions.current, [:])
-        XCTAssertEqual(events.last, "dns.vpn_override_released reason=stop")
-        XCTAssertNil(client.record)
-    }
-
-    @RuntimeActor func testAPolicyReleaseCarriesItsReason() async {
+    @RuntimeActor func testAnArmAnotherCallerHoldsIsArmedAgain() async {
         let client = ScriptedVPNDNSOverrideClient()
         let controller = controller(client)
         await controller.pass({ self.inputs() }, pollStatus: false)
 
-        await controller.pass({ self.inputs(inUse: []) }, pollStatus: false)
+        client.disown()
+        await controller.pass({ self.inputs() }, pollStatus: true)
 
-        XCTAssertEqual(events.last, "dns.vpn_override_released reason=not_in_use")
-        XCTAssertEqual(client.requests.last, .release)
+        XCTAssertTrue(events.contains("dns.vpn_override_withdrawn reason=rearmed"))
+        XCTAssertEqual(client.requests.filter { if case .arm = $0 { true } else { false } }.count, 2)
     }
 
-    @RuntimeActor func testAClientThatRewritesTheKeyIsFollowedThreeTimesThenSuspended() async {
+    @RuntimeActor func testAnArmWhoseReplyIsLostCountsAsArmedUntilAStatusSettlesIt() async {
         let client = ScriptedVPNDNSOverrideClient()
+        client.loseArmReplies()
         let controller = controller(client)
-        for index in 1...4 {
-            let servers = ["203.0.113.\(index)"]
-            await controller.pass({ self.inputs([fullTunnel(servers: servers)], inUse: Set(servers)) }, pollStatus: false)
-            clock.advance(.seconds(10))
-        }
-        await controller.pass({ self.inputs([fullTunnel(servers: ["203.0.113.9"])], inUse: ["203.0.113.9"]) }, pollStatus: false)
-
-        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_applied") }.count, 3)
-        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_suspended") }, ["dns.vpn_override_suspended service=com.cisco.anyconnect cap=applied"])
-
-        await controller.pass({ self.inputs([], inUse: [], entriesWanted: false) }, pollStatus: false)
-        await controller.pass({ self.inputs([fullTunnel(servers: ["203.0.113.9"])], inUse: ["203.0.113.9"]) }, pollStatus: false)
-        XCTAssertEqual(client.requests.last, .apply(service: service, expected: ["203.0.113.9"]))
-    }
-
-    @RuntimeActor func testAnApplyWithNoAnswerIsSettledByTheHelpersStatus() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        client.script(.reply(.status(nil)), .fail)
 
         await controller.pass({ self.inputs() }, pollStatus: false)
-
-        XCTAssertEqual(events, ["dns.vpn_override_failed operation=apply reason=helper_unreachable"])
-        XCTAssertTrue(controller.mayHoldRecord)
-        XCTAssertEqual(controller.substitutions.current, [service: tunnelServers], "the helper may have written")
+        XCTAssertTrue(events.contains { $0.hasPrefix("dns.vpn_override_failed operation=arm") })
+        XCTAssertEqual(controller.unconfirmed, target)
+        XCTAssertTrue(controller.mayArm)
 
         await controller.pass({ self.inputs() }, pollStatus: true)
-        XCTAssertEqual(Array(client.requests.suffix(2)), [.status, .apply(service: service, expected: tunnelServers)])
-        XCTAssertNotNil(controller.record)
+        XCTAssertEqual(controller.armed, target, "the status shows the helper took it")
+        XCTAssertNil(controller.unconfirmed)
+        XCTAssertEqual(client.requests.filter { if case .arm = $0 { true } else { false } }.count, 1)
     }
 
-    private var heldRecord: VPNDNSOverrideState { VPNDNSOverrideState(serviceID: service, originals: tunnelServers) }
-
-    @RuntimeActor private func applied(_ controller: VPNResolverOverrideController) async {
-        await controller.pass({ self.inputs() }, pollStatus: false)
-        await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: false)
-    }
-
-    @RuntimeActor private func flap(_ controller: VPNResolverOverrideController, _ client: ScriptedVPNDNSOverrideClient) async {
-        await controller.pass({ self.inputs([]) }, pollStatus: false)
-        client.script(.reply(.status(heldRecord)), .reply(.refused(.notPrimary)))
-        await controller.pass({ self.inputs([fullTunnel()]) }, pollStatus: false)
-        await controller.pass({ self.inputs([]) }, pollStatus: false)
-        await controller.pass({ self.inputs([fullTunnel()]) }, pollStatus: false)
-        await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: false)
-    }
-
-    @RuntimeActor func testAFlapKeepsTheOverrideAndPutsTheRelayBackOnceTheServiceIsPrimary() async {
+    @RuntimeActor func testAnArmWhoseReplyIsLostIsDisarmedOnceNoLongerWanted() async {
         let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        await applied(controller)
-        events = []
-
-        clock.advance(.seconds(66))
-        await controller.pass({ self.inputs([]) }, pollStatus: false)
-        XCTAssertEqual(client.requests.count, 2, "a reading with the service left out sends nothing, a release least of all")
-        XCTAssertEqual(controller.record, heldRecord)
-        XCTAssertEqual(controller.substitutions.current, [service: tunnelServers], "the key still reads as the tunnel's")
-
-        clock.advance(.seconds(5))
-        client.script(.reply(.status(heldRecord)), .reply(.refused(.notPrimary)))
-        await controller.pass({ self.inputs([fullTunnel()]) }, pollStatus: false)
-        XCTAssertEqual(Array(client.requests.suffix(2)), [.status, .apply(service: service, expected: tunnelServers)],
-                       "the client's own servers in the key: the helper still holds the record, so the client rewrote it")
-        clock.advance(.seconds(1))
-        await controller.pass({ self.inputs([]) }, pollStatus: false)
-        clock.advance(.seconds(1))
-        await controller.pass({ self.inputs([fullTunnel()]) }, pollStatus: false)
-        await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: false)
-
-        XCTAssertEqual(events, [
-            "dns.vpn_override_refused reason=not_primary",
-            "dns.vpn_override_applied service=com.cisco.anyconnect servers=2",
-        ])
-        XCTAssertEqual(client.requests.filter { $0 == .release }, [])
-        XCTAssertEqual(client.record, heldRecord)
-    }
-
-    @RuntimeActor func testASameServerRewriteBeforeAnyReadingOfTheWriteIsAppliedAgainByTheTick() async {
-        let client = ScriptedVPNDNSOverrideClient()
+        client.loseArmReplies()
         let controller = controller(client)
         await controller.pass({ self.inputs() }, pollStatus: false)
-        let sent = client.requests.count
 
-        clock.advance(.seconds(1))
+        await controller.pass({ self.inputs(entriesWanted: false) }, pollStatus: false)
+
+        XCTAssertEqual(client.requests.last, .disarm)
+        XCTAssertNil(client.arm)
+        XCTAssertFalse(controller.mayArm)
+    }
+
+    @RuntimeActor func testAResolverOrderThatSkipsTheKeyIsReportedOncePerChange() async {
+        let client = ScriptedVPNDNSOverrideClient()
+        let controller = controller(client)
+        order.first = FirstResolver(nameserver: tunnelServers[0], port: nil)
+
+        await controller.pass({ self.inputs() }, pollStatus: false)
         await controller.pass({ self.inputs() }, pollStatus: true)
-        XCTAssertEqual(Array(client.requests.dropFirst(sent)), [.status], "too soon: the reading may still be on its way")
+        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_not_first") }, ["dns.vpn_override_not_first service=com.cisco.anyconnect"])
 
-        clock.advance(.seconds(29))
+        order.first = ours
         await controller.pass({ self.inputs() }, pollStatus: true)
-        XCTAssertEqual(Array(client.requests.suffix(2)), [.status, .apply(service: service, expected: tunnelServers)])
-        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_applied") }.count, 2)
-    }
-
-    @RuntimeActor func testAFlapWhoseKeyStaysAtTheRelaySendsNothing() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        await applied(controller)
-        let sent = client.requests.count
-
-        for _ in 1...3 {
-            await controller.pass({ self.inputs([]) }, pollStatus: false)
-            await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: false)
-        }
-        await controller.pass({ self.inputs([]) }, pollStatus: true)
-
-        XCTAssertEqual(Array(client.requests.dropFirst(sent)), [.status], "only the health tick's poll")
-        XCTAssertEqual(events, ["dns.vpn_override_applied service=com.cisco.anyconnect servers=2"])
-    }
-
-    @RuntimeActor func testThreeFlapsInTenMinutesNeverSuspend() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        await applied(controller)
-        for _ in 1...3 {
-            clock.advance(.seconds(150))
-            await flap(controller, client)
-        }
-
-        XCTAssertFalse(events.contains { $0.hasPrefix("dns.vpn_override_suspended") }, "\(events)")
-        XCTAssertFalse(events.contains { $0.hasPrefix("dns.vpn_override_released") })
-        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_refused") }.count, 3, "one refusal per flap")
-        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_applied") }.count, 4)
-        XCTAssertEqual(client.record, heldRecord)
-        XCTAssertEqual(controller.substitutions.current, [service: tunnelServers])
-    }
-
-    @RuntimeActor func testSameServerRewritesEvery25SecondsAreReappliedAtOnceAndNeverSuspend() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        await applied(controller)
-        for rewrite in 1...48 {
-            clock.advance(.seconds(25))
-            await controller.pass({ self.inputs([]) }, pollStatus: false)
-            await controller.pass({ self.inputs([fullTunnel()]) }, pollStatus: false)
-            XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_applied") }.count, 1 + rewrite, "rewrite \(rewrite)")
-            await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: false)
-        }
-
-        XCTAssertFalse(events.contains { $0.hasPrefix("dns.vpn_override_suspended") })
-        XCTAssertNil(controller.wakeAt)
-        XCTAssertEqual(client.record, heldRecord)
-    }
-
-    @RuntimeActor func testInstantRewritesAreAppliedTenSecondsApart() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        await applied(controller)
-        for _ in 1...60 {
-            clock.advance(.seconds(1))
-            await controller.pass({ self.inputs([fullTunnel()]) }, pollStatus: false)
-            await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: false)
-        }
-
-        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_applied") }.count, 1 + 6)
-        XCTAssertFalse(events.contains { $0.hasPrefix("dns.vpn_override_suspended") })
-    }
-
-    @RuntimeActor func testAWaitArmsOneWakeThatRunsAPass() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let released = AsyncStream<Void>.makeStream()
-        let clock = self.clock
-        let controller = VPNResolverOverrideController(
-            client: client, work: PlatformWork(label: "test.vpn-override"), now: { clock.now },
-            sleep: { _ in for await _ in released.stream { return } }
-        ) { _, _ in }
-        var wakes = 0
-        controller.onWake = { wakes += 1 }
-        await applied(controller)
-        let appliedAt = clock.now
-
-        clock.advance(.seconds(3))
-        await controller.pass({ self.inputs([fullTunnel()]) }, pollStatus: false)
-        await controller.pass({ self.inputs([fullTunnel()]) }, pollStatus: false)
-        XCTAssertEqual(controller.wakeAt, appliedAt + VPNResolverOverridePolicy.minimumApplySpacing)
-        XCTAssertEqual(client.requests.filter { if case .apply = $0 { true } else { false } }.count, 1)
-
-        released.continuation.yield()
-        for _ in 0..<1000 where wakes == 0 { await Task.yield() }
-        XCTAssertEqual(wakes, 1)
-        XCTAssertNil(controller.wakeAt)
-    }
-
-    @RuntimeActor func testChangedServersSuspendAtTheCapAndResumeWhenTheSuspensionExpires() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        for index in 1...4 {
-            let servers = ["203.0.113.\(index)"]
-            await controller.pass({ self.inputs([fullTunnel(servers: servers)], inUse: Set(servers)) }, pollStatus: false)
-            clock.advance(.seconds(20))
-        }
-        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_applied") }.count, 3)
-        XCTAssertEqual(events.last, "dns.vpn_override_suspended service=com.cisco.anyconnect cap=applied")
-
-        clock.advance(.seconds(579))
-        await controller.pass({ self.inputs([fullTunnel(servers: ["203.0.113.4"])], inUse: ["203.0.113.4"]) }, pollStatus: false)
-        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_applied") }.count, 3)
-
-        clock.advance(.seconds(1))
-        await controller.pass({ self.inputs([fullTunnel(servers: ["203.0.113.4"])], inUse: ["203.0.113.4"]) }, pollStatus: false)
-        XCTAssertEqual(Array(events.suffix(2)), [
-            "dns.vpn_override_suspension_expired service=com.cisco.anyconnect",
-            "dns.vpn_override_applied service=com.cisco.anyconnect servers=1",
-        ])
-        XCTAssertEqual(client.requests.last, .apply(service: service, expected: ["203.0.113.4"]))
-    }
-
-    @RuntimeActor func testAPersistentNotPrimaryRefusalNeverSuspendsAndIsAttemptedOncePerPass() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        client.script(.reply(.status(nil)))
-        for pass in 1...120 {
-            client.script(.reply(.refused(.notPrimary)))
-            await controller.pass({ self.inputs() }, pollStatus: false)
-            XCTAssertEqual(client.requests.filter { if case .apply = $0 { true } else { false } }.count, pass)
-            XCTAssertNil(controller.wakeAt, "a refusal arms no wake")
-            clock.advance(.seconds(1))
-        }
-
-        XCTAssertFalse(events.contains { $0.hasPrefix("dns.vpn_override_suspended") })
-        XCTAssertNil(controller.record)
-    }
-
-    @RuntimeActor func testAClientThatFlapsEvery25SecondsAndIsRefusedEachTimeIsNeverSuspended() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        await applied(controller)
-        for flap in 1...48 {
-            clock.advance(.seconds(25))
-            await controller.pass({ self.inputs([]) }, pollStatus: false)
-            client.script(.reply(.status(heldRecord)), .reply(.refused(.notPrimary)))
-            await controller.pass({ self.inputs([fullTunnel()]) }, pollStatus: false)
-            XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_refused") }.count, flap)
-        }
-
-        XCTAssertFalse(events.contains { $0.hasPrefix("dns.vpn_override_suspended") })
-    }
-
-    @RuntimeActor func testAnApplyWhoseReplyIsLostIsCountedOnceWhenTheStatusConfirmsIt() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        client.loseApplyReplies()
-        await controller.pass({ self.inputs() }, pollStatus: false)
-        XCTAssertEqual(events, ["dns.vpn_override_failed operation=apply reason=helper_unreachable"])
-
-        await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: true)
-        let confirmedAt = clock.now
-        await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: true)
-
-        XCTAssertEqual(controller.record, heldRecord)
-        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_applied") }, [
-            "dns.vpn_override_applied service=com.cisco.anyconnect servers=2 confirmed=status",
-        ])
-
-        clock.advance(.seconds(3))
-        let sent = client.requests.count
-        await controller.pass({ self.inputs([fullTunnel()]) }, pollStatus: false)
-        XCTAssertFalse(client.requests.dropFirst(sent).contains { if case .apply = $0 { true } else { false } }, "spaced from the confirmed apply")
-        XCTAssertEqual(controller.wakeAt, confirmedAt + VPNResolverOverridePolicy.minimumApplySpacing)
-    }
-
-    @RuntimeActor func testAnApplyWhoseReplyIsLostIsReleasedOnceItIsNoLongerWanted() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        client.loseApplyReplies()
-        await controller.pass({ self.inputs() }, pollStatus: false)
-        XCTAssertNil(controller.record)
-        XCTAssertEqual(client.record, heldRecord, "the helper holds it")
-
-        let unwanted = inputs([], inUse: [], entriesWanted: false)
-        XCTAssertEqual(controller.decide(unwanted), .release(.gate), "the set waits for this release")
-        await controller.pass({ unwanted }, pollStatus: false)
-
-        XCTAssertEqual(client.requests.last, .release)
-        XCTAssertNil(client.record)
-        XCTAssertEqual(events.last, "dns.vpn_override_released reason=gate")
-        XCTAssertFalse(controller.mayHoldRecord)
-    }
-
-    @RuntimeActor func testAppliesWhoseRepliesAreLostCountTowardTheCap() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        client.loseApplyReplies()
-        for index in 1...4 {
-            let servers = ["203.0.113.\(index)"]
-            await controller.pass({ self.inputs([fullTunnel(servers: servers)], inUse: Set(servers)) }, pollStatus: false)
-            await controller.pass(
-                { self.inputs([fullTunnel(servers: servers, overridden: true)], inUse: Set(servers)) }, pollStatus: true
-            )
-            clock.advance(.seconds(20))
-        }
-
-        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_applied") }.count, 3)
-        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_suspended") }, [
-            "dns.vpn_override_suspended service=com.cisco.anyconnect cap=applied",
-        ])
-    }
-
-    @RuntimeActor func testARestoreTheHelperCouldNotWriteIsReportedOnceAndItsReleaseFollows() async {
-        let client = ScriptedVPNDNSOverrideClient()
-        let controller = controller(client)
-        await applied(controller)
-        events = []
-
-        client.failRestore(reason: "owner_exited")
-        await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: true)
-        await controller.pass({ self.inputs([fullTunnel(overridden: true)]) }, pollStatus: true)
-
-        XCTAssertEqual(events, ["dns.vpn_override_restore_pending service=com.cisco.anyconnect reason=helper:owner_exited"])
-        XCTAssertEqual(controller.record, heldRecord, "the key still reads 127.0.0.1 until the restore lands")
-        XCTAssertEqual(controller.substitutions.current, [service: tunnelServers])
-
-        client.releaseOnItsOwn(reason: "owner_exited")
+        order.first = FirstResolver(nameserver: "127.0.0.1", port: 53)
         await controller.pass({ self.inputs() }, pollStatus: true)
-        XCTAssertEqual(events.last, "dns.vpn_override_released reason=helper:owner_exited")
-        XCTAssertNil(controller.record)
+        XCTAssertEqual(events.filter { $0.hasPrefix("dns.vpn_override_not_first") }.count, 2, "the :53 relay first is not the key")
     }
 
-    @RuntimeActor func testAReleaseWithNothingSentAsksNothing() async {
+    @RuntimeActor func testTheOrderIsNotReadWhileTheKeyIsWithdrawn() async {
         let client = ScriptedVPNDNSOverrideClient()
+        client.withdrawOnItsOwn(reason: "vpn_changed")
         let controller = controller(client)
 
-        await controller.release(.manageOff)
+        await controller.pass({ self.inputs() }, pollStatus: true)
 
+        XCTAssertEqual(order.reads, 0)
+        XCTAssertFalse(controller.published)
+    }
+
+    @RuntimeActor func testADisarmWithNothingArmedAsksNothing() async {
+        let client = ScriptedVPNDNSOverrideClient()
+        let controller = controller(client)
+        await controller.disarm(.stop)
         XCTAssertEqual(client.requests, [])
         XCTAssertEqual(events, [])
+    }
+
+    @RuntimeActor func testAFailedDisarmKeepsTheArmForTheNextPass() async {
+        let client = ScriptedVPNDNSOverrideClient()
+        let controller = controller(client)
+        await controller.pass({ self.inputs() }, pollStatus: false)
+        client.script(.fail)
+
+        await controller.disarm(.stop)
+
+        XCTAssertTrue(controller.mayArm)
+        XCTAssertTrue(events.contains { $0.hasPrefix("dns.vpn_override_failed operation=disarm") })
+        await controller.pass({ self.inputs(entriesWanted: false) }, pollStatus: false)
+        XCTAssertFalse(controller.mayArm)
+    }
+}
+
+final class ScutilResolverOrderTests: XCTestCase {
+    private let published = """
+    DNS configuration
+
+    resolver #1
+      nameserver[0] : 127.0.0.1
+      port     : 15353
+      flags    : Supplemental, Request A records
+      reach    : 0x00030002 (Reachable,Local Address,Directly Reachable Address)
+      order    : 0
+
+    resolver #2
+      search domain[0] : corp.example
+      nameserver[0] : 192.0.2.53
+      if_index : 23 (utun6)
+      flags    : Request A records
+      order    : 1
+
+    DNS configuration (for scoped queries)
+
+    resolver #1
+      nameserver[0] : 127.0.0.1
+      if_index : 15 (en0)
+    """
+
+    func testResolverOneIsReadWithItsPort() {
+        XCTAssertEqual(ScutilResolverOrder.parse(published), FirstResolver(nameserver: "127.0.0.1", port: 15353))
+    }
+
+    func testResolverOneWithoutAPortHasNone() {
+        let vpn = "DNS configuration\n\nresolver #1\n  nameserver[0] : 192.0.2.53\n  order    : 1\n\nresolver #2\n  port : 15353\n"
+        XCTAssertEqual(ScutilResolverOrder.parse(vpn), FirstResolver(nameserver: "192.0.2.53", port: nil))
+    }
+
+    func testOutputWithoutAResolverIsUnreadable() {
+        XCTAssertNil(ScutilResolverOrder.parse(""))
+        XCTAssertNil(ScutilResolverOrder.parse("No DNS configuration available\n"))
+    }
+
+    func testRenderRoundTrips() {
+        for first in [ours, FirstResolver(nameserver: "192.0.2.53", port: nil), FirstResolver(nameserver: nil, port: nil)] {
+            XCTAssertEqual(ScutilResolverOrder.parse(ScutilResolverOrder.render(first: first)), first)
+        }
+    }
+
+    func testAFailedRunIsUnreadable() {
+        let published = self.published
+        let failed = ScutilResolverOrder(run: { _, _ in CommandResult(exitCode: 1, standardOutput: published, standardError: "") })
+        XCTAssertNil(failed.firstResolver())
+        struct Boom: Error {}
+        XCTAssertNil(ScutilResolverOrder(run: { _, _ in throw Boom() }).firstResolver())
+        let ran = ScutilResolverOrder(run: { path, arguments in
+            XCTAssertEqual(path, "/usr/sbin/scutil")
+            XCTAssertEqual(arguments, ["--dns"])
+            return CommandResult(exitCode: 0, standardOutput: published, standardError: "")
+        })
+        XCTAssertEqual(ran.firstResolver(), FirstResolver(nameserver: "127.0.0.1", port: 15353))
     }
 }

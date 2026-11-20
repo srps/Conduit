@@ -10,98 +10,64 @@ final class HelperVPNDNSOverrideTests: XCTestCase {
     private let service = "com.cisco.anyconnect"
     private let servers = ["192.0.2.53", "198.51.100.53"]
 
-    func testTheOverrideReplyFieldsRoundTrip() throws {
-        var reply = HelperResponse.error("VPN DNS override refused: changed")
-        reply.vpnDNSOverride = HelperVPNDNSOverrideStatus(serviceID: service, originals: servers)
-        reply.vpnDNSOverrideRefusal = .changed
+    private func status(published: Bool = true, reason: String? = nil, owned: Bool = true, port: Int? = 15353) -> HelperVPNDNSOverrideStatus {
+        HelperVPNDNSOverrideStatus(
+            serviceID: service, servers: servers, published: published, reason: reason, owned: owned, port: published ? port : nil
+        )
+    }
+
+    func testTheStatusRoundTrips() throws {
+        var reply = HelperResponse.ok()
+        reply.vpnDNSOverride = status(published: false, reason: "target_silent", owned: false)
         let decoded = try JSONDecoder().decode(HelperResponse.self, from: try JSONEncoder().encode(reply))
         XCTAssertEqual(decoded, reply)
     }
 
-    func testTheLastReleaseRoundTripsAndAnOlderReplyHasNone() throws {
-        var reply = HelperResponse.ok()
-        reply.vpnDNSOverrideLastRelease = "target_refused"
-        let decoded = try JSONDecoder().decode(HelperResponse.self, from: try JSONEncoder().encode(reply))
-        XCTAssertEqual(decoded.vpnDNSOverrideLastRelease, "target_refused")
-
-        let older = Data(#"{"protocolVersion":5,"success":true}"#.utf8)
-        XCTAssertNil(try JSONDecoder().decode(HelperResponse.self, from: older).vpnDNSOverrideLastRelease)
-        let wrongType = Data(#"{"protocolVersion":5,"success":true,"vpnDNSOverrideLastRelease":7}"#.utf8)
-        XCTAssertNil(try JSONDecoder().decode(HelperResponse.self, from: wrongType).vpnDNSOverrideLastRelease)
-    }
-
-    func testAnOlderClientIgnoresTheLastRelease() throws {
-        struct OlderStatusReply: Decodable {
-            var protocolVersion: Int
-            var success: Bool
-            var vpnDNSOverride: HelperVPNDNSOverrideStatus?
-        }
-        var reply = HelperResponse.ok()
-        reply.vpnDNSOverride = HelperVPNDNSOverrideStatus(serviceID: service, originals: servers)
-        reply.vpnDNSOverrideLastRelease = "relay_stopped"
-        let older = try JSONDecoder().decode(OlderStatusReply.self, from: try JSONEncoder().encode(reply))
-        XCTAssertTrue(older.success)
-        XCTAssertEqual(older.vpnDNSOverride, reply.vpnDNSOverride)
-    }
-
-    func testOnlyAReleaseReasonThisClientKnowsReachesTheReply() {
-        XCTAssertEqual(HelperToolPrivilegeClient.releaseReason("target_silent"), "target_silent")
-        XCTAssertNil(HelperToolPrivilegeClient.releaseReason("a_reason_from_later"))
-        XCTAssertNil(HelperToolPrivilegeClient.releaseReason("relay stopped 127.0.0.1"))
-        XCTAssertNil(HelperToolPrivilegeClient.releaseReason(nil))
-    }
-
     func testAnOlderHelpersReplyHasNoOverrideFields() throws {
-        let older = Data(#"{"protocolVersion":5,"success":true,"features":["dns-relay-status"]}"#.utf8)
+        let older = Data(#"{"protocolVersion":5,"success":true,"features":["dns-relay-status","vpn-dns-override"]}"#.utf8)
         let decoded = try JSONDecoder().decode(HelperResponse.self, from: older)
         XCTAssertTrue(decoded.success)
         XCTAssertNil(decoded.vpnDNSOverride)
-        XCTAssertNil(decoded.vpnDNSOverrideRefusal)
-        XCTAssertEqual(decoded.features, [.dnsRelayStatus])
+        XCTAssertEqual(decoded.features, [.dnsRelayStatus], "the rewrite helper's feature is not this one")
     }
 
-    func testARefusalOrStatusThisClientCannotReadIsDroppedNotABrokenFrame() throws {
-        let later = Data(#"{"protocolVersion":5,"success":false,"vpnDNSOverrideRefusal":"later","vpnDNSOverride":{"serviceID":1}}"#.utf8)
-        let decoded = try JSONDecoder().decode(HelperResponse.self, from: later)
-        XCTAssertFalse(decoded.success)
-        XCTAssertNil(decoded.vpnDNSOverrideRefusal)
+    func testARewriteHelpersStatusIsDroppedNotABrokenFrame() throws {
+        let rewrite = Data(#"{"protocolVersion":5,"success":true,"vpnDNSOverride":{"serviceID":"com.cisco.anyconnect","originals":["192.0.2.53"]}}"#.utf8)
+        let decoded = try JSONDecoder().decode(HelperResponse.self, from: rewrite)
+        XCTAssertTrue(decoded.success)
         XCTAssertNil(decoded.vpnDNSOverride)
     }
 
-    func testTheCommandsAndFeatureKeepTheirWireNames() throws {
-        XCTAssertEqual(HelperCommand.vpnDNSOverrideApply.rawValue, "vpn-dns-override-apply")
-        XCTAssertEqual(HelperCommand.vpnDNSOverrideRelease.rawValue, "vpn-dns-override-release")
+    func testTheCommandsFeatureAndKeyKeepTheirWireNames() {
+        XCTAssertEqual(HelperCommand.vpnDNSOverrideArm.rawValue, "vpn-dns-override-arm")
+        XCTAssertEqual(HelperCommand.vpnDNSOverrideDisarm.rawValue, "vpn-dns-override-disarm")
         XCTAssertEqual(HelperCommand.vpnDNSOverrideStatus.rawValue, "vpn-dns-override-status")
-        XCTAssertEqual(HelperFeature.vpnDNSOverride.rawValue, "vpn-dns-override")
-        for refusal in HelperVPNDNSOverrideRefusal.allCases {
-            XCTAssertEqual(VPNDNSOverrideRefusal(refusal).rawValue, refusal.rawValue)
-        }
-        XCTAssertEqual(VPNDNSOverrideRefusal.allCases.count, HelperVPNDNSOverrideRefusal.allCases.count)
+        XCTAssertEqual(HelperFeature.vpnDNSOverride.rawValue, "vpn-dns-override-key")
+        XCTAssertEqual(HelperConstants.vpnDNSOverrideServiceID, "io.github.srps.Conduit.dns-relay")
+        XCTAssertNil(UUID(uuidString: HelperConstants.vpnDNSOverrideServiceID))
+        XCTAssertFalse([53, 5353].contains(HelperConstants.vpnDNSOverrideRelayPort))
+        XCTAssertEqual(HelperProtocolVersion.current, 5)
     }
 
-    func testReleaseAndStatusAreTeardownOnlyAndApplyIsNot() {
-        XCTAssertTrue(HelperAdmission.isTeardownOnly(.vpnDNSOverrideRelease))
+    func testDisarmAndStatusAreTeardownOnlyAndArmIsNot() {
+        XCTAssertTrue(HelperAdmission.isTeardownOnly(.vpnDNSOverrideDisarm))
         XCTAssertTrue(HelperAdmission.isTeardownOnly(.vpnDNSOverrideStatus))
-        XCTAssertFalse(HelperAdmission.isTeardownOnly(.vpnDNSOverrideApply))
-        for command in [HelperCommand.vpnDNSOverrideRelease, .vpnDNSOverrideStatus] {
+        XCTAssertFalse(HelperAdmission.isTeardownOnly(.vpnDNSOverrideArm))
+        for command in [HelperCommand.vpnDNSOverrideDisarm, .vpnDNSOverrideStatus] {
             XCTAssertNil(HelperAdmission.refusal(peerUID: 501, consoleUID: 0, lastConsoleUID: 501, command: command), command.rawValue)
         }
         XCTAssertEqual(
-            HelperAdmission.refusal(peerUID: 501, consoleUID: 0, lastConsoleUID: 501, command: .vpnDNSOverrideApply, values: [service] + servers),
+            HelperAdmission.refusal(peerUID: 501, consoleUID: 0, lastConsoleUID: 501, command: .vpnDNSOverrideArm, values: [service] + servers),
             .noConsoleUser
         )
-        XCTAssertNil(HelperAdmission.refusal(peerUID: 501, consoleUID: 501, lastConsoleUID: 501, command: .vpnDNSOverrideApply, values: [service] + servers))
-        XCTAssertEqual(HelperAdmission.refusal(peerUID: 502, consoleUID: 501, lastConsoleUID: 501, command: .vpnDNSOverrideRelease), .unauthorized)
-    }
-
-    func testARefusedApplyIsAuditedAsAFixedWord() {
-        XCTAssertEqual(HelperAuditOutcome.declined.rawValue, "declined")
+        XCTAssertNil(HelperAdmission.refusal(peerUID: 501, consoleUID: 501, lastConsoleUID: 501, command: .vpnDNSOverrideArm, values: [service] + servers))
+        XCTAssertEqual(HelperAdmission.refusal(peerUID: 502, consoleUID: 501, lastConsoleUID: 501, command: .vpnDNSOverrideDisarm), .unauthorized)
     }
 
     func testAHelperWithoutTheFeatureIsUnsupportedWithoutAPrompt() throws {
         var older = HelperResponse.ok()
         older.features = [.dnsRelayStatus]
-        for request in [VPNDNSOverrideRequest.apply(service: service, expected: servers), .release, .status] {
+        for request in [VPNDNSOverrideRequest.arm(service: service, servers: servers), .disarm, .status] {
             let helper = try FakeHelper(replies: [.error("Invalid request"), older])
             defer { helper.stop() }
             let probe = clientProbe(helper.path)
@@ -125,65 +91,64 @@ final class HelperVPNDNSOverrideTests: XCTestCase {
         older.protocolVersion = 4
         let helper = try FakeHelper(replies: [older])
         defer { helper.stop() }
-        XCTAssertEqual(try clientProbe(helper.path).client.vpnDNSOverride(.release), .unsupported)
+        XCTAssertEqual(try clientProbe(helper.path).client.vpnDNSOverride(.disarm), .unsupported)
     }
 
-    func testAnApplyCarriesTheServiceAndServersAndMapsTheReply() throws {
-        var applied = HelperResponse.ok()
-        applied.vpnDNSOverride = HelperVPNDNSOverrideStatus(serviceID: service, originals: servers)
-        let helper = try FakeHelper(replies: [applied])
-        defer { helper.stop() }
-
-        XCTAssertEqual(try clientProbe(helper.path).client.vpnDNSOverride(.apply(service: service, expected: servers)), .applied)
-        XCTAssertEqual(helper.commandsSeen, [.vpnDNSOverrideApply])
-        XCTAssertEqual(helper.valuesSeen, [[service] + servers])
-    }
-
-    func testARefusedApplyIsTheRefusalWithoutAPing() throws {
-        var refused = HelperResponse.error("VPN DNS override refused: changed")
-        refused.vpnDNSOverrideRefusal = .changed
-        let helper = try FakeHelper(replies: [refused])
-        defer { helper.stop() }
-
-        XCTAssertEqual(try clientProbe(helper.path).client.vpnDNSOverride(.apply(service: service, expected: servers)), .refused(.changed))
-        XCTAssertEqual(helper.commandsSeen, [.vpnDNSOverrideApply])
-    }
-
-    func testStatusAndReleaseMapTheReply() throws {
-        var held = HelperResponse.ok()
-        held.vpnDNSOverride = HelperVPNDNSOverrideStatus(serviceID: service, originals: servers)
-        var released = HelperResponse.ok()
-        released.vpnDNSOverrideLastRelease = "target_refused"
-        var pending = held
-        pending.vpnDNSOverrideRestorePending = "owner_exited"
-        let helper = try FakeHelper(replies: [held, released, pending, .ok()])
+    func testAnArmCarriesTheServiceAndServers() throws {
+        let helper = try FakeHelper(replies: [.ok(), .ok()])
         defer { helper.stop() }
         let client = clientProbe(helper.path).client
 
-        XCTAssertEqual(try client.vpnDNSOverride(.status), .status(VPNDNSOverrideState(serviceID: service, originals: servers)))
-        XCTAssertEqual(try client.vpnDNSOverride(.status), .status(nil, lastRelease: "target_refused"))
-        XCTAssertEqual(
-            try client.vpnDNSOverride(.status),
-            .status(VPNDNSOverrideState(serviceID: service, originals: servers), restorePending: "owner_exited")
-        )
-        XCTAssertEqual(try client.vpnDNSOverride(.release), .released)
-        XCTAssertEqual(helper.commandsSeen, [.vpnDNSOverrideStatus, .vpnDNSOverrideStatus, .vpnDNSOverrideStatus, .vpnDNSOverrideRelease])
+        XCTAssertEqual(try client.vpnDNSOverride(.arm(service: service, servers: servers)), .armed)
+        XCTAssertEqual(try client.vpnDNSOverride(.disarm), .disarmed)
+        XCTAssertEqual(helper.commandsSeen, [.vpnDNSOverrideArm, .vpnDNSOverrideDisarm])
+        XCTAssertEqual(helper.valuesSeen, [[service] + servers, []])
+    }
+
+    func testStatusMapsTheReply() throws {
+        var held = HelperResponse.ok()
+        held.vpnDNSOverride = status()
+        var withheld = HelperResponse.ok()
+        withheld.vpnDNSOverride = status(published: false, reason: "vpn_changed", owned: false)
+        var later = HelperResponse.ok()
+        later.vpnDNSOverride = status(published: false, reason: "a_reason_from_later")
+        var badPort = HelperResponse.ok()
+        badPort.vpnDNSOverride = status(port: 70_000)
+        let helper = try FakeHelper(replies: [held, withheld, later, badPort, .ok()])
+        defer { helper.stop() }
+        let client = clientProbe(helper.path).client
+
+        XCTAssertEqual(try client.vpnDNSOverride(.status), .status(VPNDNSOverrideState(
+            serviceID: service, servers: servers, published: true, owned: true, port: 15353
+        )))
+        XCTAssertEqual(try client.vpnDNSOverride(.status), .status(VPNDNSOverrideState(
+            serviceID: service, servers: servers, published: false, reason: "vpn_changed", owned: false
+        )))
+        XCTAssertEqual(try client.vpnDNSOverride(.status), .status(VPNDNSOverrideState(
+            serviceID: service, servers: servers, published: false, reason: "unknown", owned: true
+        )))
+        XCTAssertEqual(try client.vpnDNSOverride(.status), .status(VPNDNSOverrideState(
+            serviceID: service, servers: servers, published: true, owned: true, port: nil
+        )))
+        XCTAssertEqual(try client.vpnDNSOverride(.status), .status(nil))
     }
 
     func testAStatusOutOfShapeIsAnError() throws {
-        var held = HelperResponse.ok()
-        held.vpnDNSOverride = HelperVPNDNSOverrideStatus(serviceID: service, originals: ["127.0.0.1"])
-        let helper = try FakeHelper(replies: [held])
-        defer { helper.stop() }
-        XCTAssertThrowsError(try clientProbe(helper.path).client.vpnDNSOverride(.status))
+        for servers in [["127.0.0.1"], ["0.0.0.0"], []] {
+            var held = HelperResponse.ok()
+            held.vpnDNSOverride = HelperVPNDNSOverrideStatus(serviceID: service, servers: servers, published: true, owned: true)
+            let helper = try FakeHelper(replies: [held])
+            defer { helper.stop() }
+            XCTAssertThrowsError(try clientProbe(helper.path).client.vpnDNSOverride(.status), "\(servers)")
+        }
     }
 
     func testAFailureFromAHelperWithTheFeatureThrows() throws {
         var current = HelperResponse.ok()
         current.features = HelperFeature.allCases
-        let helper = try FakeHelper(replies: [.error("VPN DNS override release could not write the key: restore_failed"), current])
+        let helper = try FakeHelper(replies: [.error("Invalid VPN DNS override"), current])
         defer { helper.stop() }
-        XCTAssertThrowsError(try clientProbe(helper.path).client.vpnDNSOverride(.release)) { error in
+        XCTAssertThrowsError(try clientProbe(helper.path).client.vpnDNSOverride(.arm(service: service, servers: servers))) { error in
             guard case .executionFailed? = error as? PrivilegeClientError else { return XCTFail("got \(error)") }
         }
     }
@@ -191,7 +156,7 @@ final class HelperVPNDNSOverrideTests: XCTestCase {
     func testARefusalAndAnUnreachableHelperThrow() throws {
         let helper = try FakeHelper(replies: [.refused(.noConsoleUser, "no console user yet")])
         defer { helper.stop() }
-        XCTAssertThrowsError(try clientProbe(helper.path).client.vpnDNSOverride(.apply(service: service, expected: servers))) { error in
+        XCTAssertThrowsError(try clientProbe(helper.path).client.vpnDNSOverride(.arm(service: service, servers: servers))) { error in
             guard case .refused(.noConsoleUser, _)? = error as? PrivilegeClientError else { return XCTFail("got \(error)") }
         }
         let missing = clientProbe("/tmp/pm-no-helper-\(UUID().uuidString.prefix(8)).sock")
@@ -201,20 +166,25 @@ final class HelperVPNDNSOverrideTests: XCTestCase {
         XCTAssertFalse(missing.fallbackRan.withLockedValue { $0 })
     }
 
-    func testAnApplyTheHelperWouldRefuseIsNeverSent() throws {
+    func testAnArmTheHelperWouldRefuseIsNeverSent() throws {
         let helper = try FakeHelper(replies: [.ok()])
         defer { helper.stop() }
         let client = clientProbe(helper.path).client
-        for (service, expected) in [(service, ["127.0.0.1"]), (service, []), ("a/b", servers), (service, Array(repeating: "192.0.2.1", count: 17))] {
-            XCTAssertThrowsError(try client.vpnDNSOverride(.apply(service: service, expected: expected)), "\(service) \(expected)")
+        let refused: [(String, [String])] = [
+            (service, ["127.0.0.1"]), (service, ["::"]), (service, []), ("a/b", servers),
+            (service, Array(repeating: "192.0.2.1", count: 17)),
+        ]
+        for (service, servers) in refused {
+            XCTAssertThrowsError(try client.vpnDNSOverride(.arm(service: service, servers: servers)), "\(service) \(servers)")
         }
         XCTAssertEqual(helper.requestsSeen, 0)
     }
 
-    func testAPingWithoutTheOverrideFeatureReadsAsUpdateAvailable() {
-        var older = HelperResponse.ok()
-        older.features = [.dnsRelayStatus]
-        XCTAssertEqual(HelperToolPrivilegeClient.status(forPing: older), .updateAvailable)
+    func testAPingWithoutTheKeyFeatureReadsAsUpdateAvailable() throws {
+        let rewrite = try JSONDecoder().decode(
+            HelperResponse.self, from: Data(#"{"protocolVersion":5,"success":true,"features":["dns-relay-status","vpn-dns-override"]}"#.utf8)
+        )
+        XCTAssertEqual(HelperToolPrivilegeClient.status(forPing: rewrite), .updateAvailable)
         var current = HelperResponse.ok()
         current.features = HelperFeature.allCases
         XCTAssertEqual(HelperToolPrivilegeClient.status(forPing: current), .installed)
@@ -223,10 +193,10 @@ final class HelperVPNDNSOverrideTests: XCTestCase {
     func testTheAuditingClientAndTheRecorderPassTheRequestThrough() throws {
         let base = RecordingPrivilegeClient()
         XCTAssertEqual(try base.vpnDNSOverride(.status), .unsupported, "the recorder answers as an older helper by default")
-        base.vpnDNSOverrideReply = .applied
+        base.vpnDNSOverrideReply = .armed
         let audited = AuditingPrivilegeClient(base: base, eventSink: { _ in })
-        XCTAssertEqual(try audited.vpnDNSOverride(.apply(service: service, expected: servers)), .applied)
-        XCTAssertEqual(base.vpnDNSOverrideRequests, [.status, .apply(service: service, expected: servers)])
+        XCTAssertEqual(try audited.vpnDNSOverride(.arm(service: service, servers: servers)), .armed)
+        XCTAssertEqual(base.vpnDNSOverrideRequests, [.status, .arm(service: service, servers: servers)])
         XCTAssertEqual(try AppleScriptPrivilegeClient(runner: { _ in CommandResult(exitCode: 0, standardOutput: "", standardError: "") }).vpnDNSOverride(.status), .unsupported)
     }
 
@@ -236,104 +206,95 @@ final class HelperVPNDNSOverrideTests: XCTestCase {
         return machine
     }
 
-    func testFakeMachineAppliesOnlyWhileItsRelayRuns() throws {
+    func testFakeMachinePublishesOnlyWhileItsRelayRuns() throws {
         let machine = machine()
-        XCTAssertEqual(try machine.vpnDNSOverride(.apply(service: service, expected: servers)), .refused(.relayNotServing))
+        XCTAssertEqual(try machine.vpnDNSOverride(.arm(service: service, servers: servers)), .armed)
+        XCTAssertNil(machine.vpnDNSStore.ownKey)
+        XCTAssertEqual(try machine.vpnDNSOverride(.status), .status(VPNDNSOverrideState(
+            serviceID: service, servers: servers, published: false, reason: "relay_stopped", owned: true
+        )))
         try machine.execute(.startDNSRelay, values: ["5053"])
-        XCTAssertEqual(try machine.vpnDNSOverride(.apply(service: service, expected: servers)), .applied)
-        XCTAssertEqual(machine.vpnDNSStore.serverAddresses(service), ["127.0.0.1"])
-        XCTAssertEqual(try machine.vpnDNSOverride(.status), .status(VPNDNSOverrideState(serviceID: service, originals: servers)))
-        XCTAssertEqual(machine.privilege.vpnDNSOverrideRequests.count, 3)
+        XCTAssertNil(machine.vpnDNSStore.ownKey, "the probe at the arm found no relay; the next tick's probe decides")
+        machine.tickVPNDNSOverride()
+        XCTAssertEqual(machine.vpnDNSStore.ownKey, VPNDNSOverridePublisher.ownKey(port: HelperConstants.vpnDNSOverrideRelayPort))
+        XCTAssertEqual(machine.vpnDNSStore.serverAddresses(service), servers, "the VPN's key is never written")
+        XCTAssertEqual(machine.fakeFailoverRelay?.servers, servers)
     }
 
-    func testFakeMachineReleasesBeforeItsRelayStops() throws {
+    func testFakeMachineWithdrawsBeforeItsRelayStops() throws {
         let machine = machine()
         try machine.execute(.startDNSRelay, values: ["5053"])
-        _ = try machine.vpnDNSOverride(.apply(service: service, expected: servers))
-
+        _ = try machine.vpnDNSOverride(.arm(service: service, servers: servers))
         try machine.execute(.stopDNSRelay, values: [])
-
-        XCTAssertEqual(machine.vpnDNSStore.serverAddresses(service), servers)
-        XCTAssertEqual(machine.vpnDNSOverrideOutcomes.last, .released(service: service, reason: .relayStopped, write: .restored))
+        XCTAssertNil(machine.vpnDNSStore.ownKey)
+        XCTAssertEqual(machine.vpnDNSOverrideOutcomes.last, .withdrawn(service: service, reason: .relayStopped))
+        XCTAssertNil(machine.vpnDNSOverrideArm)
     }
 
-    func testFakeMachineKeepsTheRecordAcrossARelayRestart() throws {
+    func testFakeMachineAnswersStatusForTheCallerThatArmed() throws {
         let machine = machine()
         try machine.execute(.startDNSRelay, values: ["5053"])
-        _ = try machine.vpnDNSOverride(.apply(service: service, expected: servers))
-        try machine.execute(.startDNSRelay, values: ["5054"])
-        XCTAssertEqual(try machine.vpnDNSOverride(.status), .status(VPNDNSOverrideState(serviceID: service, originals: servers)))
+        _ = try machine.vpnDNSOverride(.arm(service: service, servers: servers))
+        machine.callerPID = 9_999
+        guard case .status(let state?) = try machine.vpnDNSOverride(.status) else { return XCTFail("no status") }
+        XCTAssertFalse(state.owned, "a relaunched app is not the owner")
     }
 
-    func testFakeMachineHooksDriveTheHelpersOwnReleases() throws {
+    func testFakeMachineHooksDriveTheHelpersOwnWithdrawals() throws {
         let machine = machine()
         try machine.execute(.startDNSRelay, values: ["5053"])
+        let relay = try XCTUnwrap(machine.fakeFailoverRelay)
 
-        _ = try machine.vpnDNSOverride(.apply(service: service, expected: servers))
-        machine.vpnDNSProbe.verdict = .refused
+        _ = try machine.vpnDNSOverride(.arm(service: service, servers: servers))
+        relay.verdict = .refused
         machine.tickVPNDNSOverride()
-        XCTAssertEqual(machine.vpnDNSStore.serverAddresses(service), ["127.0.0.1"])
+        XCTAssertNotNil(machine.vpnDNSStore.ownKey)
+        XCTAssertEqual(relay.mode, .vpn)
         machine.tickVPNDNSOverride()
-        XCTAssertEqual(machine.vpnDNSStore.serverAddresses(service), servers)
+        XCTAssertNil(machine.vpnDNSStore.ownKey)
+        relay.verdict = .answered
+        machine.tickVPNDNSOverride()
+        XCTAssertNotNil(machine.vpnDNSStore.ownKey)
+        XCTAssertEqual(relay.mode, .conduit)
 
-        machine.vpnDNSProbe.verdict = .answered
-        _ = try machine.vpnDNSOverride(.apply(service: service, expected: servers))
         machine.vpnDNSOverrideOwnerExited()
-        XCTAssertEqual(machine.vpnDNSOverrideOutcomes.last, .released(service: service, reason: .ownerExited, write: .restored))
+        XCTAssertNil(machine.vpnDNSStore.ownKey)
+        XCTAssertEqual(relay.mode, .vpn)
 
-        _ = try machine.vpnDNSOverride(.apply(service: service, expected: servers))
-        machine.restartVPNDNSOverrideHelper()
-        XCTAssertEqual(machine.vpnDNSStore.serverAddresses(service), servers)
-        XCTAssertEqual(machine.vpnDNSOverrideOutcomes.last, .released(service: service, reason: .helperStart, write: .restored))
-        XCTAssertFalse(machine.dnsRelayRunning, "the relay died with the helper")
+        _ = try machine.vpnDNSOverride(.arm(service: service, servers: servers))
+        machine.killVPNDNSOverrideHelper()
+        XCTAssertNil(machine.vpnDNSStore.ownKey, "configd removes the dead session's key")
+        XCTAssertNil(machine.vpnDNSOverrideArm)
+        XCTAssertFalse(machine.dnsRelayRunning, "the relays died with the helper")
+        XCTAssertEqual(machine.vpnDNSStore.vpnKeyWrites, [])
     }
 
-    func testFakeMachineRunsAndStopsTheTCPRelayWithTheUDPOne() throws {
-        let machine = machine()
-        try machine.execute(.startDNSRelay, values: ["5053"])
-        XCTAssertTrue(machine.dnsRelayRunning)
-        XCTAssertTrue(machine.dnsTCPRelayRunning)
-        try machine.execute(.stopDNSRelay, values: [])
-        XCTAssertFalse(machine.dnsTCPRelayRunning)
-        try machine.execute(.startDNSRelay, values: ["5053"])
-        machine.restartVPNDNSOverrideHelper()
-        XCTAssertFalse(machine.dnsTCPRelayRunning, "the TCP relay died with the helper")
-    }
-
-    func testFakeMachineRefusesTheOverrideWhenTCPCouldNotBind() throws {
+    func testFakeMachineHoldsTheKeyBackWhenTCPCouldNotBind() throws {
         let machine = machine()
         machine.dnsTCPRelayBindFails = true
         try machine.execute(.startDNSRelay, values: ["5053"])
         XCTAssertTrue(machine.dnsRelayRunning, "a TCP bind failure leaves UDP serving")
         XCTAssertFalse(machine.dnsTCPRelayRunning)
-        XCTAssertEqual(
-            try machine.vpnDNSOverride(.apply(service: service, expected: servers)),
-            .refused(.relayNotServing)
-        )
-        XCTAssertEqual(machine.vpnDNSStore.writes, [])
+        _ = try machine.vpnDNSOverride(.arm(service: service, servers: servers))
+        XCTAssertNil(machine.vpnDNSStore.ownKey)
 
         machine.dnsTCPRelayBindFails = false
         try machine.execute(.startDNSRelay, values: ["5053"])
-        XCTAssertTrue(machine.dnsTCPRelayRunning)
-        XCTAssertEqual(try machine.vpnDNSOverride(.apply(service: service, expected: servers)), .applied)
+        XCTAssertNotNil(machine.vpnDNSStore.ownKey)
+        machine.killDNSTCPRelay()
+        machine.syncVPNDNSOverride()
+        XCTAssertNil(machine.vpnDNSStore.ownKey)
     }
 
-    func testFakeMachineReleasesWhenTheTCPRelayDiesOrARestartCannotBindIt() throws {
+    func testFakeMachineAnswersScutilFromTheOwnKey() throws {
         let machine = machine()
+        let order = ScutilResolverOrder(run: { try machine.run($0, $1) })
+        XCTAssertEqual(order.firstResolver(), FirstResolver(nameserver: servers[0], port: nil))
         try machine.execute(.startDNSRelay, values: ["5053"])
-        _ = try machine.vpnDNSOverride(.apply(service: service, expected: servers))
-        machine.killDNSTCPRelay()
-        machine.tickVPNDNSOverride()
-        XCTAssertEqual(machine.vpnDNSStore.serverAddresses(service), servers)
-        XCTAssertEqual(machine.vpnDNSOverrideOutcomes.last, .released(service: service, reason: .relayStopped, write: .restored))
-
-        try machine.execute(.startDNSRelay, values: ["5053"])
-        _ = try machine.vpnDNSOverride(.apply(service: service, expected: servers))
-        machine.dnsTCPRelayBindFails = true
-        try machine.execute(.startDNSRelay, values: ["5054"])
-        XCTAssertTrue(machine.dnsRelayRunning)
-        XCTAssertEqual(machine.vpnDNSStore.serverAddresses(service), servers)
-        XCTAssertEqual(machine.vpnDNSOverrideOutcomes.last, .released(service: service, reason: .relayStopped, write: .restored))
+        _ = try machine.vpnDNSOverride(.arm(service: service, servers: servers))
+        XCTAssertEqual(order.firstResolver(), FirstResolver(nameserver: "127.0.0.1", port: HelperConstants.vpnDNSOverrideRelayPort))
+        machine.resolverOrderIgnoresOwnKey = true
+        XCTAssertEqual(order.firstResolver(), FirstResolver(nameserver: servers[0], port: nil))
     }
 
     func testTheRelayStatusCarriesTCPAndAnOlderReplyHasNone() throws {
@@ -351,8 +312,8 @@ final class HelperVPNDNSOverrideTests: XCTestCase {
     func testFakeMachineAnswersAsAnOlderHelper() throws {
         let machine = machine()
         machine.vpnDNSOverrideSupported = false
-        XCTAssertEqual(try machine.vpnDNSOverride(.apply(service: service, expected: servers)), .unsupported)
-        XCTAssertEqual(machine.vpnDNSStore.writes, [])
+        XCTAssertEqual(try machine.vpnDNSOverride(.arm(service: service, servers: servers)), .unsupported)
+        XCTAssertNil(machine.vpnDNSOverrideArm)
     }
 
     private struct ClientProbe {

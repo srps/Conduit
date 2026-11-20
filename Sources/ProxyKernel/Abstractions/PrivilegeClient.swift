@@ -152,37 +152,37 @@ extension PrivilegeClient {
 }
 
 package enum VPNDNSOverrideRequest: Sendable, Equatable {
-    /// Compare-then-write: rewrites `ServerAddresses` to `127.0.0.1` only while they equal `expected`. SCDynamicStore has no
-    /// atomic swap, so a client write in the microseconds between the read and the write is overwritten.
-    case apply(service: String, expected: [String])
-    case release
+    /// Intent only: the helper publishes its own key while the VPN's key holds exactly these servers (decision 0049).
+    case arm(service: String, servers: [String])
+    case disarm
     case status
 }
 
-package enum VPNDNSOverrideRefusal: String, Sendable, Equatable, CaseIterable {
-    case notFound = "not_found"
-    case notFullTunnel = "not_full_tunnel"
-    case notPrimary = "not_primary"
-    case changed
-    case invalid
-    case relayNotServing = "relay_not_serving"
-    case writeFailed = "write_failed"
-}
-
+/// The helper's arm, as its status reports it.
 package struct VPNDNSOverrideState: Sendable, Equatable {
     package var serviceID: String
-    package var originals: [String]
+    package var servers: [String]
+    package var published: Bool
+    package var reason: String?
+    /// Whether this app armed it.
+    package var owned: Bool
+    package var port: Int?
 
-    package init(serviceID: String, originals: [String]) {
+    package init(
+        serviceID: String, servers: [String], published: Bool, reason: String? = nil, owned: Bool = true, port: Int? = nil
+    ) {
         self.serviceID = serviceID
-        self.originals = originals
+        self.servers = servers
+        self.published = published
+        self.reason = reason
+        self.owned = owned
+        self.port = port
     }
 }
 
 package enum VPNDNSOverrideReply: Sendable, Equatable {
     case unsupported
-    case applied
-    case refused(VPNDNSOverrideRefusal)
-    case released
-    case status(VPNDNSOverrideState?, lastRelease: String? = nil, restorePending: String? = nil)
+    case armed
+    case disarmed
+    case status(VPNDNSOverrideState?)
 }

@@ -764,7 +764,7 @@ extension RuntimeHost {
             let resolvers = dnsManager
             stopDNSHealthTimer()
             // Before the relay stops, and outside the guards below: the VPN's DNS must never point at a dying relay (0049).
-            await vpnDNSOverride.release(.stop)
+            await vpnDNSOverride.disarm(.stop)
             vpnDNSOverride.dnsStopped()
             let systemDNSRestored = await platformWork.run { () -> Bool in
                 systemDNS.serialized { () -> Bool in

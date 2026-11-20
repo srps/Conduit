@@ -487,18 +487,10 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         guard response.protocolVersion == HelperProtocolVersion.current else { return .unsupported }
         if response.success {
             switch request {
-            case .apply: return .applied
-            case .release: return .released
-            case .status:
-                return .status(
-                    try Self.overrideState(response.vpnDNSOverride),
-                    lastRelease: Self.releaseReason(response.vpnDNSOverrideLastRelease),
-                    restorePending: Self.releaseReason(response.vpnDNSOverrideRestorePending)
-                )
+            case .arm: return .armed
+            case .disarm: return .disarmed
+            case .status: return .status(try Self.overrideState(response.vpnDNSOverride))
             }
-        }
-        if case .apply = request, let refusal = response.vpnDNSOverrideRefusal {
-            return .refused(VPNDNSOverrideRefusal(refusal))
         }
         let ping = try sendRequest(HelperRequest(command: .ping, values: []))
         if ping.success, !(ping.features ?? []).contains(.vpnDNSOverride) {
@@ -509,15 +501,18 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
 
     private static func overrideState(_ wire: HelperVPNDNSOverrideStatus?) throws -> VPNDNSOverrideState? {
         guard let wire else { return nil }
-        let record = VPNDNSOverrideRecord(serviceID: wire.serviceID, originals: wire.originals)
-        guard record.isValid else {
+        guard VPNDNSOverrideValidation.isServiceID(wire.serviceID),
+              (1...VPNDNSOverrideValidation.maximumServers).contains(wire.servers.count),
+              wire.servers.allSatisfy(VPNDNSOverrideValidation.isTunnelServer) else {
             throw PrivilegeClientError.communicationFailed("Unreadable VPN DNS override status from the helper")
         }
-        return VPNDNSOverrideState(serviceID: wire.serviceID, originals: wire.originals)
-    }
-
-    static func releaseReason(_ wire: String?) -> String? {
-        wire.flatMap(VPNDNSOverrideReleaseReason.init(rawValue:))?.rawValue
+        return VPNDNSOverrideState(
+            serviceID: wire.serviceID, servers: wire.servers, published: wire.published,
+            reason: wire.reason.flatMap(VPNDNSOverrideReason.init(rawValue:))?.rawValue
+                ?? wire.reason.map { _ in "unknown" },
+            owned: wire.owned,
+            port: wire.port.flatMap { (1...65_535).contains($0) ? $0 : nil }
+        )
     }
 
     private func failedStatusReason() -> String {
@@ -555,9 +550,9 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         case .compareNetworkSettings:
             guard values.count == 1 else { throw NetworkSettingsError.invalidRequest }
             _ = try NetworkSettingsRequest.decode(values[0])
-        case .ping, .dnsRelayStatus, .stopDNSRelay, .stopTCPRelay, .vpnDNSOverrideRelease, .vpnDNSOverrideStatus:
+        case .ping, .dnsRelayStatus, .stopDNSRelay, .stopTCPRelay, .vpnDNSOverrideDisarm, .vpnDNSOverrideStatus:
             return
-        case .vpnDNSOverrideApply:
+        case .vpnDNSOverrideArm:
             guard (2...17).contains(values.count), VPNDNSOverrideValidation.isServiceID(values[0]),
                   values.dropFirst().allSatisfy(VPNDNSOverrideValidation.isTunnelServer) else {
                 throw PrivilegeClientError.executionFailed("invalid VPN DNS override")
@@ -895,23 +890,9 @@ extension PrivilegeRefusal {
 extension VPNDNSOverrideRequest {
     var wire: (HelperCommand, [String]) {
         switch self {
-        case .apply(let service, let expected): return (.vpnDNSOverrideApply, [service] + expected)
-        case .release: return (.vpnDNSOverrideRelease, [])
+        case .arm(let service, let servers): return (.vpnDNSOverrideArm, [service] + servers)
+        case .disarm: return (.vpnDNSOverrideDisarm, [])
         case .status: return (.vpnDNSOverrideStatus, [])
-        }
-    }
-}
-
-extension VPNDNSOverrideRefusal {
-    init(_ wire: HelperVPNDNSOverrideRefusal) {
-        switch wire {
-        case .notFound: self = .notFound
-        case .notFullTunnel: self = .notFullTunnel
-        case .notPrimary: self = .notPrimary
-        case .changed: self = .changed
-        case .invalid: self = .invalid
-        case .relayNotServing: self = .relayNotServing
-        case .writeFailed: self = .writeFailed
         }
     }
 }
