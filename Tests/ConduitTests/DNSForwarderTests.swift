@@ -1119,13 +1119,13 @@ final class DNSForwarderIntegrationTests: XCTestCase {
             internalDomain: "corp.internal.test", dohPort: doh.port,
             tuning: try Self.quickInternalAttempt(against: silentServer)
         )
-        let relay = UDPRelay()
-        try relay.start(listenPort: 0, targetPort: port)
+        let relay = DNSFailoverRelay(listenPort: 0, maximumTCPSessions: 4)
+        XCTAssertEqual(relay.start(targetPort: port), [])
         defer { relay.stop() }
 
-        XCTAssertEqual(try relay.forwarderProbe(), .relaying(targetPort: port, target: .answered))
+        XCTAssertEqual(relay.probe(), .answered)
         await stopOwnedForwarder()
-        XCTAssertEqual(try relay.forwarderProbe(), .relaying(targetPort: port, target: .refused))
+        XCTAssertEqual(relay.probe(), .refused)
     }
 
     /// Starts the owned forwarder with one split-DNS domain on the loopback
