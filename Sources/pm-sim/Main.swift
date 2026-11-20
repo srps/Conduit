@@ -111,6 +111,7 @@ enum PMSim {
               dns-split-detection-failed DNS: a pushed-resolver store that cannot be read drops the detected set; the next reading restores it (0044)
               dns-split-detection-retries DNS: a pushed-resolver store that cannot be created or subscribed to is retried on the read schedule until it reads (0048, #304)
               dns-offvpn-network-resolver DNS: off the VPN with DoH blocked, the network's own DNS server answers; routing and the PAC recover (0050)
+              dns-proxy-names-via-tunnel DNS: on a full tunnel an upstream proxy's own name asks every pushed server and never DoH (0051)
               dns-vpn-override-applies DNS: a full tunnel's key is pointed at the relay once the set is live; internal names still reach the tunnel's servers (0049)
               dns-vpn-override-client-rewrite DNS: each rewrite with new servers is applied again, three in ten minutes, then the override suspends for ten minutes (0049)
               dns-vpn-override-disconnect DNS: a removed key or a gate turning off releases the override; a reconnect applies again (0049)
@@ -332,6 +333,7 @@ enum PMSim {
         "dns-split-detection-failed",
         "dns-split-detection-retries",
         "dns-offvpn-network-resolver",
+        "dns-proxy-names-via-tunnel",
         "dns-vpn-override-applies",
         "dns-vpn-override-client-rewrite",
         "dns-vpn-override-disconnect",
@@ -567,6 +569,8 @@ enum PMSim {
             return [try await SplitDNSFollowsVPNScenarios.detectionRetries()]
         case "dns-offvpn-network-resolver":
             return [try await NetworkResolverScenarios.offVPNNetworkResolver()]
+        case "dns-proxy-names-via-tunnel":
+            return [try await ProxyNamesViaTunnelScenarios.proxyNamesViaTunnel()]
         case "dns-vpn-override-applies":
             return [try await VPNDNSOverrideScenarios.applies()]
         case "dns-vpn-override-client-rewrite":
