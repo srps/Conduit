@@ -29,6 +29,14 @@ then leaves the VPN's DNS alone.
   helper stopping or starting), never deletes the VPN's key, and retries a
   restore it could not write on its next tick. The helper's DNS relay now
   carries TCP as well as UDP (decision 0049).
+- A DNS lookup in flight when a network change or VPN flap resets the DNS
+  transports is now re-run once on the fresh transports within its lookup
+  window, or left unanswered so the client asks again. It no longer gets
+  SERVFAIL, which macOS caches, so a name could stay unresolvable well after
+  the reset once every lookup on the Mac goes through Conduit.
+  While the network path is unsatisfied, lookups are dropped instead of
+  answered SERVFAIL (`dns.unsatisfied_path_dropped` replaces
+  `dns.unsatisfied_path_servfail`). New event `dns.reset_lookup_rerun`.
 - Off the VPN, on a corporate LAN that blocks public DNS-over-HTTPS, lookups
   now fall back to the network's own DNS server (the one DHCP gives the Mac)
   when DoH gets no answer and no split-DNS server covers the name, so the PAC,
