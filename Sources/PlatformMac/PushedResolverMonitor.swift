@@ -22,19 +22,12 @@ package protocol PushedResolverObserving: AnyObject, Sendable {
 
     /// Stops observing and releases the store. Idempotent.
     func stop()
-
-    /// Read on the observer's queue once per reading; an observer that reads no store ignores it.
-    func setSubstitutions(_ provider: @Sendable @escaping () -> [String: [String]])
-}
-
-extension PushedResolverObserving {
-    package func setSubstitutions(_ provider: @Sendable @escaping () -> [String: [String]]) {}
 }
 
 /// `PushedResolverObserving` over `SCDynamicStore`, read-only. Watches the
 /// per-service DNS, IPv4 and IPv6 keys and the global DNS and IPv4 keys, and on each
 /// notification takes one `SCDynamicStoreCopyMultiple` of the service keys and
-/// parses it with `PushedResolverReading.parse(store:substitutions:)`. A reading equal to
+/// parses it with `PushedResolverReading.parse(store:)`. A reading equal to
 /// the last one delivered is not delivered again.
 ///
 /// A failed create, subscribe or read is tried again on `StoreReadSchedule`
@@ -73,7 +66,6 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
 
     private let monitorQueue = DispatchQueue(label: "io.github.srps.Conduit.PushedResolverMonitor")
     private let onChangeBox = NIOLockedValueBox<(@Sendable (PushedResolverReading) -> Void)?>(nil)
-    private let substitutionsBox = NIOLockedValueBox<@Sendable () -> [String: [String]]>({ [:] })
     private let lifecycleBox = NIOLockedValueBox<LifecycleState>(.init())
     private let barrier = ObserverStopBarrier()
     private let calls: Calls
@@ -124,10 +116,6 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
         onChangeBox.withLockedValue { $0 = onChange }
     }
 
-    package func setSubstitutions(_ provider: @Sendable @escaping () -> [String: [String]]) {
-        substitutionsBox.withLockedValue { $0 = provider }
-    }
-
     package func start() {
         let generation = lifecycleBox.withLockedValue { state -> UInt64? in
             guard !state.started else { return nil }
@@ -169,25 +157,14 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
         guard let store = calls.create("io.github.srps.Conduit.PushedResolverRead" as CFString, nil, &context) else {
             return PushedResolverReading(failure: .storeCreate)
         }
-        return read(store, calls: calls, substitutions: [:])
+        return read(store, calls: calls)
     }
 
-    private static func read(
-        _ store: SCDynamicStore, calls: Calls, substitutions: [String: [String]]
-    ) -> PushedResolverReading {
-        read(store, calls: calls) { substitutions }
-    }
-
-    /// Substitutions from both sides of the store read, the later winning, so a read spanning an apply or release parses.
-    private static func read(
-        _ store: SCDynamicStore, calls: Calls, substitutions: () -> [String: [String]]
-    ) -> PushedResolverReading {
-        let before = substitutions()
+    private static func read(_ store: SCDynamicStore, calls: Calls) -> PushedResolverReading {
         guard let values = calls.copyMultiple(store, readPatterns as CFArray) as? [String: Any] else {
             return PushedResolverReading(failure: .storeRead)
         }
-        let spanning = before.merging(substitutions()) { _, later in later }
-        return PushedResolverReading.parse(store: values, substitutions: spanning)
+        return PushedResolverReading.parse(store: values)
     }
 
     private func isCurrent(_ generation: UInt64) -> Bool {
@@ -256,8 +233,7 @@ package final class PushedResolverMonitor: PushedResolverObserving, @unchecked S
     /// Runs on `monitorQueue`.
     private func read(_ store: SCDynamicStore, _ generation: UInt64) {
         guard isCurrent(generation) else { return }
-        let provider = substitutionsBox.withLockedValue { $0 }
-        var reading = Self.read(store, calls: calls, substitutions: provider)
+        var reading = Self.read(store, calls: calls)
         if let failure = reading.failure {
             failed(failure, generation)
             return

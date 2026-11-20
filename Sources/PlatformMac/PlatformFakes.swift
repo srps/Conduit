@@ -221,21 +221,32 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     private var _refusedScripts: [String] = []
     private var _failingSetenv: Set<String> = []
 
+    /// The dynamic store as the helper's session sees it.
     package let vpnDNSStore = FakeVPNDNSStore()
-    package let vpnDNSProbe = FakeVPNDNSForwarderProbe()
-    package let vpnDNSRecordFile = InMemoryVPNDNSOverridePersistence()
+    /// The relay the helper's key names; a scripted fake unless the caller hands in a real one.
+    package let vpnDNSRelay: any FakeMachineFailoverRelay
     private let vpnDNSLock = NSLock()
-    private var vpnDNSLedger: VPNDNSOverrideLedger!
+    private var vpnDNSPublisher: VPNDNSOverridePublisher!
     private var _vpnDNSOutcomes: [VPNDNSOverrideOutcome] = []
     private var _vpnDNSOverrideSupported = true
+    private var _callerPID: pid_t = 4_242
+    private var _resolverOrderIgnoresOwnKey = false
 
-    package init(services: [String] = ["Wi-Fi"], resolverDirectory: URL) {
+    package init(
+        services: [String] = ["Wi-Fi"], resolverDirectory: URL,
+        failoverRelay: (any FakeMachineFailoverRelay)? = nil
+    ) {
         self.serviceNames = services
         self._services = Dictionary(uniqueKeysWithValues: services.map { ($0, Service()) })
         self.resolverDirectory = resolverDirectory
+        self.vpnDNSRelay = failoverRelay ?? FakeDNSFailoverRelay()
         try? FileManager.default.createDirectory(at: resolverDirectory, withIntermediateDirectories: true)
-        vpnDNSLedger = makeVPNDNSLedger()
+        vpnDNSPublisher = makeVPNDNSPublisher()
+        vpnDNSStore.onChange = { [weak self] in self?.syncVPNDNSOverride() }
     }
+
+    /// The scripted relay, when no real one was handed in.
+    package var fakeFailoverRelay: FakeDNSFailoverRelay? { vpnDNSRelay as? FakeDNSFailoverRelay }
 
     // MARK: State
 
@@ -265,13 +276,18 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
         lock.withLock { _dnsTCPRelayRunning }
     }
 
+    /// The TCP half of both relays, the one on `:53` and the failover relay.
     package var dnsTCPRelayBindFails: Bool {
         get { lock.withLock { _dnsTCPRelayBindFails } }
-        set { lock.withLock { _dnsTCPRelayBindFails = newValue } }
+        set {
+            lock.withLock { _dnsTCPRelayBindFails = newValue }
+            fakeFailoverRelay?.tcpBindFails = newValue
+        }
     }
 
     package func killDNSTCPRelay() {
         lock.withLock { _dnsTCPRelayRunning = false }
+        fakeFailoverRelay?.killTCP()
     }
 
     /// What a query to the relay's target finds, as the helper reports it. `nil`, the default, is a helper that predates
@@ -339,6 +355,8 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
             return runLaunchctl(arguments)
         case "/usr/sbin/networksetup":
             return runNetworksetup(arguments)
+        case "/usr/sbin/scutil" where arguments == ["--dns"]:
+            return Self.success(ScutilResolverOrder.render(first: firstResolver()))
         default:
             return Self.failure("unexpected command \(launchPath)")
         }
@@ -429,24 +447,24 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     package func vpnDNSOverride(_ request: VPNDNSOverrideRequest) throws -> VPNDNSOverrideReply {
         _ = try privilege.vpnDNSOverride(request)
         guard vpnDNSOverrideSupported else { return .unsupported }
-        return try withVPNDNSLedger { ledger in
+        let caller = callerPID
+        return try withVPNDNSPublisher { publisher in
             switch request {
-            case .apply(let service, let expected):
-                switch ledger.apply(service: service, expected: expected) {
-                case .applied: return .applied
-                case .refused(let reason): return .refused(VPNDNSOverrideRefusal(reason))
+            case .arm(let service, let servers):
+                guard publisher.arm(service: service, servers: servers, owner: caller) else {
+                    throw PrivilegeClientError.executionFailed("Invalid VPN DNS override")
                 }
-            case .release:
-                if let write = ledger.release(reason: .requested), write.failed {
-                    throw PrivilegeClientError.executionFailed("VPN DNS override release could not write the key: \(write.rawValue)")
-                }
-                return .released
+                return .armed
+            case .disarm:
+                publisher.disarm(.disarmed)
+                return .disarmed
             case .status:
-                return .status(
-                    ledger.status().map { VPNDNSOverrideState(serviceID: $0.serviceID, originals: $0.originals) },
-                    lastRelease: ledger.lastRelease?.rawValue,
-                    restorePending: ledger.restorePending?.rawValue
-                )
+                return .status(publisher.status(caller: caller).map {
+                    VPNDNSOverrideState(
+                        serviceID: $0.serviceID, servers: $0.servers, published: $0.published, reason: $0.reason,
+                        owned: $0.owned, port: $0.port
+                    )
+                })
             }
         }
     }
@@ -456,53 +474,80 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
         set { lock.withLock { _vpnDNSOverrideSupported = newValue } }
     }
 
+    /// The pid the helper reads off each connection; a relaunched app is a new one.
+    package var callerPID: pid_t {
+        get { lock.withLock { _callerPID } }
+        set { lock.withLock { _callerPID = newValue } }
+    }
+
+    /// A macOS that no longer puts a domainless supplemental resolver first.
+    package var resolverOrderIgnoresOwnKey: Bool {
+        get { lock.withLock { _resolverOrderIgnoresOwnKey } }
+        set { lock.withLock { _resolverOrderIgnoresOwnKey = newValue } }
+    }
+
     package var vpnDNSOverrideOutcomes: [VPNDNSOverrideOutcome] {
         vpnDNSLock.withLock { _vpnDNSOutcomes }
     }
 
+    package var vpnDNSOverrideArm: VPNDNSOverrideArm? {
+        withVPNDNSPublisher { $0.arm }
+    }
+
     package func tickVPNDNSOverride() {
-        withVPNDNSLedger { $0.tick() }
+        withVPNDNSPublisher { $0.tick() }
     }
 
+    /// A store notification reaching the helper's loop.
+    package func syncVPNDNSOverride() {
+        withVPNDNSPublisher { $0.sync() }
+    }
+
+    /// `NOTE_EXIT` for the pid that armed.
     package func vpnDNSOverrideOwnerExited() {
-        withVPNDNSLedger { $0.release(reason: .ownerExited) }
+        let pid = callerPID
+        withVPNDNSPublisher { $0.ownerExited(pid) }
     }
 
+    /// `SIGTERM`: the helper withdraws, then its session ends.
     package func stopVPNDNSOverrideHelper() {
-        withVPNDNSLedger { $0.release(reason: .helperStopping) }
+        withVPNDNSPublisher { $0.disarm(.helperStopping) }
+        killVPNDNSOverrideHelper()
     }
 
-    package func restartVPNDNSOverrideHelper() {
+    /// A crash or `kill -9`: configd removes the session's key, the relays go, and launchd starts a fresh helper.
+    package func killVPNDNSOverrideHelper() {
+        vpnDNSStore.endSession()
+        vpnDNSRelay.stop()
         lock.withLock { _dnsRelayRunning = false; _dnsRelayTargetPort = nil; _dnsTCPRelayRunning = false }
-        vpnDNSLock.withLock {
-            vpnDNSLedger = makeVPNDNSLedger()
-            vpnDNSLedger.start()
-        }
+        vpnDNSLock.withLock { vpnDNSPublisher = makeVPNDNSPublisher() }
+    }
+
+    /// The legacy restore a fresh helper runs at start.
+    @discardableResult
+    package func runLegacyVPNDNSRestore(_ file: any VPNDNSOverrideLegacyRecordFile) -> VPNDNSOverrideLegacyRestore.Outcome {
+        VPNDNSOverrideLegacyRestore.run(store: vpnDNSStore, file: file) { _ in }
     }
 
     @discardableResult
-    private func withVPNDNSLedger<T>(_ body: (VPNDNSOverrideLedger) throws -> T) rethrows -> T {
-        try vpnDNSLock.withLock { try body(vpnDNSLedger) }
+    private func withVPNDNSPublisher<T>(_ body: (VPNDNSOverridePublisher) throws -> T) rethrows -> T {
+        try vpnDNSLock.withLock { try body(vpnDNSPublisher) }
     }
 
-    private func makeVPNDNSLedger() -> VPNDNSOverrideLedger {
-        VPNDNSOverrideLedger(
+    private func makeVPNDNSPublisher() -> VPNDNSOverridePublisher {
+        VPNDNSOverridePublisher(
             store: vpnDNSStore,
-            probe: RelayGatedProbe(machine: self),
-            persistence: vpnDNSRecordFile,
+            relay: vpnDNSRelay,
             report: { [unowned self] outcome in _vpnDNSOutcomes.append(outcome) }
         )
     }
 
-    private struct RelayGatedProbe: VPNDNSForwarderProbe {
-        unowned let machine: FakeMachine
-        func probe() -> VPNDNSProbeVerdict {
-            guard machine.dnsRelayRunning else { return .notRunning }
-            return machine.vpnDNSProbe.probe()
+    private func firstResolver() -> FirstResolver {
+        if !resolverOrderIgnoresOwnKey, let own = vpnDNSStore.ownKey,
+           case .strings(let servers)? = own["ServerAddresses"], case .number(let port)? = own["ServerPort"] {
+            return FirstResolver(nameserver: servers.first, port: port)
         }
-        func tcpListening() -> Bool {
-            machine.dnsTCPRelayRunning && machine.vpnDNSProbe.tcpListening()
-        }
+        return FirstResolver(nameserver: vpnDNSStore.primary.flatMap(vpnDNSStore.serverAddresses)?.first, port: nil)
     }
 
     package func execute(_ operation: PrivilegedOperation, values: [String]) throws {
@@ -535,18 +580,20 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
             try? FileManager.default.removeItem(at: resolverDirectory.appendingPathComponent(domain))
         case .startDNSRelay:
             let target = values.first.flatMap { Int($0) }
-            let restart = lock.withLock { () -> (changed: Bool, tcp: Bool)? in
+            if let target { _ = vpnDNSRelay.start(targetPort: target) }
+            let caller = callerPID
+            withVPNDNSPublisher { $0.relayStarted(caller: caller) }
+            lock.withLock {
                 let udpUnchanged = _dnsRelayRunning && _dnsRelayTargetPort == target
                 let tcpUnchanged = _dnsTCPRelayRunning && _dnsRelayTargetPort == target
-                guard !(udpUnchanged && tcpUnchanged) else { return nil }
+                guard !(udpUnchanged && tcpUnchanged) else { return }
                 _dnsRelayRunning = true
                 _dnsRelayTargetPort = target
                 if !tcpUnchanged { _dnsTCPRelayRunning = !_dnsTCPRelayBindFails }
-                return (true, _dnsTCPRelayRunning)
             }
-            if let restart { withVPNDNSLedger { $0.relayRestarted(succeeded: restart.tcp) } }
         case .stopDNSRelay:
-            withVPNDNSLedger { $0.release(reason: .relayStopped) }
+            withVPNDNSPublisher { $0.disarm(.relayStopped) }
+            vpnDNSRelay.stop()
             lock.withLock { _dnsRelayRunning = false; _dnsRelayTargetPort = nil; _dnsTCPRelayRunning = false }
         case .startTCPRelay, .stopTCPRelay, .ping:
             break
@@ -611,7 +658,8 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     }
 }
 
-package final class FakeVPNDNSStore: VPNDNSStore, @unchecked Sendable {
+/// The helper's store session over an in-memory store: the VPN's keys, and one temporary key that dies with the session.
+package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked Sendable {
     package struct Tunnel: Equatable, Sendable {
         package var dns: [String: VPNDNSValue]?
         package var ipv4: Bool
@@ -624,30 +672,43 @@ package final class FakeVPNDNSStore: VPNDNSStore, @unchecked Sendable {
         }
     }
 
-    package enum Write: Equatable, Sendable {
-        case set(service: String, value: [String: VPNDNSValue])
-    }
-
     private let lock = NSLock()
     private var _services: [String: Tunnel] = [:]
     private var _primary: String?
-    private var _writes: [Write] = []
-    private var _failsWrites = false
-    private var _beforeWrite: (@Sendable (String) -> Void)?
+    private var _ownKey: [String: VPNDNSValue]?
+    private var _vpnKeyWrites: [String] = []
+    private var _failsRemove = false
+    private var _failsPublish = false
+    private var _sessionsClosed = 0
+    private var _onChange: (@Sendable () -> Void)?
 
     package init() {}
+
+    /// Called after each change the client or configd makes, as a store notification reaches the helper.
+    package var onChange: (@Sendable () -> Void)? {
+        get { lock.withLock { _onChange } }
+        set { lock.withLock { _onChange = newValue } }
+    }
+
+    private func changed(_ body: () -> Void) {
+        let notify = lock.withLock { () -> (@Sendable () -> Void)? in
+            body()
+            return _onChange
+        }
+        notify?()
+    }
 
     package func connectFullTunnel(_ service: String, servers: [String], extra: [String: VPNDNSValue] = [:]) {
         var dns = extra
         dns["ServerAddresses"] = .strings(servers)
-        lock.withLock {
+        changed {
             _services[service] = Tunnel(dns: dns)
             _primary = service
         }
     }
 
     package func setTunnel(_ service: String, _ tunnel: Tunnel?) {
-        lock.withLock { _services[service] = tunnel }
+        changed { _services[service] = tunnel }
     }
 
     package func tunnel(_ service: String) -> Tunnel? {
@@ -656,31 +717,46 @@ package final class FakeVPNDNSStore: VPNDNSStore, @unchecked Sendable {
 
     package var primary: String? {
         get { lock.withLock { _primary } }
-        set { lock.withLock { _primary = newValue } }
+        set { changed { _primary = newValue } }
     }
 
     package func clientRewrite(_ service: String, servers: [String]) {
-        lock.withLock { _services[service]?.dns?["ServerAddresses"] = .strings(servers) }
+        changed { _services[service]?.dns?["ServerAddresses"] = .strings(servers) }
     }
 
     package func clientRemove(_ service: String) {
-        lock.withLock {
+        changed {
             _services[service] = nil
             if _primary == service { _primary = nil }
         }
     }
 
-    package var writes: [Write] { lock.withLock { _writes } }
-
-    package var failsWrites: Bool {
-        get { lock.withLock { _failsWrites } }
-        set { lock.withLock { _failsWrites = newValue } }
+    /// configd restarting drops every temporary key and tells its watchers.
+    package func configdRestart() {
+        changed { _ownKey = nil }
     }
 
-    package var beforeWrite: (@Sendable (String) -> Void)? {
-        get { lock.withLock { _beforeWrite } }
-        set { lock.withLock { _beforeWrite = newValue } }
+    /// The helper's session ending: configd removes its key.
+    package func endSession() {
+        lock.withLock { _ownKey = nil }
     }
+
+    package var ownKey: [String: VPNDNSValue]? { lock.withLock { _ownKey } }
+
+    /// Writes to any VPN key; only the legacy restore makes one.
+    package var vpnKeyWrites: [String] { lock.withLock { _vpnKeyWrites } }
+
+    package var failsRemove: Bool {
+        get { lock.withLock { _failsRemove } }
+        set { lock.withLock { _failsRemove = newValue } }
+    }
+
+    package var failsPublish: Bool {
+        get { lock.withLock { _failsPublish } }
+        set { lock.withLock { _failsPublish = newValue } }
+    }
+
+    package var sessionsClosed: Int { lock.withLock { _sessionsClosed } }
 
     package func serverAddresses(_ service: String) -> [String]? {
         guard case .strings(let servers)? = tunnel(service)?.dns?["ServerAddresses"] else { return nil }
@@ -691,10 +767,6 @@ package final class FakeVPNDNSStore: VPNDNSStore, @unchecked Sendable {
         lock.withLock { _services[service]?.dns }
     }
 
-    package func ipv4Exists(service: String) -> Bool {
-        lock.withLock { _services[service]?.ipv4 ?? false }
-    }
-
     package func overridesPrimary(service: String) -> Bool {
         lock.withLock { _services[service].map { $0.ipv4 && $0.overridePrimary } ?? false }
     }
@@ -703,107 +775,149 @@ package final class FakeVPNDNSStore: VPNDNSStore, @unchecked Sendable {
         lock.withLock { _primary }
     }
 
+    package func ownKeyExists() -> Bool {
+        lock.withLock { _ownKey != nil }
+    }
+
+    package func publishOwnKey(_ value: [String: VPNDNSValue]) -> Bool {
+        lock.withLock {
+            guard !_failsPublish else { return false }
+            _ownKey = value
+            return true
+        }
+    }
+
+    package func removeOwnKey() -> Bool {
+        lock.withLock {
+            guard !_failsRemove else { return false }
+            _ownKey = nil
+            return true
+        }
+    }
+
+    package func closeSession() {
+        lock.withLock {
+            _sessionsClosed += 1
+            _ownKey = nil
+        }
+    }
+
     package func setDNS(_ value: [String: VPNDNSValue], service: String) -> Bool {
-        beforeWrite?(service)
-        return lock.withLock {
-            guard !_failsWrites else { return false }
-            _writes.append(.set(service: service, value: value))
+        lock.withLock {
+            _vpnKeyWrites.append(service)
             var tunnel = _services[service] ?? Tunnel(dns: nil, ipv4: false, overridePrimary: false)
             tunnel.dns = value
             _services[service] = tunnel
             return true
         }
     }
-
 }
 
-package final class FakeVPNDNSForwarderProbe: VPNDNSForwarderProbe, @unchecked Sendable {
-    private let lock = NSLock()
-    private var _verdict: VPNDNSProbeVerdict
-    private var _probes = 0
-    private var _tcpRelayListening = true
-    private var _onProbe: (@Sendable () -> Void)?
+/// What `FakeMachine` needs of the failover relay beyond the publisher's view: start and stop it.
+package protocol FakeMachineFailoverRelay: VPNDNSFailoverRelay, Sendable {
+    func start(targetPort: Int) -> [String]
+    func stop()
+    func restartDeadHalves() -> (restarted: Bool, failures: [String])
+}
 
-    package init(verdict: VPNDNSProbeVerdict = .answered) {
-        _verdict = verdict
+extension DNSFailoverRelay: FakeMachineFailoverRelay {}
+
+/// The failover relay with its halves, mode, servers and probe scripted.
+package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked Sendable {
+    private let lock = NSLock()
+    private var udp = false
+    private var tcp = false
+    private var _target: Int?
+    private var _tcpBindFails = false
+    private var _mode: VPNDNSRelayMode = .conduit
+    private var _servers: [String] = []
+    private var _verdict: VPNDNSProbeVerdict = .answered
+    private var _probes = 0
+
+    package init() {}
+
+    package var listeningPort: Int? {
+        lock.withLock { udp && tcp ? HelperConstants.vpnDNSOverrideRelayPort : nil }
     }
+
+    package var mode: VPNDNSRelayMode { lock.withLock { _mode } }
+    package var servers: [String] { lock.withLock { _servers } }
+    package var probes: Int { lock.withLock { _probes } }
+    package var running: (udp: Bool, tcp: Bool) { lock.withLock { (udp, tcp) } }
 
     package var verdict: VPNDNSProbeVerdict {
         get { lock.withLock { _verdict } }
         set { lock.withLock { _verdict = newValue } }
     }
 
-    package var probes: Int { lock.withLock { _probes } }
-
-    package var tcpRelayListening: Bool {
-        get { lock.withLock { _tcpRelayListening } }
-        set { lock.withLock { _tcpRelayListening = newValue } }
+    package var tcpBindFails: Bool {
+        get { lock.withLock { _tcpBindFails } }
+        set { lock.withLock { _tcpBindFails = newValue } }
     }
 
-    package func tcpListening() -> Bool {
-        lock.withLock { _tcpRelayListening }
-    }
+    package func setMode(_ mode: VPNDNSRelayMode) { lock.withLock { _mode = mode } }
 
-    package var onProbe: (@Sendable () -> Void)? {
-        get { lock.withLock { _onProbe } }
-        set { lock.withLock { _onProbe = newValue } }
+    package func setFailoverServers(_ servers: [String]) {
+        let usable = VPNDNSOverrideValidation.failoverServers(servers)
+        lock.withLock { _servers = usable }
     }
 
     package func probe() -> VPNDNSProbeVerdict {
-        onProbe?()
-        return lock.withLock {
+        lock.withLock {
+            guard udp else { return .notRunning }
             _probes += 1
             return _verdict
         }
     }
-}
 
-package final class InMemoryVPNDNSOverridePersistence: VPNDNSOverridePersistence, @unchecked Sendable {
-    package struct Failure: Error, LocalizedError {
-        package var errorDescription: String? { "scripted persistence failure" }
-    }
-
-    private let lock = NSLock()
-    private var _bytes: Data?
-    private var _failsSave = false
-    private var _failsDelete = false
-
-    package init(bytes: Data? = nil) {
-        _bytes = bytes
-    }
-
-    package var bytes: Data? {
-        get { lock.withLock { _bytes } }
-        set { lock.withLock { _bytes = newValue } }
-    }
-
-    package var failsSave: Bool {
-        get { lock.withLock { _failsSave } }
-        set { lock.withLock { _failsSave = newValue } }
-    }
-
-    package var failsDelete: Bool {
-        get { lock.withLock { _failsDelete } }
-        set { lock.withLock { _failsDelete = newValue } }
-    }
-
-    package func load() -> VPNDNSOverrideStoredRecord {
-        guard let bytes else { return .none }
-        return VPNDNSOverrideFile.decode(bytes)
-    }
-
-    package func save(_ record: VPNDNSOverrideRecord) throws {
-        let data = try VPNDNSOverrideFile.encode(record)
-        try lock.withLock {
-            guard !_failsSave else { throw Failure() }
-            _bytes = data
+    package func start(targetPort: Int) -> [String] {
+        lock.withLock {
+            _target = targetPort
+            udp = true
+            if !tcp { tcp = !_tcpBindFails }
+            return tcp ? [] : ["tcp: bind failed"]
         }
     }
 
-    package func delete() throws {
-        try lock.withLock {
-            guard !_failsDelete else { throw Failure() }
-            _bytes = nil
+    package func stop() {
+        lock.withLock {
+            udp = false
+            tcp = false
+            _target = nil
+        }
+    }
+
+    package func killTCP() {
+        lock.withLock { tcp = false }
+    }
+
+    package func restartDeadHalves() -> (restarted: Bool, failures: [String]) {
+        guard let target = lock.withLock({ _target }), !(running.udp && running.tcp) else { return (false, []) }
+        return (true, start(targetPort: target))
+    }
+}
+
+/// Resolver #1 as a scripted `scutil --dns` would print it.
+package final class FakeResolverOrder: ResolverOrderReading, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _first: FirstResolver?
+    private var _reads = 0
+
+    package init(first: FirstResolver? = nil) {
+        _first = first
+    }
+
+    package var first: FirstResolver? {
+        get { lock.withLock { _first } }
+        set { lock.withLock { _first = newValue } }
+    }
+
+    package var reads: Int { lock.withLock { _reads } }
+
+    package func firstResolver() -> FirstResolver? {
+        lock.withLock {
+            _reads += 1
+            return _first
         }
     }
 }
@@ -1502,17 +1616,8 @@ package final class FakePushedResolverObserver: PushedResolverObserving, @unchec
     private var started = false
     private var starts = 0
     private var primed: PushedResolverReading?
-    private var substitutionProvider: (@Sendable () -> [String: [String]])?
 
     package init() {}
-
-    package func substitutions() -> [String: [String]] {
-        lock.withLock { substitutionProvider }?() ?? [:]
-    }
-
-    package func setSubstitutions(_ provider: @Sendable @escaping () -> [String: [String]]) {
-        lock.withLock { substitutionProvider = provider }
-    }
 
     /// Stopped-to-started transitions so far.
     package var startCount: Int { lock.withLock { starts } }

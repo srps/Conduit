@@ -85,44 +85,43 @@ final class RuntimeHostVPNDNSOverrideTests: XCTestCase {
         XCTAssertNotNil(running.index("dns.split_table_changed detected_domains=1"))
         XCTAssertEqual(running.lines.filter { $0.hasPrefix("dns.vpn_override_") }, [])
         XCTAssertEqual(running.host.vpnDNSOverride.support, .unsupported)
-        XCTAssertEqual(running.host.vpnDNSOverride.substitutions.current, [:])
     }
 
-    @RuntimeActor func testTheOverrideLandsAfterTheTunnelsServersAreInUse() async throws {
+    @RuntimeActor func testTheArmLandsAfterTheTunnelsServersAreInUse() async throws {
         try requireForwardingAudit()
         let client = ScriptedVPNDNSOverrideClient()
         let running = try await start(override: client)
 
         await running.report(.connected, live: ["utun6"])
 
-        XCTAssertEqual(client.requests, [.status, .apply(service: "com.cisco.anyconnect", expected: [tunnelServer])])
+        XCTAssertEqual(client.requests.first, .arm(service: "com.cisco.anyconnect", servers: [tunnelServer]))
         let set = try XCTUnwrap(running.index("dns.split_table_changed detected_domains=1"))
-        let applied = try XCTUnwrap(running.index("dns.vpn_override_applied service=com.cisco.anyconnect servers=1"))
-        XCTAssertLessThan(set, applied)
-        XCTAssertEqual(running.host.vpnDNSOverride.substitutions.current, ["com.cisco.anyconnect": [tunnelServer]])
+        let armed = try XCTUnwrap(running.index("dns.vpn_override_armed service=com.cisco.anyconnect servers=1"))
+        let published = try XCTUnwrap(running.index("dns.vpn_override_published service=com.cisco.anyconnect"))
+        XCTAssertLessThan(set, armed)
+        XCTAssertLessThan(armed, published)
     }
 
-    @RuntimeActor func testARefusedApplyIsSentAgainOnlyOnTheNextTrigger() async throws {
+    @RuntimeActor func testAFailedArmIsSettledByTheNextStatusAndSentAgain() async throws {
         try requireForwardingAudit()
         let client = ScriptedVPNDNSOverrideClient()
-        client.script(.reply(.status(nil)), .reply(.refused(.notPrimary)), .reply(.refused(.notPrimary)))
+        client.script(.fail)
         let running = try await start(override: client)
-        let applies = { client.requests.filter { if case .apply = $0 { true } else { false } }.count }
+        let arms = { client.requests.filter { if case .arm = $0 { true } else { false } }.count }
 
         await running.report(.connected, live: ["utun6"])
-        XCTAssertEqual(applies(), 1)
+        XCTAssertEqual(arms(), 1)
         for _ in 0..<50 { await Task.yield() }
         await running.host.deliveries.drain()
-        XCTAssertEqual(applies(), 1, "a refusal triggers no pass of its own")
-        XCTAssertNil(running.host.vpnDNSOverride.wakeAt)
+        XCTAssertEqual(arms(), 1, "a failure triggers no pass of its own")
+        XCTAssertTrue(running.host.vpnDNSOverride.mayArm, "an arm with no reply may be held")
 
-        running.host.requestVPNDNSOverrideRun(pollStatus: false)
+        running.host.requestVPNDNSOverrideRun(pollStatus: true)
         await running.host.deliveries.drain()
-        XCTAssertEqual(applies(), 2)
-        XCTAssertFalse(running.lines.contains { $0.hasPrefix("dns.vpn_override_suspended") })
+        XCTAssertEqual(arms(), 2)
     }
 
-    @RuntimeActor func testADisconnectReleasesBeforeTheSetDrops() async throws {
+    @RuntimeActor func testADisconnectDisarmsBeforeTheSetDrops() async throws {
         try requireForwardingAudit()
         let client = ScriptedVPNDNSOverrideClient()
         let running = try await start(override: client)
@@ -130,13 +129,13 @@ final class RuntimeHostVPNDNSOverrideTests: XCTestCase {
 
         await running.report(.disconnected(reason: .userInitiated), live: [])
 
-        let released = try XCTUnwrap(running.index("dns.vpn_override_released reason=gate"))
+        let disarmed = try XCTUnwrap(running.index("dns.vpn_override_disarmed reason=gate"))
         let dropped = try XCTUnwrap(running.index("dns.split_table_changed detected_domains=0"))
-        XCTAssertLessThan(released, dropped, "the default resolver leaves the relay before the tunnel's servers do")
-        XCTAssertNil(client.record)
+        XCTAssertLessThan(disarmed, dropped, "the default resolver leaves the relay before the tunnel's servers do")
+        XCTAssertNil(client.arm)
     }
 
-    @RuntimeActor func testManageSystemDNSOffReleasesBeforeSystemDNSIsRestored() async throws {
+    @RuntimeActor func testManageSystemDNSOffDisarmsBeforeSystemDNSIsRestored() async throws {
         try requireForwardingAudit()
         let client = ScriptedVPNDNSOverrideClient()
         let running = try await start(override: client)
@@ -149,21 +148,21 @@ final class RuntimeHostVPNDNSOverrideTests: XCTestCase {
         )
 
         let after = Array(running.lines.dropFirst(before))
-        let released = try XCTUnwrap(after.firstIndex { $0.hasPrefix("dns.vpn_override_released reason=manage_off") })
+        let disarmed = try XCTUnwrap(after.firstIndex { $0.hasPrefix("dns.vpn_override_disarmed reason=manage_off") })
         if let relayStop = after.firstIndex(where: { $0.contains("command=stop-dns-relay outcome=requested") }) {
-            XCTAssertLessThan(released, relayStop)
+            XCTAssertLessThan(disarmed, relayStop)
         }
-        XCTAssertNil(client.record)
+        XCTAssertNil(client.arm)
     }
 
-    @RuntimeActor func testASetHeldWhileAnApplyIsOutIsDecidedOnAgainBeforeItIsApplied() async throws {
+    @RuntimeActor func testASetHeldWhileAnArmIsOutIsDecidedOnAgainBeforeItIsApplied() async throws {
         try requireForwardingAudit()
         let client = ScriptedVPNDNSOverrideClient()
         let running = try await start(override: client)
         let applying = DispatchSemaphore(value: 0)
         let proceed = DispatchSemaphore(value: 0)
         client.onEachCall { request in
-            guard case .apply = request else { return }
+            guard case .arm = request else { return }
             applying.signal()
             proceed.wait()
         }
@@ -182,12 +181,12 @@ final class RuntimeHostVPNDNSOverrideTests: XCTestCase {
         proceed.signal()
         await running.host.deliveries.drain()
 
-        let applied = try XCTUnwrap(running.index("dns.vpn_override_applied"))
-        let released = try XCTUnwrap(running.index("dns.vpn_override_released reason=gate"))
+        let armed = try XCTUnwrap(running.index("dns.vpn_override_armed"))
+        let disarmed = try XCTUnwrap(running.index("dns.vpn_override_disarmed reason=gate"))
         let dropped = try XCTUnwrap(running.index("dns.split_table_changed detected_domains=0"))
-        XCTAssertLessThan(applied, released)
-        XCTAssertLessThan(released, dropped, "the release lands before the forwarder loses the tunnel's servers")
-        XCTAssertNil(client.record)
+        XCTAssertLessThan(armed, disarmed)
+        XCTAssertLessThan(disarmed, dropped, "the disarm lands before the forwarder loses the tunnel's servers")
+        XCTAssertNil(client.arm)
         XCTAssertNil(running.host.vpnDNSOverrideHeldSet)
     }
 
@@ -196,7 +195,7 @@ final class RuntimeHostVPNDNSOverrideTests: XCTestCase {
         semaphore.wait()
     }
 
-    @RuntimeActor func testStopReleasesBeforeTheRelayStops() async throws {
+    @RuntimeActor func testStopDisarmsBeforeTheRelayStops() async throws {
         try requireForwardingAudit()
         let client = ScriptedVPNDNSOverrideClient()
         let running = try await start(override: client)
@@ -207,11 +206,10 @@ final class RuntimeHostVPNDNSOverrideTests: XCTestCase {
         await running.host.deliveries.drain()
 
         let after = Array(running.lines.dropFirst(before))
-        let released = try XCTUnwrap(after.firstIndex { $0.hasPrefix("dns.vpn_override_released") })
+        let disarmed = try XCTUnwrap(after.firstIndex { $0.hasPrefix("dns.vpn_override_disarmed reason=stop") })
         if let relayStop = after.firstIndex(where: { $0.contains("command=stop-dns-relay outcome=requested") }) {
-            XCTAssertLessThan(released, relayStop)
+            XCTAssertLessThan(disarmed, relayStop)
         }
-        XCTAssertEqual(after.filter { $0.hasPrefix("dns.vpn_override_released") }.count, 1, "one release for one record")
-        XCTAssertNil(client.record)
+        XCTAssertNil(client.arm)
     }
 }

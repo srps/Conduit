@@ -371,11 +371,7 @@ package final class RuntimeHost {
         reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
         splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval,
         networkPathSettle: NetworkPathSettle = .standard,
-        dnsForwarderTuning: DNSForwarderTuning = DNSForwarderTuning(),
-        vpnDNSOverrideClock: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
-        vpnDNSOverrideSleep: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void = {
-            try await Task.sleep(until: $0, clock: .continuous)
-        }
+        dnsForwarderTuning: DNSForwarderTuning = DNSForwarderTuning()
     ) async throws -> RuntimeHost {
         let store = ConfigurationStore(
             session: stateSession,
@@ -407,9 +403,7 @@ package final class RuntimeHost {
             reapplyRetrySchedule: reapplyRetrySchedule,
             splitDNSHelperCheckInterval: splitDNSHelperCheckInterval,
             networkPathSettle: networkPathSettle,
-            dnsForwarderTuning: dnsForwarderTuning,
-            vpnDNSOverrideClock: vpnDNSOverrideClock,
-            vpnDNSOverrideSleep: vpnDNSOverrideSleep
+            dnsForwarderTuning: dnsForwarderTuning
         )
         host.emitConfigurationEvents(opened.events)
         return host
@@ -442,11 +436,7 @@ package final class RuntimeHost {
         reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
         splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval,
         networkPathSettle: NetworkPathSettle = .standard,
-        dnsForwarderTuning: DNSForwarderTuning = DNSForwarderTuning(),
-        vpnDNSOverrideClock: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
-        vpnDNSOverrideSleep: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void = {
-            try await Task.sleep(until: $0, clock: .continuous)
-        }
+        dnsForwarderTuning: DNSForwarderTuning = DNSForwarderTuning()
     ) {
         self.incarnation = incarnation
         self.startedAt = startedAt
@@ -526,9 +516,9 @@ package final class RuntimeHost {
         // DNS module's slot orders the relay's, and the tunnel lifecycle the resolver's, so their place in the queue only delays them.
         let platformWork = PlatformWork(label: "io.github.srps.Conduit.daemon.platform-work")
         self.platformWork = platformWork
-        // The clock and the sleep only rate-limit a repair; they are never authority.
         self.vpnDNSOverride = VPNResolverOverrideController(
-            client: auditedPrivilegeClient, work: platformWork, now: vpnDNSOverrideClock, sleep: vpnDNSOverrideSleep
+            client: auditedPrivilegeClient, work: platformWork,
+            resolverOrder: ScutilResolverOrder(run: effects.commandRunner)
         ) { [logger] event, level in
             diagnosticsEventLog.append(event)
             logger.log(level, "VPN DNS override: \(event.event) \(event.detail ?? "")", category: .system)
@@ -649,8 +639,6 @@ package final class RuntimeHost {
             splitDNSDetection.receive(reading)
             pushedResolverUpdates.deliver(using: deliveries) { self?.applyPendingSplitDNSDetection() }
         }
-        self.pushedResolverObserver.setSubstitutions { [substitutions = vpnDNSOverride.substitutions] in substitutions.current }
-        vpnDNSOverride.onWake = { [weak self] in self?.requestVPNDNSOverrideRun(pollStatus: false) }
         reconciler.host = self
 
         // Crash recovery: a run that was `SIGKILL`ed never tore down, so the
@@ -2213,7 +2201,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
             // relay the user just asked to remove.
             stopDNSHealthTimer()
             // The VPN's DNS goes back before the interfaces' does, whatever the clear below finds.
-            await vpnDNSOverride.release(.manageOff)
+            await vpnDNSOverride.disarm(.manageOff)
             let systemDNS = systemDNSManager
             let cleared = await platformWork.run {
                 attemptFlagStep("Could not restore system DNS after the setting changed", logger: logger) {

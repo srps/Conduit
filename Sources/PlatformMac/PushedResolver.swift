@@ -20,8 +20,6 @@ package struct PushedResolver: Hashable, Sendable {
     /// default resolver. Only the parser's full-tunnel domain rule reads it
     /// (owner decisions 8 and 9).
     package let overridesPrimary: Bool
-    /// Part of equality, so a reading after the helper restores the key differs from the one before it.
-    package let overridden: Bool
 
     package init(
         serviceID: String,
@@ -29,8 +27,7 @@ package struct PushedResolver: Hashable, Sendable {
         interface: String,
         domains: [String],
         servers: [String],
-        overridesPrimary: Bool = false,
-        overridden: Bool = false
+        overridesPrimary: Bool = false
     ) {
         assert(!domains.isEmpty && !servers.isEmpty, "a pushed resolver names at least one domain and one server")
         self.serviceID = serviceID
@@ -39,7 +36,6 @@ package struct PushedResolver: Hashable, Sendable {
         self.domains = domains
         self.servers = servers
         self.overridesPrimary = overridesPrimary
-        self.overridden = overridden
     }
 }
 
@@ -152,12 +148,10 @@ extension PushedResolverReading {
     /// any; otherwise, for a full tunnel (`OverridePrimary` 1), `DomainName`
     /// then `SearchDomains`; otherwise the key is rejected as
     /// `no_match_domains`.
-    package static func parse(
-        store: [String: Any],
-        substitutions: [String: [String]] = [:]
-    ) -> PushedResolverReading {
+    package static func parse(store: [String: Any]) -> PushedResolverReading {
         var reading = PushedResolverReading()
-        for serviceID in serviceIDs(in: store) {
+        // The helper's own key (decision 0049) names Conduit's relay; it is never a pushed resolver.
+        for serviceID in serviceIDs(in: store) where serviceID != HelperConstants.vpnDNSOverrideServiceID {
             let dns = store[servicePrefix + serviceID + "/DNS"] as? [String: Any] ?? [:]
             let addressing = ["IPv4", "IPv6"].compactMap { store[servicePrefix + serviceID + "/" + $0] as? [String: Any] }
             guard let interface = addressing.lazy.compactMap({ $0["InterfaceName"] as? String }).first else {
@@ -168,8 +162,7 @@ extension PushedResolverReading {
             let ipv4 = store[servicePrefix + serviceID + "/IPv4"] as? [String: Any]
             let overridesPrimary = (ipv4?["OverridePrimary"] as? NSNumber)?.boolValue == true
             parseResolver(
-                serviceID: serviceID, interface: interface, dns: dns, overridesPrimary: overridesPrimary,
-                substitution: substitutions[serviceID], into: &reading
+                serviceID: serviceID, interface: interface, dns: dns, overridesPrimary: overridesPrimary, into: &reading
             )
         }
         reading.network = parseNetworkResolver(store: store)
@@ -220,7 +213,6 @@ extension PushedResolverReading {
         interface: String,
         dns: [String: Any],
         overridesPrimary: Bool,
-        substitution: [String]?,
         into reading: inout PushedResolverReading
     ) {
         func reject(_ reason: PushedResolverRejection.Reason, _ value: String? = nil) {
@@ -266,15 +258,12 @@ extension PushedResolverReading {
             }
         }
 
-        var stored = strings("ServerAddresses", .invalidServer)
-        let overridden = substitution != nil && stored == [overrideServer]
-        if overridden, let substitution { stored = substitution }
         var servers: [String] = []
         var selfReferential = false
-        for server in stored {
+        for server in strings("ServerAddresses", .invalidServer) {
             if !IPAddressSyntax.isLiteral(server) {
                 reject(.invalidServer, server)
-            } else if VPNDNSOverrideValidation.isLoopback(server) {
+            } else if !VPNDNSOverrideValidation.isTunnelServer(server) {
                 selfReferential = true
                 reject(.selfReferential, server)
             } else if !servers.contains(server) {
@@ -290,12 +279,9 @@ extension PushedResolverReading {
             interface: interface,
             domains: domains,
             servers: servers,
-            overridesPrimary: overridesPrimary,
-            overridden: overridden
+            overridesPrimary: overridesPrimary
         ))
     }
-
-    package static let overrideServer = "127.0.0.1"
 
     private static func isSystemDomain(_ domain: String) -> Bool {
         ["local", "arpa"].contains { domain == $0 || domain.hasSuffix(".\($0)") }

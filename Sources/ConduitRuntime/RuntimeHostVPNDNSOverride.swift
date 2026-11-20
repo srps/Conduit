@@ -3,14 +3,14 @@ import Foundation
 import PlatformMac
 import ProxyKernel
 
-/// The release goes ahead of both clears of system DNS (`.clearSystemDNS` and the DNS teardown).
+/// The disarm goes ahead of both clears of system DNS (`.clearSystemDNS` and the DNS teardown).
 extension RuntimeHost {
     /// Asks for a pass in its own delivery, so a caller in a synchronous turn never waits on the helper.
     func requestVPNDNSOverrideRun(pollStatus: Bool) {
         deliveries.deliver { [weak self] in await self?.runVPNDNSOverride(pollStatus: pollStatus) }
     }
 
-    /// One pass at a time; a held set whose release fails twice waits for the next request, so a failing helper never spins.
+    /// One pass at a time; a held set whose disarm fails twice waits for the next request, so a failing helper never spins.
     func runVPNDNSOverride(pollStatus: Bool) async {
         vpnDNSOverrideWanted = true
         vpnDNSOverridePoll = vpnDNSOverridePoll || pollStatus
@@ -53,10 +53,10 @@ extension RuntimeHost {
     }
 
     func vpnDNSOverrideReleases(before set: LiveSplitDNSDetection.DetectedSet) -> Bool {
-        guard vpnDNSOverride.mayHoldRecord else { return false }
+        guard vpnDNSOverride.mayArm else { return false }
         var inputs = vpnDNSOverrideInputs()
         inputs.serversInUse = Set(set.rules.flatMap(\.servers))
-        if case .release = vpnDNSOverride.decide(inputs) { return true }
+        if case .disarm = vpnDNSOverride.decide(inputs) { return true }
         return false
     }
 }
