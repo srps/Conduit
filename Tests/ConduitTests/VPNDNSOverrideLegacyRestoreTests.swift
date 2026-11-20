@@ -27,9 +27,10 @@ final class VPNDNSOverrideLegacyRestoreTests: XCTestCase {
     }
 
     private final class RefusingStore: VPNDNSLegacyStore {
-        let dns: [String: VPNDNSValue]
-        init(dns: [String: VPNDNSValue]) { self.dns = dns }
-        func dns(service: String) -> [String: VPNDNSValue]? { dns }
+        let read: VPNDNSLegacyRead
+        init(dns: [String: VPNDNSValue]) { read = .value(dns) }
+        init(read: VPNDNSLegacyRead) { self.read = read }
+        func legacyDNS(service: String) -> VPNDNSLegacyRead { read }
         func setDNS(_ value: [String: VPNDNSValue], service: String) -> Bool { false }
     }
 
@@ -68,6 +69,17 @@ final class VPNDNSOverrideLegacyRestoreTests: XCTestCase {
         XCTAssertNil(store.dns(service: service))
         XCTAssertEqual(store.vpnKeyWrites, [])
         XCTAssertEqual(file.deletes, 1)
+    }
+
+    func testAKeyThatCannotBeReadKeepsTheRecordAndIsNotWritten() {
+        let file = RecordFile(record)
+        let store = RefusingStore(read: .unreadable("copy: Failed!"))
+        var reported: [VPNDNSOverrideLegacyRestore.Outcome] = []
+        let outcome = VPNDNSOverrideLegacyRestore.run(store: store, file: file) { reported.append($0) }
+        XCTAssertEqual(outcome, .keyUnreadable(service: service, reason: "copy: Failed!"))
+        XCTAssertTrue(outcome.isFailure)
+        XCTAssertEqual(reported, [outcome])
+        XCTAssertEqual(file.deletes, 0, "the originals stay for the next start")
     }
 
     func testARestoreTheStoreRefusesKeepsTheRecordForTheNextStart() {

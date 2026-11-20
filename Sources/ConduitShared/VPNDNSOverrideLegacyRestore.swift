@@ -30,9 +30,16 @@ package protocol VPNDNSOverrideLegacyRecordFile {
     func delete() throws
 }
 
+package enum VPNDNSLegacyRead: Equatable, Sendable {
+    case absent
+    /// The store failed, or the key holds a field that cannot be written back.
+    case unreadable(String)
+    case value([String: VPNDNSValue])
+}
+
 /// The only write to a VPN client's key: putting back what an older helper replaced, once.
 package protocol VPNDNSLegacyStore {
-    func dns(service: String) -> [String: VPNDNSValue]?
+    func legacyDNS(service: String) -> VPNDNSLegacyRead
     func setDNS(_ value: [String: VPNDNSValue], service: String) -> Bool
 }
 
@@ -43,6 +50,8 @@ package enum VPNDNSOverrideLegacyRestore {
         /// The key no longer holds `127.0.0.1`: the client wrote its own servers, so nothing is written.
         case keyChanged(service: String)
         case keyGone(service: String)
+        /// The record stays, for the next start.
+        case keyUnreadable(service: String, reason: String)
         /// The record stays, for the next start.
         case restoreFailed(service: String)
         case undecodable(String)
@@ -55,6 +64,8 @@ package enum VPNDNSOverrideLegacyRestore {
             case .restored(let service): return "\(prefix) restored service=\(HelperAudit.safe(service))"
             case .keyChanged(let service): return "\(prefix) key_changed service=\(HelperAudit.safe(service)); left alone"
             case .keyGone(let service): return "\(prefix) key_gone service=\(HelperAudit.safe(service)); left alone"
+            case .keyUnreadable(let service, let reason):
+                return "\(prefix) key_unreadable service=\(HelperAudit.safe(service)) reason=\"\(HelperAudit.bounded(reason))\"; record kept"
             case .restoreFailed(let service): return "\(prefix) restore_failed service=\(HelperAudit.safe(service)); record kept"
             case .undecodable(let why): return "\(prefix) record undecodable, deleted: \"\(HelperAudit.bounded(why))\""
             case .deleteFailed(let why): return "\(prefix) record delete failed: \"\(HelperAudit.bounded(why))\""
@@ -63,7 +74,7 @@ package enum VPNDNSOverrideLegacyRestore {
 
         package var isFailure: Bool {
             switch self {
-            case .restoreFailed, .undecodable, .deleteFailed: return true
+            case .keyUnreadable, .restoreFailed, .undecodable, .deleteFailed: return true
             default: return false
             }
         }
@@ -86,7 +97,10 @@ package enum VPNDNSOverrideLegacyRestore {
             outcome = restore(record, store: store)
         }
         report(outcome)
-        if case .restoreFailed = outcome { return outcome }
+        switch outcome {
+        case .restoreFailed, .keyUnreadable: return outcome
+        default: break
+        }
         do {
             try file.delete()
         } catch {
@@ -98,7 +112,12 @@ package enum VPNDNSOverrideLegacyRestore {
     }
 
     private static func restore(_ record: VPNDNSOverrideLegacyRecord, store: any VPNDNSLegacyStore) -> Outcome {
-        guard var dns = store.dns(service: record.serviceID) else { return .keyGone(service: record.serviceID) }
+        var dns: [String: VPNDNSValue]
+        switch store.legacyDNS(service: record.serviceID) {
+        case .absent: return .keyGone(service: record.serviceID)
+        case .unreadable(let reason): return .keyUnreadable(service: record.serviceID, reason: reason)
+        case .value(let value): dns = value
+        }
         guard dns["ServerAddresses"] == .strings(["127.0.0.1"]) else { return .keyChanged(service: record.serviceID) }
         dns["ServerAddresses"] = .strings(record.originals)
         return store.setDNS(dns, service: record.serviceID)
