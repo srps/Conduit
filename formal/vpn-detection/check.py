@@ -58,6 +58,8 @@ OVERRIDE_COVERED = [
     "Sources/ConduitShared/VPNDNSOverrideLedger.swift",
     "Sources/ConduitHelper/HelperDaemon.swift",
     "Sources/ConduitHelper/HelperEventLoop.swift",
+    "Sources/ProxyKernel/Network/UDPRelay.swift",
+    "Sources/ProxyKernel/Network/TCPRelay.swift",
     "Sources/PlatformMac/VPNResolverOverridePolicy.swift",
     "Sources/PlatformMac/VPNResolverOverrideController.swift",
     "Sources/PlatformMac/PushedResolver.swift",
@@ -94,9 +96,9 @@ SAFETY = ["TypeOK", "NoEntryFilesOffVPN", "GateFollowsLastPublished", "NothingPu
           "WakeRecoversOnlyWhenSeeing", "SweepsNotHeldWhenDefinite", "OrchestratorAfterEntryFiles",
           "OrchestratorFollowsLastPublished", "ApplyOnlyFromCurrentSession"]
 LIVENESS = ["NoStuckUnknown", "FilesFollowVPN", "VPNReconnects"]
-OVERRIDE_SAFETY = ["TypeOK", "NoClobber", "NoSelfReference", "NoServerlessDefault", "ReleaseBeforeUnset",
-                   "NoLoopbackWithoutService", "ClientKeyKept", "OneRefusalPerTrigger", "LandedNoted"]
-OVERRIDE_LIVENESS = ["EventuallyReleased", "SuspensionEnds"]
+OVERRIDE_SAFETY = ["TypeOK", "KeyAnswered", "VPNKeyUntouched", "NoLoopbackTarget", "KeyWithdrawn",
+                   "InternalNamesServed", "NoSelfReference"]
+OVERRIDE_LIVENESS = ["EventuallyWithdrawn", "KeyReturns"]
 TEMPORAL = set(LIVENESS) | set(OVERRIDE_LIVENESS)
 
 # The bounds: how much the environment may do in one behaviour. Every check runs two Starts,
@@ -154,49 +156,26 @@ CHECKS = [
 ]
 
 # Each override safety check takes one class of trouble: all of them at once exhausts TLC's memory.
-OVERRIDE_NONE = dict(MaxVersions=1, MaxDisconnects=0, MaxGateFlaps=0, MaxRepublishes=0, MaxIPv4Flaps=0,
-                     MaxSameRewrites=0, MaxOwnerExits=0, MaxHelperCrashes=0, MaxRelayDeaths=0,
-                     MaxForwarderFaults=0, MaxDNSStops=0, MaxWriteFails=0, MaxLostReplies=0, ApplyCap=3,
-                     Endless="FALSE")
+OVERRIDE_NONE = dict(MaxVersions=1, MaxDisconnects=0, MaxGateFlaps=0, MaxIPv4Flaps=0, MaxLoopbackLists=0,
+                     MaxConfigdRestarts=0, MaxOwnerExits=0, MaxHelperCrashes=0, MaxRelayDeaths=0,
+                     MaxForwarderFaults=0, MaxDNSStops=0, MaxLostReplies=0)
 OVERRIDE_CLIENT = dict(OVERRIDE_NONE, MaxVersions=3, MaxDisconnects=1, MaxGateFlaps=1, MaxIPv4Flaps=1,
-                       MaxDNSStops=1)
+                       MaxLoopbackLists=1, MaxConfigdRestarts=1, MaxDNSStops=1)
 OVERRIDE_PROCESS = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxIPv4Flaps=1, MaxOwnerExits=1,
-                        MaxHelperCrashes=1, MaxDNSStops=1)
-OVERRIDE_RELAY = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxGateFlaps=1, MaxRelayDeaths=1,
-                      MaxForwarderFaults=1, MaxDNSStops=1)
-OVERRIDE_LIVE = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxOwnerExits=1,
-                     MaxRelayDeaths=1, MaxForwarderFaults=1)
-OVERRIDE_MUTANT = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxGateFlaps=1, MaxIPv4Flaps=1,
-                       MaxOwnerExits=1, MaxHelperCrashes=1, MaxDNSStops=1)
-OVERRIDE_FLAPS = dict(OVERRIDE_NONE, MaxIPv4Flaps=3)
-OVERRIDE_SAME_REWRITE = dict(OVERRIDE_NONE, MaxSameRewrites=1, MaxIPv4Flaps=1)
-OVERRIDE_ENDLESS = dict(OVERRIDE_NONE, MaxSameRewrites=1, MaxIPv4Flaps=1, Endless="TRUE")
-OVERRIDE_SUSPENSION = dict(OVERRIDE_NONE, MaxVersions=3, ApplyCap=1)
-OVERRIDE_FAULTS = dict(OVERRIDE_NONE, MaxVersions=2, MaxGateFlaps=1, MaxOwnerExits=1,
-                       MaxForwarderFaults=1, MaxDNSStops=1, MaxWriteFails=1, MaxLostReplies=1)
-OVERRIDE_FAULTS_LIVE = dict(OVERRIDE_NONE, MaxVersions=2, MaxRelayDeaths=1, MaxForwarderFaults=1,
-                            MaxWriteFails=1, MaxLostReplies=1)
+                        MaxHelperCrashes=1, MaxDNSStops=1, MaxLostReplies=1)
+OVERRIDE_RELAY = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxGateFlaps=1, MaxLoopbackLists=1,
+                      MaxRelayDeaths=1, MaxForwarderFaults=1, MaxDNSStops=1)
+OVERRIDE_LIVE = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxIPv4Flaps=1, MaxConfigdRestarts=1,
+                     MaxOwnerExits=1, MaxRelayDeaths=1, MaxForwarderFaults=1)
 CHECKS += [
     Check("override-safety-client", OVERRIDE_CLIENT, invariants=OVERRIDE_SAFETY,
-          full=dict(OVERRIDE_CLIENT, MaxVersions=4), spec=OVERRIDE),
+          full=dict(OVERRIDE_CLIENT, MaxVersions=4, MaxOwnerExits=1), spec=OVERRIDE),
     Check("override-safety-process", OVERRIDE_PROCESS, invariants=OVERRIDE_SAFETY,
-          full=dict(OVERRIDE_PROCESS, MaxVersions=3), spec=OVERRIDE),
+          full=dict(OVERRIDE_PROCESS, MaxVersions=3, MaxConfigdRestarts=1), spec=OVERRIDE),
     Check("override-safety-relay", OVERRIDE_RELAY, invariants=OVERRIDE_SAFETY,
-          full=dict(OVERRIDE_RELAY, MaxVersions=3), spec=OVERRIDE),
+          full=dict(OVERRIDE_RELAY, MaxVersions=3, MaxOwnerExits=1), spec=OVERRIDE),
     Check("override-liveness", OVERRIDE_LIVE, invariants=["TypeOK"], properties=OVERRIDE_LIVENESS,
-          full=dict(OVERRIDE_LIVE, MaxIPv4Flaps=1), spec=OVERRIDE),
-    Check("override-flaps", OVERRIDE_FLAPS, invariants=OVERRIDE_SAFETY + ["NeverSuspended"],
-          full=dict(OVERRIDE_FLAPS, MaxVersions=2), spec=OVERRIDE),
-    Check("override-same-rewrite", OVERRIDE_SAME_REWRITE, invariants=OVERRIDE_SAFETY + ["NeverLost"],
-          full=dict(OVERRIDE_SAME_REWRITE, MaxSameRewrites=2), spec=OVERRIDE),
-    Check("override-same-endless", OVERRIDE_ENDLESS, invariants=OVERRIDE_SAFETY + ["NeverSuspended", "NeverLost"],
-          full=dict(OVERRIDE_ENDLESS, MaxVersions=2), spec=OVERRIDE),
-    Check("override-suspension-expires", OVERRIDE_SUSPENSION, invariants=["TypeOK"], properties=["SuspensionEnds"],
-          full=dict(OVERRIDE_SUSPENSION, MaxIPv4Flaps=1), spec=OVERRIDE),
-    Check("override-store-faults", OVERRIDE_FAULTS, invariants=OVERRIDE_SAFETY,
-          full=dict(OVERRIDE_FAULTS, MaxWriteFails=2), spec=OVERRIDE),
-    Check("override-store-faults-liveness", OVERRIDE_FAULTS_LIVE, invariants=["TypeOK"],
-          properties=["EventuallyReleased"], full=dict(OVERRIDE_FAULTS_LIVE, MaxWriteFails=2), spec=OVERRIDE),
+          full=dict(OVERRIDE_LIVE, MaxGateFlaps=1, MaxLostReplies=1), spec=OVERRIDE),
 ]
 
 CHECK_NAMED = {check.name: check for check in CHECKS}
@@ -328,160 +307,90 @@ def override_mutant(name, swift, edits, expect, bounds=None):
     return Mutant(name, swift, edits, expect, bounds=bounds, check=check, spec=OVERRIDE)
 
 
+OVERRIDE_MUTANT = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxGateFlaps=1, MaxIPv4Flaps=1,
+                       MaxOwnerExits=1, MaxHelperCrashes=1, MaxDNSStops=1, MaxForwarderFaults=1)
 OVERRIDE_FORWARDER_ONLY = dict(OVERRIDE_NONE, MaxVersions=2, MaxForwarderFaults=1)
-OVERRIDE_WRITE_FAILS = dict(OVERRIDE_NONE, MaxVersions=2, MaxForwarderFaults=1, MaxWriteFails=1)
-OVERRIDE_LOST_REPLY = dict(OVERRIDE_NONE, MaxVersions=2, MaxLostReplies=1)
+OVERRIDE_LOOPBACK = dict(OVERRIDE_NONE, MaxVersions=2, MaxLoopbackLists=1, MaxForwarderFaults=1)
+OVERRIDE_CONFIGD = dict(OVERRIDE_NONE, MaxVersions=2, MaxConfigdRestarts=1)
+OVERRIDE_LOST_REPLY = dict(OVERRIDE_NONE, MaxVersions=2, MaxGateFlaps=1, MaxLostReplies=1)
 
-
+# The combined design (0049 as revised in #330) is ahead of the code: each `swift` text names the change
+# that would break it once it is built.
 MUTANTS += [
     override_mutant(
-        "ov-release-no-compare",
-        "VPNDNSOverrideLedger.restore: delete `guard dns[\"ServerAddresses\"] == .strings(Self.relayServers) "
-        "else { return .keyChanged }`, so the originals are written over whatever the key holds",
-        [("ReleaseCompares == TRUE", "ReleaseCompares == FALSE")],
-        "NoClobber"),
+        "ov-no-per-query-failover",
+        "UDPRelay and TCPRelay: fail over to the VPN's servers only when the helper's tick switches the mode, "
+        "so a lookup to a forwarder that refuses or stays silent goes unanswered until the next probe",
+        [("PerQueryFailover == TRUE", "PerQueryFailover == FALSE")],
+        "KeyAnswered", bounds=OVERRIDE_FORWARDER_ONLY),
     override_mutant(
-        "ov-apply-gone-no-compare",
-        "VPNDNSOverrideLedger.apply: on a missing IPv4 key, write the originals back without the "
-        "`store.dns(service:) == overridden` check, so a value the client wrote since is overwritten",
-        [("ApplyGoneCompares == TRUE", "ApplyGoneCompares == FALSE")],
-        "NoClobber"),
+        "ov-key-points-at-conduit",
+        "the helper publishes its key with Conduit's forwarder port instead of the relay's, so a forwarder that "
+        "is gone or silent leaves every lookup unanswered",
+        [("KeyTargetsRelay == TRUE", "KeyTargetsRelay == FALSE")],
+        "KeyAnswered", bounds=OVERRIDE_FORWARDER_ONLY),
     override_mutant(
-        "ov-removes-key-without-ipv4",
-        "VPNDNSOverrideLedger.restore ends `guard !store.ipv4Exists(service:) else { return "
-        ".restored }; return store.removeDNS(service:) ? ...`, and apply's no-IPv4 path removes its key, so "
-        "a flap of the IPv4 key deletes the client's DNS key",
-        [("RemovesGoneKey == FALSE", "RemovesGoneKey == TRUE")],
-        "ClientKeyKept"),
+        "ov-failover-to-loopback",
+        "the relay's failover keeps a loopback server from the VPN's key, so a failed-over lookup is sent "
+        "to a loopback address",
+        [("FiltersLoopback == TRUE", "FiltersLoopback == FALSE")],
+        "NoLoopbackTarget", bounds=OVERRIDE_LOOPBACK),
     override_mutant(
-        "ov-apply-no-service-check",
-        "VPNDNSOverrideLedger.apply: delete `guard store.ipv4Exists(service:)` after setDNS, so a client "
-        "delete between check and setDNS leaves a recreated key at 127.0.0.1 on a removed service",
-        [("ApplyChecksService == TRUE", "ApplyChecksService == FALSE")],
-        "NoLoopbackWithoutService"),
-    override_mutant(
-        "ov-apply-before-live-set",
-        "VPNResolverOverridePolicy.wanted: delete `guard tunnel.servers.allSatisfy(input.serversInUse.contains)`, "
-        "so an apply goes out before the live set has the tunnel's servers",
-        [("ServersInUse == TRUE", "ServersInUse == FALSE")],
-        "ReleaseBeforeUnset"),
-    override_mutant(
-        "ov-set-dropped-before-release",
-        "RuntimeHostSplitDNSDetection.applyPendingSplitDNSDetection: delete `|| vpnDNSOverrideReleases(before: set)`, "
-        "so the set without the tunnel's servers is applied before the release",
-        [("HoldBeforeRelease == TRUE", "HoldBeforeRelease == FALSE")],
-        "ReleaseBeforeUnset"),
-    override_mutant(
-        "ov-parser-no-substitution",
-        "PushedResolverReading.parseResolver: `if overridden, let substitution { stored = substitution }` "
-        "removed and 127.0.0.1 not dropped as self-referential, so the override reads as a tunnel server",
-        [("ParseLoopback(box) == box", "ParseLoopback(box) == LO")],
-        "NoSelfReference"),
+        "ov-key-kept-after-owner-exit",
+        "HelperDaemon.run: on the owner's NOTE_EXIT, stop watching but leave the key published",
+        [("WithdrawsOnExit == TRUE", "WithdrawsOnExit == FALSE")],
+        "KeyWithdrawn"),
     override_mutant(
         "ov-no-note-exit",
-        "HelperDaemon.run: delete `loop.watchOwner(...)` after each event, so an owner's exit releases only "
-        "through tick(), which a relaunched app's answering forwarder satisfies",
+        "HelperDaemon.run: delete `loop.watchOwner(...)`, so the key outlives an owner that exited",
         [("WatchOwner == TRUE", "WatchOwner == FALSE")],
-        "ReleaseBeforeUnset"),
+        "KeyWithdrawn"),
     override_mutant(
-        "ov-exits-after-connection",
-        "HelperEventLoop.ordered: return `(connection ? [.connection] : []) + signals + exits`, so the "
-        "relaunched app's connection is served before the dead owner's exit",
-        [("ExitsFirst == TRUE", "ExitsFirst == FALSE")],
-        "ReleaseBeforeUnset"),
+        "ov-no-republish-after-configd-restart",
+        "the helper does not watch its own key, so after configd restarts and drops it the key stays gone "
+        "while the helper believes it published",
+        [("NoticesOwnKey == TRUE", "NoticesOwnKey == FALSE")],
+        "KeyReturns", bounds=OVERRIDE_CONFIGD),
     override_mutant(
-        "ov-record-kept-at-start",
-        "VPNDNSOverrideLedger.start: `case .record(let persisted)` keeps `record = persisted` without "
-        "`release(reason: .helperStart)`; the fresh helper watches no owner",
-        [("ReleaseAtStart == TRUE", "ReleaseAtStart == FALSE")],
-        "ReleaseBeforeUnset"),
+        "ov-writes-vpn-key",
+        "the helper also writes 127.0.0.1 into the VPN's own `State:/Network/Service/<id>/DNS`, as the "
+        "rewrite did",
+        [("WritesVPNKey == FALSE", "WritesVPNKey == TRUE")],
+        "VPNKeyUntouched"),
+    override_mutant(
+        "ov-reads-own-key",
+        "PushedResolverReading.parse: read Conduit's own key as a pushed resolver, so 127.0.0.1 enters the "
+        "live split-DNS set",
+        [("IgnoresOwnKey == TRUE", "IgnoresOwnKey == FALSE")],
+        "NoSelfReference"),
+    override_mutant(
+        "ov-arm-before-live-set",
+        "VPNResolverOverridePolicy.wanted: delete `guard tunnel.servers.allSatisfy(input.serversInUse.contains)`, "
+        "so the key is armed before the live set has the VPN's servers",
+        [("ServersInUse == TRUE", "ServersInUse == FALSE")],
+        "InternalNamesServed"),
+    override_mutant(
+        "ov-set-dropped-before-disarm",
+        "RuntimeHostSplitDNSDetection.applyPendingSplitDNSDetection: apply a new set while the key may be "
+        "armed, before the disarm",
+        [("HoldBeforeDisarm == TRUE", "HoldBeforeDisarm == FALSE")],
+        "InternalNamesServed"),
+    override_mutant(
+        "ov-unconfirmed-arm-kept",
+        "VPNResolverOverrideController.decide: decide on `record` alone, so an arm whose reply was lost is not "
+        "disarmed before the set changes",
+        [("ReleasesUnconfirmed == TRUE", "ReleasesUnconfirmed == FALSE")],
+        "InternalNamesServed", bounds=OVERRIDE_LOST_REPLY),
     override_mutant(
         "ov-tick-ignores-refused",
-        "VPNDNSOverrideLedger.tick: `case .refused` never reaches the streak of 2 that releases with "
-        "target_refused, so a stopped forwarder's 127.0.0.1 waits on the app's own release",
-        [("IF h.refused + 1 >= 2 THEN StartRelease(\"none\", 0)", "IF h.refused + 1 >= 2 THEN UNCHANGED h")],
-        "EventuallyReleased", bounds=OVERRIDE_FORWARDER_ONLY),
+        "the helper's tick never reaches the streak of 2 refusals that withdraws the key",
+        [("!.probeOK = @ /\\ h.refused + 1 < 2", "!.probeOK = @")],
+        "EventuallyWithdrawn", bounds=OVERRIDE_FORWARDER_ONLY),
     override_mutant(
         "ov-tick-ignores-silent",
-        "VPNDNSOverrideLedger.tick: `case .silent` never reaches the streak of 3 that releases with "
-        "target_silent, so a hung app's 127.0.0.1 is never given back",
-        [("IF h.silent + 1 >= 3 THEN StartRelease(\"none\", 0)", "IF h.silent + 1 >= 3 THEN UNCHANGED h")],
-        "EventuallyReleased", bounds=OVERRIDE_FORWARDER_ONLY),
-    override_mutant(
-        "ov-held-set-applied-unchecked",
-        "RuntimeHostVPNDNSOverride.runVPNDNSOverride: apply vpnDNSOverrideHeldSet after the pass without "
-        "asking vpnDNSOverrideReleases(before:) again, so a set held while an apply was out drops the "
-        "tunnel's servers before the release that follows",
-        [("HeldSetRechecked == TRUE", "HeldSetRechecked == FALSE")],
-        "ReleaseBeforeUnset"),
-    override_mutant(
-        "ov-hold-reads-live-set",
-        "VPNResolverOverridePolicy.holds: test the record's originals against the orchestrator's live set "
-        "(orchestrator.detectedSplitDNSRules) instead of the serversInUse decide is handed, so "
-        "vpnDNSOverrideReleases(before:) no longer sees the set about to drop them",
-        [("HoldOnSetInUse == TRUE", "HoldOnSetInUse == FALSE")],
-        "ReleaseBeforeUnset"),
-    override_mutant(
-        "ov-same-servers-capped",
-        "VPNResolverOverridePolicy.decide: check `recent(input.applies) < maximumApplies` whatever "
-        "`last?.servers`, and VPNResolverOverrideController.apply: `note(service, in: &applies)` on every landed "
-        "apply, so a client writing its own servers back is suspended after maximumApplies re-applies",
-        [("SameServersUncapped == TRUE", "SameServersUncapped == FALSE")],
-        "NeverSuspended", bounds=OVERRIDE_ENDLESS),
-    override_mutant(
-        "ov-refusals-capped",
-        "VPNResolverOverridePolicy.decide: suspend once `recent(input.refusals)` reaches a cap, so a client that "
-        "flaps without end and is refused each time suspends the override",
-        [("RefusalsCapped == FALSE", "RefusalsCapped == TRUE")],
-        "NeverSuspended", bounds=OVERRIDE_ENDLESS),
-    override_mutant(
-        "ov-refusal-retries-at-once",
-        "VPNResolverOverrideController.apply: a refused apply asks for another pass at once, so the helper is "
-        "sent the refused apply again with no new reading, tick or wake in between",
-        [("RefusalRetriesAtOnce == FALSE", "RefusalRetriesAtOnce == TRUE")],
-        "OneRefusalPerTrigger"),
-    override_mutant(
-        "ov-suspension-never-expires",
-        "VPNResolverOverrideController.observe: drop the loop that removes a suspension older than "
-        "suspensionLifetime, so a suspension lasts until the gate turns off or DNS restarts",
-        [("SuspensionsExpire == TRUE", "SuspensionsExpire == FALSE")],
-        "SuspensionEnds", bounds=OVERRIDE_SUSPENSION),
-    override_mutant(
-        "ov-refusals-count-as-applies",
-        "VPNResolverOverrideController.apply: every apply sent counts toward "
-        "maximumApplies, refused or not, so three IPv4 flaps that each refuse an apply in flight suspend",
-        [("RefusalsSeparate == TRUE", "RefusalsSeparate == FALSE")],
-        "NeverSuspended", bounds=OVERRIDE_FLAPS),
-    override_mutant(
-        "ov-same-rewrite-kept",
-        "VPNResolverOverrideController.confirm: never set keyRewritten, so a client that writes the same "
-        "servers back over 127.0.0.1 leaves decide matching the record, and nothing re-applies",
-        [("SameRewriteReapplies == TRUE", "SameRewriteReapplies == FALSE")],
-        "NeverLost", bounds=OVERRIDE_SAME_REWRITE),
-    override_mutant(
-        "ov-failed-restore-forgotten",
-        "VPNDNSOverrideLedger.release: `forgetRecord()` whatever `restore` returned, so a restore the store "
-        "refused leaves the key at 127.0.0.1 with no record and nothing to retry it",
-        [("KeepsFailedRestore == TRUE", "KeepsFailedRestore == FALSE")],
-        "NoServerlessDefault", bounds=OVERRIDE_WRITE_FAILS),
-    override_mutant(
-        "ov-confirmed-apply-uncounted",
-        "VPNResolverOverrideController.confirm: adopt an unconfirmed apply the status holds without "
-        "`landed(...)`, so it skips noteLanded, the cap and the spacing",
-        [("AdoptCounts == TRUE", "AdoptCounts == FALSE")],
-        "LandedNoted", bounds=OVERRIDE_LOST_REPLY),
-    override_mutant(
-        "ov-unconfirmed-apply-kept",
-        "VPNResolverOverrideController.decide: decide on `record` alone, so an apply whose reply was lost is not "
-        "released when it stops being wanted, and the set without the tunnel's servers is applied over it",
-        [("ReleasesUnconfirmed == TRUE", "ReleasesUnconfirmed == FALSE")],
-        "ReleaseBeforeUnset", bounds=dict(OVERRIDE_LOST_REPLY, MaxGateFlaps=1)),
-    override_mutant(
-        "ov-apply-before-status",
-        "VPNResolverOverrideController.pass: apply without asking the helper's status first while an apply may "
-        "be unconfirmed, so a stale reading re-applies over a record the helper already holds",
-        [("StatusBeforeApply == TRUE", "StatusBeforeApply == FALSE")],
-        "ReleaseBeforeUnset", bounds=OVERRIDE_FAULTS),
+        "the helper's tick never reaches the streak of 3 silent probes that withdraws the key",
+        [("!.probeOK = @ /\\ h.silent + 1 < 3", "!.probeOK = @")],
+        "EventuallyWithdrawn", bounds=OVERRIDE_FORWARDER_ONLY),
 ]
 
 
