@@ -147,6 +147,27 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
         XCTAssertEqual(events(named: "dns.network_resolver_fallback").count, 0)
     }
 
+    func testAProxyOrPACHostIsNeverAskedOfTheNetworkServer() async throws {
+        let network = try await networkDNS(answering: true)
+        let doh = try await dohProvider(silent: true)
+        let port = try await start(dohPort: doh.port, networkPort: network.port, configure: { config in
+            config.upstreams = [UpstreamProxy(name: "Corp", host: "Proxy.Corp.Example.", port: 8080, priority: 0)]
+            config.routing.pacURL = "http://pac.corp.example/proxy.pac"
+        })
+
+        for name in ["proxy.corp.example", "pac.corp.example"] {
+            let reply = try await rawReply(name, port: port)
+            XCTAssertEqual(reply.map(DNSWireFormat.extractRCode), 2, "SERVFAIL for \(name), never the network's unauthenticated answer")
+            XCTAssertEqual(network.queryCount(name), 0)
+        }
+        let other = try await SplitDNSProbe.resolve("www.example.com", port: port)
+        XCTAssertEqual(other, Self.networkIP, "other names still fall back")
+        XCTAssertEqual(events(named: "dns.network_resolver_fallback").compactMap(\.detail), [
+            "name=proxy.corp.example servers=1 outcome=proxy_host suppressed=0",
+            "name=www.example.com servers=1 outcome=answered suppressed=0",
+        ], "one event per outcome per minute")
+    }
+
     func testBothSilentAnswerServfailInsideTheRelayWindow() async throws {
         let network = try await silentServer()
         let doh = try await dohProvider(silent: true)
@@ -234,7 +255,8 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
         splitDNS: (@Sendable () -> SplitDNSTable)? = nil,
         dohRequestTimeout: TimeInterval = 0.3,
         networkResolverTimeout: TimeAmount = .milliseconds(300),
-        lookupWindow: TimeAmount? = nil
+        lookupWindow: TimeAmount? = nil,
+        configure: (inout ProxyConfig) -> Void = { _ in }
     ) async throws -> Int {
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -242,6 +264,7 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
         config.dohProviders = ["http://127.0.0.1:\(dohPort)/dns-query"]
         config.localHost = "127.0.0.1"
         config.localPort = 9
+        configure(&config)
         let frozen = config
         var tuning = DNSForwarderTuning()
         let network = Self.networkServer
