@@ -12,12 +12,13 @@ on:
       - "Sources/ProxyKernel/Proxy/TunnelRelayHandler.swift"
 permissions:
   contents: read
+env:
+  # The oldest Xcode the README supports; raise it on purpose.
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
 jobs:
   regression:
     runs-on: macos-26
     timeout-minutes: 15
-    env:
-      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: xcrun swift build --product pm-sim

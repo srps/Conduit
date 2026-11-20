@@ -18,6 +18,8 @@ permissions:
   contents: read
 
 env:
+  # The oldest Xcode the README supports; raise it on purpose.
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
   # Existing NIO storage suppressions have a documented blind spot;
   # see .tsan-suppressions for their scope and rationale.
   TSAN_OPTIONS: suppressions=${{ github.workspace }}/.tsan-suppressions
@@ -32,11 +34,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build (ASan)
-        run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift build --sanitize=address
+        run: xcrun swift build --sanitize=address
       - name: pm-sim suite (ASan)
-        run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift run --sanitize=address pm-sim all
+        run: xcrun swift run --sanitize=address pm-sim all
       - name: websocket-upgrade scenario (ASan)
-        run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift run --sanitize=address pm-sim websocket-upgrade
+        run: xcrun swift run --sanitize=address pm-sim websocket-upgrade
 
   tsan:
     name: pm-sim under ThreadSanitizer
@@ -45,11 +47,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build (TSan)
-        run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift build --sanitize=thread
+        run: xcrun swift build --sanitize=thread
       - name: pm-sim suite (TSan)
-        run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift run --sanitize=thread pm-sim all
+        run: xcrun swift run --sanitize=thread pm-sim all
       - name: websocket-upgrade scenario (TSan)
-        run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift run --sanitize=thread pm-sim websocket-upgrade
+        run: xcrun swift run --sanitize=thread pm-sim websocket-upgrade
 
   # Unit/integration tests under TSan catch handler-confinement races the
   # simulator's schedules may not interleave.
@@ -60,4 +62,4 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Test (TSan)
-        run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift test --sanitize=thread
+        run: xcrun swift test --sanitize=thread
