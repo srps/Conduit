@@ -36,7 +36,8 @@ Each property's comment in the spec says what it guarantees and the harm if it b
 - `NoClobber`. A helper write replaces only what it compared and meant to replace, or the value it wrote itself, or a client value written between its compare-read and its write (the documented window). A write with no compare-read before it gets no window. Harm: the client's current servers are overwritten.
 - `NoSelfReference`. The reading, the live set and a held set never carry `127.0.0.1` as a tunnel server. Harm: the forwarder queries itself.
 - `NoServerlessDefault`. The key holds `127.0.0.1` only while the helper holds a record. Harm: nothing can give the key back.
-- `ReleaseBeforeUnset`. While the key holds `127.0.0.1` and the relay and forwarder serve it, the live set has the tunnel's servers, except between the owner's exit and the helper handling it. After a client write inside apply's window, or a reading parsed with a box replaced since (both self-correcting), any list the client published counts. Harm: internal names fail.
+- `ReleaseBeforeUnset`. While the key holds `127.0.0.1` and the relay and forwarder serve it, the live set has the tunnel's servers, except between the owner's exit and the helper handling it. After a client write inside apply's window, a restore that landed over a client write inside release's window (until the client's next write), or a reading parsed with a box replaced since (all self-correcting), any list the client published counts. It does not hold while a restore is pending: the store refused the restoring write, nothing can give the key back, and each tick retries it. Harm: internal names fail.
+- `LandedNoted`. The record the app holds is the last landed apply it noted (`lastN`, with `spaced` and the cap set in the same step), whether its reply or a later status showed it. Harm: an apply that a status confirms is neither spaced nor capped.
 - `NoLoopbackWithoutService`. A key at `127.0.0.1` exists without the IPv4 key, other than during an IPv4 flap, only while the helper holds a record and is inside an operation or down. Harm: a `127.0.0.1` key outlives the removed service.
 - `ClientKeyKept`. A service that is up or only flapping always has its DNS key; the helper never deletes it. Harm: the client does not republish a deleted key, so the Mac has no default resolver (the owner's machine, 2026-11-19).
 - `OneRefusalPerTrigger`. A refused apply is not sent again until a store reading, a tick or a wake. Harm: a refusal that asks for its own pass spins the helper with no client change.
@@ -64,6 +65,13 @@ Each was an open bug or a witness at the sync commit and is now a mutant that mu
 
 `BoxBothSides` (the monitor's box taken on both sides of the store read) has no mutant: no property here fails with the box taken before the read only, because the hold makes the spurious no-full-tunnel reading harmless. The Swift test `testAReadThatSpansTheBoxChangingReadsThroughEitherSide` covers it.
 
+## Store faults and lost replies
+
+- `ov-failed-restore-forgotten` (`NoServerlessDefault`, at `OVERRIDE_WRITE_FAILS`). `release` forgot the record whatever `restore` returned, so a restore the store refused left the key at `127.0.0.1` with nothing to retry it. It now keeps the record pending, and each tick retries before probing.
+- `ov-confirmed-apply-uncounted` (`LandedNoted`, at `OVERRIDE_LOST_REPLY`). `confirm` adopted an unconfirmed apply without `noteLanded`, the cap or the event.
+- `ov-unconfirmed-apply-kept` (`ReleaseBeforeUnset`). With its reply lost, an apply held by the helper was not released when the gate turned off, because `decide` looked at `record` only; the set without the tunnel's servers was applied over a key at `127.0.0.1` until the next status call. Found by the lost-reply action; `decide` now releases such an apply.
+- `ov-apply-before-status` (`ReleaseBeforeUnset`, at `OVERRIDE_FAULTS`). An apply sent without the status call `pass` makes first while an apply may be unconfirmed.
+
 ## Bounds
 
 Every check starts from `OVERRIDE_NONE` (one list, no fault, cap 3) and adds one class of trouble, because all of them at once ran past 7 GB of TLC state in five minutes:
@@ -76,10 +84,12 @@ Every check starts from `OVERRIDE_NONE` (one list, no fault, cap 3) and adds one
 - `override-same-rewrite` (`OVERRIDE_SAME_REWRITE`): one same-server rewrite and one IPv4 flap; adds `NeverLost`.
 - `override-same-endless` (`OVERRIDE_ENDLESS`): same-server rewrites and IPv4 flaps that spend no budget (`Endless`), each flap able to cost a refusal; adds `NeverSuspended` and `NeverLost`.
 - `override-suspension-expires` (`OVERRIDE_SUSPENSION`): three lists at cap 1; checks `SuspensionEnds`.
+- `override-store-faults` (`OVERRIDE_FAULTS`): two lists, a gate flap, an app exit, a forwarder fault, a DNS Stop, one failed store write and one lost apply reply; the safety properties. No disconnect: with one, TLC finds a path in which the helper's restore recreates a key the client deleted inside release's window and the client then republishes only its IPv4 key, which the model allows but a real client does not do (it writes DNS before IPv4 on reconnect); that path is open and needs a design look before disconnects are added. `--full` allows two write failures.
+- `override-store-faults-liveness` (`OVERRIDE_FAULTS_LIVE`): two lists, a relay death, a forwarder fault, one failed write and one lost reply; checks `EventuallyReleased`. `--full` allows two write failures.
 
 `--full` adds a list to each safety check and an IPv4 flap to liveness. Safety mutants run at `OVERRIDE_MUTANT`, the tick mutants with only a forwarder fault (`OVERRIDE_FORWARDER_ONLY`).
 
-Measured on a 12-core laptop: client 11.3M distinct states in 40 s, process 14.5M in 54 s, relay 15.5M in 52 s, liveness 2.6M in 75 s; every mutant, bug and witness 1 to 2 s. The full liveness bounds took 13.8M states and 521 s.
+Measured on a 12-core laptop: client 11.3M distinct states in 40 s, process 14.5M in 54 s, relay 15.5M in 52 s, liveness 2.6M in 75 s; every mutant, bug and witness 1 to 2 s. The full liveness bounds took 13.8M states and 521 s. With the store faults, the full tier (`--full=override --mutants`) took 30 min wall on the same laptop: client 31.4M distinct in 135 s, process 59.9M in 253 s, relay 90.8M in 523 s, liveness 7.7M in 485 s, store faults 25.0M in 320 s, store-faults liveness 0.7M in 45 s, every mutant at most 12 s.
 
 ## Coverage record
 
@@ -95,8 +105,11 @@ Synced at SYNC_COMMIT. Move it forward only after you confirm, function by funct
 | `HApplyIPv4`, `ApplyChecksService`, `WatchOwner` | `apply`: `guard store.ipv4Exists(service:)`, `record = replacement`, `resetProbeStreaks`; `Sources/ConduitHelper/HelperDaemon.swift` `applyVPNDNSOverride` (`overrideOwner = peerPID`) and `run`'s `loop.watchOwner(...)`, `ESRCH` releasing `.ownerExited` |
 | `HApplyGoneRead`, `HApplyGoneWrite`, `ApplyGoneCompares` | `apply`'s no-IPv4 path: `store.dns(service:) == overridden`, `setDNS` of the originals, `forgetRecord`, refused `not_found` |
 | `HRelRead`, `HRelWrite`, `ReleaseCompares`, `FinishRelease` | `VPNDNSOverrideLedger.release` -> `restore`: `dns(service:)`, `guard ... == .strings(Self.relayServers)`, `setDNS` of the originals; `forgetRecord`, `lastRelease` |
+| `HRelWriteFails`, `FailRelease`, `KeepsFailedRestore`, `rec.pending`, `MaxWriteFails` | `restore`'s `setDNS` returning false (`restoreFailed`): `release` keeps the record and its file and sets `restorePending`; `HelperDaemon`'s `.stopDNSRelay` stops the relay and replies ok anyway, `releaseVPNDNSOverride` replies an error |
+| `HApplyWriteFails` | `apply`'s `setDNS` returning false: `forgetRecord`, refused `write_failed`, which the controller keeps as `unconfirmedApply` |
+| `HApplyReplyLost`, `MaxLostReplies` | an apply the helper landed whose reply the app never got (a timeout or a dropped connection): the controller's `.failure` branch, `unconfirmedApply` |
 | `HRelIPv4`, `HRelRemove`, `RemovesGoneKey` | the ledger before 276eebd5 (`ipv4Exists`, `removeDNS`), run only by `ov-removes-key-without-ipv4` |
-| `HTick` | `VPNDNSOverrideLedger.tick`: `probe.tcpListening()` false or `.notRunning` -> `relayStopped`, two `.refused`, three `.silent`; `HelperEventLoop.next(tickDue:)` |
+| `HTick` | `VPNDNSOverrideLedger.tick`: a pending restore retried first, before any probe; `probe.tcpListening()` false or `.notRunning` -> `relayStopped`, two `.refused`, three `.silent`; `HelperEventLoop.next(tickDue:)` |
 | `HOwnerExit`, `ExitPending`, `HelperFree`, `ExitsFirst` | `Sources/ConduitHelper/HelperEventLoop.swift` `ordered` (signals, owner exits, one connection) and `next`; `HelperDaemon.run` `.ownerExited` -> `release(.ownerExited)` |
 | `HSignal` | `HelperDaemon.run` `.signal` -> `release(.helperStopping)`, exit |
 | `HAccept` (other requests) | `HelperDaemon.processRequest`: `releaseVPNDNSOverride` (`.requested`), `startDNSRelay` (both halves, idempotent; a restart keeps the record only if TCP binds too, and a TCP bind failure is `HAccept` then `RelayDies`; `relayRestarted(succeeded:)`), `.stopDNSRelay` (`release(.relayStopped)` then both stop) |
@@ -108,7 +121,9 @@ Synced at SYNC_COMMIT. Move it forward only after you confirm, function by funct
 | `MayHoldOf`, `known`, `unApply`, `unRel`, `applies`, `refusals`, `lastN`, `spaced`, `susp`, `rewritten`, `fresh`, `tries`, `RefusalsSeparate`, `RefusalsCapped`, `RefusalRetriesAtOnce`, `SuspensionsExpire` | `Sources/PlatformMac/VPNResolverOverrideController.swift` `mayHoldRecord`, `record`, `unconfirmedApply`, `unconfirmedRelease`, `applies` (`note(_:in:)`), `lastApplies` (`noteLanded`), `wakeAt`, `suspended`, `keyRewritten`, `observe` |
 | `SpacingElapses`, `SuspensionExpires` | controller `armWake(at:)` and `onWake` (`RuntimeHost.requestVPNDNSOverrideRun`); `observe`'s expiry of `suspended` past `suspensionLifetime` |
 | `AppPoll`, `Polled`, `SameRewriteReapplies` | controller `pass`'s `status(_:)` and `confirm(_:lastRelease:restorePending:reading:)` (`keyRewritten` once `writeSeen` or `readingSettle`; an adopted `unconfirmedApply` counted through `landed`) |
-| `AppPass`, `ApplyOK`, `ApplyRefused`, `ApplyFailed`, `ReleaseOK`, `ReleaseFailed`, `AfterCall` | controller `pass`, `apply`, `release`; `RuntimeHostVPNDNSOverride.runVPNDNSOverride` (the held set after the pass, `HeldSetRechecked`) |
+| `AppPass`, `ApplyOK`, `ApplyRefused`, `ApplyFailed`, `ReleaseOK`, `ReleaseFailed`, `AfterCall`, `StatusBeforeApply` | controller `pass` (`statusDue` before an apply while `mayHoldRecord`), `apply`, `release`; `RuntimeHostVPNDNSOverride.runVPNDNSOverride` (the held set after the pass, `HeldSetRechecked`) |
+| `ReleasesUnconfirmed` (in `DecisionOf`) | controller `decide`: with no `record`, an `unconfirmedApply` that `decide` would release is released |
+| `AdoptCounts` (in `Polled`), `LandedNoted` | controller `confirm`'s adoption of `unconfirmedApply` through `landed(...)`: `note`, `noteLanded`, the backoff reset, `confirmed=status` |
 | `AppTake`, `NewSet`, `HoldBeforeRelease`, `FlapHold` | `Sources/ConduitRuntime/RuntimeHostSplitDNSDetection.swift` `applyPendingSplitDNSDetection`, `vpnDNSOverrideReleases(before:)`; `LiveSplitDNSDetection.take`; `Sources/PlatformMac/LiveSplitDNSPolicy.swift` `heldThroughFlap` (added to the model on claude/vpn-override-flap: without it every flap dropped the set) |
 | `AppRestartRelay`, `AppStartDNS` | `RuntimeHost.handleDNSHealthResult` (a relay restart); `startDNSModule` and `SystemDNSManager.startRelay` |
 | `AppStop`, `AppTdRelease`, `AppTdClear` | `RuntimeHostLifecycle`'s DNS teardown: `stopDNSHealthTimer`, `await vpnDNSOverride.release(.stop)`, `dnsStopped()`, `SystemDNSManager.clear` -> `stopRelay` |
@@ -128,7 +143,8 @@ The atomicity of each step, and the code it relies on, is in the spec's header.
 6. A helper reply is applied by the app instance that sent it, and dropped if it exited.
 7. The pid watch, the reply and the held set's application join the step that ends their event or turn; no key is touched between them.
 8. `readingSettle` is abstracted as the reading being the key as it is: the status call that finds a same-server rewrite comes after the reading has caught up.
-9. A store write never fails. A failed restore keeps the record (`restorePending`) and the next tick retries it before any probe; the Swift tests and `dns-vpn-override-restore-retry` cover that, not the model.
+9. A store write fails at most `MaxWriteFails` times a run, on apply or on the restore; a status call and a release never fail on their own, only through `HelperCrash`.
+10. `relwin` marks a restore that landed over a client write made after release's read (the design's release window); the client's next write of the key clears it.
 
 ## What it leaves out
 
