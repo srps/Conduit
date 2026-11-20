@@ -545,7 +545,7 @@ enum VPNDNSOverrideScenarios {
                 overrideEvents.contains($0.event) && ($0.detail ?? "").contains("192.0.2.")
             })
             if assertions.contains(where: { !$0.passed }) {
-                notes.append("override events: \(names(events.filter { $0.event.hasPrefix("dns.vpn_override") }))")
+                notes.append("override events: \(names(events.filter { overrideEvents.contains($0.event) }))")
             }
         } catch {
             notes.append("events unreadable: \(error)")
