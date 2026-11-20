@@ -1,6 +1,6 @@
 # Design: take the default resolver back from a full-tunnel VPN
 
-Decision: [0049](decisions/0049-take-the-default-resolver-back-from-a-full-tunnel.md), revised in #330 to the combined design below: a temporary key of Conduit's own, served by a fail-safe relay in the helper. The code still implements the first design, which rewrote the VPN client's key; [The first implementation](#the-first-implementation) lists what changes. Builds on [0044](decisions/0044-split-dns-follows-vpn-pushed-resolvers.md) and [`design-live-vpn-split-dns.md`](design-live-vpn-split-dns.md). An independent review (2026-11-19) of the first design shaped the liveness, re-trigger and restart rules that carry over; its findings are listed under [Review](#review).
+Decision: [0049](decisions/0049-take-the-default-resolver-back-from-a-full-tunnel.md), revised in #330 to the combined design below: a temporary key of Conduit's own, served by a fail-safe relay in the helper. The first design rewrote the VPN client's key; [The first implementation](#the-first-implementation) lists what the combined design removed. Builds on [0044](decisions/0044-split-dns-follows-vpn-pushed-resolvers.md) and [`design-live-vpn-split-dns.md`](design-live-vpn-split-dns.md). An independent review (2026-11-19) of the first design shaped the liveness, re-trigger and restart rules that carry over; its findings are listed under [Review](#review).
 
 ## Problem
 
