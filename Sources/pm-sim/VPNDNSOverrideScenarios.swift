@@ -106,8 +106,9 @@ enum VPNDNSOverrideScenarios {
             check("a Stop withdraws the key", try await stage.until { stage.ownKey == nil })
             check("the Stop's disarm comes before the relay stops", stage.disarmThenRelayStop(since: mark))
         } verify: { events, check in
+            // A pass beside an explicit disarm may report the same reason again.
             let disarms = names(events).filter { $0.hasPrefix("dns.vpn_override_disarmed") }
-            // A pass that saw the relay stop may disarm again after the Stop's disarm; it lands after it.
+                .reduce(into: [String]()) { if $0.last != $1 { $0.append($1) } }
             check("the toggle disarms first as manage_off, the Stop as stop",
                   Array(disarms.prefix(2)) == ["dns.vpn_override_disarmed reason=manage_off", "dns.vpn_override_disarmed reason=stop"])
         }
@@ -543,6 +544,9 @@ enum VPNDNSOverrideScenarios {
             check("no override event names a server address", !events.contains {
                 overrideEvents.contains($0.event) && ($0.detail ?? "").contains("192.0.2.")
             })
+            if assertions.contains(where: { !$0.passed }) {
+                notes.append("override events: \(names(events.filter { $0.event.hasPrefix("dns.vpn_override") }))")
+            }
         } catch {
             notes.append("events unreadable: \(error)")
             check("the events file is readable", false)
