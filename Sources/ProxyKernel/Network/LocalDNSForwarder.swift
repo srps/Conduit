@@ -2012,18 +2012,20 @@ private final class UDPResponseCollector: ChannelInboundHandler, @unchecked Send
     }
 
     private func complete(with bytes: [UInt8]) {
-        lock.withLock {
-            continuation?.resume(returning: bytes)
-            continuation = nil
-        }
+        takeContinuation()?.resume(returning: bytes)
     }
 
     /// Ends the wait with `error`, unless something already ended it. The
     /// one path to the continuation's failure, from any thread.
     func fail(with error: Error) {
+        takeContinuation()?.resume(throwing: error)
+    }
+
+    /// Resumed outside the lock: a task cancel runs `cancel()` under the task's status lock, which a resume also takes.
+    private func takeContinuation() -> CheckedContinuation<[UInt8], Error>? {
         lock.withLock {
-            continuation?.resume(throwing: error)
-            continuation = nil
+            defer { continuation = nil }
+            return continuation
         }
     }
 }
