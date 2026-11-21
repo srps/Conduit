@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
-/// The proxy hostnames PAC answers have routed through, most recently seen
+/// The proxy hostnames PAC answers have routed through, most recently used
 /// last, for the DNS forwarder to resolve through a tunnel's servers
-/// (decision 0051). Written by `PACRoutingEngine`, read from any thread.
+/// (decision 0051). `PACRoutingEngine` records a chain on every answer it
+/// gives, cached or evaluated; read from any thread.
 package final class PACProxyHosts: @unchecked Sendable {
-    /// Past it, recording a new host evicts the one seen longest ago; an
-    /// evicted host resolves as a public name again until a PAC answer names it.
+    /// Past it, recording a new host evicts the one used longest ago; an
+    /// evicted host resolves as a public name again until an answer names it.
     package static let limit = 32
 
     private let lock = NSLock()

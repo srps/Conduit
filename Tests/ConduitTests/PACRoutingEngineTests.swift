@@ -93,6 +93,34 @@ final class PACRoutingEngineTests: XCTestCase {
         XCTAssertEqual(hosts.current, ["first.proxy.example.com", "second.proxy.example.com"])
     }
 
+    func testACachedAnswerRecordsItsProxyHostAgainAfterEviction() async throws {
+        var config = ProxyConfig.testFixture()
+        config.pacURL = "http://example.com/proxy.pac"
+        config.pacRoutingEnabled = true
+        let script = """
+        function FindProxyForURL(url, host) {
+            if (host == "kept.example.org") return "PROXY kept.proxy.example.com:8080";
+            return "PROXY via-" + host + ":8080";
+        }
+        """
+        let hosts = PACProxyHosts()
+        let engine = PACRoutingEngine(
+            configProvider: { config }, resolver: CFPACEvaluator(), refreshInterval: 300, pacLoader: { _ in script }, proxyHosts: hosts
+        )
+        try await engine.refresh(force: true)
+
+        _ = engine.route(for: "https://kept.example.org/", host: "kept.example.org")
+        for index in 0..<PACProxyHosts.limit {
+            _ = engine.route(for: "https://h\(index).example.org/", host: "h\(index).example.org")
+        }
+        XCTAssertFalse(hosts.current.contains("kept.proxy.example.com"), "evicted by newer answers")
+
+        _ = engine.route(for: "https://kept.example.org/", host: "kept.example.org")
+
+        XCTAssertEqual(hosts.current.last, "kept.proxy.example.com", "the cached answer records its host again")
+        XCTAssertEqual(hosts.current.count, PACProxyHosts.limit)
+    }
+
     func testRefreshIntervalControlsPACReloads() async throws {
         var config = ProxyConfig.testFixture()
         config.pacURL = "http://example.com/proxy.pac"
