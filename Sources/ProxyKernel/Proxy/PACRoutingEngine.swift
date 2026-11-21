@@ -878,12 +878,17 @@ package final class PACRoutingEngine: @unchecked Sendable {
 
     private func cachedRoute(forKey key: String) -> CachedRoute {
         let now = self.now()
-        return lock.withLock {
+        let cached: CachedRoute = lock.withLock {
             purgeExpiredRouteCacheEntriesLocked(now: now)
             guard let entry = routeCache[key] else { return .miss }
             touchRouteCacheKeyLocked(key)
             return now >= entry.revalidateAfter ? .stale(entry.chain) : .fresh(entry.chain)
         }
+        switch cached {
+        case .fresh(let chain), .stale(let chain): proxyHosts?.record(chain)
+        case .miss: break
+        }
+        return cached
     }
 
     private enum StoreOutcome {

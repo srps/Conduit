@@ -23,7 +23,7 @@ That path has a circular dependency. While the VPN is connected, DoH prefers the
 
 **Recommended: option A.**
 
-1. **Which names.** The hosts of the enabled upstreams in `ProxyConfig`, and the hosts of the `PROXY` entries a PAC answer named. The configuration bounds the first set. The second is the last `PACProxyHosts.limit` (32) hosts seen: recording a new host past the limit evicts the host seen longest ago, which then resolves as a public name until a PAC answer names it again. `HTTPS` entries are rejected by `PACChain.classify` and never dialled, so they are not recorded.
+1. **Which names.** The hosts of the enabled upstreams in `ProxyConfig`, and the hosts of the `PROXY` entries a PAC answer named. The configuration bounds the first set. The second is the last `PACProxyHosts.limit` (32) hosts used: the engine records a chain's hosts on every answer it gives, cached or evaluated, and recording a new host past the limit evicts the host used longest ago, which then resolves as a public name until an answer names it again. `HTTPS` entries are rejected by `PACChain.classify` and never dialled, so they are not recorded.
 2. **Matching.** Exact, ignoring case and a trailing dot. No suffix matching: a name under a proxy host is a public name.
 3. **When.** Only while `SplitDNSTable.usesPushedServers`, and only for a name under no split-DNS rule. A name under a rule keeps the rule's path.
 4. **How.** Ask every pushed server, in rule order and each once (`SplitDNSTable.pushedServers`), with `internalDomainTimeout`, the internal stage budget and the internal servers' circuit breaker, as an internal name is asked. The first reply, NXDOMAIN included, is the answer. Silence answers SERVFAIL. It never falls through to DoH or to the 0050 network resolver. Like an internal answer, it is not cached.
@@ -44,14 +44,14 @@ That path has a circular dependency. While the VPN is connected, DoH prefers the
 - On a full tunnel, the proxies' names resolve as long as any pushed server answers, so a flap that silences the first server no longer takes public DNS down through DoH.
 - The proxies' names are visible to the tunnel's servers. They already are: the single attempt asks the first of them.
 - A proxy name that only public DNS knows, while a tunnel is in use, gets the tunnel servers' NXDOMAIN instead of a DoH answer. DoH over those same proxies could not reliably answer it either. A configuration in this state should name the proxy by IP literal.
-- A PAC answer that names many proxies is held to 32 hosts. Past that, the oldest-seen names lose the tunnel path until a PAC answer names them again.
+- A PAC answer that names many proxies is held to 32 hosts. Past that, the names used longest ago lose the tunnel path until an answer names them again; a proxy still being dialled is always among the most recent.
 - The name set is rebuilt from the configuration and the PAC record on each public lookup while pushed servers are in use: one lock, an array copy and a set of at most the upstream count plus 32 names.
 
 ## Invariants and verification
 
 - While pushed servers are in use, a configured or PAC-learned proxy host asks every pushed server and never DoH; NXDOMAIN is the answer; silence is SERVFAIL; the event carries a count, never an address, once per outcome per window. Off the VPN the same name takes the public path. A name that only has a proxy host as a suffix is a public name. `Tests/ConduitTests/DNSForwarderProxyHostTests.swift`.
 - Off the VPN, with DoH silent, a PAC-learned proxy host is never asked of the network's server: SERVFAIL and `outcome=proxy_host`. `DNSForwarderNetworkResolverTests.testAPACLearnedProxyHostIsNeverAskedOfTheNetworkServer`.
-- The PAC record holds its cap and evicts the host seen longest ago; the engine records an evaluated chain's `PROXY` hosts. `DNSForwarderProxyHostTests` and `PACRoutingEngineTests.testEvaluatedProxyHostsAreRecordedForTheForwarder`.
+- The PAC record holds its cap and evicts the host used longest ago; the engine records a chain's `PROXY` hosts when it evaluates it and again on each cache hit. `DNSForwarderProxyHostTests`, `PACRoutingEngineTests.testEvaluatedProxyHostsAreRecordedForTheForwarder` and `testACachedAnswerRecordsItsProxyHostAgainAfterEviction`.
 - End to end through the actual host: `pm-sim dns-proxy-names-via-tunnel`. On a full tunnel that pushes `de.corp.example`, with the first pushed server silent and DoH never answering, the upstream's hostname resolves through the second pushed server, DoH is not asked for it, and a public name keeps its single attempt and DoH. With the proxy-host path disabled, four of its twelve checks fail.
 - What would disprove the design: a proxy host that reaches DoH or the network resolver while pushed servers are in use, a proxy host that reaches a pushed server off the VPN, a suffix match, or a `dns.proxy_host_via_tunnel` event that carries an address.
 
