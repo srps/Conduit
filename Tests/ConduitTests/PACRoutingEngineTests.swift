@@ -90,7 +90,7 @@ final class PACRoutingEngineTests: XCTestCase {
         XCTAssertEqual(hosts.current, [], "nothing is recorded before an answer")
         _ = engine.route(for: "https://www.example.org/", host: "www.example.org")
 
-        XCTAssertEqual(hosts.current, ["first.proxy.example.com", "second.proxy.example.com"])
+        XCTAssertEqual(hosts.current, ["second.proxy.example.com", "first.proxy.example.com"], "the first choice is recorded last")
     }
 
     func testACachedAnswerRecordsItsProxyHostAgainAfterEviction() async throws {
@@ -104,8 +104,10 @@ final class PACRoutingEngineTests: XCTestCase {
         }
         """
         let hosts = PACProxyHosts()
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
         let engine = PACRoutingEngine(
-            configProvider: { config }, resolver: CFPACEvaluator(), refreshInterval: 300, pacLoader: { _ in script }, proxyHosts: hosts
+            configProvider: { config }, resolver: CFPACEvaluator(), refreshInterval: 300, pacLoader: { _ in script },
+            eventSink: { event in events.withLockedValue { $0.append(event) } }, proxyHosts: hosts
         )
         try await engine.refresh(force: true)
 
@@ -119,6 +121,30 @@ final class PACRoutingEngineTests: XCTestCase {
 
         XCTAssertEqual(hosts.current.last, "kept.proxy.example.com", "the cached answer records its host again")
         XCTAssertEqual(hosts.current.count, PACProxyHosts.limit)
+        let evictions = events.withLockedValue { $0 }.filter { $0.event == "pac.proxy_hosts_evicted" }
+        XCTAssertEqual(evictions.map(\.detail), ["evicted=1 limit=32 suppressed=0"], "the second eviction falls inside the minute")
+    }
+
+    func testAChainLongerThanTheHostSetKeepsItsFirstChoices() async throws {
+        var config = ProxyConfig.testFixture()
+        config.pacURL = "http://example.com/proxy.pac"
+        config.pacRoutingEnabled = true
+        config.pacUsableRouteLimit = 40
+        let chain = (0..<40).map { "PROXY p\($0).example.com:8080" }.joined(separator: "; ")
+        let script = "function FindProxyForURL(url, host) { return \"\(chain)\"; }"
+        let hosts = PACProxyHosts()
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let engine = PACRoutingEngine(
+            configProvider: { config }, resolver: CFPACEvaluator(), refreshInterval: 300, pacLoader: { _ in script },
+            eventSink: { event in events.withLockedValue { $0.append(event) } }, proxyHosts: hosts
+        )
+        try await engine.refresh(force: true)
+
+        _ = engine.route(for: "https://a.example.org/", host: "a.example.org")
+        _ = engine.route(for: "https://b.example.org/", host: "b.example.org")
+
+        XCTAssertEqual(hosts.current, (0..<PACProxyHosts.limit).reversed().map { "p\($0).example.com" })
+        XCTAssertFalse(events.withLockedValue { $0 }.contains { $0.event == "pac.proxy_hosts_evicted" }, "the chain fits; nothing is evicted")
     }
 
     func testRefreshIntervalControlsPACReloads() async throws {
