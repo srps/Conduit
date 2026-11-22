@@ -263,4 +263,39 @@ final class AuthCredentialRetryTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 5, "released as soon as every call was blocked")
     }
 
+
+    func testTokenCallsPastTheirCapAreRefusedAndASlotFreesWhenItsCallReturns() async throws {
+        let auth = BlockingAuthenticator(timeout: 10)
+        let retry = AuthCredentialRetry(attempts: 0)
+        let limit = AuthCredentialRetry.maximumTokenCallsInFlight
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let sink: @Sendable (RuntimeEvent) -> Void = { event in events.withLockedValue { $0.append(event) } }
+
+        let held = Task {
+            try await withThrowingTaskGroup(of: String.self) { group in
+                for _ in 0..<limit {
+                    group.addTask { try await retry.initialToken(from: auth, host: "proxy.example.com") }
+                }
+                return try await group.reduce(into: 0) { count, _ in count += 1 }
+            }
+        }
+        while AuthCredentialRetry.tokenCallsInFlightCount < limit { try await Task.sleep(nanoseconds: 5_000_000) }
+
+        do {
+            _ = try await retry.initialToken(from: auth, host: "proxy.example.com", eventSink: sink)
+            XCTFail("a call past the cap is refused")
+        } catch {
+            XCTAssertTrue(ConnectionPoolError.isAuthHandshakeLimitExceeded(error))
+        }
+        XCTAssertEqual(events.withLockedValue { $0 }.map(\.event), ["auth.handshake_rejected"])
+        XCTAssertEqual(events.withLockedValue { $0 }.first?.detail, "host=proxy.example.com scope=token_calls pending=\(limit) limit=\(limit)")
+
+        auth.release()
+        let finished = try await held.value
+        XCTAssertEqual(finished, limit)
+        XCTAssertEqual(AuthCredentialRetry.tokenCallsInFlightCount, 0, "every slot freed when its call returned")
+        let after = try await retry.initialToken(from: auth, host: "proxy.example.com")
+        XCTAssertEqual(after, "Negotiate token")
+    }
+
 }
