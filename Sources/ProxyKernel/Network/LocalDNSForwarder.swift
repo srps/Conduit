@@ -1010,9 +1010,13 @@ final class DNSResolutionCore: @unchecked Sendable {
             return .finished(DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes))
         }
 
-        if !isInternal, let cachedResponse = responseCache.lookup(for: cacheKey, query: queryBytes) {
-            recordQuery(doh: false, cacheHit: true)
-            return .finished(cachedResponse)
+        if !isInternal, let cached = responseCache.lookup(for: cacheKey, query: queryBytes) {
+            // A network-server answer cached before the name became a proxy host is not reused for it.
+            if !cached.viaNetworkResolver || !isProtectedHost(domain, config: config) {
+                recordQuery(doh: false, cacheHit: true)
+                return .finished(cached.response)
+            }
+            logger.log(.debug, "DNS: cached network-server answer for \(domain) not reused; it is now a proxy host.", category: .network)
         }
 
         guard pathSatisfied() else {
@@ -1141,7 +1145,7 @@ final class DNSResolutionCore: @unchecked Sendable {
         }
 
         if !isInternal {
-            cacheResponse(responseBytes, for: cacheKey, matching: queryBytes)
+            cacheResponse(responseBytes, for: cacheKey, matching: queryBytes, viaNetworkResolver: viaNetworkResolver)
         }
 
         return .finished(responseBytes)
@@ -1215,13 +1219,19 @@ final class DNSResolutionCore: @unchecked Sendable {
     }
 
     /// Events carry how many servers the network names, never which.
+    /// A configured upstream or a PAC-learned proxy host: the network server's
+    /// answer is unauthenticated, and Conduit sends credentials to its
+    /// upstreams and takes them from the PAC.
+    private func isProtectedHost(_ name: String, config: ProxyConfig) -> Bool {
+        Self.credentialHosts(config).contains(Self.normalizedHost(name)) || proxyHostsProvider?().contains(name) == true
+    }
+
     private func askNetworkResolver(
         query: [UInt8], name: String, table: SplitDNSTable, config: ProxyConfig, began: NIODeadline
     ) async -> [UInt8]? {
         guard !Task.isCancelled, !table.usesPushedServers, splitDNSProvider?().usesPushedServers != true,
               let servers = networkResolverProvider?(), !servers.isEmpty else { return nil }
-        // Its answer is unauthenticated, and Conduit sends credentials to its upstreams and takes them from the PAC.
-        if Self.credentialHosts(config).contains(Self.normalizedHost(name)) || proxyHostsProvider?().contains(name) == true {
+        if isProtectedHost(name, config: config) {
             reportNetworkResolverFallback(name: name, servers: servers.count, outcome: "proxy_host")
             return nil
         }
@@ -1698,7 +1708,7 @@ final class DNSResolutionCore: @unchecked Sendable {
         return nil
     }
 
-    private func cacheResponse(_ response: [UInt8], for key: DNSCacheKey, matching query: [UInt8]) {
+    private func cacheResponse(_ response: [UInt8], for key: DNSCacheKey, matching query: [UInt8], viaNetworkResolver: Bool) {
         guard DNSWireFormat.responseQuestionMatches(query: query, response: response) else { return }
 
         let ttl: TimeInterval?
@@ -1711,7 +1721,7 @@ final class DNSResolutionCore: @unchecked Sendable {
         }
 
         guard let ttl else { return }
-        responseCache.store(response, for: key, ttl: ttl)
+        responseCache.store(response, for: key, ttl: ttl, viaNetworkResolver: viaNetworkResolver)
     }
 }
 
@@ -2060,6 +2070,7 @@ private struct DNSCacheEntry {
     let response: [UInt8]
     let expiresAt: Date
     var lastAccess: Date
+    let viaNetworkResolver: Bool
 }
 
 private final class DNSResponseCache: @unchecked Sendable {
@@ -2070,7 +2081,7 @@ private final class DNSResponseCache: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [DNSCacheKey: DNSCacheEntry] = [:]
 
-    func lookup(for key: DNSCacheKey, query: [UInt8]) -> [UInt8]? {
+    func lookup(for key: DNSCacheKey, query: [UInt8]) -> (response: [UInt8], viaNetworkResolver: Bool)? {
         lock.withLock {
             let now = Date.now
             purgeExpiredEntries(now: now)
@@ -2080,16 +2091,16 @@ private final class DNSResponseCache: @unchecked Sendable {
             }
             entry.lastAccess = now
             entries[key] = entry
-            return DNSWireFormat.responseByUpdatingTransactionID(entry.response, from: query)
+            return (DNSWireFormat.responseByUpdatingTransactionID(entry.response, from: query), entry.viaNetworkResolver)
         }
     }
 
-    func store(_ response: [UInt8], for key: DNSCacheKey, ttl: TimeInterval) {
+    func store(_ response: [UInt8], for key: DNSCacheKey, ttl: TimeInterval, viaNetworkResolver: Bool) {
         guard ttl > 0 else { return }
         let now = Date()
         let expiresAt = now.addingTimeInterval(ttl)
         lock.withLock {
-            entries[key] = DNSCacheEntry(response: response, expiresAt: expiresAt, lastAccess: now)
+            entries[key] = DNSCacheEntry(response: response, expiresAt: expiresAt, lastAccess: now, viaNetworkResolver: viaNetworkResolver)
             evictIfNeeded(now: now)
         }
     }

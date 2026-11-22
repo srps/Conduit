@@ -173,7 +173,7 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
         let doh = try await dohProvider(silent: true)
         let port = try await start(
             dohPort: doh.port, networkPort: network.port,
-            proxyHosts: ProxyHostNames(names: ["pac-proxy.corp.example"])
+            proxyHosts: { ProxyHostNames(names: ["pac-proxy.corp.example"]) }
         )
 
         let reply = try await rawReply("pac-proxy.corp.example", port: port)
@@ -183,6 +183,29 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
         XCTAssertEqual(events(named: "dns.network_resolver_fallback").compactMap(\.detail), [
             "name=pac-proxy.corp.example servers=1 outcome=proxy_host suppressed=0",
         ])
+    }
+
+    func testACachedNetworkAnswerIsNotReusedOnceItsNameIsAPACProxy() async throws {
+        let network = try await networkDNS(answering: true)
+        let doh = try await dohProvider(silent: true)
+        let learned = PACProxyHosts()
+        let port = try await start(
+            dohPort: doh.port, networkPort: network.port,
+            proxyHosts: { ProxyHostNames(names: learned.current) }
+        )
+
+        let before = try await SplitDNSProbe.resolve("pac-proxy.corp.example", port: port)
+        XCTAssertEqual(before, Self.networkIP, "an ordinary name: the network server answers and it is cached")
+        learned.record(host: "pac-proxy.corp.example")
+
+        let reply = try await rawReply("pac-proxy.corp.example", port: port)
+
+        XCTAssertEqual(reply.map(DNSWireFormat.extractRCode), 2, "the cached network answer is not reused for a proxy host")
+        XCTAssertEqual(network.queryCount("pac-proxy.corp.example"), 1, "nor is the network server asked again")
+        let plain = try await SplitDNSProbe.resolve("www.example.com", port: port)
+        let cachedPlain = try await SplitDNSProbe.resolve("www.example.com", port: port, txID: 0x5D02)
+        XCTAssertEqual([plain, cachedPlain], [Self.networkIP, Self.networkIP])
+        XCTAssertEqual(network.queryCount("www.example.com"), 1, "other names still use the cached network answer")
     }
 
     func testBothSilentAnswerServfailInsideTheRelayWindow() async throws {
@@ -273,7 +296,7 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
         dohRequestTimeout: TimeInterval = 0.3,
         networkResolverTimeout: TimeAmount = .milliseconds(300),
         lookupWindow: TimeAmount? = nil,
-        proxyHosts: ProxyHostNames? = nil,
+        proxyHosts: (@Sendable () -> ProxyHostNames)? = nil,
         configure: (inout ProxyConfig) -> Void = { _ in }
     ) async throws -> Int {
         var config = ProxyConfig.testFixture()
@@ -302,7 +325,7 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
             configProvider: { frozen },
             splitDNSProvider: fixedTable,
             networkResolverProvider: { servers.withLockedValue { $0 } },
-            proxyHostsProvider: proxyHosts.map { names in { @Sendable in names } },
+            proxyHostsProvider: proxyHosts,
             onResolutionRecovered: { recovery in recoveries.withLockedValue { $0.append(recovery) } },
             tuning: tuning,
             eventSink: { event in events.withLockedValue { $0.append(event) } }
