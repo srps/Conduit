@@ -986,7 +986,7 @@ final class DNSResolutionCore: @unchecked Sendable {
         let table = splitDNSProvider?() ?? SplitDNSTable(manual: config.dnsEntries, detected: [])
         let rule = table.rule(matching: domain)
         let isMulticast = DNSWireFormat.isMulticastDNSName(domain)
-        let isProxyHostViaTunnel = rule == nil && !isMulticast && table.usesPushedServers
+        let isProxyHostViaTunnel = rule == nil && table.usesPushedServers
             && (proxyHostsProvider?().contains(domain) ?? false)
         let isInternal = rule != nil || isMulticast || isProxyHostViaTunnel
         let queryType = DNSWireFormat.extractQueryType(from: queryBytes)
