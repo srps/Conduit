@@ -47,6 +47,26 @@ final class DNSForwarderProxyHostTests: XCTestCase {
         )
     }
 
+    func testALocalProxyHostOnATunnelAsksThePushedServersNotAManualEntry() async throws {
+        let manual = try await silentServer()
+        let tunnel = try await tunnelDNS(answering: "proxy.corp.local")
+        let doh = try await dohProvider()
+        let table = SplitDNSTable(
+            manual: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.80"])],
+            detected: Self.fullTunnel.rules
+        )
+        let port = try await start(
+            dohPort: doh.port, endpoints: ["192.0.2.80": manual.port, Self.firstPushed: tunnel.port, Self.secondPushed: tunnel.port],
+            table: table, hosts: ProxyHostNames(names: ["proxy.corp.local"])
+        )
+
+        let answer = try await SplitDNSProbe.resolve("proxy.corp.local", port: port)
+
+        XCTAssertEqual(answer, Self.tunnelIP)
+        XCTAssertEqual(manual.received, 0, "a `.local` proxy host is a proxy host first")
+        XCTAssertEqual(doh.requestCount(), 0)
+    }
+
     func testAProxyHostOnATunnelTakesNXDOMAINAsTheAnswer() async throws {
         let tunnel = try await tunnelDNS(answering: "other.example.net")
         let doh = try await dohProvider()
