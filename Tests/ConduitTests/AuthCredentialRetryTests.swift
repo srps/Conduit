@@ -244,7 +244,7 @@ final class AuthCredentialRetryTests: XCTestCase {
     func testBlockedTokenCallsLeaveTheCooperativePoolFree() async throws {
         let auth = BlockingAuthenticator(timeout: 10)
         let retry = AuthCredentialRetry(attempts: 0)
-        let calls = ProcessInfo.processInfo.activeProcessorCount + 4
+        let calls = min(ProcessInfo.processInfo.activeProcessorCount + 4, AuthCredentialRetry.maximumTokenCallsInFlight)
         let started = Date()
 
         let tokens = try await withThrowingTaskGroup(of: String.self) { group in
