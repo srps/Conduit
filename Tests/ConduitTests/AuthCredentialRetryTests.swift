@@ -52,6 +52,42 @@ final class AuthCredentialRetryTests: XCTestCase {
         func reset() {}
     }
 
+    /// Blocks each call until `release()` or `timeout`, as a token call
+    /// waiting on a Keychain read does.
+    private final class BlockingAuthenticator: ProxyAuthenticator, @unchecked Sendable {
+        let scheme = "Negotiate"
+        private let gate = NSCondition()
+        private var released = false
+        private var entered = 0
+        private let timeout: TimeInterval
+
+        init(timeout: TimeInterval) { self.timeout = timeout }
+
+        var enteredCount: Int { gate.withLock { entered } }
+
+        func release() {
+            gate.withLock {
+                released = true
+                gate.broadcast()
+            }
+        }
+
+        func initialToken(for host: String) throws -> String {
+            let deadline = Date().addingTimeInterval(timeout)
+            return try gate.withLock {
+                entered += 1
+                while !released {
+                    guard gate.wait(until: deadline) else { throw PlainFailure() }
+                }
+                return "Negotiate token"
+            }
+        }
+
+        func processChallenge(headerValues: [String], host: String) throws -> String? { nil }
+        func canHandle(scheme: String) -> Bool { true }
+        func reset() {}
+    }
+
     private final class Clock: @unchecked Sendable {
         private let lock = NIOLock()
         private var current = Date(timeIntervalSince1970: 1_000)
@@ -202,4 +238,29 @@ final class AuthCredentialRetryTests: XCTestCase {
         XCTAssertEqual(clock.sleeps, [])
         XCTAssertFalse(retry.isInOutage(host: "proxy.example"))
     }
+
+    /// More blocked token calls than the cooperative pool has threads must
+    /// leave a thread for the task that unblocks them.
+    func testBlockedTokenCallsLeaveTheCooperativePoolFree() async throws {
+        let auth = BlockingAuthenticator(timeout: 10)
+        let retry = AuthCredentialRetry(attempts: 0)
+        let calls = ProcessInfo.processInfo.activeProcessorCount + 4
+        let started = Date()
+
+        let tokens = try await withThrowingTaskGroup(of: String.self) { group in
+            for _ in 0..<calls {
+                group.addTask { try await retry.initialToken(from: auth, host: "proxy.example.com") }
+            }
+            group.addTask {
+                while auth.enteredCount < calls { try await Task.sleep(nanoseconds: 5_000_000) }
+                auth.release()
+                return "released"
+            }
+            return try await group.reduce(into: []) { $0.append($1) }
+        }
+
+        XCTAssertEqual(tokens.filter { $0 == "Negotiate token" }.count, calls)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5, "released as soon as every call was blocked")
+    }
+
 }
