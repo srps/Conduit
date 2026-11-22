@@ -391,7 +391,7 @@ final class ListenerRecycleTests: XCTestCase {
         let recovered = await ladder.value
         withExtendedLifetime(service) {}
 
-        XCTAssertFalse(recovered, "a ladder the stop overtook reports no recovery")
+        XCTAssertEqual(recovered, .failed, "a ladder the stop overtook reports no recovery")
         XCTAssertEqual(service.refusedSteps, [.closeStalledConnections], "the held step was refused at the server")
         XCTAssertNil(harness.server.listeningPort, "the ladder's recycle must not re-listen after the stop")
         XCTAssertFalse(canConnect(to: port), "nothing answers on the configured port")
@@ -410,7 +410,7 @@ final class ListenerRecycleTests: XCTestCase {
         let recovered = await recovery.recover(trigger: .unreachable(detail: "gated"))
         withExtendedLifetime(service) {}
 
-        XCTAssertFalse(recovered, "the health check still fails after the fallback, so the ladder is exhausted")
+        XCTAssertEqual(recovered, .failed, "the health check still fails after the fallback, so the ladder is exhausted")
         XCTAssertEqual(harness.server.listeningPort, port, "the fallback bound the configured port under the ladder's own stamp")
     }
 
@@ -453,7 +453,7 @@ final class ListenerRecycleTests: XCTestCase {
         let recovered = await ladder.value
         withExtendedLifetime(service) {}
 
-        XCTAssertFalse(recovered, "a ladder a newer start overtook reports no recovery")
+        XCTAssertEqual(recovered, .failed, "a ladder a newer start overtook reports no recovery")
         XCTAssertEqual(service.refusedSteps, [.switchUpstream], "the held step was refused at the server")
         XCTAssertEqual(harness.server.activeUpstream(), selected, "the newer pool's upstream was not switched")
         XCTAssertEqual(harness.server.listeningPort, port, "the newer listener is untouched")

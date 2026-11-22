@@ -16,7 +16,7 @@ final class AutoRecoveryTests: XCTestCase {
         let recovery = AutoRecovery(service: service, logger: logger)
 
         let result = await recovery.recover()
-        XCTAssertTrue(result)
+        XCTAssertEqual(result, .recovered)
         XCTAssertEqual(service.closeStalledCallCount, 1)
         XCTAssertEqual(service.reauthenticateCallCount, 0, "Should not escalate past first success")
     }
@@ -35,7 +35,7 @@ final class AutoRecoveryTests: XCTestCase {
         let recovery = AutoRecovery(service: service, logger: logger)
 
         let result = await recovery.recover()
-        XCTAssertTrue(result)
+        XCTAssertEqual(result, .recovered)
         XCTAssertEqual(service.closeStalledCallCount, 1)
         XCTAssertEqual(service.reauthenticateCallCount, 1)
         XCTAssertEqual(service.switchUpstreamCallCount, 1)
@@ -55,7 +55,7 @@ final class AutoRecoveryTests: XCTestCase {
 
         let result = await recovery.recover(isCurrent: { current.withLockedValue { $0 } })
 
-        XCTAssertFalse(result)
+        XCTAssertEqual(result, .failed)
         XCTAssertEqual(service.closeStalledCallCount, 1)
         XCTAssertEqual(service.reauthenticateCallCount, 0)
         XCTAssertEqual(service.switchUpstreamCallCount, 0)
@@ -79,7 +79,7 @@ final class AutoRecoveryTests: XCTestCase {
 
             let result = await recovery.recover(isCurrent: { current.withLockedValue { $0 } })
 
-            XCTAssertFalse(result, "healthy=\(healthy) recycleSucceeds=\(recycleSucceeds)")
+            XCTAssertEqual(result, .failed, "healthy=\(healthy) recycleSucceeds=\(recycleSucceeds)")
             XCTAssertEqual(service.recycleListenerCallCount, 1)
             XCTAssertEqual(events.names, ["recovery.abandoned"])
             XCTAssertEqual(events.details, ["reason=superseded after_step=recycleListener"])
@@ -92,7 +92,7 @@ final class AutoRecoveryTests: XCTestCase {
         let recovery = AutoRecovery(service: service, logger: logger)
 
         let result = await recovery.recover()
-        XCTAssertFalse(result)
+        XCTAssertEqual(result, .failed)
         XCTAssertEqual(service.recycleListenerCallCount, 1, "Should try all steps including listener recycle")
     }
 
@@ -110,7 +110,7 @@ final class AutoRecoveryTests: XCTestCase {
 
         let result = await recovery.recover(trigger: .unreachable(detail: "Connect timeout (500 ms)"))
 
-        XCTAssertFalse(result)
+        XCTAssertEqual(result, .failed)
         XCTAssertEqual(service.reauthenticateCallCount, 0)
         XCTAssertEqual(service.closeStalledCallCount, 1)
         XCTAssertEqual(service.switchUpstreamCallCount, 1)
@@ -134,7 +134,7 @@ final class AutoRecoveryTests: XCTestCase {
 
         let result = await recovery.recover(trigger: .credentialUnavailable(detail: "407 with no usable credential"))
 
-        XCTAssertFalse(result)
+        XCTAssertEqual(result, .failed)
         XCTAssertEqual(service.reauthenticateCallCount, 1)
         XCTAssertEqual(events.names, ["recovery.exhausted"])
         XCTAssertTrue(events.details.last?.hasPrefix("failure=credential_unavailable ") == true)
@@ -156,7 +156,7 @@ final class AutoRecoveryTests: XCTestCase {
 
         let result = await recovery.recover(trigger: .unreachable(detail: "Connect timeout (500 ms)"))
 
-        XCTAssertTrue(result)
+        XCTAssertEqual(result, .recovered)
         XCTAssertEqual(service.reauthenticateCallCount, 1)
     }
 
@@ -174,7 +174,7 @@ final class AutoRecoveryTests: XCTestCase {
 
         let result = await recovery.recover(trigger: rejected)
 
-        XCTAssertFalse(result)
+        XCTAssertEqual(result, .failed)
         XCTAssertEqual(service.reauthenticateCallCount, 1)
         XCTAssertEqual(events.names, ["recovery.exhausted"])
         XCTAssertTrue(events.details.last?.hasPrefix("failure=authentication_rejected ") == true)
@@ -195,7 +195,7 @@ final class AutoRecoveryTests: XCTestCase {
 
         let result = await recovery.recover(trigger: .configurationRefused(detail: "health.upstreamResponseTimeout"))
 
-        XCTAssertFalse(result)
+        XCTAssertEqual(result, .failed)
         XCTAssertEqual(service.closeStalledCallCount, 0)
         XCTAssertEqual(service.reauthenticateCallCount, 0)
         XCTAssertEqual(service.switchUpstreamCallCount, 0)
@@ -219,7 +219,7 @@ final class AutoRecoveryTests: XCTestCase {
 
         let result = await recovery.recover(trigger: .upstreamStatus(code: 502, upstream: "proxy.example.test:8080"))
 
-        XCTAssertFalse(result)
+        XCTAssertEqual(result, .failed)
         XCTAssertEqual(service.closeStalledCallCount, 1)
         XCTAssertEqual(service.reauthenticateCallCount, 0)
         XCTAssertEqual(service.switchUpstreamCallCount, 0)
@@ -243,7 +243,7 @@ final class AutoRecoveryTests: XCTestCase {
 
         let result = await recovery.recover(trigger: .unreachable(detail: "connect timeout"))
 
-        XCTAssertFalse(result)
+        XCTAssertEqual(result, .deferred)
         XCTAssertEqual(service.switchUpstreamCallCount, 0, "no upstream verdict, so no switch")
         XCTAssertEqual(service.recycleListenerCallCount, 0)
         XCTAssertEqual(service.healthCheckCallCount, 1)
@@ -258,7 +258,7 @@ final class AutoRecoveryTests: XCTestCase {
 
         let result = await recovery.recover(trigger: .localLimit(detail: "pending handshakes"))
 
-        XCTAssertFalse(result)
+        XCTAssertEqual(result, .deferred)
         XCTAssertEqual(service.closeStalledCallCount + service.switchUpstreamCallCount + service.healthCheckCallCount, 0)
         XCTAssertEqual(events.names, ["recovery.skipped"])
         XCTAssertEqual(events.details.first, "reason=local_limit summary=pending handshakes")
@@ -295,7 +295,7 @@ final class AutoRecoveryTests: XCTestCase {
         let recovery = AutoRecovery(service: nil, logger: logger)
 
         let result = await recovery.recover()
-        XCTAssertFalse(result)
+        XCTAssertEqual(result, .failed)
     }
 }
 
