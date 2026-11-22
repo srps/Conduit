@@ -7,6 +7,12 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
+- A burst of proxy connections that fall back to NTLM while the saved
+  password is still being read, as behind the Keychain prompt after an
+  update, no longer stalls Conduit. Each handshake waits for that read off
+  Swift's shared threads, so the rest of Conduit keeps running and every
+  handshake gets the password once it arrives (#327).
+
 ## 0.7.0
 
 This release makes Conduit's VPN on/off verdict, and the split DNS that depends

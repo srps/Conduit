@@ -12,8 +12,19 @@ import NIOConcurrencyHelpers
 /// cost every connection the retry budget. A success clears the outage.
 ///
 /// Called from the auth `Task` off the event loop; the waits are `async`.
+/// The token calls themselves block (a GSS exchange, or the NTLM fallback
+/// waiting on a Keychain read), so they run on `tokenQueue`, never on a
+/// cooperative thread: a burst as wide as the pool would otherwise hold
+/// every thread until the read's deadline (#327).
 package final class AuthCredentialRetry: @unchecked Sendable {
     package static let shared = AuthCredentialRetry()
+
+    /// Concurrent, outside the cooperative pool. Bounded by the handshakes
+    /// `AuthHandshakeLimiter` admits, one call each at a time. Nothing that
+    /// ends a call runs here: the credential read has its own serial queue.
+    private static let tokenQueue = DispatchQueue(
+        label: "io.github.srps.Conduit.auth-token", qos: .userInitiated, attributes: .concurrent
+    )
 
     /// Retries after the first failure.
     package let attempts: Int
@@ -60,7 +71,7 @@ package final class AuthCredentialRetry: @unchecked Sendable {
             let lastAttempt = attempt >= attempts || isInOutage(host: key)
             do {
                 if let deferring {
-                    let result = try deferring.initialToken(for: host, allowFallback: lastAttempt)
+                    let result = try await Self.offPool { try deferring.initialToken(for: host, allowFallback: lastAttempt) }
                     // A downgrade is the primary's outage: later handshakes go
                     // straight to the fallback until the hold expires.
                     if result.usedFallback {
@@ -72,7 +83,7 @@ package final class AuthCredentialRetry: @unchecked Sendable {
                     }
                     return result.token
                 }
-                let token = try auth.initialToken(for: host)
+                let token = try await Self.offPool { try auth.initialToken(for: host) }
                 clearOutage(host: key)
                 return token
             } catch where error.isCredentialRetryable {
@@ -86,6 +97,12 @@ package final class AuthCredentialRetry: @unchecked Sendable {
                 logger?.log(.info, "Credential unavailable for \(host); retrying the handshake in \(Int(delay * 1000)) ms (attempt \(attempt) of \(attempts)).", category: .auth)
                 try await sleep(delay)
             }
+        }
+    }
+
+    private static func offPool<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            tokenQueue.async { continuation.resume(with: Result { try body() }) }
         }
     }
 
