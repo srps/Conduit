@@ -17,11 +17,16 @@ package enum HealthCheckFailure: Error, Equatable, Sendable {
     /// The check did not run: a configured duration is one the runtime cannot hold. This says
     /// nothing about any upstream, so it feeds neither the breaker nor recovery.
     case configurationRefused(detail: String)
+    /// The check reached no upstream: a local limit (pending handshakes, or
+    /// the token calls running off the cooperative pool) refused its
+    /// handshake. Like `.configurationRefused`, it feeds neither the breaker
+    /// nor recovery.
+    case localLimit(detail: String)
 
     package var summary: String {
         switch self {
         case .credentialUnavailable(let detail), .authenticationRejected(let detail), .unreachable(let detail),
-             .configurationRefused(let detail):
+             .configurationRefused(let detail), .localLimit(let detail):
             return detail
         case .upstreamStatus(let code, let upstream):
             return "HTTP \(code) via \(upstream)"

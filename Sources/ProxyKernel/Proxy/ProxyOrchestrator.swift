@@ -3056,6 +3056,11 @@ package final class ProxyOrchestrator {
             emitEvent(.config, "recovery.skipped", detail: "reason=configuration_refused summary=\(result.summary)")
             return
         }
+        // A local limit refused the check's handshake: no upstream was asked.
+        if case .localLimit = result.failure {
+            emitEvent(.health, "recovery.skipped", detail: "reason=local_limit summary=\(result.summary)")
+            return
+        }
 
         // The ladder cannot supply a credential; report once and keep checking.
         if case .credentialUnavailable = result.failure {

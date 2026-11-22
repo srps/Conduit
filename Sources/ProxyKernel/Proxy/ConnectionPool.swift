@@ -693,6 +693,7 @@ package final class ConnectionPool: @unchecked Sendable {
     /// Recovery branches on this: only `.unreachable` skips re-authentication,
     /// so an upstream that answered with a final 407 must not land there.
     static func healthFailure(for error: Error, detail: String) -> HealthCheckFailure {
+        if ConnectionPoolError.isAuthHandshakeLimitExceeded(error) { return .localLimit(detail: detail) }
         if error.isCredentialUnavailable { return .credentialUnavailable(detail: detail) }
         if case ConnectionPoolError.authenticationRejected? = error as? ConnectionPoolError {
             return .authenticationRejected(detail: detail)

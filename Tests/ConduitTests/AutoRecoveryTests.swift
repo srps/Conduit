@@ -229,6 +229,48 @@ final class AutoRecoveryTests: XCTestCase {
         XCTAssertEqual(events.details.first, "reason=configuration_refused summary=health.connectionCheckTimeout")
     }
 
+    /// A check a local limit refused asked no upstream: the ladder stops at it, before the
+    /// step that would switch upstreams, and it is not exhaustion.
+    @RuntimeActor func testALocalLimitFromAStepCheckStopsTheLadderBeforeASwitch() async {
+        let events = EventRecorder()
+        let service = MockRecoverableService()
+        service.closeStalledShouldSucceed = true
+        service.reauthenticateShouldSucceed = true
+        service.switchUpstreamShouldSucceed = true
+        service.recycleListenerShouldSucceed = true
+        service.healthResults = [.unhealthy(.localLimit(detail: "token calls"), responseTimeMS: 0)]
+        let recovery = AutoRecovery(service: service, logger: DiscardingLogSink(), eventSink: events.record)
+
+        let result = await recovery.recover(trigger: .unreachable(detail: "connect timeout"))
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(service.switchUpstreamCallCount, 0, "no upstream verdict, so no switch")
+        XCTAssertEqual(service.recycleListenerCallCount, 0)
+        XCTAssertEqual(service.healthCheckCallCount, 1)
+        XCTAssertEqual(events.names.last, "recovery.skipped")
+        XCTAssertEqual(events.details.last, "reason=local_limit summary=token calls")
+    }
+
+    @RuntimeActor func testALocalLimitTriggerRunsNoStep() async {
+        let events = EventRecorder()
+        let service = MockRecoverableService()
+        let recovery = AutoRecovery(service: service, logger: DiscardingLogSink(), eventSink: events.record)
+
+        let result = await recovery.recover(trigger: .localLimit(detail: "pending handshakes"))
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(service.closeStalledCallCount + service.switchUpstreamCallCount + service.healthCheckCallCount, 0)
+        XCTAssertEqual(events.names, ["recovery.skipped"])
+        XCTAssertEqual(events.details.first, "reason=local_limit summary=pending handshakes")
+    }
+
+    func testHealthCheckClassifiesAHandshakeLimitAsLocalNotUnreachable() {
+        XCTAssertEqual(
+            ConnectionPool.healthFailure(for: ConnectionPoolError.authHandshakeLimitExceeded, detail: "limit"),
+            .localLimit(detail: "limit")
+        )
+    }
+
     func testHealthCheckClassifiesAFinal407AsRejectionNotUnreachable() {
         XCTAssertEqual(
             ConnectionPool.healthFailure(for: ConnectionPoolError.authenticationRejected, detail: "rejected"),
