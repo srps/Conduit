@@ -69,8 +69,8 @@ package final class AutoRecovery: @unchecked Sendable {
     /// `isCurrent` is asked before each step and after each step's outcome:
     /// once it says no (a VPN transition made the triggering evidence
     /// stale), the ladder stops with `recovery.abandoned` and returns `false`
-    /// without declaring exhaustion (#155). A configuration refusal (`.configurationRefused`)
-    /// stops the ladder before any step, or at the first check that returns it, with
+    /// without declaring exhaustion (#155). A check that reached no upstream (`.configurationRefused`,
+    /// `.localLimit`) stops the ladder before any step, or at the first check that returns it, with
     /// `recovery.skipped`; it is never reported as exhaustion. The ladder runs on the
     /// runtime actor, where the orchestrator advances its routing generation, so a
     /// check and the outcome it allows happen in one turn.
@@ -89,8 +89,8 @@ package final class AutoRecovery: @unchecked Sendable {
         var latestFailure = trigger
         // A refused check is not an upstream outcome, and no step can supply a configured
         // duration. Refuse before any side effect, so no step runs for this trigger.
-        if let detail = Self.configurationRefusal(latestFailure) {
-            return refuse(detail: detail)
+        if let refusal = Self.refusal(latestFailure) {
+            return refuse(refusal)
         }
 
         for step in RecoveryStep.allCases {
@@ -127,9 +127,9 @@ package final class AutoRecovery: @unchecked Sendable {
                     return true
                 }
                 if let failure = health.failure { latestFailure = failure }
-                // The check did not run for a configured duration: stop here, with no later step.
-                if let refusal = Self.configurationRefusal(health.failure) {
-                    return refuse(detail: refusal)
+                // The check reached no upstream: stop here, with no later step.
+                if let refusal = Self.refusal(health.failure) {
+                    return refuse(refusal)
                 }
                 let suffix = detail.map { " \($0);" } ?? ""
                 logger.log(.warning, "Recovery step completed but health check still failing: \(step.description).\(suffix) \(health.summary)", category: .network)
@@ -152,19 +152,37 @@ package final class AutoRecovery: @unchecked Sendable {
         return false
     }
 
-    /// The refusal's detail when `failure` says a configured duration is one the runtime
-    /// cannot hold, or nil. Such a failure is a local configuration fact, not an upstream one.
-    private static func configurationRefusal(_ failure: HealthCheckFailure?) -> String? {
-        if case .configurationRefused(let detail)? = failure { return detail }
-        return nil
+    /// A check that reached no upstream, for a local fact rather than an upstream one: a
+    /// configured duration the runtime cannot hold, or a local limit that refused its handshake.
+    private enum Refusal {
+        case configuration(String)
+        case localLimit(String)
+    }
+
+    private static func refusal(_ failure: HealthCheckFailure?) -> Refusal? {
+        switch failure {
+        case .configurationRefused(let detail)?: return .configuration(detail)
+        case .localLimit(let detail)?: return .localLimit(detail)
+        default: return nil
+        }
     }
 
     /// Records the refusal as the existing `recovery.skipped` outcome and returns `false`.
     /// The ladder is not exhausted: no step ran, or it stopped at a refused check.
-    private func refuse(detail: String) -> Bool {
-        emit("recovery.skipped", detail: "reason=configuration_refused summary=\(detail)")
-        logger.log(.error, Self.configurationRefusalMessage(detail), category: .network)
+    private func refuse(_ refusal: Refusal) -> Bool {
+        switch refusal {
+        case .configuration(let detail):
+            emit("recovery.skipped", detail: "reason=configuration_refused summary=\(detail)")
+            logger.log(.error, Self.configurationRefusalMessage(detail), category: .network)
+        case .localLimit(let detail):
+            emit("recovery.skipped", detail: "reason=local_limit summary=\(detail)")
+            logger.log(.warning, Self.localLimitMessage(detail), category: .network)
+        }
         return false
+    }
+
+    private static func localLimitMessage(_ detail: String) -> String {
+        "Automatic recovery stopped: a local limit refused the health check's handshake, so no upstream was asked (\(detail)). Health checks continue."
     }
 
     private static func configurationRefusalMessage(_ detail: String) -> String {
@@ -185,6 +203,9 @@ package final class AutoRecovery: @unchecked Sendable {
         case .configurationRefused(let detail):
             // `recover` never reaches exhaustion with this failure; this keeps the mapping total.
             return ("configuration_refused", configurationRefusalMessage(detail))
+        case .localLimit(let detail):
+            // Nor with this one.
+            return ("local_limit", localLimitMessage(detail))
         case .unreachable(let detail):
             return ("unreachable",
                     "Automatic recovery exhausted all steps: no upstream proxy answered (\(detail)). Health checks continue and routing resumes when an upstream is reachable.")
