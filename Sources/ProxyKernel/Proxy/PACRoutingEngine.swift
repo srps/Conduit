@@ -144,6 +144,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
     private let evaluationReportGate: RuntimeEventRepeatGate
     /// One global slot for `pac.routes_truncated`: never keyed by PAC text.
     private let truncationReportGate: RuntimeEventRepeatGate
+    private let evictionReportGate: RuntimeEventRepeatGate
     /// Drives the route cache and the evaluation timing, so tests can move
     /// time. The refresh interval and fetch backoff use the wall clock.
     private let now: @Sendable () -> Date
@@ -169,6 +170,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
         self.proxyHosts = proxyHosts
         self.evaluationReportGate = RuntimeEventRepeatGate(repeatInterval: Self.slowEvaluationReportInterval, now: now)
         self.truncationReportGate = RuntimeEventRepeatGate(repeatInterval: 60, now: now)
+        self.evictionReportGate = RuntimeEventRepeatGate(repeatInterval: 60, now: now)
         self.configProvider = configProvider
         self.resolver = resolver
         self.logger = logger
@@ -568,13 +570,27 @@ package final class PACRoutingEngine: @unchecked Sendable {
 
     /// Report a decision with no usable answer (rate-limited) and pass it on.
     private func answer(_ decision: PACDecision, host: String, error: (any Error)? = nil) -> PACDecision {
-        if case .noUsableAnswer(let reason, let rejected) = decision {
+        switch decision {
+        case .noUsableAnswer(let reason, let rejected):
             if let error {
                 logger?.log(.debug, "PAC evaluation for \(host) failed: \(error.displayDescription)", category: .pac)
             }
             noUsableRouteReporter.report(reason, rejected: rejected, host: host)
+        case .routes(let chain):
+            if let evicted = proxyHosts?.record(chain), evicted > 0 { reportProxyHostEviction(evicted) }
+        default:
+            break
         }
         return decision
+    }
+
+    /// `pac.proxy_hosts_evicted`, once a minute across all hosts, counts only.
+    private func reportProxyHostEviction(_ evicted: Int) {
+        guard let suppressed = evictionReportGate.admit(host: "", reason: "proxy_hosts_evicted") else { return }
+        let event = RuntimeEvent(kind: .routing, event: "pac.proxy_hosts_evicted",
+            detail: "evicted=\(evicted) limit=\(PACProxyHosts.limit) suppressed=\(suppressed)")
+        eventSink?(event)
+        logger?.log(.notice, "PAC proxy hosts evicted from the tunnel-resolved set: \(event.detail ?? "")", category: .pac)
     }
 
     /// The cache holds chains bounded only by `PACChain`'s ceiling; each
@@ -878,17 +894,12 @@ package final class PACRoutingEngine: @unchecked Sendable {
 
     private func cachedRoute(forKey key: String) -> CachedRoute {
         let now = self.now()
-        let cached: CachedRoute = lock.withLock {
+        return lock.withLock {
             purgeExpiredRouteCacheEntriesLocked(now: now)
             guard let entry = routeCache[key] else { return .miss }
             touchRouteCacheKeyLocked(key)
             return now >= entry.revalidateAfter ? .stale(entry.chain) : .fresh(entry.chain)
         }
-        switch cached {
-        case .fresh(let chain), .stale(let chain): proxyHosts?.record(chain)
-        case .miss: break
-        }
-        return cached
     }
 
     private enum StoreOutcome {
@@ -917,7 +928,6 @@ package final class PACRoutingEngine: @unchecked Sendable {
             evictRouteCacheIfNeededLocked(now: now)
             return .stored
         }
-        if outcome != .superseded { proxyHosts?.record(chain) }
         return outcome
     }
 

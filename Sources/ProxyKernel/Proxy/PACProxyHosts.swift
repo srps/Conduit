@@ -3,7 +3,7 @@ import Foundation
 
 /// The proxy hostnames PAC answers have routed through, most recently used
 /// last, for the DNS forwarder to resolve through a tunnel's servers
-/// (decision 0051). `PACRoutingEngine` records a chain on every answer it
+/// (decision 0051). `PACRoutingEngine` records the routes of every answer it
 /// gives, cached or evaluated; read from any thread.
 package final class PACProxyHosts: @unchecked Sendable {
     /// Past it, recording a new host evicts the one used longest ago; an
@@ -20,21 +20,30 @@ package final class PACProxyHosts: @unchecked Sendable {
         lock.withLock { hosts }
     }
 
-    package func record(_ chain: PACChain) {
-        for route in chain.routes {
-            guard case .proxy(let host, _) = route else { continue }
-            record(host: host)
+    /// Records the chain's first `limit` `PROXY` hosts, last to first, so
+    /// its first choice is the newest and a long chain cannot evict its own
+    /// head. Returns how many hosts the limit evicted.
+    @discardableResult
+    package func record(_ chain: PACChain) -> Int {
+        let proxies = chain.routes.compactMap { route -> String? in
+            guard case .proxy(let host, _) = route else { return nil }
+            return host
         }
+        return proxies.prefix(Self.limit).reversed().reduce(0) { $0 + record(host: $1) }
     }
 
-    package func record(host: String) {
+    /// Returns how many hosts the limit evicted: 0 or 1.
+    @discardableResult
+    package func record(host: String) -> Int {
         let name = ProxyHostNames.normalize(host)
-        guard !name.isEmpty else { return }
-        lock.withLock {
-            if hosts.last == name { return }
+        guard !name.isEmpty else { return 0 }
+        return lock.withLock {
+            if hosts.last == name { return 0 }
             hosts.removeAll { $0 == name }
             hosts.append(name)
-            if hosts.count > Self.limit { hosts.removeFirst(hosts.count - Self.limit) }
+            let excess = max(hosts.count - Self.limit, 0)
+            hosts.removeFirst(excess)
+            return excess
         }
     }
 }
