@@ -19,12 +19,19 @@ import NIOConcurrencyHelpers
 package final class AuthCredentialRetry: @unchecked Sendable {
     package static let shared = AuthCredentialRetry()
 
-    /// Concurrent, outside the cooperative pool. Bounded by the handshakes
-    /// `AuthHandshakeLimiter` admits, one call each at a time. Nothing that
-    /// ends a call runs here: the credential read has its own serial queue.
+    /// Concurrent, outside the cooperative pool. Nothing that ends a call
+    /// runs here: the credential read has its own serial queue.
     private static let tokenQueue = DispatchQueue(
         label: "io.github.srps.Conduit.auth-token", qos: .userInitiated, attributes: .concurrent
     )
+
+    /// Token calls running or queued on `tokenQueue`, each holding a thread
+    /// while it blocks. A slot frees when the call returns, not when its
+    /// handshake goes away, so connection churn cannot stack calls past it.
+    /// Past it a handshake fails as one past the pending-handshake limit.
+    package static let maximumTokenCallsInFlight = 64
+    private static let tokenCallsInFlight = NIOLockedValueBox(0)
+    package static var tokenCallsInFlightCount: Int { tokenCallsInFlight.withLockedValue { $0 } }
 
     /// Retries after the first failure.
     package let attempts: Int
@@ -71,7 +78,9 @@ package final class AuthCredentialRetry: @unchecked Sendable {
             let lastAttempt = attempt >= attempts || isInOutage(host: key)
             do {
                 if let deferring {
-                    let result = try await Self.offPool { try deferring.initialToken(for: host, allowFallback: lastAttempt) }
+                    let result = try await offPool(host: key, eventSink: eventSink) {
+                        try deferring.initialToken(for: host, allowFallback: lastAttempt)
+                    }
                     // A downgrade is the primary's outage: later handshakes go
                     // straight to the fallback until the hold expires.
                     if result.usedFallback {
@@ -83,7 +92,7 @@ package final class AuthCredentialRetry: @unchecked Sendable {
                     }
                     return result.token
                 }
-                let token = try await Self.offPool { try auth.initialToken(for: host) }
+                let token = try await offPool(host: key, eventSink: eventSink) { try auth.initialToken(for: host) }
                 clearOutage(host: key)
                 return token
             } catch where error.isCredentialRetryable {
@@ -100,9 +109,28 @@ package final class AuthCredentialRetry: @unchecked Sendable {
         }
     }
 
-    private static func offPool<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
-        try await withCheckedThrowingContinuation { continuation in
-            tokenQueue.async { continuation.resume(with: Result { try body() }) }
+    private func offPool<T: Sendable>(
+        host: String,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)?,
+        _ body: @escaping @Sendable () throws -> T
+    ) async throws -> T {
+        let limit = Self.maximumTokenCallsInFlight
+        let admitted = Self.tokenCallsInFlight.withLockedValue { count in
+            guard count < limit else { return false }
+            count += 1
+            return true
+        }
+        guard admitted else {
+            eventSink?(RuntimeEvent(kind: .auth, event: "auth.handshake_rejected",
+                                    detail: "host=\(host) scope=token_calls pending=\(limit) limit=\(limit)"))
+            throw ConnectionPoolError.authHandshakeLimitExceeded
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            Self.tokenQueue.async {
+                let result = Result { try body() }
+                Self.tokenCallsInFlight.withLockedValue { $0 -= 1 }
+                continuation.resume(with: result)
+            }
         }
     }
 
