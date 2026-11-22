@@ -20,16 +20,18 @@ package final class PACProxyHosts: @unchecked Sendable {
         lock.withLock { hosts }
     }
 
-    /// Records the chain's first `limit` `PROXY` hosts, last to first, so
-    /// its first choice is the newest and a long chain cannot evict its own
-    /// head. Returns how many hosts the limit evicted.
+    /// Records the chain's first `limit` distinct `PROXY` hostnames, last to
+    /// first, so its first choice is the newest and a long chain cannot evict
+    /// its own head. Returns how many hosts the limit evicted.
     @discardableResult
     package func record(_ chain: PACChain) -> Int {
-        let proxies = chain.routes.compactMap { route -> String? in
+        var seen = Set<String>()
+        let names = chain.routes.compactMap { route -> String? in
             guard case .proxy(let host, _) = route else { return nil }
-            return host
+            let name = ProxyHostNames.normalize(host)
+            return seen.insert(name).inserted ? name : nil
         }
-        return proxies.prefix(Self.limit).reversed().reduce(0) { $0 + record(host: $1) }
+        return names.prefix(Self.limit).reversed().reduce(0) { $0 + record(host: $1) }
     }
 
     /// Returns how many hosts the limit evicted: 0 or 1.

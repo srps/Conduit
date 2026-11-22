@@ -206,6 +206,13 @@ final class DNSForwarderProxyHostTests: XCTestCase {
         XCTAssertEqual(current.last, "proxy-new.example.com")
     }
 
+    func testRepeatedHostsOnOtherPortsLeaveRoomForADistinctBackup() {
+        let learned = PACProxyHosts()
+        let repeated = (0..<PACProxyHosts.limit).map { PACRoute.proxy(host: "Primary.example.com", port: 8000 + $0) }
+        learned.record(PACChain(routes: repeated + [.proxy(host: "backup.example.com", port: 8080)]))
+        XCTAssertEqual(learned.current, ["backup.example.com", "primary.example.com"])
+    }
+
     func testPACRoutesThatAreNotProxiesAreNotRecorded() {
         let learned = PACProxyHosts()
         learned.record(PACChain(routes: [.direct, .proxy(host: "proxy.example.com", port: 80)]))
