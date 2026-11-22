@@ -3092,7 +3092,7 @@ package final class ProxyOrchestrator {
         let stamp = localProxyServer.listenerStamp
         mutateSnapshot { $0.runtimeStatus.state = .recovering }
         Task {
-            let recovered = await self.autoRecovery.recover(trigger: result.failure, since: stamp) {
+            let outcome = await self.autoRecovery.recover(trigger: result.failure, since: stamp) {
                 self.routingGeneration == generation && self.lifecycleEpoch == lifecycle
             }
             guard generation == self.routingGeneration, lifecycle == self.lifecycleEpoch else {
@@ -3106,6 +3106,17 @@ package final class ProxyOrchestrator {
                 }
                 return
             }
+            if outcome == .deferred {
+                // A local limit stopped the ladder before any upstream answered: the next failed check may start one at once.
+                self.recoveryGate.release()
+                self.mutateSnapshot {
+                    guard $0.runtimeStatus.state == .recovering else { return }
+                    $0.runtimeStatus.state = .degraded
+                }
+                self.refreshUpstreamStatuses()
+                return
+            }
+            let recovered = outcome == .recovered
             self.recoveryGate.end(recovered: recovered)
             if !recovered {
                 let seconds = Int(self.recoveryGate.cooldown)

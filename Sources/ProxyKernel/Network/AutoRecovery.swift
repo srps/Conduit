@@ -68,7 +68,7 @@ package final class AutoRecovery: @unchecked Sendable {
     ///
     /// `isCurrent` is asked before each step and after each step's outcome:
     /// once it says no (a VPN transition made the triggering evidence
-    /// stale), the ladder stops with `recovery.abandoned` and returns `false`
+    /// stale), the ladder stops with `recovery.abandoned` and returns `.failed`
     /// without declaring exhaustion (#155). A check that reached no upstream (`.configurationRefused`,
     /// `.localLimit`) stops the ladder before any step, or at the first check that returns it, with
     /// `recovery.skipped`; it is never reported as exhaustion. The ladder runs on the
@@ -83,8 +83,8 @@ package final class AutoRecovery: @unchecked Sendable {
         trigger: HealthCheckFailure? = nil,
         since stamp: ListenerStamp? = nil,
         isCurrent: @RuntimeActor () -> Bool = { true }
-    ) async -> Bool {
-        guard let service else { return false }
+    ) async -> RecoveryOutcome {
+        guard let service else { return .failed }
         var expected = stamp ?? service.listenerStamp
         var latestFailure = trigger
         // A refused check is not an upstream outcome, and no step can supply a configured
@@ -124,7 +124,7 @@ package final class AutoRecovery: @unchecked Sendable {
                 if health.healthy {
                     let suffix = detail.map { " (\($0))" } ?? ""
                     logger.log(.notice, "Recovery step succeeded: \(step.description)\(suffix).", category: .network)
-                    return true
+                    return .recovered
                 }
                 if let failure = health.failure { latestFailure = failure }
                 // The check reached no upstream: stop here, with no later step.
@@ -143,13 +143,13 @@ package final class AutoRecovery: @unchecked Sendable {
         let exhausted = Self.exhaustion(for: latestFailure)
         emit("recovery.exhausted", detail: "failure=\(exhausted.failure) summary=\(latestFailure?.summary ?? "unknown")")
         logger.log(.error, exhausted.message, category: .network)
-        return false
+        return .failed
     }
 
-    private func abandon(at position: String) -> Bool {
+    private func abandon(at position: String) -> RecoveryOutcome {
         emit("recovery.abandoned", detail: "reason=superseded \(position)")
         logger.log(.notice, "Recovery stopped: the routing or the listener it began under has been superseded (\(position)).", category: .network)
-        return false
+        return .failed
     }
 
     /// A check that reached no upstream, for a local fact rather than an upstream one: a
@@ -167,9 +167,10 @@ package final class AutoRecovery: @unchecked Sendable {
         }
     }
 
-    /// Records the refusal as the existing `recovery.skipped` outcome and returns `false`.
-    /// The ladder is not exhausted: no step ran, or it stopped at a refused check.
-    private func refuse(_ refusal: Refusal) -> Bool {
+    /// Records the refusal as the existing `recovery.skipped` outcome. The ladder is not
+    /// exhausted: no step ran, or it stopped at a refused check. A local limit passes once
+    /// capacity returns, so it defers rather than fails.
+    private func refuse(_ refusal: Refusal) -> RecoveryOutcome {
         switch refusal {
         case .configuration(let detail):
             emit("recovery.skipped", detail: "reason=configuration_refused summary=\(detail)")
@@ -177,8 +178,9 @@ package final class AutoRecovery: @unchecked Sendable {
         case .localLimit(let detail):
             emit("recovery.skipped", detail: "reason=local_limit summary=\(detail)")
             logger.log(.warning, Self.localLimitMessage(detail), category: .network)
+            return .deferred
         }
-        return false
+        return .failed
     }
 
     private static func localLimitMessage(_ detail: String) -> String {
@@ -233,6 +235,14 @@ package final class AutoRecovery: @unchecked Sendable {
 /// back and forth several times a second. The gate admits one ladder at a
 /// time and, after one exhausts, none for `cooldown`; a healthy result
 /// clears the cooldown so a real recovery is acted on at once.
+/// How a recovery ladder ended. `.deferred`: a local limit stopped it before any upstream
+/// answered, so it is neither a recovery nor an exhaustion.
+package enum RecoveryOutcome: Equatable, Sendable {
+    case recovered
+    case failed
+    case deferred
+}
+
 package struct RecoveryGate: Sendable {
     package enum Decision: Equatable, Sendable {
         case run
@@ -268,6 +278,12 @@ package struct RecoveryGate: Sendable {
 
     /// A healthy check: forget the last exhaustion so the next failure is
     /// acted on immediately.
+    /// A ladder that stopped for a local limit: it proved nothing about the upstream, so it
+    /// starts no cooldown.
+    package mutating func release() {
+        inFlight = false
+    }
+
     package mutating func reset() {
         exhaustedAt = nil
     }

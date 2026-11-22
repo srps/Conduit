@@ -38,4 +38,12 @@ final class RecoveryGateTests: XCTestCase {
         gate.reset()
         XCTAssertEqual(gate.begin(now: t0 + 2), .run)
     }
+
+    func testALadderALocalLimitDeferredStartsNoCooldown() {
+        var gate = RecoveryGate(cooldown: 60)
+        _ = gate.begin(now: t0)
+        gate.release()
+        XCTAssertFalse(gate.inFlight)
+        XCTAssertEqual(gate.begin(now: t0 + 1), .run)
+    }
 }
