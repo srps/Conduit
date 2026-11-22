@@ -117,6 +117,8 @@ jobs:
         "$conduit_bin_dir/pm-sim" shared-inbound-budget
         "$conduit_bin_dir/pm-sim" pac-fetch-bounds
         "$conduit_bin_dir/pm-sim" bounded-writers
+        # One cooperative thread: an auth handshake that blocks it stalls the scenario on any runner.
+        LIBDISPATCH_COOPERATIVE_POOL_STRICT=1 "$conduit_bin_dir/pm-sim" ntlm-credential-cache
         python3 scripts/test-dns-shutdown.py "$conduit_bin_dir/pm-dns"
         python3 scripts/test-status-stream.py "$conduit_bin_dir/pm-proxy"
 
