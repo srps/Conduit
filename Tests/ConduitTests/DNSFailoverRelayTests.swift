@@ -2,7 +2,6 @@
 import Darwin
 import Foundation
 import XCTest
-@testable import ConduitShared
 @testable import ProxyKernel
 
 /// A loopback DNS server on UDP and, optionally, TCP on the same port that answers A queries with one address.
@@ -303,6 +302,13 @@ final class DNSFailoverRelayTests: XCTestCase {
         XCTAssertEqual(relay.route.servers, [])
         relay.setMode(.vpn)
         XCTAssertNil(ask(relay, timeout: 0.5).ip)
+    }
+
+    func testTheKernelKeepsOnlyUsableServersInOrderWithoutRepeats() {
+        XCTAssertEqual(
+            DNSFailoverServers.usable(["192.0.2.53", "127.0.0.1", "::1", "0.0.0.0", "::", "192.0.2.53", "2001:db8::53", "x", "::ffff:127.0.0.1"]),
+            ["192.0.2.53", "2001:db8::53"]
+        )
     }
 
     func testAtCapacityAQueryIsDroppedAndCounted() throws {

@@ -55,9 +55,9 @@ MODEL = ["formal/vpn-detection/VPNDetection.tla", "formal/vpn-detection/check.py
          ".claude/skills/vpn-detection-model/"]
 
 OVERRIDE_COVERED = [
-    "Sources/ConduitShared/VPNDNSOverridePublisher.swift",
+    "Sources/HelperSupport/VPNDNSOverridePublisher.swift",
     "Sources/ConduitShared/VPNDNSOverrideValidation.swift",
-    "Sources/ConduitShared/VPNDNSOverrideLegacyRestore.swift",
+    "Sources/HelperSupport/VPNDNSOverrideLegacyRestore.swift",
     "Sources/ConduitHelper/HelperDaemon.swift",
     "Sources/ConduitHelper/HelperEventLoop.swift",
     "Sources/ConduitHelper/VPNDNSOverrideAdapters.swift",
@@ -334,7 +334,7 @@ MUTANTS += [
         "KeyAnswered", bounds=OVERRIDE_FORWARDER_ONLY),
     override_mutant(
         "ov-failover-to-loopback",
-        "DNSFailoverRoute.setServers: keep the loopback servers that `VPNDNSOverrideValidation.failoverServers` "
+        "DNSFailoverRoute.setServers: keep the loopback servers that `DNSFailoverServers.usable` "
         "drops, so a failed-over lookup is sent to a loopback address",
         [("FiltersLoopback == TRUE", "FiltersLoopback == FALSE")],
         "NoLoopbackTarget", bounds=OVERRIDE_LOOPBACK),

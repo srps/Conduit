@@ -3,6 +3,7 @@ import Foundation
 import os
 import ProxyKernel
 import ConduitShared
+import HelperSupport
 import SystemConfiguration
 
 /// All helper output goes through here, into the unified log.

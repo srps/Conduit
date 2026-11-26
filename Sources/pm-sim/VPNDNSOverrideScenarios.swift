@@ -2,6 +2,7 @@
 import ConduitRuntime
 import ConduitShared
 import Foundation
+import HelperSupport
 import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix

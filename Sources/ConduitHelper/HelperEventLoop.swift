@@ -2,6 +2,7 @@
 import Darwin
 import Foundation
 import ConduitShared
+import HelperSupport
 
 /// One thread. The caller sets `SIGTERM` and `SIGINT` to `SIG_IGN`; kqueue still records them.
 final class HelperEventLoop {

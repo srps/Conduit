@@ -2,6 +2,7 @@
 import Foundation
 import XCTest
 @testable import ConduitShared
+@testable import HelperSupport
 @testable import PlatformMac
 
 final class VPNDNSOverridePublisherTests: XCTestCase {

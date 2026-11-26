@@ -3,6 +3,7 @@ import Foundation
 import NIOConcurrencyHelpers
 import XCTest
 @testable import ConduitShared
+@testable import HelperSupport
 @testable import PlatformMac
 @testable import ProxyKernel
 

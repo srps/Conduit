@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import ConduitShared
+import HelperSupport
 import SystemConfiguration
 
 /// The helper's own store session. Root only, and only the helper's one thread calls it.

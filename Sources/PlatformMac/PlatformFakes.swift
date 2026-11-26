@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import ProxyKernel
 import ConduitShared
+import HelperSupport
 import SystemConfiguration
 
 package struct FakeUpdatePreflight: UpdatePreflighting {
@@ -833,9 +834,9 @@ package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked S
     private var tcp = false
     private var _target: Int?
     private var _tcpBindFails = false
-    private var _mode: VPNDNSRelayMode = .conduit
+    private var _mode: DNSFailoverMode = .conduit
     private var _servers: [String] = []
-    private var _verdict: VPNDNSProbeVerdict = .answered
+    private var _verdict: DNSFailoverProbeOutcome = .answered
     private var _probes = 0
 
     package init() {}
@@ -844,12 +845,12 @@ package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked S
         lock.withLock { udp && tcp ? HelperConstants.vpnDNSOverrideRelayPort : nil }
     }
 
-    package var mode: VPNDNSRelayMode { lock.withLock { _mode } }
+    package var mode: DNSFailoverMode { lock.withLock { _mode } }
     package var servers: [String] { lock.withLock { _servers } }
     package var probes: Int { lock.withLock { _probes } }
     package var running: (udp: Bool, tcp: Bool) { lock.withLock { (udp, tcp) } }
 
-    package var verdict: VPNDNSProbeVerdict {
+    package var verdict: DNSFailoverProbeOutcome {
         get { lock.withLock { _verdict } }
         set { lock.withLock { _verdict = newValue } }
     }
@@ -859,14 +860,14 @@ package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked S
         set { lock.withLock { _tcpBindFails = newValue } }
     }
 
-    package func setMode(_ mode: VPNDNSRelayMode) { lock.withLock { _mode = mode } }
+    package func setMode(_ mode: DNSFailoverMode) { lock.withLock { _mode = mode } }
 
     package func setFailoverServers(_ servers: [String]) {
         let usable = VPNDNSOverrideValidation.failoverServers(servers)
         lock.withLock { _servers = usable }
     }
 
-    package func probe() -> VPNDNSProbeVerdict {
+    package func probe() -> DNSFailoverProbeOutcome {
         lock.withLock {
             guard udp else { return .notRunning }
             _probes += 1

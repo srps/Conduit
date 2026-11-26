@@ -47,7 +47,7 @@ PushedResolverReading.parse                    relay on 127.0.0.1 ──► Cond
 
 There are two halves, each testable on its own:
 
-- a pure publisher in `ConduitShared`, which both the helper and `FakeMachine` run
+- a pure publisher in `HelperSupport`, a small internal target that the helper, `FakeMachine` and pm-sim link and the kernel never imports
 - a pure policy in `PlatformMac`, which the host drives
 
 ## The helper half
@@ -64,7 +64,7 @@ The helper never writes, restores or deletes the VPN client's keys, nor any key 
 
 ### Publisher
 
-The publisher (`VPNDNSOverridePublisher` in `Sources/ConduitShared`) holds, in memory only, the armed request: the VPN service, the servers the app's live set holds for it, and the owner pid. There is no record file: nothing outlives the helper that a later helper would have to undo.
+The publisher (`VPNDNSOverridePublisher` in `Sources/HelperSupport`) holds, in memory only, the armed request: the VPN service, the servers the app's live set holds for it, and the owner pid. There is no record file: nothing outlives the helper that a later helper would have to undo.
 
 It reaches the machine through two protocols, so tests drive it with fakes: `VPNDNSStore`, with `dns(service:)`, `overridesPrimary`, `primaryService`, and `publishOwnKey`, `removeOwnKey`, `ownKeyExists` and `closeSession` for its own key only; and `VPNDNSFailoverRelay`, the relay's listening port, its mode, its failover servers and its probe.
 

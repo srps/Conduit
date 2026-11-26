@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+import ConduitShared
 import Darwin
 import Foundation
+import ProxyKernel
 
 // Single-threaded by contract: the helper calls it from its one loop, and `FakeMachine` from under a lock.
 
@@ -25,38 +27,15 @@ package protocol VPNDNSStore: AnyObject {
     func closeSession()
 }
 
-package enum VPNDNSRelayMode: String, Equatable, Sendable {
-    case conduit
-    case vpn
-}
-
-package enum VPNDNSProbeVerdict: Equatable, Sendable {
-    case notRunning
-    case answered
-    case refused
-    case silent
-    case failed(String)
-}
-
-/// The fail-safe relay the own key names.
+/// The fail-safe relay the own key names; `DNSFailoverRelay` is the real one.
 package protocol VPNDNSFailoverRelay: AnyObject {
     /// Set only while both the UDP and the TCP half listen.
     var listeningPort: Int? { get }
-    var mode: VPNDNSRelayMode { get }
-    func setMode(_ mode: VPNDNSRelayMode)
+    var mode: DNSFailoverMode { get }
+    func setMode(_ mode: DNSFailoverMode)
     func setFailoverServers(_ servers: [String])
     /// Asks Conduit's forwarder the reserved probe name.
-    func probe() -> VPNDNSProbeVerdict
-}
-
-package enum VPNDNSOverrideReason: String, Sendable, CaseIterable {
-    case ownerExited = "owner_exited"
-    case targetRefused = "target_refused"
-    case targetSilent = "target_silent"
-    case vpnChanged = "vpn_changed"
-    case relayStopped = "relay_stopped"
-    case disarmed
-    case helperStopping = "helper_stopping"
+    func probe() -> DNSFailoverProbeOutcome
 }
 
 package struct VPNDNSOverrideArm: Equatable, Sendable {
@@ -77,7 +56,7 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
     case publishFailed(service: String)
     case withdrawn(service: String, reason: VPNDNSOverrideReason)
     case removalRefused(service: String)
-    case probeMissed(service: String, verdict: VPNDNSProbeVerdict, consecutive: Int)
+    case probeMissed(service: String, verdict: DNSFailoverProbeOutcome, consecutive: Int)
 
     package var logLine: String {
         let prefix = "vpn-dns-override"
@@ -105,7 +84,7 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
     }
 }
 
-extension VPNDNSProbeVerdict {
+extension DNSFailoverProbeOutcome {
     var word: String {
         switch self {
         case .notRunning: return "not_running"
@@ -140,7 +119,7 @@ package final class VPNDNSOverridePublisher {
     private var publishedPort: Int?
     private var failoverService: String?
     private var probeOK = false
-    private var lastVerdict: VPNDNSProbeVerdict?
+    private var lastVerdict: DNSFailoverProbeOutcome?
     private var consecutiveRefused = 0
     private var consecutiveSilent = 0
 

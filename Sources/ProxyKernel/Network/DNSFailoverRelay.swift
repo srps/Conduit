@@ -1,20 +1,63 @@
 // SPDX-License-Identifier: Apache-2.0
-import ConduitShared
 import Foundation
+
+/// Where the fail-safe relay sends a new query (decision 0049).
+package enum DNSFailoverMode: String, Equatable, Sendable {
+    case conduit
+    case vpn
+}
+
+/// What one probe of Conduit's forwarder found.
+package enum DNSFailoverProbeOutcome: Equatable, Sendable {
+    case notRunning
+    case answered
+    case refused
+    case silent
+    /// The prober's own socket failed; it says nothing about the forwarder.
+    case failed(String)
+}
+
+/// The servers the relay may fail over to: address literals that are neither loopback nor unspecified, in order, without repeats.
+package enum DNSFailoverServers {
+    package static func usable(_ servers: [String]) -> [String] {
+        var kept: [String] = []
+        for server in servers where isUsable(server) && !kept.contains(server) {
+            kept.append(server)
+        }
+        return kept
+    }
+
+    package static func isUsable(_ address: String) -> Bool {
+        var v4 = in_addr()
+        if inet_pton(AF_INET, address, &v4) == 1 {
+            let host = UInt32(bigEndian: v4.s_addr)
+            return host >> 24 != 127 && host != 0
+        }
+        var v6 = in6_addr()
+        guard inet_pton(AF_INET6, address, &v6) == 1 else { return false }
+        return withUnsafeBytes(of: &v6) { bytes in
+            let unspecified = bytes.allSatisfy { $0 == 0 }
+            let loopback = bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1
+            let mapped = bytes.prefix(10).allSatisfy { $0 == 0 } && bytes[10] == 0xff && bytes[11] == 0xff
+            let mappedUnusable = mapped && (bytes[12] == 127 || bytes[12...].allSatisfy { $0 == 0 })
+            return !unspecified && !loopback && !mappedUnusable
+        }
+    }
+}
 
 /// The mode and the VPN's servers that both halves of the fail-safe relay follow (decision 0049).
 package final class DNSFailoverRoute: @unchecked Sendable {
     private let lock = NSLock()
-    private var _mode: VPNDNSRelayMode = .conduit
+    private var _mode: DNSFailoverMode = .conduit
     private var _servers: [String] = []
     private var observers: [@Sendable () -> Void] = []
 
     package init() {}
 
-    package var mode: VPNDNSRelayMode { lock.withLock { _mode } }
+    package var mode: DNSFailoverMode { lock.withLock { _mode } }
     package var servers: [String] { lock.withLock { _servers } }
 
-    package func setMode(_ mode: VPNDNSRelayMode) {
+    package func setMode(_ mode: DNSFailoverMode) {
         let notify = lock.withLock { () -> [@Sendable () -> Void] in
             let switched = _mode == .conduit && mode == .vpn
             _mode = mode
@@ -25,7 +68,7 @@ package final class DNSFailoverRoute: @unchecked Sendable {
 
     /// Loopback and unspecified addresses never become a failover target.
     package func setServers(_ servers: [String]) {
-        let usable = VPNDNSOverrideValidation.failoverServers(servers)
+        let usable = DNSFailoverServers.usable(servers)
         lock.withLock { _servers = usable }
     }
 
@@ -335,7 +378,7 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
         loop.servers = servers
     }
 
-    private func receiveQueries(_ loop: inout Loop, _ buffer: inout [UInt8], lfd: Int32, cfd: Int32, mode: VPNDNSRelayMode, now: UInt64) {
+    private func receiveQueries(_ loop: inout Loop, _ buffer: inout [UInt8], lfd: Int32, cfd: Int32, mode: DNSFailoverMode, now: UInt64) {
         for _ in 0..<64 {
             var client = sockaddr_in()
             var clientLength = socklen_t(MemoryLayout<sockaddr_in>.size)
@@ -448,7 +491,7 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
         }
     }
 
-    private func expire(_ loop: inout Loop, lfd: Int32, cfd: Int32, mode: VPNDNSRelayMode, now: UInt64) {
+    private func expire(_ loop: inout Loop, lfd: Int32, cfd: Int32, mode: DNSFailoverMode, now: UInt64) {
         let lifetime = FailoverSocket.nanoseconds(timing.entryLifetime)
         loop.pending = loop.pending.filter { now - $0.value.arrived < lifetime }
         if mode == .vpn {
@@ -704,7 +747,7 @@ package final class DNSFailoverTCPRelay: @unchecked Sendable {
 }
 
 /// Both halves on one port, and the probe of Conduit's forwarder (decision 0049).
-package final class DNSFailoverRelay: VPNDNSFailoverRelay, @unchecked Sendable {
+package final class DNSFailoverRelay: @unchecked Sendable {
     package static let probeBoundMilliseconds = 500
 
     package let route: DNSFailoverRoute
@@ -741,8 +784,8 @@ package final class DNSFailoverRelay: VPNDNSFailoverRelay, @unchecked Sendable {
         return port
     }
 
-    package var mode: VPNDNSRelayMode { route.mode }
-    package func setMode(_ mode: VPNDNSRelayMode) { route.setMode(mode) }
+    package var mode: DNSFailoverMode { route.mode }
+    package func setMode(_ mode: DNSFailoverMode) { route.setMode(mode) }
     package func setFailoverServers(_ servers: [String]) { route.setServers(servers) }
 
     /// Starts each half that is not already running for `targetPort`; returns what failed, one line per half.
@@ -778,7 +821,7 @@ package final class DNSFailoverRelay: VPNDNSFailoverRelay, @unchecked Sendable {
         tcp.stop()
     }
 
-    package func probe() -> VPNDNSProbeVerdict {
+    package func probe() -> DNSFailoverProbeOutcome {
         guard let target = udp.target else { return .notRunning }
         do {
             switch try UDPRelay.probe(
