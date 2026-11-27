@@ -1000,29 +1000,31 @@ package final class DNSFailoverTCPRelay: @unchecked Sendable {
     }
 
     /// A session to Conduit, a frame at a time each way, so each query counts as the UDP half counts each: answered by
-    /// the reply that matches it, or left unanswered when Conduit closes, answers what was not asked, or lets the oldest
-    /// wait out its lifetime, while the relay is still on Conduit. The session then closes, so the resolver's retry
-    /// takes the relay's mode. At most `maximumQueriesPerSession` wait; the client's next frame is read once one is
-    /// answered.
+    /// the reply with its ID and question, or left unanswered when Conduit closes, answers what was not asked, or lets
+    /// the oldest wait out its lifetime, while the relay is still on Conduit. The session then closes, so the resolver's
+    /// retry takes the relay's mode, and the oldest is the one kept for the recheck. A client that leaves is not a loss:
+    /// what it sent is still waited for. At most `maximumQueriesPerSession` wait; the client's next frame is read once
+    /// one is answered.
     private func relayCounted(_ first: [UInt8], client: Int32, target: Int32) {
         let lifetime = FailoverSocket.nanoseconds(timing.entryLifetime)
         let frameWait = FailoverSocket.milliseconds(timing.connectTimeout)
         var waiting: [(query: [UInt8], sentAt: UInt64)] = [(first, FailoverSocket.now)]
+        var clientOpen = true
         func leftUnanswered() {
             guard route.mode == .conduit else { return }
-            for query in waiting.map(\.query) where DNSWireFormat.headerAndQuestion(of: query) != nil {
+            for query in waiting.reversed().map(\.query) where DNSWireFormat.headerAndQuestion(of: query) != nil {
                 route.conduitLeftUnanswered(query, over: .tcp)
             }
         }
         var fds = [pollfd(fd: client, events: Int16(POLLIN), revents: 0), pollfd(fd: target, events: Int16(POLLIN), revents: 0)]
-        while true {
+        while clientOpen || !waiting.isEmpty {
             let now = FailoverSocket.now
             var wait: Int32 = 30_000
             if let oldest = waiting.first {
                 guard now - oldest.sentAt < lifetime else { return leftUnanswered() }
                 wait = Int32(clamping: max(1, (oldest.sentAt + lifetime - now) / 1_000_000))
             }
-            fds[0].fd = waiting.count < Self.maximumQueriesPerSession ? client : -1
+            fds[0].fd = clientOpen && waiting.count < Self.maximumQueriesPerSession ? client : -1
             fds[0].revents = 0
             fds[1].revents = 0
             let ready = poll(&fds, 2, wait)
@@ -1030,15 +1032,18 @@ package final class DNSFailoverTCPRelay: @unchecked Sendable {
             guard ready >= 0 else { return }
             if fds[1].revents != 0 {
                 guard let reply = FailoverSocket.readFramed(target, timeoutMilliseconds: frameWait),
-                      let index = waiting.firstIndex(where: { DNSWireFormat.responseQuestionMatches(query: $0.query, response: reply) })
+                      let index = waiting.firstIndex(where: { DNSWireFormat.isResponse(reply, to: $0.query) })
                 else { return leftUnanswered() }
                 waiting.remove(at: index)
                 route.conduitAnswered(.tcp)
-                guard FailoverSocket.writeFramed(client, reply) else { return }
+                if clientOpen, !FailoverSocket.writeFramed(client, reply) { clientOpen = false }
             }
             if fds[0].revents != 0 {
-                guard let query = FailoverSocket.readFramed(client, timeoutMilliseconds: frameWait),
-                      FailoverSocket.writeFramed(target, query) else { return }
+                guard let query = FailoverSocket.readFramed(client, timeoutMilliseconds: frameWait) else {
+                    clientOpen = false
+                    continue
+                }
+                guard FailoverSocket.writeFramed(target, query) else { return leftUnanswered() }
                 waiting.append((query, FailoverSocket.now))
             }
         }
