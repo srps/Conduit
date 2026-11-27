@@ -115,8 +115,6 @@ final class AppState: ObservableObject {
     private var helperChangeInFlight = false
     /// Up from an Uninstall Helper click until its removal ends: nothing sent meanwhile may point a service at the relay.
     private var helperUninstallFence = false
-    /// A Settings save the fence held, submitted when it lifts.
-    private var configurationDeferredByUninstall = false
     /// Commands sent through `dispatch` and not yet ended, and the one uninstall waiting for them to end.
     private var dispatchesInFlight = 0
     private var dispatchDrainWaiters: [CheckedContinuation<Void, Never>] = []
@@ -549,12 +547,10 @@ final class AppState: ObservableObject {
 
     private func submitConfiguration() {
         guard phase == .ready || phase == .opening, let editor, editor.ledger.isDirty(.configuration) else { return }
-        if helperUninstallFence, platformConfig.manageSystemDNS {
-            if !configurationDeferredByUninstall {
-                recordHelperEvent(RuntimeEvent(kind: .lifecycle, event: "helper.uninstall_fenced",
-                                               detail: "command=apply reason=manage_system_dns outcome=deferred"), level: .notice)
-            }
-            configurationDeferredByUninstall = true
+        if helperUninstallFence {
+            recordHelperEvent(RuntimeEvent(kind: .lifecycle, event: "helper.uninstall_fenced",
+                                           detail: "command=apply reason=settings_save outcome=refused"), level: .notice)
+            lastErrorMessage = Self.helperUninstallSaveRefusedMessage
             return
         }
         editor.save(.configuration)
@@ -1279,13 +1275,13 @@ final class AppState: ObservableObject {
                     }
                 )?.value
             }
-            await self.liftHelperUninstallFence()
+            self.helperUninstallFence = false
         }
     }
 
     /// Why a command or a Settings save is held while Uninstall Helper runs, nil when it may go: one that could point a service at the
     /// relay, which the helper about to be removed serves. A Start with DNS or its companion, a Restart with its companion, and a reload
-    /// that may adopt a file which turns Manage system DNS on are refused; a save is deferred until the uninstall ends.
+    /// that may adopt a file which turns Manage system DNS on are refused, and so is a Settings save, whose draft stays in the editor.
     private func dnsWriterFenceRefusal(_ command: ControlRuntimeCommand) -> String? {
         guard helperUninstallFence else { return nil }
         switch command {
@@ -1306,36 +1302,6 @@ final class AppState: ObservableObject {
         recordHelperEvent(RuntimeEvent(kind: .lifecycle, event: "helper.uninstall_fenced",
                                        detail: "command=\(command.kind.rawValue) reason=\(reason) outcome=refused"), level: .notice)
         lastErrorMessage = Self.helperUninstallFencedMessage
-    }
-
-    /// Ends the fence, then submits the Settings save it deferred. A restoring Stop that failed costs the editor its baseline, so the draft
-    /// is first carried over a fresh read rather than refused for a reload that would discard it.
-    private func liftHelperUninstallFence() async {
-        helperUninstallFence = false
-        guard configurationDeferredByUninstall else { return }
-        configurationDeferredByUninstall = false
-        if let editor, !editor.ledger.filesNeedingReload.isEmpty { await carryDraftsOverAFreshRead() }
-        submitConfiguration()
-    }
-
-    /// One fresh editor read rebuilds the baselines, and the drafts go back over it as edits. Nothing is rebuilt under a save in flight.
-    private func carryDraftsOverAFreshRead() async {
-        guard let editor, let editorClient, let incarnation else { return }
-        await editor.settle()
-        let drafts = (config: config, platform: platformConfig, preferences: appPreferences)
-        do {
-            let deadline = RuntimeDeadline.after(RuntimeEditorSession.exchangeBudget, from: .now)
-            let observation = try await read(editorClient, incarnation: incarnation, deadline: deadline)
-            guard !quitFence, editor.isIdle, let ledger = seed(observation) else { return }
-            editor.rebuild(ledger)
-            assignDrafts(drafts.config, drafts.platform, drafts.preferences)
-            followHostOwnedIntent()
-            editor.edited(.configuration)
-            refreshReloadNeed()
-        } catch {
-            lastErrorMessage = "The configuration could not be read again (\(error)), so the Settings change held during Uninstall Helper "
-                + "was not saved."
-        }
     }
 
     /// Waits for the Settings save, a reload and the commands already out, so none of them lands after the last check.
@@ -1419,6 +1385,9 @@ final class AppState: ObservableObject {
 
     static let helperUninstallFencedMessage = "Uninstall Helper is checking your DNS settings, so nothing that could point them back at "
         + "Conduit starts or reloads until it finishes. Try again then."
+
+    static let helperUninstallSaveRefusedMessage = "Your Settings changes were not saved while Uninstall Helper runs. They are still here: "
+        + "save them again once Uninstall Helper ends."
 
     static func helperUninstallRefusedMessage(_ release: ControlSystemDNSRelease) -> String {
         let services = release.loopbackServices.rawValue
