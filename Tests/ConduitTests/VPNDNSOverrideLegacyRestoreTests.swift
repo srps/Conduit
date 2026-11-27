@@ -38,10 +38,10 @@ final class VPNDNSOverrideLegacyRestoreTests: XCTestCase {
     }
 
     private final class RefusingStore: VPNDNSLegacyStore {
-        var read: VPNDNSLegacyRead
+        var read: VPNDNSRead
         init(dns: [String: VPNDNSValue]) { read = .value(dns) }
-        init(read: VPNDNSLegacyRead) { self.read = read }
-        func legacyDNS(service: String) -> VPNDNSLegacyRead { read }
+        init(read: VPNDNSRead) { self.read = read }
+        func legacyDNS(service: String) -> VPNDNSRead { read }
         func setDNS(_ value: [String: VPNDNSValue], service: String) -> Bool { false }
     }
 
@@ -58,7 +58,7 @@ final class VPNDNSOverrideLegacyRestoreTests: XCTestCase {
         XCTAssertEqual(outcome, .restored(service: service))
         XCTAssertEqual(reported, [.restored(service: service)])
         XCTAssertEqual(store.serverAddresses(service), originals)
-        XCTAssertEqual(store.dns(service: service)?["DomainName"], .string("corp.example"), "the rest of the key is kept")
+        XCTAssertEqual(store.tunnel(service)?.dns?["DomainName"], .string("corp.example"), "the rest of the key is kept")
         XCTAssertEqual(store.vpnKeyWrites, [service])
         XCTAssertEqual(file.deletes, 1)
     }
@@ -77,7 +77,7 @@ final class VPNDNSOverrideLegacyRestoreTests: XCTestCase {
         let store = FakeVPNDNSStore()
         let file = RecordFile(record)
         XCTAssertEqual(VPNDNSOverrideLegacyRestore.run(store: store, file: file) { _ in }, .keyGone(service: service))
-        XCTAssertNil(store.dns(service: service))
+        XCTAssertEqual(store.dns(service: service), .absent)
         XCTAssertEqual(store.vpnKeyWrites, [])
         XCTAssertEqual(file.deletes, 1)
     }

@@ -281,6 +281,12 @@ enum VPNDNSOverrideScenarios {
             check("so lookups are still answered", try await rig.lookup().answer == vpnAnswerIP)
             rig.machine.tickVPNDNSOverride()
             check("a tick that still cannot remove it keeps both", store.ownKey != nil && rig.relay.listeningPort != nil)
+            store.failsVPNRead = true
+            rig.machine.tickVPNDNSOverride()
+            check("a tick that cannot read the VPN's key keeps its servers",
+                  rig.relay.route.servers == tunnelServers && store.ownKey != nil)
+            check("so the lingering key is still answered", try await rig.lookup().answer == vpnAnswerIP)
+            store.failsVPNRead = false
             store.failsRead = false
             store.failsRemove = false
             rig.machine.tickVPNDNSOverride()

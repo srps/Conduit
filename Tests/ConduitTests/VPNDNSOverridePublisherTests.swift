@@ -214,6 +214,36 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         XCTAssertNil(rig.store.ownKey)
     }
 
+    func testAnUnreadableVPNKeyKeepsTheLastServersButNotTheKey() {
+        let rig = armed(rig())
+        rig.store.failsVPNRead = true
+        rig.publisher.sync()
+        XCTAssertEqual(rig.relay.servers, servers, "a failed read is not the servers gone")
+        XCTAssertNil(rig.store.ownKey, "nor is it the VPN's key confirmed")
+        XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .vpnUnreadable))
+        rig.tick()
+        XCTAssertEqual(rig.outcomes.filter { if case .failoverServersKept = $0 { true } else { false } }.count, 1, "reported once")
+        rig.store.failsVPNRead = false
+        rig.publisher.sync()
+        XCTAssertEqual(rig.store.ownKey, key)
+        rig.store.clientRemove(service)
+        rig.publisher.sync()
+        XCTAssertEqual(rig.relay.servers, [], "a read that shows the key gone does replace them")
+    }
+
+    func testDuringAPendingCleanupAnUnreadableVPNKeyKeepsTheFailoverServers() {
+        let rig = armed(rig())
+        rig.store.failsRemove = true
+        rig.store.closeLeavesKey = true
+        rig.publisher.disarm(.relayStopped)
+        XCTAssertTrue(rig.publisher.cleanupPending)
+        rig.store.failsVPNRead = true
+        rig.tick()
+        XCTAssertTrue(rig.publisher.cleanupPending)
+        XCTAssertEqual(rig.relay.servers, servers, "the lingering key still has the VPN's servers behind it")
+        XCTAssertEqual(rig.relay.mode, .vpn)
+    }
+
     func testAKeyAClosedSessionStillHoldsIsRemovedOnTheNextTickAndNothingIsPublishedMeanwhile() {
         let rig = armed(rig())
         rig.store.failsRemove = true

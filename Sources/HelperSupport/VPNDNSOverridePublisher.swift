@@ -14,6 +14,14 @@ package enum VPNDNSValue: Equatable, Sendable {
     case numbers([Int])
 }
 
+/// What a read of a VPN key found. A failed read is neither absence nor a change.
+package enum VPNDNSRead: Equatable, Sendable {
+    case absent
+    /// The store failed; for the legacy restore, also a key holding a field that cannot be written back.
+    case unreadable(String)
+    case value([String: VPNDNSValue])
+}
+
 /// What a read of the own key found. A failed read is not absence.
 package enum VPNDNSOwnKeyState: Equatable, Sendable {
     case present
@@ -31,7 +39,7 @@ package enum VPNDNSPublishResult: Equatable, Sendable {
 
 /// The dynamic store as the publisher sees it: the VPN's keys read-only, and one key of its own.
 package protocol VPNDNSStore: AnyObject {
-    func dns(service: String) -> [String: VPNDNSValue]?
+    func dns(service: String) -> VPNDNSRead
     func overridesPrimary(service: String) -> Bool
     func primaryService() -> String?
     func ownKeyState() -> VPNDNSOwnKeyState
@@ -81,6 +89,8 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
     /// The session was closed after a refused removal, and no read has yet shown the key gone; retried each tick.
     case cleanupPending(service: String, reason: VPNDNSOverrideReason)
     case probeMissed(service: String, probe: DNSFailoverProbe, consecutive: Int)
+    /// The VPN's key could not be read: the relay keeps the servers it last read from it.
+    case failoverServersKept(service: String, reason: String)
     /// The probe answered, but since the last tick Conduit answered none of the real queries it left unanswered.
     case queriesUnanswered(service: String, unanswered: Int)
 
@@ -104,6 +114,9 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
         case .probeMissed(let service, let probe, let consecutive):
             return "\(prefix) probe service=\(HelperAudit.safe(service)) verdict=\(probe.verdict.word) "
                 + "udp=\(probe.udp.word) tcp=\(probe.tcp.word) consecutive=\(consecutive)"
+        case .failoverServersKept(let service, let reason):
+            return "\(prefix) failover_servers_kept service=\(HelperAudit.safe(service)) reason=\"\(HelperAudit.bounded(reason))\"; "
+                + "the VPN's key is unreadable"
         case .queriesUnanswered(let service, let unanswered):
             return "\(prefix) queries_unanswered service=\(HelperAudit.safe(service)) unanswered=\(unanswered); counted as silent"
         }
@@ -111,7 +124,7 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
 
     package var isFailure: Bool {
         switch self {
-        case .publishFailed, .publishCollision, .removalRefused, .cleanupPending: return true
+        case .publishFailed, .publishCollision, .removalRefused, .cleanupPending, .failoverServersKept: return true
         default: return false
         }
     }
@@ -164,6 +177,7 @@ package final class VPNDNSOverridePublisher {
     private var lastConfirmed: UInt64?
     private var lastProgress = DNSFailoverProgress(answered: 0, unanswered: 0)
     private var lastPrimary: String??
+    private var serversUnreadable = false
     private let now: () -> UInt64
 
     /// `now` is monotonic nanoseconds.
@@ -324,7 +338,13 @@ package final class VPNDNSOverridePublisher {
     }
 
     private func hold(_ arm: VPNDNSOverrideArm) -> VPNDNSOverrideReason? {
-        guard let dns = store.dns(service: arm.service), case .strings(let listed)? = dns["ServerAddresses"],
+        let dns: [String: VPNDNSValue]
+        switch store.dns(service: arm.service) {
+        case .value(let value): dns = value
+        case .unreadable: return .vpnUnreadable
+        case .absent: return .vpnChanged
+        }
+        guard case .strings(let listed)? = dns["ServerAddresses"],
               VPNDNSOverrideValidation.failoverServers(listed) == arm.servers else { return .vpnChanged }
         if let supplemental = dns["SupplementalMatchDomains"], supplemental != .strings([]) { return .vpnChanged }
         guard store.overridesPrimary(service: arm.service), store.primaryService() == arm.service else {
@@ -367,13 +387,22 @@ package final class VPNDNSOverridePublisher {
         report(.withdrawn(service: service, reason: shown))
     }
 
+    /// An unreadable key keeps the servers last read: only a read that shows them gone or changed replaces them.
     private func refreshFailoverServers() {
         guard let service = arm?.service ?? failoverService else { return }
-        var servers: [String] = []
-        if case .strings(let listed)? = store.dns(service: service)?["ServerAddresses"] {
-            servers = VPNDNSOverrideValidation.failoverServers(listed)
+        switch store.dns(service: service) {
+        case .value(let dns):
+            serversUnreadable = false
+            var servers: [String] = []
+            if case .strings(let listed)? = dns["ServerAddresses"] { servers = VPNDNSOverrideValidation.failoverServers(listed) }
+            relay.setFailoverServers(servers)
+        case .absent:
+            serversUnreadable = false
+            relay.setFailoverServers([])
+        case .unreadable(let reason):
+            if !serversUnreadable { report(.failoverServersKept(service: service, reason: reason)) }
+            serversUnreadable = true
         }
-        relay.setFailoverServers(servers)
         let primary = store.primaryService()
         if let seen = lastPrimary, seen != primary { relay.renewServerSockets() }
         lastPrimary = primary

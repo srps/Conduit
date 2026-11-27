@@ -704,6 +704,7 @@ package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked 
     private var _failsRemove = false
     private var _failsPublish = false
     private var _failsRead = false
+    private var _failsVPNRead = false
     private var _closeLeavesKey = false
     private var _sessionsClosed = 0
     private var _onChange: (@Sendable () -> Void)?
@@ -783,6 +784,12 @@ package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked 
         set { lock.withLock { _failsRead = newValue } }
     }
 
+    /// Every read of a VPN's DNS key fails, as the own key's can while configd is busy.
+    package var failsVPNRead: Bool {
+        get { lock.withLock { _failsVPNRead } }
+        set { lock.withLock { _failsVPNRead = newValue } }
+    }
+
     package var failsPublish: Bool {
         get { lock.withLock { _failsPublish } }
         set { lock.withLock { _failsPublish = newValue } }
@@ -795,12 +802,15 @@ package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked 
         return servers
     }
 
-    package func dns(service: String) -> [String: VPNDNSValue]? {
-        lock.withLock { _services[service]?.dns }
+    package func dns(service: String) -> VPNDNSRead {
+        lock.withLock {
+            guard !_failsVPNRead else { return .unreadable("read failed") }
+            return _services[service]?.dns.map(VPNDNSRead.value) ?? .absent
+        }
     }
 
-    package func legacyDNS(service: String) -> VPNDNSLegacyRead {
-        dns(service: service).map(VPNDNSLegacyRead.value) ?? .absent
+    package func legacyDNS(service: String) -> VPNDNSRead {
+        dns(service: service)
     }
 
     package func overridesPrimary(service: String) -> Bool {

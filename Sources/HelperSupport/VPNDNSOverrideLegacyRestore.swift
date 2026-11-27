@@ -36,16 +36,9 @@ package protocol VPNDNSOverrideLegacyRecordFile {
     func setAside() throws
 }
 
-package enum VPNDNSLegacyRead: Equatable, Sendable {
-    case absent
-    /// The store failed, or the key holds a field that cannot be written back.
-    case unreadable(String)
-    case value([String: VPNDNSValue])
-}
-
 /// The only write to a VPN client's key: putting back what an older helper replaced, once.
 package protocol VPNDNSLegacyStore {
-    func legacyDNS(service: String) -> VPNDNSLegacyRead
+    func legacyDNS(service: String) -> VPNDNSRead
     func setDNS(_ value: [String: VPNDNSValue], service: String) -> Bool
 }
 

@@ -10,6 +10,8 @@ package enum VPNDNSOverrideReason: String, Sendable, CaseIterable {
     /// The helper could not watch the owner's exit, so it dropped the arm.
     case ownerUnwatched = "owner_unwatched"
     case vpnChanged = "vpn_changed"
+    /// The VPN's DNS key could not be read, so whether it still matches is unknown.
+    case vpnUnreadable = "vpn_unreadable"
     case relayStopped = "relay_stopped"
     case disarmed
     case helperStopping = "helper_stopping"

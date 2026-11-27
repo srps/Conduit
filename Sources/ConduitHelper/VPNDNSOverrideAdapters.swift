@@ -56,10 +56,14 @@ final class SCDynamicStoreVPNDNSStore: VPNDNSStore {
         return SCDynamicStoreCopyValue(store, key) as? [String: Any]
     }
 
-    func dns(service: String) -> [String: VPNDNSValue]? {
-        copy("State:/Network/Service/\(service)/DNS" as CFString).map { raw in
-            raw.compactMapValues(VPNDNSPropertyList.value)
+    func dns(service: String) -> VPNDNSRead {
+        guard let store else { return .unreadable("no session") }
+        guard let copied = SCDynamicStoreCopyValue(store, "State:/Network/Service/\(service)/DNS" as CFString) else {
+            let status = SCError()
+            return status == kSCStatusNoKey ? .absent : .unreadable(String(cString: SCErrorString(status)))
         }
+        guard let raw = copied as? [String: Any] else { return .unreadable("not a dictionary") }
+        return .value(raw.compactMapValues(VPNDNSPropertyList.value))
     }
 
     func overridesPrimary(service: String) -> Bool {
@@ -106,7 +110,7 @@ final class SCDynamicStoreVPNDNSStore: VPNDNSStore {
 struct SCDynamicStoreLegacyVPNDNSStore: VPNDNSLegacyStore {
     private let store = SCDynamicStoreCreate(nil, "io.github.srps.Conduit.Helper.vpn-dns-override-legacy" as CFString, nil, nil)
 
-    func legacyDNS(service: String) -> VPNDNSLegacyRead {
+    func legacyDNS(service: String) -> VPNDNSRead {
         guard let store else { return .unreadable("store: \(SCDynamicStoreVPNDNSStore.lastError)") }
         guard let copied = SCDynamicStoreCopyValue(store, "State:/Network/Service/\(service)/DNS" as CFString) else {
             let status = SCError()
