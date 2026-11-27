@@ -265,6 +265,38 @@ enum VPNDNSOverrideScenarios {
     }
 
     @RuntimeActor
+    static func ownKeyConduitProbeOnly() async throws -> ScenarioResult {
+        var timing = DNSFailoverTiming()
+        timing.entryLifetime = .seconds(2)
+        return try await rig(name: "dns-own-key-conduit-probe-only", timing: timing) { rig, check in
+            check("Conduit answers through the relay", try await rig.lookup().answer == publicIP)
+            rig.conduit.probeOnly = true
+            check("the probe still answers, so the relay waits on Conduit and the lookup is lost",
+                  try await rig.lookup().answer == nil)
+            check("the lost lookup is counted", rig.relay.conduitProgress.unanswered == 1)
+            for tick in 1...2 {
+                rig.machine.tickVPNDNSOverride()
+                check("tick \(tick): the answered probe does not send the lookups back to Conduit", rig.relay.mode == .vpn)
+                check("tick \(tick): they keep reaching the VPN's servers at once", try await rig.lookup().seconds < 0.5)
+            }
+            check("two ticks keep the key", rig.machine.vpnDNSStore.ownKey != nil)
+            rig.machine.tickVPNDNSOverride()
+            check("the third withdraws it", rig.machine.vpnDNSStore.ownKey == nil
+                && rig.machine.vpnDNSOverrideOutcomes.contains(.withdrawn(service: service, reason: .targetSilent)))
+            rig.machine.tickVPNDNSOverride()
+            check("a probe answer alone does not bring it back", rig.machine.vpnDNSStore.ownKey == nil
+                && rig.machine.vpnDNSOverrideOutcomes.contains { outcome in
+                    if case .queriesUnanswered(_, 0, .silent) = outcome { true } else { false }
+                })
+            rig.conduit.probeOnly = false
+            rig.machine.tickVPNDNSOverride()
+            check("Conduit answering the dropped question brings the key and Conduit back",
+                  rig.machine.vpnDNSStore.ownKey != nil && rig.relay.mode == .conduit)
+            check("Conduit answers again", try await rig.lookup().answer == publicIP)
+        }
+    }
+
+    @RuntimeActor
     static func ownKeyCleanupPending() async throws -> ScenarioResult {
         try await rig(name: "dns-own-key-cleanup-pending") { rig, check in
             check("Conduit answers through the relay", try await rig.lookup().answer == publicIP)
@@ -681,6 +713,7 @@ enum VPNDNSOverrideScenarios {
     @RuntimeActor
     private static func rig(
         name: String,
+        timing: DNSFailoverTiming = .standard,
         _ body: @RuntimeActor (Rig, (String, Bool) -> Void) async throws -> Void
     ) async throws -> ScenarioResult {
         let began = Date()
@@ -697,7 +730,7 @@ enum VPNDNSOverrideScenarios {
         ScenarioCleanup.register { await vpnServer.stop() }
         let vpnPort = vpnServer.port
         // Every VPN server the relay may try is the loopback stand-in; nothing leaves the Mac.
-        let relay = DNSFailoverRelay(listenPort: 0, maximumTCPSessions: 64, serverEndpoint: { _ in
+        let relay = DNSFailoverRelay(listenPort: 0, maximumTCPSessions: 64, timing: timing, serverEndpoint: { _ in
             DNSFailoverEndpoint(host: "127.0.0.1", port: vpnPort)
         })
         let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("pm-\(name)-\(UUID().uuidString)", isDirectory: true)
@@ -736,10 +769,10 @@ enum VPNDNSOverrideScenarios {
 }
 
 /// A DNS server on UDP and TCP that answers every A query with one address, and the reserved probe name NXDOMAIN as
-/// Conduit's forwarder does; it can be made silent.
+/// Conduit's forwarder does; it can be made silent, or to answer the probe name alone.
 final class StandInDNSServer: @unchecked Sendable {
     private let ip: String
-    private let state = NIOLockedValueBox((silent: false, asked: 0))
+    private let state = NIOLockedValueBox((silent: false, probeOnly: false, asked: 0))
     private let channel = NIOLockedValueBox<Channel?>(nil)
     private let stream = NIOLockedValueBox<Int32>(-1)
 
@@ -753,6 +786,11 @@ final class StandInDNSServer: @unchecked Sendable {
     var silent: Bool {
         get { state.withLockedValue { $0.silent } }
         set { state.withLockedValue { $0.silent = newValue } }
+    }
+
+    var probeOnly: Bool {
+        get { state.withLockedValue { $0.probeOnly } }
+        set { state.withLockedValue { $0.probeOnly = newValue } }
     }
 
     func start(group: EventLoopGroup) async throws {
@@ -775,13 +813,16 @@ final class StandInDNSServer: @unchecked Sendable {
         do { try await bound.close() } catch { fputs("stand-in DNS server close failed: \(error)\n", stderr) }
     }
 
-    fileprivate static func reply(to query: [UInt8], ip: String, state: NIOLockedValueBox<(silent: Bool, asked: Int)>) -> [UInt8]? {
-        let silent = state.withLockedValue { current in
+    typealias State = NIOLockedValueBox<(silent: Bool, probeOnly: Bool, asked: Int)>
+
+    fileprivate static func reply(to query: [UInt8], ip: String, state: State) -> [UInt8]? {
+        let (silent, probeOnly) = state.withLockedValue { current in
             current.asked += 1
-            return current.silent
+            return (current.silent, current.probeOnly)
         }
         guard !silent else { return nil }
         if DNSWireFormat.isForwarderProbe(query) { return DNSWireFormat.emptyDNSResponse(originalQuery: query, rcode: 3) }
+        guard !probeOnly else { return nil }
         return DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: ip)
     }
 
@@ -812,7 +853,7 @@ final class StandInDNSServer: @unchecked Sendable {
         }.start()
     }
 
-    private static func serve(_ client: Int32, ip: String, state: NIOLockedValueBox<(silent: Bool, asked: Int)>) {
+    private static func serve(_ client: Int32, ip: String, state: State) {
         defer { close(client) }
         func readFully(_ count: Int) -> [UInt8]? {
             var bytes = [UInt8](repeating: 0, count: count)
@@ -836,9 +877,9 @@ final class StandInDNSServer: @unchecked Sendable {
         typealias OutboundOut = AddressedEnvelope<ByteBuffer>
 
         private let ip: String
-        private let state: NIOLockedValueBox<(silent: Bool, asked: Int)>
+        private let state: StandInDNSServer.State
 
-        init(ip: String, state: NIOLockedValueBox<(silent: Bool, asked: Int)>) {
+        init(ip: String, state: StandInDNSServer.State) {
             self.ip = ip
             self.state = state
         }

@@ -874,8 +874,10 @@ package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked S
     private var _servers: [String] = []
     private var _verdict: DNSFailoverProbeOutcome = .answered
     private var _tcpVerdict: DNSFailoverProbeOutcome?
-    private var _progress = DNSFailoverProgress(answered: 0, unanswered: 0)
+    private var _progress = DNSFailoverProgress(answered: 0, unanswered: 0, lastUnanswered: false)
     private var _probes = 0
+    private var _recheck: DNSFailoverProbeOutcome = .silent
+    private var _rechecks = 0
     private var _socketRenewals = 0
 
     package init() {}
@@ -921,6 +923,21 @@ package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked S
     package func setFailoverServers(_ servers: [String]) {
         let usable = VPNDNSOverrideValidation.failoverServers(servers)
         lock.withLock { _servers = usable }
+    }
+
+    /// What asking Conduit again its last unanswered question gets: a forwarder that answers only the probe by default.
+    package var recheckVerdict: DNSFailoverProbeOutcome {
+        get { lock.withLock { _recheck } }
+        set { lock.withLock { _recheck = newValue } }
+    }
+
+    package var rechecks: Int { lock.withLock { _rechecks } }
+
+    package func recheck() -> DNSFailoverProbeOutcome {
+        lock.withLock {
+            _rechecks += 1
+            return _recheck
+        }
     }
 
     package func probe() -> DNSFailoverProbe {

@@ -2,6 +2,8 @@
 import Darwin
 import Foundation
 import XCTest
+@testable import HelperSupport
+@testable import PlatformMac
 @testable import ProxyKernel
 
 /// A loopback DNS server on UDP and, optionally, TCP on the same port that answers A queries with one address.
@@ -501,11 +503,71 @@ final class DNSFailoverRelayTests: XCTestCase {
         XCTAssertNil(ask(relay, timeout: 0.5).ip)
         XCTAssertEqual(relay.mode, .conduit, "the in-relay probe answered, so the relay stays")
         Thread.sleep(forTimeInterval: 2.2)
-        XCTAssertEqual(relay.conduitProgress, DNSFailoverProgress(answered: 0, unanswered: 1))
+        XCTAssertEqual(relay.conduitProgress, DNSFailoverProgress(answered: 0, unanswered: 1, lastUnanswered: true))
         XCTAssertEqual(relay.probe().verdict, .answered, "the probe alone cannot see it")
         conduit.dropsRealQueries = false
         XCTAssertEqual(ask(relay).ip, conduitIP)
-        XCTAssertEqual(relay.conduitProgress, DNSFailoverProgress(answered: 1, unanswered: 1))
+        XCTAssertEqual(relay.conduitProgress, DNSFailoverProgress(answered: 1, unanswered: 1, lastUnanswered: false))
+    }
+
+    func testATCPQueryConduitNeverAnswersIsCountedAndAskedAgain() throws {
+        let conduit = try standIn(conduitIP, tcp: true)
+        conduit.dropsRealQueries = true
+        let relay = try relay(conduitPort: conduit.port, servers: [:])
+        XCTAssertEqual(relay.recheck(), .notRunning, "nothing left unanswered yet")
+        XCTAssertNil(try askTCP(relay))
+        XCTAssertEqual(relay.conduitProgress, DNSFailoverProgress(answered: 0, unanswered: 1, lastUnanswered: true), "TCP lookups count too")
+        let asked = conduit.asked(queryName)
+        XCTAssertEqual(relay.recheck(), .silent)
+        XCTAssertEqual(conduit.asked(queryName), asked + 1, "the recheck asks Conduit the question it dropped")
+        conduit.dropsRealQueries = false
+        XCTAssertEqual(relay.recheck(), .answered)
+        XCTAssertEqual(try askTCP(relay), conduitIP)
+        XCTAssertEqual(relay.conduitProgress, DNSFailoverProgress(answered: 1, unanswered: 1, lastUnanswered: false))
+    }
+
+    /// The publisher over the real relay, with a forwarder that answers the probe name and nothing else.
+    func testAProbeOnlyForwarderLosesTheKeyByTheBoundAndNeverGetsTheLookupsBack() throws {
+        let conduit = try standIn(conduitIP, tcp: true)
+        let vpn = try standIn(vpnIP, tcp: true)
+        let relay = try relay(conduitPort: conduit.port, servers: ["192.0.2.53": vpn])
+        let service = "com.cisco.anyconnect"
+        let store = FakeVPNDNSStore()
+        store.connectFullTunnel(service, servers: ["192.0.2.53"])
+        final class Clock: @unchecked Sendable { var now: UInt64 = 1_000_000_000_000 }
+        let clock = Clock()
+        var outcomes: [VPNDNSOverrideOutcome] = []
+        let publisher = VPNDNSOverridePublisher(store: store, relay: relay, now: { clock.now }) { outcomes.append($0) }
+        func tick() {
+            clock.now += UInt64(VPNDNSOverridePublisher.tickSeconds) * 1_000_000_000
+            publisher.tick()
+        }
+        XCTAssertTrue(publisher.arm(service: service, servers: ["192.0.2.53"], owner: 1))
+        XCTAssertNotNil(store.ownKey)
+
+        conduit.dropsRealQueries = true
+        XCTAssertNil(ask(relay, timeout: 0.5).ip, "the lookups of the interval before the tick are lost")
+        Thread.sleep(forTimeInterval: 2.2)
+        tick()
+        XCTAssertEqual(relay.mode, .vpn)
+        XCTAssertEqual(ask(relay).ip, vpnIP, "the next lookup goes to the VPN's servers")
+        XCTAssertNotNil(store.ownKey)
+        tick()
+        XCTAssertEqual(relay.mode, .vpn, "an answered probe does not send the lookups back to a forwarder that drops them")
+        XCTAssertEqual(ask(relay).ip, vpnIP)
+        XCTAssertNotNil(store.ownKey)
+        tick()
+        XCTAssertNil(store.ownKey, "withdrawn 30 s after the last confirmed answer")
+        XCTAssertEqual(outcomes.last, .withdrawn(service: service, reason: .targetSilent))
+        tick()
+        XCTAssertNil(store.ownKey, "a probe answer alone does not bring it back")
+        XCTAssertEqual(relay.mode, .vpn)
+
+        conduit.dropsRealQueries = false
+        tick()
+        XCTAssertNotNil(store.ownKey, "Conduit answered the question it had dropped")
+        XCTAssertEqual(relay.mode, .conduit)
+        XCTAssertEqual(ask(relay).ip, conduitIP)
     }
 
     func testATCPSessionTakesTheModeAtConnect() throws {

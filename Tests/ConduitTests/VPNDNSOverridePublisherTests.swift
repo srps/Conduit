@@ -441,21 +441,65 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
     func testAProbeAnswerCannotHideAForwarderThatDropsEveryRealQuery() {
         let rig = armed(rig())
         for tick in 1...3 {
-            rig.relay.conduitProgress = DNSFailoverProgress(answered: 0, unanswered: tick * 4)
+            rig.relay.conduitProgress = DNSFailoverProgress(answered: 0, unanswered: tick * 4, lastUnanswered: true)
             rig.tick()
         }
         XCTAssertNil(rig.store.ownKey)
         XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .targetSilent))
-        XCTAssertTrue(rig.outcomes.contains(.queriesUnanswered(service: service, unanswered: 4)))
+        XCTAssertTrue(rig.outcomes.contains(.queriesUnanswered(service: service, unanswered: 4, recheck: .silent)))
+    }
+
+    func testOnceRealQueriesGoUnansweredOnlyAnAnswerToOneEndsIt() {
+        let rig = armed(rig())
+        rig.relay.conduitProgress = DNSFailoverProgress(answered: 0, unanswered: 4, lastUnanswered: true)
+        rig.tick()
+        XCTAssertEqual(rig.relay.mode, .vpn)
+        for _ in 0..<2 {
+            XCTAssertEqual(rig.store.ownKey, key, "within the bound")
+            rig.tick()
+            XCTAssertEqual(rig.relay.mode, .vpn, "the probe answers, but Conduit has had no real query to answer")
+        }
+        XCTAssertNil(rig.store.ownKey, "30 s after the last confirmed answer")
+        XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .targetSilent))
+        rig.publisher.relayStarted(caller: owner)
+        XCTAssertEqual(rig.relay.mode, .vpn, "a relay start does not send the lookups back either")
+
+        rig.relay.recheckVerdict = .answered
+        rig.tick()
+        XCTAssertEqual(rig.store.ownKey, key, "Conduit answered the question it had dropped")
+        XCTAssertEqual(rig.relay.mode, .conduit)
+        rig.tick()
+        XCTAssertEqual(rig.relay.rechecks, 4, "no recheck once real queries are known to be answered")
+    }
+
+    func testAnArmDoesNotEndTheFailure() {
+        let rig = armed(rig())
+        rig.relay.conduitProgress = DNSFailoverProgress(answered: 0, unanswered: 4, lastUnanswered: true)
+        rig.tick()
+        rig.publisher.disarm(.disarmed)
+        XCTAssertTrue(rig.publisher.arm(service: service, servers: servers, owner: owner))
+        XCTAssertNil(rig.store.ownKey, "the arm's own probe is screened the same way")
+        XCTAssertEqual(rig.relay.mode, .vpn)
+        rig.relay.conduitProgress = DNSFailoverProgress(answered: 1, unanswered: 4, lastUnanswered: false)
+        rig.tick()
+        XCTAssertEqual(rig.store.ownKey, key, "a real query Conduit answered ends it")
     }
 
     func testSomeUnansweredQueriesBesideAnsweredOnesAreProgress() {
         let rig = armed(rig())
         for tick in 1...4 {
-            rig.relay.conduitProgress = DNSFailoverProgress(answered: tick * 10, unanswered: tick)
+            rig.relay.conduitProgress = DNSFailoverProgress(answered: tick * 10, unanswered: tick, lastUnanswered: false)
             rig.tick()
         }
         XCTAssertEqual(rig.store.ownKey, key)
+    }
+
+    func testAnswersBeforeTheLastDroppedQueryDoNotEndTheFailure() {
+        let rig = armed(rig())
+        rig.relay.conduitProgress = DNSFailoverProgress(answered: 10, unanswered: 1, lastUnanswered: true)
+        rig.tick()
+        XCTAssertEqual(rig.relay.mode, .vpn, "Conduit answered, then dropped the latest one")
+        XCTAssertEqual(rig.relay.rechecks, 1)
     }
 
     func testAnArmWhoseProbeFailsWaitsForAnAnsweredTick() {
