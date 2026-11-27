@@ -20,6 +20,7 @@ package enum ControlRuntimeCommandKind: String, Codable, Sendable, Equatable, Ca
     case setLaunchAtLogin = "set-launch-at-login"
     case credentialsChanged = "credentials-changed"
     case reload
+    case checkSystemDNSRelease = "check-system-dns-release"
     case quit
 }
 
@@ -123,6 +124,10 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     /// operation completes when they end, or fails `cleanupIncomplete` at that deadline, while the work still runs and owns the root until
     /// it ends; the operation quiesces only then.
     case quit(total: ControlWireBudget, flush: ControlQuitFlush)
+    /// Reads whether Conduit still has anything in system DNS: records waiting to be restored, or a service in any location whose DNS
+    /// servers are the loopback resolver the helper's relay serves. It restores nothing and changes no intent; a client asks it before
+    /// it removes the helper.
+    case checkSystemDNSRelease
 
     package var kind: ControlRuntimeCommandKind {
         switch self {
@@ -135,6 +140,7 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case .setLaunchAtLogin: .setLaunchAtLogin
         case .credentialsChanged: .credentialsChanged
         case .reload: .reload
+        case .checkSystemDNSRelease: .checkSystemDNSRelease
         case .quit: .quit
         }
     }
@@ -196,6 +202,8 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "a reload carries nothing")
             }
             self = .reload
+        case .checkSystemDNSRelease:
+            self = .checkSystemDNSRelease
         case .quit:
             self = .quit(
                 total: try container.decode(ControlWireBudget.self, forKey: .totalMilliseconds),
@@ -220,7 +228,7 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
             try container.encode(module, forKey: .module)
             try container.encode(revision, forKey: .lifecycleRevision)
             try container.encodeIfPresent(companion, forKey: .conditionalDNSRevision)
-        case .testDNS, .credentialsChanged, .reload:
+        case .testDNS, .credentialsChanged, .reload, .checkSystemDNSRelease:
             break
         case .refreshPreflight(let helperReplaced):
             try container.encode(helperReplaced, forKey: .helperReplaced)
@@ -344,6 +352,31 @@ package struct ControlDNSLivenessProbe: Codable, Sendable, Equatable {
     }
 }
 
+/// What a system DNS release check read. Counts only: the host's `platform.dns_release_residue` events name the services, up to
+/// `maximumNamedServices` of them, and its verdict counts the rest.
+package struct ControlSystemDNSRelease: Codable, Sendable, Equatable {
+    package static let maximumNamedServices = 16
+
+    /// False when the settings or the journal could not be read, so nothing is proven released.
+    package var settingsRead: Bool
+    /// Journal records of changed services still waiting to be restored.
+    package var recordsKept: ControlCount
+    /// Services, in any location, whose DNS servers are the loopback resolver alone.
+    package var loopbackServices: ControlCount
+    /// Whether the host would point a newly eligible service at the relay: it applies Manage system DNS, the forwarder runs, and no Stop
+    /// fences it.
+    package var appliesSystemDNS: Bool
+
+    package init(settingsRead: Bool, recordsKept: ControlCount, loopbackServices: ControlCount, appliesSystemDNS: Bool) {
+        self.settingsRead = settingsRead
+        self.recordsKept = recordsKept
+        self.loopbackServices = loopbackServices
+        self.appliesSystemDNS = appliesSystemDNS
+    }
+
+    package var isReleased: Bool { settingsRead && recordsKept.rawValue == 0 && loopbackServices.rawValue == 0 }
+}
+
 /// The value a settled command reports beyond its settled revision. Each command has
 /// exactly one result kind, which `ControlCompletion` enforces. `settled` belongs only
 /// to Stop, quit and a credentials invalidation, whose result is the revision they settle at; no command
@@ -359,6 +392,8 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
     case dnsDisable(ControlDNSDisableWrite)
     /// An explicit reload's typed answer.
     case reload(ControlReloadResult)
+    /// A system DNS release check's reading.
+    case systemDNSRelease(ControlSystemDNSRelease)
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -367,6 +402,7 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
         case observation
         case write
         case reload
+        case release
     }
 
     package init(from decoder: any Decoder) throws {
@@ -386,6 +422,8 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
             self = .dnsDisable(try container.decode(ControlDNSDisableWrite.self, forKey: .write))
         case "reload":
             self = .reload(try container.decode(ControlReloadResult.self, forKey: .reload))
+        case "system-dns-release":
+            self = .systemDNSRelease(try container.decode(ControlSystemDNSRelease.self, forKey: .release))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "an unknown result")
         }
@@ -414,6 +452,9 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
         case .reload(let result):
             try container.encode("reload", forKey: .type)
             try container.encode(result, forKey: .reload)
+        case .systemDNSRelease(let release):
+            try container.encode("system-dns-release", forKey: .type)
+            try container.encode(release, forKey: .release)
         }
     }
 }

@@ -1229,7 +1229,8 @@ package final class RuntimeHost {
             let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
             let events = orchestrator.eventLog, logger = logger
             let applyProxy = platform.manageSystemProxy && state.proxyIsUp
-            let applyDNS = platform.manageSystemDNS && state.dnsIsUp
+            // A Stop's fence over a running forwarder is a Stop whose restore kept it: it serves the services already on the relay only.
+            let applyDNS = platform.manageSystemDNS && state.dnsIsUp && !workflow.dnsIntent.fenced
             let withholdProxyRestore = !applyProxy && declinedLaunchRecovery[.systemProxy] != nil
             let withholdDNSRestore = !applyDNS && declinedLaunchRecovery[.systemDNS] != nil
             for (kind, withheld) in [(NetworkSettingsKind.proxies, withholdProxyRestore), (.dns, withholdDNSRestore)] where withheld {
@@ -1700,8 +1701,8 @@ package final class RuntimeHost {
             && !dnsRelayRestartInFlight
     }
 
-    private var systemDNSReconcileIsDue: Bool {
-        platformConfig.manageSystemDNS && orchestrator.snapshot.dnsRunState == .running
+    var systemDNSReconcileIsDue: Bool {
+        platformConfig.manageSystemDNS && orchestrator.snapshot.dnsRunState == .running && !workflow.dnsIntent.fenced
     }
 
     /// Arms the probe for the DNS run that holds the lane now, and starts its observation clear.
@@ -2203,13 +2204,22 @@ extension RuntimeHost: RuntimeReconcilerHost {
             // The VPN's DNS goes back before the interfaces' does, whatever the clear below finds.
             await vpnDNSOverride.disarm(.manageOff)
             let systemDNS = systemDNSManager
-            let cleared = await platformWork.run {
-                attemptFlagStep("Could not restore system DNS after the setting changed", logger: logger) {
-                    try systemDNS.clear(logger: logger)
-                } && !systemDNS.hasSavedState()
+            let keepsServing = Self.forwarderServes(orchestrator.snapshot.dnsRunState)
+            let restore = await platformWork.run { () -> SystemDNSTeardownRestore in
+                var kept: SystemDNSClearOutcome = .relayStopped
+                let cleared = attemptFlagStep("Could not restore system DNS after the setting changed", logger: logger) {
+                    kept = try systemDNS.clear(logger: logger, keepingRelayWhileInUse: keepsServing)
+                }
+                if case .relayKept(let reason, let services) = kept { return .relayKept(reason: reason, loopbackServices: services) }
+                return cleared && !systemDNS.hasSavedState() ? .restored : .notRestored
             }
-            if cleared { surfaceWritten(.systemDNS) }
-            return cleared
+            if case .relayKept(let reason, let services) = restore {
+                // The probe's relay restart keeps the relay that still serves those services up.
+                keptServing(operation: "switch_off", reason: reason, loopbackServices: services)
+                if let port = orchestrator.snapshot.bindings.dnsPort { startDNSHealthTimer(forwarderPort: port) }
+            }
+            if restore == .restored { surfaceWritten(.systemDNS) }
+            return restore == .restored
         case .setLaunchAtLogin:
             return performImmediate(action, platform: platform, previousPlatform: previousPlatform)
         }

@@ -491,9 +491,9 @@ GateForgetsAtStop == TRUE
 FenceAtStop == TRUE
 Max(a, b) == IF a > b THEN a ELSE b
 
-\* RuntimeHostLifecycle.tearDown: with every module going down, stopVPNMonitor(); then
-\* runtimeStarted = false, and tearDownProxy's clear (resolvers.clear) queued with its place.
-\* A report that lands between the two can queue only a removal, so one step stands for both.
+\* RuntimeHostLifecycle.tearDown: runtimeStarted = false; after the DNS teardown, with every
+\* module going down, stopVPNMonitor(); then tearDownProxy's clear (resolvers.clear) queued with
+\* its place. A report that lands between them can queue only a removal, so one step stands for all.
 \* A Stop of the proxy alone (`whole` false), with DNS or tunnels staying up, keeps the monitor,
 \* its session and the gate's verdict.
 HStopBegin(failCancel, whole) ==

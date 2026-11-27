@@ -104,6 +104,8 @@ final class InteractiveHostHarness {
         /// The state-file access the host's store uses; a test that parks a store step names a `HeldStateFileRead`.
         var stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem()
         var vpnDNSOverride: (any PrivilegeClient)?
+        /// The network locations system DNS is restored through; nil restores through `networksetup`.
+        var locationStore: FakeNetworkLocationStore?
         /// The helper status source; nil observes none. A preflight test names a `FakeHelperLifecycle` read through `hold`.
         var helperStatus: (any HelperLifecycleManaging)?
         /// The saved-password store; a credentials test shares it with the app-side writer it stands in for.
@@ -135,6 +137,9 @@ final class InteractiveHostHarness {
             let dnsProbe = self.dnsProbe
             let helperStatus = self.helperStatus.map { HoldingHelperStatus(base: $0, hold: hold) }
             let vpnDNSOverride = self.vpnDNSOverride
+            let locationStore = self.locationStore
+            let locationObserver = FakeNetworkLocationObserver()
+            locationObserver.reportsActiveLocation(of: locationStore)
             let built = try await RuntimeHost.open(
                 stateSession: session,
                 logger: logger,
@@ -166,8 +171,8 @@ final class InteractiveHostHarness {
                     },
                     relayRecheckPause: { _ in },
                     networkPath: FakeNetworkPathObserver(),
-                    networkLocation: FakeNetworkLocationObserver(),
-                    networkLocationStoreFactory: { _ in nil },
+                    networkLocation: locationObserver,
+                    networkLocationStoreFactory: { _ in locationStore },
                     vpnStatusMonitor: { _, _ in vpn },
                     pushedResolvers: pushedResolvers,
                     wake: FakeSystemWakeObserver(),

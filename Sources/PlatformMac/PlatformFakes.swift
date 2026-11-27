@@ -1038,9 +1038,16 @@ package final class FakeHelperLifecycle: HelperLifecycleManaging, @unchecked Sen
     private var _fails = false
     private var _callerPolicy: HelperPinOutcome = .enforced
     private var _statusAfterInstall: HelperToolPrivilegeClient.Status = .installed
+    private var _observeUninstall: (@Sendable () -> Void)?
 
     package struct Refused: Error, LocalizedError {
         package var errorDescription: String? { "helper lifecycle refused" }
+    }
+
+    /// Runs as an uninstall begins, before it is counted, so a test can read the machine the helper was removed from.
+    package var observeUninstall: (@Sendable () -> Void)? {
+        get { lock.withLock { _observeUninstall } }
+        set { lock.withLock { _observeUninstall = newValue } }
     }
 
     package init(status: HelperToolPrivilegeClient.Status = .installed) {
@@ -1091,6 +1098,7 @@ package final class FakeHelperLifecycle: HelperLifecycleManaging, @unchecked Sen
     }
 
     package func uninstallHelper() throws {
+        observeUninstall?()
         let refused: Bool = lock.withLock {
             _uninstalls += 1
             if !_fails { _status = .notInstalled }

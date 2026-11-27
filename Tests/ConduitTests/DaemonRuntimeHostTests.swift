@@ -104,6 +104,7 @@ private final class ParkingStateFiles: StateFileAccessing, @unchecked Sendable {
     private var armed = false
     private var parked = false
     private var released = false
+    private var writesFail = false
 
     func armRead() {
         condition.withLock {
@@ -141,8 +142,14 @@ private final class ParkingStateFiles: StateFileAccessing, @unchecked Sendable {
         return inner.readConfigurationFile(file, limit: limit)
     }
 
+    /// Fails every configuration write as a full disk would, until cleared.
+    func failWrites(_ fail: Bool) {
+        condition.withLock { writesFail = fail }
+    }
+
     func replaceConfigurationFile(_ file: StateRootFile, bytes: Data) -> Result<Void, ConfigurationFileWriteError> {
-        inner.replaceConfigurationFile(file, bytes: bytes)
+        if condition.withLock({ writesFail }) { return .failure(.writeFailed(errno: ENOSPC)) }
+        return inner.replaceConfigurationFile(file, bytes: bytes)
     }
 
     func entryPresence(_ file: StateRootFile) -> Result<Bool, ConfigurationPresenceError> {
@@ -2325,6 +2332,239 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(try locations.snapshot(), stopped)
         XCTAssertEqual(stopped.services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
         XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+    }
+
+    /// DNS on the relay, over the location fixture, with the restore refused from here on.
+    @RuntimeActor private func runDNSOnTheRelayWithRestoreRefused() async throws -> (RuntimeHost, FakeNetworkLocationStore) {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsForwarderEnabled = true
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        XCTAssertEqual(try locations.snapshot().services[0].dns["ServerAddresses"], .list(["127.0.0.1"]))
+        XCTAssertTrue(harness.machine.dnsRelayRunning)
+        locations.refuseWrites(true)
+        return (host, locations)
+    }
+
+    @RuntimeActor private func keptServingEvents(_ host: RuntimeHost) -> [String] {
+        host.orchestrator.eventLog.events.filter { $0.event == "platform.dns_restore_kept_serving" }.compactMap(\.detail)
+    }
+
+    /// The release check says whether the host still applies system DNS: while it manages a running forwarder, and no longer once a Stop
+    /// fences DNS, a Stop that kept DNS serving included.
+    @RuntimeActor func testTheReleaseCheckSaysWhetherTheHostStillAppliesSystemDNS() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        let running = await host.checkSystemDNSRelease()
+        XCTAssertTrue(running.appliesSystemDNS)
+
+        let kept = await host.stopDNS()
+        XCTAssertEqual(kept.keptServing, [.dns])
+        let fenced = await host.checkSystemDNSRelease()
+        XCTAssertFalse(fenced.appliesSystemDNS, "a kept Stop points no new service at the relay")
+        XCTAssertFalse(fenced.isReleased)
+
+        locations.refuseWrites(false)
+        _ = await host.stopDNS()
+        let stopped = await host.checkSystemDNSRelease()
+        XCTAssertFalse(stopped.appliesSystemDNS)
+        XCTAssertTrue(stopped.isReleased)
+        await host.stopRuntime()
+    }
+
+    /// A DNS Stop whose restore fails while a service still points at 127.0.0.1 leaves the relay and the forwarder serving it, says so,
+    /// and keeps the record; the next Stop retries and stops both.
+    @RuntimeActor func testADNSStopWhoseRestoreFailsKeepsTheRelayAndTheForwarderServing() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+
+        let refused = await host.stopDNS()
+        XCTAssertEqual(refused.keptServing, [.dns])
+        XCTAssertFalse(refused.stopped.contains(.dns))
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running, "the forwarder still answers the relay")
+        XCTAssertTrue(harness.machine.dnsRelayRunning, "the relay still answers 127.0.0.1")
+        XCTAssertNotNil(host.dnsHealthTimer, "the probe keeps restarting the relay those services use")
+        XCTAssertTrue(harness.journal.hasRecords(for: .systemDNS))
+        XCTAssertEqual(keptServingEvents(host).count, 1)
+        XCTAssertTrue(keptServingEvents(host).first?.hasPrefix("operation=stop loopback_services=1 reason=") ?? false, "\(keptServingEvents(host))")
+
+        locations.refuseWrites(false)
+        let retried = await host.stopDNS()
+        XCTAssertTrue(retried.stopped.contains(.dns))
+        XCTAssertEqual(try locations.snapshot().services[0].dns["ServerAddresses"], .list(["192.0.2.1"]))
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertNotEqual(host.orchestrator.snapshot.dnsRunState, .running)
+        await host.stopRuntime()
+    }
+
+    /// A Stop whose restore succeeds for the recorded service still keeps the relay and the forwarder while an unrecorded copy of it
+    /// points at 127.0.0.1.
+    @RuntimeActor func testADNSStopKeepsServingAServiceItHasNoRecordOf() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        locations.refuseWrites(false)
+        locations.edit { snapshot in
+            snapshot.services.append(.init(locationID: "55555555-5555-5555-5555-555555555555", serviceID: "66666666-6666-6666-6666-666666666666",
+                                           name: "Wi-Fi", enabled: true, proxies: [:], dns: ["ServerAddresses": .list(["127.0.0.1"])]))
+        }
+
+        let stop = await host.stopDNS()
+        XCTAssertEqual(stop.keptServing, [.dns])
+        XCTAssertEqual(try locations.snapshot().services[0].dns["ServerAddresses"], .list(["192.0.2.1"]))
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running, "the forwarder still answers the copy")
+        XCTAssertTrue(harness.machine.dnsRelayRunning, "the relay still answers the copy on 127.0.0.1")
+
+        locations.edit { $0.services[$0.services.count - 1].dns = ["ServerAddresses": .list(["192.0.2.3"])] }
+        let retried = await host.stopDNS()
+        XCTAssertTrue(retried.stopped.contains(.dns), "nothing is left on the relay")
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        await host.stopRuntime()
+    }
+
+    /// A switch-off that keeps the relay for a service it has no record of leaves no record for a later Stop, and that Stop still keeps the
+    /// relay and the forwarder together.
+    @RuntimeActor func testAStopAfterASwitchOffKeptForAnUnrecordedServiceKeepsTheRelayWithTheForwarder() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        locations.refuseWrites(false)
+        locations.edit { snapshot in
+            snapshot.services.append(.init(locationID: "55555555-5555-5555-5555-555555555555", serviceID: "66666666-6666-6666-6666-666666666666",
+                                           name: "Wi-Fi", enabled: true, proxies: [:], dns: ["ServerAddresses": .list(["127.0.0.1"])]))
+        }
+        try await harness.flip(PlatformIntegrationConfig(manageSystemDNS: false), on: host)
+        XCTAssertTrue(harness.machine.dnsRelayRunning)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+
+        let stop = await host.stopDNS()
+        XCTAssertEqual(stop.keptServing, [.dns])
+        XCTAssertTrue(harness.machine.dnsRelayRunning)
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running, "the relay never outlives the forwarder")
+
+        locations.edit { $0.services[$0.services.count - 1].dns = ["ServerAddresses": .list(["192.0.2.3"])] }
+        let retried = await host.stopDNS()
+        XCTAssertTrue(retried.stopped.contains(.dns))
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        await host.stopRuntime()
+    }
+
+    /// While a kept Stop is pending, a service that becomes eligible keeps its own DNS: only the services already on the relay use it.
+    @RuntimeActor func testAKeptStopPointsNoNewServiceAtTheRelay() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        let kept = await host.stopDNS()
+        XCTAssertEqual(kept.keptServing, [.dns])
+        locations.refuseWrites(false)
+        locations.edit { snapshot in
+            snapshot.services.append(.init(locationID: NetworkLocationFixture.home, serviceID: "77777777-7777-7777-7777-777777777777",
+                                           name: "Ethernet", enabled: true, proxies: [:], dns: ["ServerAddresses": .list(["192.0.2.7"])]))
+        }
+
+        await host.reconcileSystemDNSIfRunning()
+        XCTAssertEqual(try locations.snapshot().services.last?.dns["ServerAddresses"], .list(["192.0.2.7"]))
+
+        await host.deliveries.drain()
+        locations.edit { $0.activeLocationID = NetworkLocationFixture.office }
+        harness.locationObserver.emit(NetworkLocationFixture.office)
+        await host.deliveries.drain()
+        XCTAssertEqual(try locations.snapshot().services[1].dns["ServerAddresses"], .list(["192.0.2.2"]), "a location switch keeps it too")
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running)
+        await host.stopRuntime()
+    }
+
+    @RuntimeActor private func savedDNSEnabled() throws -> Bool {
+        try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false).dnsForwarderEnabled
+    }
+
+    @RuntimeActor private func keptEnabledEvents(_ host: RuntimeHost) -> [String] {
+        host.orchestrator.eventLog.events.filter { $0.event == "config.dns_stop_kept_enabled" }.compactMap(\.detail)
+    }
+
+    /// A kept Stop leaves DNS enabled in the saved settings, so a relaunch serves DNS again. The file holds the enable while the save is
+    /// out, so an exit there leaves it too. A newer Stop that restores saves the disable.
+    @RuntimeActor func testAKeptStopLeavesDNSEnabledInTheSavedSettings() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        harness.stateFiles.armRead()
+        let stopping = Task { await host.stopDNS() }
+        let parked = await harness.stateFiles.waitUntilParked()
+        XCTAssertTrue(parked, "the Stop's save is out")
+        XCTAssertTrue(try savedDNSEnabled(), "an exit before the save lands leaves DNS enabled")
+        harness.stateFiles.release()
+        let kept = await stopping.value
+        XCTAssertEqual(kept.keptServing, [.dns])
+        XCTAssertEqual(kept.dnsSave, .saved)
+        XCTAssertTrue(try savedDNSEnabled())
+        XCTAssertEqual(keptEnabledEvents(host), ["save=saved"])
+
+        locations.refuseWrites(false)
+        let retried = await host.stopDNS()
+        XCTAssertTrue(retried.stopped.contains(.dns))
+        XCTAssertEqual(retried.dnsSave, .saved)
+        XCTAssertFalse(try savedDNSEnabled(), "the newer Stop restored, so its disable wins")
+        await host.stopRuntime()
+    }
+
+    /// A kept Stop under a disk that refuses every write still leaves DNS enabled: the file already holds the enable, so the save verifies
+    /// with nothing to write. The next write of the runtime file, here a proxy Restart's, saves DNS enabled rather than the Stop's disable.
+    @RuntimeActor func testAKeptStopUnderAFailingDiskKeepsDNSEnabledForTheNextWrite() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        harness.stateFiles.failWrites(true)
+        let kept = await host.stopDNS()
+        XCTAssertEqual(kept.keptServing, [.dns])
+        XCTAssertEqual(kept.dnsSave, .saved)
+        XCTAssertTrue(try savedDNSEnabled())
+        XCTAssertEqual(keptEnabledEvents(host), ["save=saved"])
+
+        harness.stateFiles.failWrites(false)
+        _ = try await host.restartProxy()
+        XCTAssertTrue(try savedDNSEnabled(), "the next write saves the kept intent")
+        locations.refuseWrites(false)
+        await host.stopRuntime()
+    }
+
+    /// An edit of the runtime file that lands while a kept Stop's save is out wins: the save writes nothing over it.
+    @RuntimeActor func testAnEditWhileAKeptStopSavesWins() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        harness.stateFiles.armRead()
+        let stopping = Task { await host.stopDNS() }
+        let parked = await harness.stateFiles.waitUntilParked()
+        XCTAssertTrue(parked)
+        var edited = try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false)
+        edited.profileName = "Edited"
+        try ProxyConfigPersistence.save(edited, in: harness.environment)
+        harness.stateFiles.release()
+        let kept = await stopping.value
+        XCTAssertEqual(kept.keptServing, [.dns])
+        XCTAssertEqual(kept.dnsSave, .owed)
+        let saved = try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false)
+        XCTAssertEqual(saved.profileName, "Edited")
+        XCTAssertTrue(saved.dnsForwarderEnabled)
+        XCTAssertEqual(keptEnabledEvents(host), ["save=owed"])
+        locations.refuseWrites(false)
+        await host.stopRuntime()
+    }
+
+    /// Turning Manage system DNS off under a refused restore leaves the relay in front of the forwarder that keeps running.
+    @RuntimeActor func testASystemDNSSwitchOffWhoseRestoreFailsKeepsTheRelay() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+
+        try await harness.flip(PlatformIntegrationConfig(manageSystemDNS: false), on: host)
+        XCTAssertTrue(harness.machine.dnsRelayRunning)
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running)
+        XCTAssertTrue(keptServingEvents(host).first?.hasPrefix("operation=switch_off loopback_services=1 reason=") ?? false,
+                      "\(keptServingEvents(host))")
+        locations.refuseWrites(false)
+        await host.stopRuntime()
+    }
+
+    /// The quit cannot keep the in-process forwarder, so it stops the relay with it whatever the restore came to.
+    @RuntimeActor func testTheQuitStopsTheRelayEvenWhenTheRestoreFails() async throws {
+        let (host, _) = try await runDNSOnTheRelayWithRestoreRefused()
+
+        await host.shutdown()
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertTrue(keptServingEvents(host).isEmpty)
+        XCTAssertTrue(harness.journal.hasRecords(for: .systemDNS), "the record stays for the next launch")
     }
 
     @RuntimeActor func testVPNReconcileRetriesDNSInSameLocationAfterInitiallyDisabledService() async throws {

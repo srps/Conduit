@@ -50,6 +50,29 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    /// A location that is not active still counts: switching to it later would point DNS at a relay that is gone.
+    func testTheReleaseReadingFindsTheLoopbackResolverInEveryLocation() throws {
+        try withRecovery { store, journal, recovery, _ in
+            XCTAssertEqual(recovery.dnsReleaseReading(), .released)
+            store.edit { $0.services[1].dns = self.localDNS }
+            XCTAssertEqual(recovery.dnsReleaseReading(), .remaining(recordsKept: 0, residue: [
+                SystemDNSResidue(locationID: office, active: false, serviceID: officeService, serviceName: "Wi-Fi")
+            ]))
+            store.edit { $0.services[1].dns = ["ServerAddresses": .list(["127.0.0.1", "192.0.2.2"])] }
+            XCTAssertEqual(recovery.dnsReleaseReading(), .released, "only the loopback resolver alone is Conduit's")
+
+            try recovery.apply(kind: .dns, desired: localDNS, config: ProxyConfig())
+            guard case .remaining(recordsKept: 1, let residue) = recovery.dnsReleaseReading() else { return XCTFail("the applied record") }
+            XCTAssertEqual(residue.map(\.locationID), [home])
+            try recovery.clear(kind: .dns, config: ProxyConfig())
+            XCTAssertEqual(recovery.dnsReleaseReading(), .released)
+            XCTAssertFalse(journal.hasRecords(for: .systemDNS))
+
+            store.edit { $0.services[0].unreadableDNS = true }
+            XCTAssertEqual(recovery.dnsReleaseReading(), .unreadable(reason: "unsupported_settings"))
+        }
+    }
+
     func testRestoreEventsNameLocationAndServiceInFieldsTheSanitizerKeeps() throws {
         try withRecovery { store, _, recovery, events in
             try recovery.apply(kind: .dns, desired: localDNS, config: ProxyConfig())

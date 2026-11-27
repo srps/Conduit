@@ -108,11 +108,14 @@ final class RuntimeClientContractTests: XCTestCase {
         XCTAssertEqual(
             ControlRuntimeCommandKind.allCases.map(\.rawValue),
             ["stop", "start", "restart", "test-dns", "test-upstream", "refresh-preflight", "set-launch-at-login", "credentials-changed",
-             "reload", "quit"]
+             "reload", "check-system-dns-release", "quit"]
         )
         // The invalidation names nothing beyond itself: no secret, identity or digest.
         XCTAssertEqual(String(decoding: try JSONEncoder().encode(ControlRuntimeCommand.credentialsChanged), as: UTF8.self),
                        #"{"type":"credentials-changed"}"#)
+        // The release check is a read: it names nothing.
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(ControlRuntimeCommand.checkSystemDNSRelease), as: UTF8.self),
+                       #"{"type":"check-system-dns-release"}"#)
         XCTAssertThrowsError(try JSONDecoder().decode(ControlRuntimeCommand.self, from: Data(#"{"type":"refresh-preflight"}"#.utf8)),
                              "a preflight refresh names whether the helper was replaced")
         let save = ControlRequestID(rawValue: UUID())

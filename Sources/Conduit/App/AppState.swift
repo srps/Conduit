@@ -114,6 +114,11 @@ final class AppState: ObservableObject {
     /// An install waits on a password dialog for as long as the user takes, so it has its own queue.
     private let helperLifecycleWork = PlatformWork(label: "io.github.srps.Conduit.app.helper-lifecycle")
     private var helperChangeInFlight = false
+    /// Up from an Uninstall Helper click until its removal ends: nothing sent meanwhile may point a service at the relay.
+    private var helperUninstallFence = false
+    /// Commands sent through `dispatch` and not yet ended, and the one uninstall waiting for them to end.
+    private var dispatchesInFlight = 0
+    private var dispatchDrainWaiters: [CheckedContinuation<Void, Never>] = []
     /// The DNS module's last observed error while it ran, for the degraded notification's transition.
     private var lastDNSError: String?
     private var lastSnapshotDeclinedSystemDNSRecovery = false
@@ -547,6 +552,12 @@ final class AppState: ObservableObject {
 
     private func submitConfiguration() {
         guard phase == .ready || phase == .opening, let editor, editor.ledger.isDirty(.configuration) else { return }
+        if helperUninstallFence {
+            recordHelperEvent(RuntimeEvent(kind: .lifecycle, event: "helper.uninstall_fenced",
+                                           detail: "command=apply reason=settings_save outcome=refused"), level: .notice)
+            lastErrorMessage = Self.helperUninstallSaveRefusedMessage
+            return
+        }
         editor.save(.configuration)
         refreshConfigurationProblem()
     }
@@ -718,6 +729,7 @@ final class AppState: ObservableObject {
             lastErrorMessage = "A reload from disk is already running."
             return
         }
+        if let reason = dnsWriterFenceRefusal(.reload) { return refuseWhileUninstallingHelper(.reload, reason: reason) }
         reloading = true
         cancelPendingSave()
         reloadTask = Task { @MainActor [weak self] in
@@ -846,7 +858,7 @@ final class AppState: ObservableObject {
     func toggleDNS() {
         guard controlsEnabled, let modules = runtime.stamp?.modules else { return }
         switch MenuBarPresentation.moduleToggleAction(for: runtime.dnsRunState) {
-        case .stop: send(.stop(.dns)) { _ in }
+        case .stop: send(.stop(.dns)) { [weak self] outcome in self?.dnsStopped(outcome) }
         case .none: break
         case .start:
             guard mayStart() else { return }
@@ -897,8 +909,17 @@ final class AppState: ObservableObject {
 
     func restoreSystemDNSByStoppingDNS() {
         guard controlsEnabled else { return }
-        send(.stop(.dns)) { _ in }
+        send(.stop(.dns)) { [weak self] outcome in self?.dnsStopped(outcome) }
     }
+
+    /// A DNS Stop whose restore failed while a service still used the relay leaves DNS running; the host's event names why.
+    private func dnsStopped(_ outcome: ControlOperationOutcome?) {
+        guard case .failed(.cleanupIncomplete)? = outcome else { return }
+        lastErrorMessage = Self.dnsKeptServingMessage
+    }
+
+    static let dnsKeptServingMessage = "DNS is still running: Conduit could not restore your DNS settings, and your network services "
+        + "still use its resolver on 127.0.0.1. Stop DNS again to retry."
 
     static let systemDNSRecoveryDeclinedTitle = "System DNS still points at Conduit"
     static let systemDNSRecoveryDeclinedBody = "Its relay is not answering, so names may not resolve. Start DNS, or restore your DNS settings."
@@ -911,6 +932,10 @@ final class AppState: ObservableObject {
     /// a later Stop replaces is never settled. A command dropped at the quit's fence or the ordinary cap settles with no outcome at once.
     private func send(_ command: ControlRuntimeCommand, settled: @escaping @MainActor (ControlOperationOutcome?) -> Void) {
         guard !quitFence else { return settled(nil) }
+        if let reason = dnsWriterFenceRefusal(command) {
+            refuseWhileUninstallingHelper(command, reason: reason)
+            return settled(nil)
+        }
         if case .stop(let module) = command {
             guard stopLanes[module] == nil else {
                 stopLanes[module]?.wanted = settled
@@ -939,9 +964,13 @@ final class AppState: ObservableObject {
         let requestID = ControlRequestID(rawValue: UUID())
         // Known to the editor from this turn, before the send, so a save submitted while it is out can wait for its write.
         editor?.ownCommandSent(command, requestID: requestID)
+        dispatchesInFlight += 1
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { ended() }
+            defer {
+                ended()
+                self.dispatchEnded()
+            }
             let end = await self.settle(command, requestID: requestID)
             switch end {
             case .settled(let outcome): self.editor?.ownCommandEnded(outcome: outcome, requestID: requestID)
@@ -953,6 +982,14 @@ final class AppState: ObservableObject {
             settled(end.outcome)
             self.refreshPreflight()
         }
+    }
+
+    private func dispatchEnded() {
+        dispatchesInFlight -= 1
+        guard dispatchesInFlight == 0 else { return }
+        let waiters = dispatchDrainWaiters
+        dispatchDrainWaiters = []
+        for waiter in waiters { waiter.resume() }
     }
 
     /// How a command ended, as far as the app can know.
@@ -1234,29 +1271,174 @@ final class AppState: ObservableObject {
         )
     }
 
+    /// The helper's relay serves every service still on Conduit's loopback resolver, so the helper is removed only once system DNS is
+    /// released: what is left is restored through the Restore DNS Settings path, a DNS Stop, and a fresh check must then find nothing.
+    /// From the click until the removal ends, nothing this app sends may point a service back at the relay (`dnsWriterFenceRefusal`):
+    /// the work already out is drained first, so the last check runs under the fence right before the removal.
     func uninstallHelper() {
-        changeHelper(
-            "uninstall",
-            refreshAfter: .zero,
-            { lifecycle in try lifecycle.uninstallHelper() },
-            succeeded: { appState, _ in
-                appState.helperCallerPolicy = nil
-                return (RuntimeEvent(kind: .lifecycle, event: "helper.uninstalled"), .notice)
+        guard !helperChangeInFlight, !quitFence else { return }
+        helperChangeInFlight = true
+        helperUninstallFence = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.drainDNSWriters()
+            let released = await self.releaseSystemDNSForHelperRemoval()
+            self.helperChangeInFlight = false
+            if released {
+                await self.changeHelper(
+                    "uninstall",
+                    refreshAfter: .zero,
+                    { lifecycle in try lifecycle.uninstallHelper() },
+                    succeeded: { appState, _ in
+                        appState.helperCallerPolicy = nil
+                        return (RuntimeEvent(kind: .lifecycle, event: "helper.uninstalled"), .notice)
+                    }
+                )?.value
             }
-        )
+            self.helperUninstallFence = false
+        }
+    }
+
+    /// Why a command or a Settings save is held while Uninstall Helper runs, nil when it may go: one that could point a service at the
+    /// relay, which the helper about to be removed serves. A Start with DNS or its companion, a Restart with its companion, and a reload
+    /// that may adopt a file which turns Manage system DNS on are refused, and so is a Settings save, whose draft stays in the editor.
+    private func dnsWriterFenceRefusal(_ command: ControlRuntimeCommand) -> String? {
+        guard helperUninstallFence else { return nil }
+        switch command {
+        case .start(.dns, _, _), .restart(.dns, _, _):
+            return "dns_start"
+        case .start(_, _, .some), .restart(_, _, .some):
+            return "dns_companion"
+        case .reload:
+            return "reload"
+        case .start, .restart, .stop, .testDNS, .testUpstream, .refreshPreflight, .setLaunchAtLogin, .credentialsChanged,
+             .checkSystemDNSRelease, .quit:
+            return nil
+        }
+    }
+
+    /// Records and shows a command the uninstall fence refused. Event first.
+    private func refuseWhileUninstallingHelper(_ command: ControlRuntimeCommand, reason: String) {
+        recordHelperEvent(RuntimeEvent(kind: .lifecycle, event: "helper.uninstall_fenced",
+                                       detail: "command=\(command.kind.rawValue) reason=\(reason) outcome=refused"), level: .notice)
+        lastErrorMessage = Self.helperUninstallFencedMessage
+    }
+
+    /// Waits for the Settings save, a reload and the commands already out, so none of them lands after the last check.
+    private func drainDNSWriters() async {
+        while true {
+            await editor?.settle()
+            if let reloadTask {
+                await reloadTask.value
+                continue
+            }
+            guard dispatchesInFlight > 0 else { return }
+            await withCheckedContinuation { dispatchDrainWaiters.append($0) }
+        }
+    }
+
+    /// While the host applies system DNS, a network or location notification can point a newly eligible service at the relay at any
+    /// time, the password prompt included, so the uninstall stops DNS even when the first check finds nothing. The last check must find
+    /// the host no longer applying it: a Stop that never ran, or ran and was undone, refuses the removal.
+    private func releaseSystemDNSForHelperRemoval() async -> Bool {
+        guard var release = await readableSystemDNSRelease() else { return false }
+        if !release.isReleased || release.appliesSystemDNS, !quitFence {
+            recordHelperEvent(RuntimeEvent(kind: .lifecycle, event: "helper.uninstall_restoring_dns",
+                                           detail: Self.releaseDetail(release)), level: .notice)
+            _ = await stopDNSForHelperRemoval()
+            guard let after = await readableSystemDNSRelease() else { return false }
+            release = after
+        }
+        guard release.isReleased else {
+            refuseHelperUninstall(detail: "reason=system_dns_not_released " + Self.releaseDetail(release),
+                                  message: Self.helperUninstallRefusedMessage(release))
+            return false
+        }
+        guard !release.appliesSystemDNS else {
+            refuseHelperUninstall(detail: "reason=dns_still_applied", message: Self.helperUninstallStillAppliedMessage)
+            return false
+        }
+        return true
+    }
+
+    /// A release check the host answered from settings and a journal it could read. Anything else refuses the uninstall at once: an
+    /// unreadable check proves nothing either way, so it stops nothing.
+    private func readableSystemDNSRelease() async -> ControlSystemDNSRelease? {
+        guard let release = await checkSystemDNSRelease() else {
+            refuseHelperUninstall(detail: "reason=release_check_failed", message: Self.helperUninstallUncheckedMessage)
+            return nil
+        }
+        guard release.settingsRead else {
+            refuseHelperUninstall(detail: "reason=system_dns_unreadable", message: Self.helperUninstallUncheckedMessage)
+            return nil
+        }
+        return release
+    }
+
+    private func checkSystemDNSRelease() async -> ControlSystemDNSRelease? {
+        guard case .completed(let completion)? = await settle(.checkSystemDNSRelease).outcome,
+              case .systemDNSRelease(let release) = completion.result else { return nil }
+        return release
+    }
+
+    /// The Restore DNS Settings Stop, awaited. It goes beside the Stop lane, so its settlement is never handed to a later caller.
+    private func stopDNSForHelperRemoval() async -> ControlOperationOutcome? {
+        guard !quitFence else { return nil }
+        return await withCheckedContinuation { continuation in
+            dispatch(.stop(.dns), settled: { continuation.resume(returning: $0) }, ended: {})
+        }
+    }
+
+    private func refuseHelperUninstall(detail: String, message: String) {
+        recordHelperEvent(RuntimeEvent(kind: .lifecycle, event: "helper.uninstall_refused", detail: detail), level: .error)
+        lastErrorMessage = message
+    }
+
+    private func recordHelperEvent(_ event: RuntimeEvent, level: LogLevel) {
+        eventLog.append(event)
+        logStore.log(level, "Helper: \(event.event) \(event.detail ?? "")", category: .system)
+    }
+
+    private static func releaseDetail(_ release: ControlSystemDNSRelease) -> String {
+        "records=\(release.recordsKept.rawValue) loopback_services=\(release.loopbackServices.rawValue)"
+    }
+
+    static let helperUninstallUncheckedMessage = "The helper was not uninstalled: Conduit could not confirm that your network services "
+        + "no longer use its DNS resolver. Turn off Manage system DNS, then try again."
+
+    static let helperUninstallStillAppliedMessage = "The helper was not uninstalled: Conduit could not confirm that DNS stopped, so it "
+        + "could still point a network service at the helper's resolver. Stop DNS, then try again."
+
+    static let helperUninstallFencedMessage = "Uninstall Helper is checking your DNS settings, so nothing that could point them back at "
+        + "Conduit starts or reloads until it finishes. Try again then."
+
+    static let helperUninstallSaveRefusedMessage = "Your Settings changes were not saved while Uninstall Helper runs. They are still here: "
+        + "save them again once Uninstall Helper ends."
+
+    static func helperUninstallRefusedMessage(_ release: ControlSystemDNSRelease) -> String {
+        let services = release.loopbackServices.rawValue
+        let records = release.recordsKept.rawValue
+        var left: [String] = []
+        if services > 0 { left.append("\(services) network service\(services == 1 ? "" : "s") still use\(services == 1 ? "s" : "") its DNS resolver (127.0.0.1)") }
+        if records > 0 { left.append("\(records) DNS change\(records == 1 ? " is" : "s are") not restored") }
+        return "The helper was not uninstalled: " + left.joined(separator: " and ") + ", and without the helper DNS would stop working. "
+            + "Use Restore DNS Settings or turn off Manage system DNS, then try again. The event log names up to "
+            + "\(ControlSystemDNSRelease.maximumNamedServices) of those services by location and name, and counts the rest. "
+            + "If you run your own DNS resolver on 127.0.0.1, remove the helper with sudo ./uninstall-helper.sh --force."
     }
 
     /// An install or uninstall, off the main actor, one at a time. Event first, log line derived from it. A success tells the host the
-    /// helper was replaced, so the verdict it held for the old one is not kept.
+    /// helper was replaced, so the verdict it held for the old one is not kept. The task ends once the change and its refresh have.
+    @discardableResult
     private func changeHelper<Outcome: Sendable>(
         _ operation: String,
         refreshAfter delay: Duration,
         _ change: @escaping @Sendable (any HelperLifecycleManaging) throws -> Outcome,
         succeeded: @escaping @MainActor (AppState, Outcome) -> (RuntimeEvent, LogLevel)
-    ) {
-        guard !helperChangeInFlight, !quitFence else { return }
+    ) -> Task<Void, Never>? {
+        guard !helperChangeInFlight, !quitFence else { return nil }
         helperChangeInFlight = true
-        Task { @MainActor [weak self, helperLifecycleWork, helperLifecycle] in
+        return Task { @MainActor [weak self, helperLifecycleWork, helperLifecycle] in
             let result: Result<Outcome, HelperChangeFailure> = await helperLifecycleWork.run {
                 do {
                     return .success(try change(helperLifecycle))

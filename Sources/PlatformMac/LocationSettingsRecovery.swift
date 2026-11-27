@@ -124,6 +124,25 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         }
     }
 
+    /// Every location's services, not only the active one's: a location the user switches to later still points at the relay.
+    package func dnsReleaseReading() -> SystemDNSReleaseReading {
+        guard journal.fileState != .unreadable else { return .unreadable(reason: "journal_unreadable") }
+        let snapshot: NetworkLocationSnapshot
+        do {
+            snapshot = try store.snapshot()
+        } catch {
+            return .unreadable(reason: "settings_unreadable")
+        }
+        var residue: [SystemDNSResidue] = []
+        for member in snapshot.services where member.supportsDNS {
+            guard !member.unreadableDNS else { return .unreadable(reason: "unsupported_settings") }
+            guard member.dns["ServerAddresses"] == .list([SystemDNSResidue.loopbackResolver]) else { continue }
+            residue.append(SystemDNSResidue(locationID: member.locationID, active: member.locationID == snapshot.activeLocationID,
+                                            serviceID: member.serviceID, serviceName: member.name))
+        }
+        return SystemDNSReleaseReading(recordsKept: journal.records(for: .systemDNS).count, residue: residue)
+    }
+
     package func isApplied(kind: NetworkSettingsKind, desired: [String: NetworkSettingValue]) -> Bool {
         do {
             let snapshot = try store.snapshot()

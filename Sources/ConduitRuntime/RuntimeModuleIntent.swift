@@ -179,12 +179,14 @@ struct RuntimeModuleIntents: Equatable, Sendable {
     }
 
     /// The one rule for a verified runtime write's DNS bit, a Start's or a save's, staged under `intentRevision`. A save has no Start of its
-    /// own, so it is never `ownEnable`.
+    /// own, so it is never `ownEnable`. While a Stop's save is owed under that intent, `dnsConfigured` is the bit it owes: a write of that
+    /// bit, or a DNS Start's own enable, ends the obligation, and a write of the other bit, staged before a kept Stop turned the intent back
+    /// on, changes nothing.
     mutating func recordVerifiedDNSWrite(_ enabled: Bool, intentRevision: Int?, ownEnable: Bool) {
         guard let intentRevision, dnsIntentRevision == intentRevision else { return }
-        dnsConfigured = enabled
         switch modules.dns.pending {
-        case .stopSave(let revision) where (!enabled || ownEnable) && revision == intentRevision:
+        case .stopSave(let revision) where revision == intentRevision:
+            guard enabled == dnsConfigured || ownEnable else { return }
             modules.dns.pending = nil
         case .start(var start) where start.displacesOwedSave:
             start.displacesOwedSave = false
@@ -192,6 +194,7 @@ struct RuntimeModuleIntents: Equatable, Sendable {
         case .stopSave, .start, nil:
             break
         }
+        dnsConfigured = enabled
     }
 
     // MARK: - Admission
@@ -424,6 +427,17 @@ struct RuntimeModuleIntents: Equatable, Sendable {
     mutating func settleConditional(_ ticket: RuntimeLifecycleTicket, succeeded: Bool) {
         guard succeeded, conditionalActivationAllowed(ticket) else { return }
         modules.dns.enabled = true
+    }
+
+    /// A session Stop of DNS at `revision` whose teardown kept DNS serving, because a service still used the relay after the restore. While
+    /// it is still DNS's latest admission, its configured intent goes back to on and its save is owed again, so the save writes the enable
+    /// and a relaunch serves DNS. The fence and the permission stay a Stop's. A newer Start or Stop of DNS keeps its own intent. Returns
+    /// whether the intent was kept.
+    mutating func keepConfiguredAfterKeptStop(revision: Int) -> Bool {
+        guard !terminal, dnsIntentRevision == revision, modules.dns.revision == revision else { return false }
+        dnsConfigured = true
+        modules.dns.pending = .stopSave(revision: revision)
+        return true
     }
 
     func stopSaveIsCurrent(revision: Int) -> Bool {

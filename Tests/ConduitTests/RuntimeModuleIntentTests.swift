@@ -429,6 +429,63 @@ final class RuntimeModuleIntentTests: XCTestCase {
         XCTAssertFalse(fenced.conditionalActivationAllowed(blocked), "a Stop's fence keeps DNS off through a reload")
     }
 
+    /// A Stop whose teardown kept DNS serving owes the enable while it is DNS's latest admission, even after a shared write of its disable
+    /// ended the obligation. A newer Stop, a newer DNS Start or the quit keeps its own intent.
+    func testAKeptStopOwesTheEnableOnlyWhileItIsDNSsLatestAdmission() throws {
+        var kept = RuntimeModuleIntents(dnsEnabled: true)
+        let stop = kept.stop([.dns], reason: .session)
+        kept.recordVerifiedDNSWrite(false, intentRevision: stop, ownEnable: false)
+        XCTAssertNil(kept.modules.dns.pending, "a shared write of the disable ended the obligation")
+        XCTAssertTrue(kept.keepConfiguredAfterKeptStop(revision: stop))
+        XCTAssertTrue(kept.dnsConfigured)
+        XCTAssertTrue(kept.stopSaveIsCurrent(revision: stop), "the enable is owed again")
+        XCTAssertTrue(kept.modules.dns.fenced, "the fence stays a Stop's")
+        XCTAssertFalse(kept.modules.dns.enabled)
+
+        var newerStop = RuntimeModuleIntents(dnsEnabled: true)
+        let older = newerStop.stop([.dns], reason: .session)
+        newerStop.stop([.dns], reason: .session)
+        XCTAssertFalse(newerStop.keepConfiguredAfterKeptStop(revision: older))
+        XCTAssertFalse(newerStop.dnsConfigured)
+
+        var newerStart = RuntimeModuleIntents(dnsEnabled: true)
+        let stopped = newerStart.stop([.dns], reason: .session)
+        _ = try admitted(&newerStart, request(dns: .start))
+        XCTAssertFalse(newerStart.keepConfiguredAfterKeptStop(revision: stopped))
+
+        var quit = RuntimeModuleIntents(dnsEnabled: true)
+        let beforeQuit = quit.stop([.dns], reason: .session)
+        quit.stop(Set(ControlModule.allCases), reason: .processQuit)
+        XCTAssertFalse(quit.keepConfiguredAfterKeptStop(revision: beforeQuit))
+    }
+
+    /// A save that staged the Stop's disable before the teardown kept DNS serving verifies late: the kept enable stands and stays owed,
+    /// so the next write stages it.
+    func testASaveStagedBeforeAKeptStopDoesNotUndoTheKeptEnable() {
+        var intents = RuntimeModuleIntents(dnsEnabled: true)
+        let stop = intents.stop([.dns], reason: .session)
+        let staged = intents.stagedDNSForwarderEnabled(for: nil)
+        XCTAssertFalse(staged)
+        XCTAssertTrue(intents.keepConfiguredAfterKeptStop(revision: stop))
+
+        intents.recordVerifiedDNSWrite(staged, intentRevision: stop, ownEnable: false)
+        XCTAssertTrue(intents.dnsConfigured, "the kept enable stands")
+        XCTAssertTrue(intents.stopSaveIsCurrent(revision: stop), "and is still owed")
+        XCTAssertTrue(intents.stagedDNSForwarderEnabled(for: nil), "the next write stages it")
+    }
+
+    /// Any write that verifies the enable a kept Stop owes ends the obligation, so a configured Start is no longer refused as busy.
+    func testAnyVerifiedWriteOfTheKeptEnableEndsTheObligation() {
+        var intents = RuntimeModuleIntents(dnsEnabled: true)
+        let stop = intents.stop([.dns], reason: .session)
+        XCTAssertTrue(intents.keepConfiguredAfterKeptStop(revision: stop))
+
+        intents.recordVerifiedDNSWrite(intents.stagedDNSForwarderEnabled(for: nil), intentRevision: stop, ownEnable: false)
+        XCTAssertNil(intents.modules.dns.pending, "nothing is owed")
+        XCTAssertTrue(intents.dnsConfigured)
+        XCTAssertNotEqual(intents.admit(request(dns: .configuredStart)), .failure(.busy(.dns)))
+    }
+
     /// A terminal stop latches and persists no disable, but keeps a DNS save an earlier session Stop reserved.
     func testATerminalStopKeepsAnEarlierStopSaveAndPersistsNoDisable() throws {
         var intents = RuntimeModuleIntents(dnsEnabled: true)

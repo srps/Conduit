@@ -178,16 +178,52 @@ package final class SystemDNSManager: @unchecked Sendable {
         logger?.log(.notice, "Set system DNS to 127.0.0.1 via relay :53 -> :\(forwarderPort) on \(writable.count) interface(s).", category: .system)
     }
 
-    package func clear(logger: (any LogSink)?) throws {
+    /// Restores system DNS and stops the relay. `keepingRelayWhileInUse` is
+    /// for a teardown whose forwarder stays up: a restore, failed or not,
+    /// that leaves a service on 127.0.0.1, or that cannot be read back, keeps
+    /// the relay serving it and returns `relayKept` instead of throwing. A
+    /// failed restore keeps its journal for retry either way. Only a manager with
+    /// location recovery keeps the relay; the `networksetup` path stops it
+    /// before it restores.
+    @discardableResult
+    package func clear(logger: (any LogSink)?, keepingRelayWhileInUse: Bool = false) throws -> SystemDNSClearOutcome {
         operations.lock()
         defer { operations.unlock() }
         if let locationRecovery {
-            // Restore first, but the relay must never outlive a stopped
-            // forwarder. Failed restoration keeps its journal for retry.
-            defer { stopRelay(logger: logger) }
-            try locationRecovery.clear(kind: .dns, config: configProvider())
-            return
+            do {
+                try locationRecovery.clear(kind: .dns, config: configProvider())
+            } catch {
+                if keepingRelayWhileInUse, let kept = Self.relayKept(reason: error.localizedDescription,
+                                                                     reading: locationRecovery.dnsReleaseReading()) {
+                    return kept
+                }
+                stopRelay(logger: logger)
+                throw error
+            }
+            // The journal covers only the services Conduit wrote. A copy of a location made while it pointed at the relay is not one.
+            if keepingRelayWhileInUse, let kept = Self.relayKept(reason: "loopback_remains", reading: locationRecovery.dnsReleaseReading()) {
+                return kept
+            }
+            stopRelay(logger: logger)
+            return .relayStopped
         }
+        try clearThroughNetworkSetup(logger: logger)
+        return .relayStopped
+    }
+
+    /// Whether a restore leaves anything on the relay: a service still on 127.0.0.1, or a reading that cannot say.
+    private static func relayKept(reason: String, reading: SystemDNSReleaseReading) -> SystemDNSClearOutcome? {
+        switch reading {
+        case .remaining(_, let residue) where !residue.isEmpty:
+            return .relayKept(reason: reason, loopbackServices: residue.count)
+        case .unreadable:
+            return .relayKept(reason: reason, loopbackServices: nil)
+        case .remaining, .released:
+            return nil
+        }
+    }
+
+    private func clearThroughNetworkSetup(logger: (any LogSink)?) throws {
         guard hasSavedInterfaces() else {
             // A previous teardown restored this surface. Probing the machine
             // now would flag a user's own 127.0.0.1 resolver — just restored —
@@ -456,6 +492,30 @@ package final class SystemDNSManager: @unchecked Sendable {
 
     package func hasSavedState() -> Bool {
         hasSavedInterfaces()
+    }
+
+    /// Whether anything of Conduit's is left in system DNS: journal records still waiting to be restored, or a service whose DNS
+    /// servers are the loopback resolver alone, in any location. It reads and writes nothing. The helper's relay serves those
+    /// services, so the helper may go only once this reads `released`.
+    package func releaseReading() -> SystemDNSReleaseReading {
+        operations.withLock {
+            if let locationRecovery { return locationRecovery.dnsReleaseReading() }
+            guard journal.fileState != .unreadable else { return .unreadable(reason: "journal_unreadable") }
+            let services: [String]
+            do {
+                services = try listedNetworkServices(includingDisabled: true)
+            } catch {
+                return .unreadable(reason: "listing_failed")
+            }
+            var residue: [SystemDNSResidue] = []
+            for service in services {
+                guard let servers = readDNSServersStrict(service: service) else { return .unreadable(reason: "servers_unreadable") }
+                if servers == [SystemDNSResidue.loopbackResolver] {
+                    residue.append(SystemDNSResidue(locationID: nil, active: true, serviceID: nil, serviceName: service))
+                }
+            }
+            return SystemDNSReleaseReading(recordsKept: journal.records(for: .systemDNS).count, residue: residue)
+        }
     }
 
     // MARK: - Private
@@ -731,3 +791,43 @@ package final class SystemDNSManager: @unchecked Sendable {
 
 }
 
+
+/// A service whose DNS servers are Conduit's loopback resolver alone. Location and service IDs are absent on a machine read through
+/// `networksetup`, which sees only the current location.
+package struct SystemDNSResidue: Equatable, Sendable {
+    package static let loopbackResolver = "127.0.0.1"
+
+    package var locationID: String?
+    package var active: Bool
+    package var serviceID: String?
+    package var serviceName: String
+
+    package init(locationID: String?, active: Bool, serviceID: String?, serviceName: String) {
+        self.locationID = locationID
+        self.active = active
+        self.serviceID = serviceID
+        self.serviceName = serviceName
+    }
+}
+
+/// What `SystemDNSManager.clear` did with the relay.
+package enum SystemDNSClearOutcome: Equatable, Sendable {
+    case relayStopped
+    /// Services still use the relay after the restore, so it keeps serving them. `loopbackServices` is nil when the settings could not
+    /// be read back.
+    case relayKept(reason: String, loopbackServices: Int?)
+}
+
+/// What `SystemDNSManager.releaseReading()` found.
+package enum SystemDNSReleaseReading: Equatable, Sendable {
+    /// Nothing recorded and no service on the loopback resolver.
+    case released
+    /// Records still to restore, services still on the loopback resolver, or both.
+    case remaining(recordsKept: Int, residue: [SystemDNSResidue])
+    /// The settings or the journal could not be read, so nothing is proven released.
+    case unreadable(reason: String)
+
+    init(recordsKept: Int, residue: [SystemDNSResidue]) {
+        self = recordsKept == 0 && residue.isEmpty ? .released : .remaining(recordsKept: recordsKept, residue: residue)
+    }
+}

@@ -69,6 +69,8 @@ jobs:
         python3 scripts/test-kerberos-worker.py "$conduit_bin_dir/Conduit" "$conduit_bin_dir/ConduitDaemon"
     - name: Install script argument parsing
       run: bash ./scripts/test-install-helper-args.sh
+    - name: Uninstall script refuses while services use Conduit's DNS
+      run: bash ./scripts/test-uninstall-helper-args.sh
     - name: Network probe verdicts (stubbed system tools)
       run: bash ./scripts/test-probe-network.sh
     - name: Dev bundle packaging (stand-in tools, nothing signed or installed)

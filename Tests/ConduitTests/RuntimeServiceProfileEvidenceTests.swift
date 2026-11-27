@@ -371,6 +371,7 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
             // JSON `false` is a byte longer than `true`, as for the login-item flag below.
             ("submit-refresh-preflight", .refreshPreflight(helperReplaced: false)),
             ("submit-credentials-changed", .credentialsChanged),
+            ("submit-check-system-dns-release", .checkSystemDNSRelease),
             ("submit-reload", .reload),
             ("submit-set-launch-at-login", .setLaunchAtLogin(false, ifPlatformBaseline: platformBaseline)),
             ("submit-quit-both-flushes", .quit(total: try ControlWireBudget(Int(Int32.max)), flush: flush)),
@@ -546,6 +547,10 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
             ("refresh-preflight", try completed(.refreshPreflight, .preflight(preflight))),
             ("set-launch-at-login", try completed(.setLaunchAtLogin, .platformWrite(platform))),
             ("reload", try completed(.reload, .reload(reload))),
+            ("check-system-dns-release", try completed(.checkSystemDNSRelease, .systemDNSRelease(ControlSystemDNSRelease(
+                settingsRead: false, recordsKept: try ControlCount(Int.max), loopbackServices: try ControlCount(Int.max),
+                appliesSystemDNS: false
+            )))),
             ("partially-completed", .partiallyCompleted(partial)),
             ("failed", .failed(try widest(ControlFailureCode.allCases))),
             ("superseded", .superseded(by: ControlOperationID(rawValue: id))),

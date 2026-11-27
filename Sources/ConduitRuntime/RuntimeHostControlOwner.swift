@@ -124,6 +124,8 @@ enum RuntimeControlAdmission {
     case credentialsChanged
     /// An explicit reload, pending work from its admission, with the intent generation its fence captured.
     case reload(capturedAt: Int, request: ControlRequestID)
+    /// A read of what Conduit still has in system DNS.
+    case systemDNSRelease
 }
 
 /// The latest control Stop of one module: the service operation and the revision its fence took.
@@ -249,6 +251,11 @@ extension RuntimeHost: ControlCommandOwner {
             pendingAdmissions += 1
             controlAdmissions[operation] = .reload(capturedAt: workflow.generation, request: request)
             return .admitted
+        case .checkSystemDNSRelease:
+            // It reads; it changes no intent.
+            guard !workflow.isTerminal else { return .rejected(.hostStopping) }
+            controlAdmissions[operation] = .systemDNSRelease
+            return .admitted
         case .restart(.dns, _, _), .restart(.tunnels, _, _), .testUpstream:
             // Not adopted on this owner yet; each is refused whole before anything changes.
             return .rejected(.notImplemented)
@@ -343,6 +350,13 @@ extension RuntimeHost: ControlCommandOwner {
                 defer { pendingAdmissions -= 1 }
                 let decision = await performReload(capturedAt: captured, requestID: request)
                 report.settled(completed(.reload, result: .reload(Self.reloadResult(decision))))
+                report.quiesced()
+                onControlStateChange?()
+            }
+        case .systemDNSRelease:
+            Task { [self] in
+                let release = await checkSystemDNSRelease()
+                report.settled(completed(.checkSystemDNSRelease, result: .systemDNSRelease(release)))
                 report.quiesced()
                 onControlStateChange?()
             }
@@ -441,12 +455,14 @@ extension RuntimeHost: ControlCommandOwner {
 
     /// A Stop completed when its module is down, by its own teardown or one it joined. A module a newer Start took is not this Stop's.
     /// Its fence was established at admission either way. A session DNS Stop that attempted its disable save completes with that save's
-    /// causal runtime write, so the client that holds the baseline it was conditional on can recognize the write as its own Stop's.
+    /// causal runtime write, so the client that holds the baseline it was conditional on can recognize the write as its own Stop's. A module
+    /// its teardown left serving, because a service still used it after a failed restore, fails as `cleanup_incomplete`.
     private func controlOutcome(
         of stop: RuntimeModuleStopOutcome,
         module: ControlModule,
         dnsWrite: RuntimeConfigurationWorkflow.DNSStopWrite?
     ) -> ControlOperationOutcome {
+        if stop.keptServing.contains(module) { return .failed(.cleanupIncomplete) }
         guard stop.stopped.contains(module) || modulesDown().contains(module) else { return .failed(.staleRevision) }
         guard let dnsWrite else { return completed(.stop) }
         do {

@@ -42,6 +42,8 @@ package struct RuntimeModuleStopOutcome: Equatable, Sendable {
     package var stopped: Set<ControlModule>
     /// The disable save of a session Stop of DNS, else nil.
     package var dnsSave: RuntimeDNSStopSave?
+    /// The modules this Stop's teardown left serving because their restore failed while a service still used them.
+    package var keptServing: Set<ControlModule> = []
 }
 
 /// One Start admitted in its synchronous turn and not yet run (`RuntimeHost.admitModuleStart`). It carries no configuration value: its
@@ -127,6 +129,8 @@ final class RuntimeLifecycleEffect {
     var conditionalDNS: RuntimeConditionalDNSResult?
     /// The modules a Stop's teardown ran to its end, for a joiner.
     var stopped: Set<ControlModule> = []
+    /// The modules its teardown left serving: DNS whose restore failed while a service still used the relay.
+    var keptServing: Set<ControlModule> = []
     /// Set once the members settled, so a later identical Start is not adopted into an effect that can settle it no more.
     var completed = false
     /// Set once it lost its authority, so no identical Start is adopted into a teardown.
@@ -744,63 +748,23 @@ extension RuntimeHost {
         // A newer start or stop may have begun during that wait. It owns its modules' observers and state now.
         var remaining = modules.filter { goesOn($0) }
         guard !remaining.isEmpty else { return [] }
-        if remaining.union(modulesDown()) == Self.allModules {
-            stopVPNMonitor()
-            networkLocationObserver.stop()
-            networkPathObserver.stop()
-            networkPathObserving = false
-            cancelNetworkPathSettle()
-        }
         if remaining.contains(.proxy) { runtimeStarted = false }
 
         // Cleanup clears what the machine holds: the runtime input it was pushed, and the flags the reconciler completed. A flag that never
         // landed is covered by the journal.
         let config = heldRuntimeConfig
         let platform = completedPlatformBaseline
-        let logger = self.logger
-        if remaining.contains(.dns) {
-            let token = effect.token(.dns)
-            let systemDNS = systemDNSManager
-            let resolvers = dnsManager
-            stopDNSHealthTimer()
-            // Before the relay stops, and outside the guards below: the VPN's DNS must never point at a dying relay (0049).
-            await vpnDNSOverride.disarm(.stop)
-            vpnDNSOverride.dnsStopped()
-            let systemDNSRestored = await platformWork.run { () -> Bool in
-                systemDNS.serialized { () -> Bool in
-                    guard terminal || !token.isSuperseded else { return false }
-                    guard platform.manageSystemDNS || systemDNS.hasSavedState() else { return false }
-                    do {
-                        try systemDNS.clear(logger: logger)
-                    } catch {
-                        logger.log(.warning, "Could not restore system DNS: \(error.localizedDescription)", category: .system)
-                    }
-                    return !systemDNS.hasSavedState()
-                }
-            }
-            if systemDNSRestored { surfaceWritten(.systemDNS) }
-            if goesOn(.dns) { await orchestrator.stopDNS() }
-            // The proxy's own clear below removes every resolver file; a proxy that stays up keeps its entry files.
-            if goesOn(.dns), !remaining.contains(.proxy), platform.manageDNSResolvers {
-                let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
-                let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
-                await platformWork.run {
-                    resolvers.serialized {
-                        guard terminal || !token.isSuperseded else { return }
-                        do {
-                            try resolvers.refreshInterceptFiles(
-                                config: config,
-                                interceptReady: interceptReady,
-                                forwarderRunning: forwarderRunning,
-                                logger: logger
-                            )
-                        } catch {
-                            logger.log(.warning, "Could not withdraw intercept resolver files: \(error.localizedDescription)", category: .system)
-                        }
-                    }
-                }
-            }
-            if !goesOn(.dns) { remaining.remove(.dns) }
+        if remaining.contains(.dns),
+           !(await tearDownDNS(under: effect, config: config, platform: platform, terminal: terminal, proxyStops: remaining.contains(.proxy))) {
+            remaining.remove(.dns)
+        }
+        // After DNS, whose failed restore can keep the forwarder serving on the VPN's readings, and before the proxy's clear is queued.
+        if remaining.union(modulesDown()) == Self.allModules {
+            stopVPNMonitor()
+            networkLocationObserver.stop()
+            networkPathObserver.stop()
+            networkPathObserving = false
+            cancelNetworkPathSettle()
         }
         if remaining.contains(.tunnels) {
             if goesOn(.tunnels) { await orchestrator.stopTunnels() }
@@ -811,6 +775,71 @@ extension RuntimeHost {
         }
         if !remaining.isEmpty { logStopped(remaining) }
         return remaining
+    }
+
+    /// The DNS module's part of `tearDown`. Returns whether it ran to its end. Outside a terminal teardown, a restore that fails while a
+    /// service still uses the relay ends it early: the relay and the forwarder stay up together to answer that service, the journal keeps
+    /// its records for the next Stop, and `effect.keptServing` names DNS. A quit stops both whatever the restore came to.
+    private func tearDownDNS(
+        under effect: RuntimeLifecycleEffect,
+        config: ProxyConfig,
+        platform: PlatformIntegrationConfig,
+        terminal: Bool,
+        proxyStops: Bool
+    ) async -> Bool {
+        let token = effect.token(.dns)
+        let systemDNS = systemDNSManager
+        let resolvers = dnsManager
+        let logger = self.logger
+        let keepsServing = !terminal && Self.forwarderServes(orchestrator.snapshot.dnsRunState)
+        stopDNSHealthTimer()
+        // Before the relay stops, and outside the guards below: the VPN's DNS must never point at a dying relay (0049).
+        await vpnDNSOverride.disarm(.stop)
+        vpnDNSOverride.dnsStopped()
+        let restore = await platformWork.run { () -> SystemDNSTeardownRestore in
+            systemDNS.serialized { () -> SystemDNSTeardownRestore in
+                guard terminal || !token.isSuperseded else { return .notRestored }
+                guard platform.manageSystemDNS || systemDNS.hasSavedState() else { return .notRestored }
+                do {
+                    if case .relayKept(let reason, let services) = try systemDNS.clear(logger: logger, keepingRelayWhileInUse: keepsServing) {
+                        return .relayKept(reason: reason, loopbackServices: services)
+                    }
+                } catch {
+                    logger.log(.warning, "Could not restore system DNS: \(error.localizedDescription)", category: .system)
+                }
+                return systemDNS.hasSavedState() ? .notRestored : .restored
+            }
+        }
+        if case .relayKept(let reason, let services) = restore {
+            keptServing(operation: "stop", reason: reason, loopbackServices: services)
+            effect.keptServing.insert(.dns)
+            if holdsLane(effect, .dns), let port = orchestrator.snapshot.bindings.dnsPort { startDNSHealthTimer(forwarderPort: port) }
+            return false
+        }
+        if restore == .restored { surfaceWritten(.systemDNS) }
+        guard terminal || holdsLane(effect, .dns) else { return false }
+        await orchestrator.stopDNS()
+        // The proxy's own clear removes every resolver file; a proxy that stays up keeps its entry files.
+        if terminal || holdsLane(effect, .dns), !proxyStops, platform.manageDNSResolvers {
+            let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
+            let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
+            await platformWork.run {
+                resolvers.serialized {
+                    guard terminal || !token.isSuperseded else { return }
+                    do {
+                        try resolvers.refreshInterceptFiles(
+                            config: config,
+                            interceptReady: interceptReady,
+                            forwarderRunning: forwarderRunning,
+                            logger: logger
+                        )
+                    } catch {
+                        logger.log(.warning, "Could not withdraw intercept resolver files: \(error.localizedDescription)", category: .system)
+                    }
+                }
+            }
+        }
+        return terminal || holdsLane(effect, .dns)
     }
 
     /// The proxy module's part of `tearDown`. Returns whether it ran to its end.
@@ -949,21 +978,25 @@ extension RuntimeHost {
         let revisions = workflow.revisions
         let scope = modules.filter { revisions[$0] == revision }
         var stopped: Set<ControlModule> = []
+        var keptServing: Set<ControlModule> = []
         if !scope.isEmpty {
             let operation = Self.stopOperation(scope)
             switch beginLanes(scope, kind: .stop, operation: operation, request: .stop(reason), prepared: nil, coalescing: true) {
             case .join(let running):
                 await join(running, operation: operation)
                 stopped = running.stopped
+                keptServing = running.keptServing
             case .run(let stop):
                 stop.stopped = await tearDown(scope, under: stop, terminal: false)
                 stopped = stop.stopped
+                keptServing = stop.keptServing
                 endLanes(stop)
             }
         }
         guard reason == .session, modules.contains(.dns) else {
-            return RuntimeModuleStopOutcome(stopped: stopped, dnsSave: nil)
+            return RuntimeModuleStopOutcome(stopped: stopped, dnsSave: nil, keptServing: keptServing)
         }
+        let keptEnabled = keptServing.contains(.dns) && workflow.keepDNSConfiguredAfterKeptStop(revision: revision)
         let save = await workflow.saveOwedDNSStopWrite(requestID: admitted.requestID)
         emitConfigurationEvents(save.events)
         let result: RuntimeDNSStopSave = switch save.save {
@@ -971,8 +1004,13 @@ extension RuntimeHost {
         case .owed: .owed
         case .notOwed: .notOwed
         }
+        if keptServing.contains(.dns) {
+            let outcome = keptEnabled ? (result == .saved ? "saved" : "owed") : "superseded"
+            recordLifecycle(RuntimeEvent(kind: .config, event: "config.dns_stop_kept_enabled", detail: "save=\(outcome)"),
+                            level: keptEnabled && result == .saved ? .notice : .warning)
+        }
         admitted.facts.dnsWrite = save.write
-        return RuntimeModuleStopOutcome(stopped: stopped, dnsSave: result)
+        return RuntimeModuleStopOutcome(stopped: stopped, dnsSave: result, keptServing: keptServing)
     }
 
     /// The lifecycle operation a Stop of `scope` names in its events.

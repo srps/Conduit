@@ -695,13 +695,30 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         try fallback.runPrivilegedScript(Self.uninstallScript)
     }
 
+    /// `launchctl`'s exit status for a service it has no record of.
+    static let launchctlNoSuchService = 113
+
     /// Stops at the first removal that fails, so a helper or pin left behind
     /// is reported rather than hidden behind a later step's success; the steps
-    /// expected to fail carry their own `|| true`.
+    /// expected to fail carry their own `|| true`. A bootout that fails on a
+    /// job launchd has no record of (`launchctl print` exits 113) is that
+    /// expected failure. Any other failed bootout stops the uninstall before
+    /// anything is deleted: the job is still loaded, or launchd could not say.
     static var uninstallScript: String {
-        """
+        let service = ("system/" + HelperConstants.serviceLabel).shellQuoted
+        return """
         set -e
-        launchctl bootout system \(HelperConstants.launchdPlistPath.shellQuoted) 2>/dev/null || true
+        if ! launchctl bootout \(service) 2>/dev/null; then
+            status=0
+            launchctl print \(service) >/dev/null 2>&1 || status=$?
+            if [ "$status" -eq 0 ]; then
+                echo "launchctl bootout failed and the helper is still loaded, so nothing was removed." >&2
+                exit 1
+            elif [ "$status" -ne \(Self.launchctlNoSuchService) ]; then
+                echo "launchctl bootout failed and launchctl print could not say whether the helper is loaded (exit $status), so nothing was removed." >&2
+                exit 1
+            fi
+        fi
         rm -f \(HelperConstants.binaryInstallPath.shellQuoted) \(HelperConstants.launchdPlistPath.shellQuoted) \(HelperConstants.socketPath.shellQuoted)
         rm -f \(HelperConstants.callerRequirementPath.shellQuoted)
         rmdir \(HelperConstants.callerRequirementDirectory.shellQuoted) 2>/dev/null || true
