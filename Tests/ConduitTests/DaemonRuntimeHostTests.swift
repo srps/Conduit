@@ -104,6 +104,7 @@ private final class ParkingStateFiles: StateFileAccessing, @unchecked Sendable {
     private var armed = false
     private var parked = false
     private var released = false
+    private var writesFail = false
 
     func armRead() {
         condition.withLock {
@@ -141,8 +142,14 @@ private final class ParkingStateFiles: StateFileAccessing, @unchecked Sendable {
         return inner.readConfigurationFile(file, limit: limit)
     }
 
+    /// Fails every configuration write as a full disk would, until cleared.
+    func failWrites(_ fail: Bool) {
+        condition.withLock { writesFail = fail }
+    }
+
     func replaceConfigurationFile(_ file: StateRootFile, bytes: Data) -> Result<Void, ConfigurationFileWriteError> {
-        inner.replaceConfigurationFile(file, bytes: bytes)
+        if condition.withLock({ writesFail }) { return .failure(.writeFailed(errno: ENOSPC)) }
+        return inner.replaceConfigurationFile(file, bytes: bytes)
     }
 
     func entryPresence(_ file: StateRootFile) -> Result<Bool, ConfigurationPresenceError> {
@@ -2416,6 +2423,78 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.deliveries.drain()
         XCTAssertEqual(try locations.snapshot().services[1].dns["ServerAddresses"], .list(["192.0.2.2"]), "a location switch keeps it too")
         XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running)
+        await host.stopRuntime()
+    }
+
+    @RuntimeActor private func savedDNSEnabled() throws -> Bool {
+        try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false).dnsForwarderEnabled
+    }
+
+    @RuntimeActor private func keptEnabledEvents(_ host: RuntimeHost) -> [String] {
+        host.orchestrator.eventLog.events.filter { $0.event == "config.dns_stop_kept_enabled" }.compactMap(\.detail)
+    }
+
+    /// A kept Stop leaves DNS enabled in the saved settings, so a relaunch serves DNS again. The file holds the enable while the save is
+    /// out, so an exit there leaves it too. A newer Stop that restores saves the disable.
+    @RuntimeActor func testAKeptStopLeavesDNSEnabledInTheSavedSettings() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        harness.stateFiles.armRead()
+        let stopping = Task { await host.stopDNS() }
+        let parked = await harness.stateFiles.waitUntilParked()
+        XCTAssertTrue(parked, "the Stop's save is out")
+        XCTAssertTrue(try savedDNSEnabled(), "an exit before the save lands leaves DNS enabled")
+        harness.stateFiles.release()
+        let kept = await stopping.value
+        XCTAssertEqual(kept.keptServing, [.dns])
+        XCTAssertEqual(kept.dnsSave, .saved)
+        XCTAssertTrue(try savedDNSEnabled())
+        XCTAssertEqual(keptEnabledEvents(host), ["save=saved"])
+
+        locations.refuseWrites(false)
+        let retried = await host.stopDNS()
+        XCTAssertTrue(retried.stopped.contains(.dns))
+        XCTAssertEqual(retried.dnsSave, .saved)
+        XCTAssertFalse(try savedDNSEnabled(), "the newer Stop restored, so its disable wins")
+        await host.stopRuntime()
+    }
+
+    /// A kept Stop whose save the disk refuses stays owed and leaves the file as it was, enabled; the next write of the runtime file, here
+    /// a proxy Restart's, saves DNS enabled rather than the Stop's disable.
+    @RuntimeActor func testAKeptStopWhoseSaveFailsKeepsDNSEnabledForTheNextWrite() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        harness.stateFiles.failWrites(true)
+        let kept = await host.stopDNS()
+        XCTAssertEqual(kept.keptServing, [.dns])
+        XCTAssertEqual(kept.dnsSave, .owed)
+        XCTAssertTrue(try savedDNSEnabled())
+        XCTAssertEqual(keptEnabledEvents(host), ["save=owed"])
+
+        harness.stateFiles.failWrites(false)
+        _ = try await host.restartProxy()
+        XCTAssertTrue(try savedDNSEnabled(), "the next write saves the kept intent")
+        locations.refuseWrites(false)
+        await host.stopRuntime()
+    }
+
+    /// An edit of the runtime file that lands while a kept Stop's save is out wins: the save writes nothing over it.
+    @RuntimeActor func testAnEditWhileAKeptStopSavesWins() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        harness.stateFiles.armRead()
+        let stopping = Task { await host.stopDNS() }
+        let parked = await harness.stateFiles.waitUntilParked()
+        XCTAssertTrue(parked)
+        var edited = try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false)
+        edited.profileName = "Edited"
+        try ProxyConfigPersistence.save(edited, in: harness.environment)
+        harness.stateFiles.release()
+        let kept = await stopping.value
+        XCTAssertEqual(kept.keptServing, [.dns])
+        XCTAssertEqual(kept.dnsSave, .owed)
+        let saved = try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false)
+        XCTAssertEqual(saved.profileName, "Edited")
+        XCTAssertTrue(saved.dnsForwarderEnabled)
+        XCTAssertEqual(keptEnabledEvents(host), ["save=owed"])
+        locations.refuseWrites(false)
         await host.stopRuntime()
     }
 
