@@ -259,6 +259,7 @@ package struct ControlCompletion: Codable, Sendable, Equatable {
         case (.refreshPreflight, .preflight): true
         case (.setLaunchAtLogin, .platformWrite): true
         case (.reload, .reload): true
+        case (.checkSystemDNSRelease, .systemDNSRelease): true
         default: false
         }
     }

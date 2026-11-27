@@ -124,6 +124,8 @@ enum RuntimeControlAdmission {
     case credentialsChanged
     /// An explicit reload, pending work from its admission, with the intent generation its fence captured.
     case reload(capturedAt: Int, request: ControlRequestID)
+    /// A read of what Conduit still has in system DNS.
+    case systemDNSRelease
 }
 
 /// The latest control Stop of one module: the service operation and the revision its fence took.
@@ -249,6 +251,11 @@ extension RuntimeHost: ControlCommandOwner {
             pendingAdmissions += 1
             controlAdmissions[operation] = .reload(capturedAt: workflow.generation, request: request)
             return .admitted
+        case .checkSystemDNSRelease:
+            // It reads; it changes no intent.
+            guard !workflow.isTerminal else { return .rejected(.hostStopping) }
+            controlAdmissions[operation] = .systemDNSRelease
+            return .admitted
         case .restart(.dns, _, _), .restart(.tunnels, _, _), .testUpstream:
             // Not adopted on this owner yet; each is refused whole before anything changes.
             return .rejected(.notImplemented)
@@ -343,6 +350,13 @@ extension RuntimeHost: ControlCommandOwner {
                 defer { pendingAdmissions -= 1 }
                 let decision = await performReload(capturedAt: captured, requestID: request)
                 report.settled(completed(.reload, result: .reload(Self.reloadResult(decision))))
+                report.quiesced()
+                onControlStateChange?()
+            }
+        case .systemDNSRelease:
+            Task { [self] in
+                let release = await checkSystemDNSRelease()
+                report.settled(completed(.checkSystemDNSRelease, result: .systemDNSRelease(release)))
                 report.quiesced()
                 onControlStateChange?()
             }

@@ -244,7 +244,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         guard case .completed(let completion) = outcome else { return nil }
         switch completion.result {
         case .settled, .dnsDisable: return completion.command
-        case .upstreamProbe, .dnsLiveness, .preflight, .platformWrite, .reload: return nil
+        case .upstreamProbe, .dnsLiveness, .preflight, .platformWrite, .reload, .systemDNSRelease: return nil
         }
     }
 

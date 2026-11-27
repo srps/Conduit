@@ -458,6 +458,30 @@ package final class SystemDNSManager: @unchecked Sendable {
         hasSavedInterfaces()
     }
 
+    /// Whether anything of Conduit's is left in system DNS: journal records still waiting to be restored, or a service whose DNS
+    /// servers are the loopback resolver alone, in any location. It reads and writes nothing. The helper's relay serves those
+    /// services, so the helper may go only once this reads `released`.
+    package func releaseReading() -> SystemDNSReleaseReading {
+        operations.withLock {
+            if let locationRecovery { return locationRecovery.dnsReleaseReading() }
+            guard journal.fileState != .unreadable else { return .unreadable(reason: "journal_unreadable") }
+            let services: [String]
+            do {
+                services = try listedNetworkServices(includingDisabled: true)
+            } catch {
+                return .unreadable(reason: "listing_failed")
+            }
+            var residue: [SystemDNSResidue] = []
+            for service in services {
+                guard let servers = readDNSServersStrict(service: service) else { return .unreadable(reason: "servers_unreadable") }
+                if servers == [SystemDNSResidue.loopbackResolver] {
+                    residue.append(SystemDNSResidue(locationID: nil, active: true, serviceID: nil, serviceName: service))
+                }
+            }
+            return SystemDNSReleaseReading(recordsKept: journal.records(for: .systemDNS).count, residue: residue)
+        }
+    }
+
     // MARK: - Private
 
     private func deleteSavedState() {
@@ -729,3 +753,35 @@ package final class SystemDNSManager: @unchecked Sendable {
 
 }
 
+
+/// A service whose DNS servers are Conduit's loopback resolver alone. Location and service IDs are absent on a machine read through
+/// `networksetup`, which sees only the current location.
+package struct SystemDNSResidue: Equatable, Sendable {
+    package static let loopbackResolver = "127.0.0.1"
+
+    package var locationID: String?
+    package var active: Bool
+    package var serviceID: String?
+    package var serviceName: String
+
+    package init(locationID: String?, active: Bool, serviceID: String?, serviceName: String) {
+        self.locationID = locationID
+        self.active = active
+        self.serviceID = serviceID
+        self.serviceName = serviceName
+    }
+}
+
+/// What `SystemDNSManager.releaseReading()` found.
+package enum SystemDNSReleaseReading: Equatable, Sendable {
+    /// Nothing recorded and no service on the loopback resolver.
+    case released
+    /// Records still to restore, services still on the loopback resolver, or both.
+    case remaining(recordsKept: Int, residue: [SystemDNSResidue])
+    /// The settings or the journal could not be read, so nothing is proven released.
+    case unreadable(reason: String)
+
+    init(recordsKept: Int, residue: [SystemDNSResidue]) {
+        self = recordsKept == 0 && residue.isEmpty ? .released : .remaining(recordsKept: recordsKept, residue: residue)
+    }
+}

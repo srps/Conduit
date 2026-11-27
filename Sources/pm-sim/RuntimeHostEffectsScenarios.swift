@@ -660,6 +660,9 @@ enum RuntimeHostEffectsScenario {
             check("the client's snapshot shows the restarted proxy", viaClient.proxyShown)
             check("a proxy Stop through the framed client completes", viaClient.completed)
             check("the client's Stop clears the system proxy", !machine.service("Wi-Fi").routesThroughAProxy)
+            // Before a client removes the helper, it asks whether the helper's relay still serves any of system DNS.
+            let released = systemDNSRelease(try await settleThroughClient(clients.control, .checkSystemDNSRelease))
+            check("after the DNS Stop a release check through the framed client finds nothing left", released?.isReleased == true)
             var refusal: RuntimeStartRefusal?
             do {
                 _ = try await host.startDNS(expecting: PrivateModuleSlots(proxy: nil, dns: observed.dns - 1, tunnels: nil))
@@ -705,6 +708,13 @@ enum RuntimeHostEffectsScenario {
                       case .observed(let items) = observation.reading else { return false }
                 return items.helper == .installed && !items.helperReadBusy
             }())
+            let held = systemDNSRelease(try await settleThroughClient(clients.control, .checkSystemDNSRelease))
+            check("while DNS runs on the relay a release check names what the helper still serves", held.map {
+                $0.settingsRead && $0.recordsKept.rawValue > 0 && $0.loopbackServices.rawValue > 0
+            } ?? false)
+            let wifiDNS = try machine.run("/usr/sbin/networksetup", ["-getdnsservers", "Wi-Fi"]).standardOutput
+            check("the release check restores nothing",
+                  machine.dnsRelayRunning && wifiDNS.trimmingCharacters(in: .whitespacesAndNewlines) == "127.0.0.1")
             let credentials = try await settleThroughClient(clients.control, .credentialsChanged)
             check("a credentials notice through the framed client completes", {
                 guard case .completed(let completion)? = credentials else { return false }
@@ -915,6 +925,12 @@ enum RuntimeHostEffectsScenario {
             }
         }
         return nil
+    }
+
+    /// The system DNS release a settlement carries, nil for any other outcome.
+    private static func systemDNSRelease(_ outcome: ControlOperationOutcome?) -> ControlSystemDNSRelease? {
+        guard case .completed(let completion)? = outcome, case .systemDNSRelease(let release) = completion.result else { return nil }
+        return release
     }
 
     /// The reload answer a settlement carries, nil for any other outcome.

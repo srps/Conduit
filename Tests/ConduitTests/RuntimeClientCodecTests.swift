@@ -98,6 +98,7 @@ final class RuntimeClientCodecTests: XCTestCase {
             .refreshPreflight(helperReplaced: false),
             .refreshPreflight(helperReplaced: true),
             .credentialsChanged,
+            .checkSystemDNSRelease,
         ]
         for command in commands {
             let message = try submit(command)

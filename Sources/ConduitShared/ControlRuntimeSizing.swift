@@ -128,7 +128,7 @@ extension ControlCommandResult {
             try budget.text(probe.name)
             try budget.text(probe.endpoint)
             try budget.elements(probe.displayNotices.count)
-        case .settled, .dnsLiveness, .preflight, .platformWrite, .dnsDisable, .reload:
+        case .settled, .dnsLiveness, .preflight, .platformWrite, .dnsDisable, .reload, .systemDNSRelease:
             break
         }
     }
