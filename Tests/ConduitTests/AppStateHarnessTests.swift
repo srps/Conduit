@@ -1549,6 +1549,67 @@ final class AppStateHarnessTests: XCTestCase {
         await harness.settle("the deferred save ran once the removal ended") { state.editor?.ledger.saved.platform.manageSystemDNS == true }
     }
 
+    /// A reload already out when Uninstall Helper is clicked is joined before the last check: one that adopts Manage system DNS from disk
+    /// points the service at the relay, and the uninstall then restores it before the helper goes.
+    func testUninstallJoinsAReloadStartedBeforeTheClick() async throws {
+        let harness = try makeHarness()
+        let held = HeldStateFileRead()
+        harness.stateFiles = held
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let state = await harness.ready()
+        state.toggleDNS()
+        await harness.settle("DNS runs") { state.runtime.dnsRunState == .running }
+        try PlatformConfigPersistence.save(PlatformIntegrationConfig(manageSystemDNS: true), in: harness.environment)
+        let witness = UninstallWitness()
+        harness.helper.observeUninstall = {
+            var dns: NetworkSettingValue?
+            locations.edit { dns = $0.services.first { $0.locationID == NetworkLocationFixture.home }?.dns["ServerAddresses"] }
+            witness.record(dns: dns, records: false)
+        }
+
+        held.hold.arm(onQueueLabeled: ".configuration-store") { name, _ in name == "read" }
+        state.reloadConfigurationFromDisk()
+        await held.hold.waitUntilReached()
+        state.uninstallHelper()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(harness.helper.uninstalls, 0, "the uninstall waits for the reload")
+        held.hold.release()
+        await harness.settle("the uninstall ended") {
+            state.eventLog.events.contains { $0.event == "helper.uninstalled" || $0.event == "helper.uninstall_refused" }
+        }
+        await state.reloadTask?.value
+
+        XCTAssertEqual(harness.helper.uninstalls, 1)
+        XCTAssertEqual(witness.seen?.dns, .list(["192.0.2.1"]), "no service pointed at the relay when the helper went")
+        XCTAssertEqual(homeService(locations)?.dns["ServerAddresses"], .list(["192.0.2.1"]), "nor after it")
+    }
+
+    /// A service that becomes eligible while the removal waits for the password is not pointed at the relay: with Manage system DNS on,
+    /// the uninstall stops DNS before its last check, so no notification finds a forwarder to apply.
+    func testAServiceThatBecomesEligibleDuringTheRemovalIsNotPointedAtTheRelay() async throws {
+        let harness = try makeHarness(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        locations.edit { $0.services[0].enabled = false }
+        harness.locationStore = locations
+        let state = await harness.ready()
+        state.toggleDNS()
+        await harness.settle("DNS runs") { state.runtime.dnsRunState == .running }
+        XCTAssertEqual(homeService(locations)?.dns["ServerAddresses"], .list(["192.0.2.1"]), "no service was eligible")
+        let removal = HeldRemoval()
+        harness.helper.observeUninstall = { removal.hold() }
+
+        state.uninstallHelper()
+        await harness.settle("the removal is out") { removal.isHeld }
+        locations.edit { $0.services[0].enabled = true }
+        harness.locationObserver.emit(NetworkLocationFixture.home)
+        try await Task.sleep(for: .milliseconds(200))
+        removal.release()
+        await harness.settle("the helper was removed") { state.eventLog.events.contains { $0.event == "helper.uninstalled" } }
+
+        XCTAssertEqual(homeService(locations)?.dns["ServerAddresses"], .list(["192.0.2.1"]), "the newly eligible service keeps its own DNS")
+    }
+
     /// A busy reading keeps the held verdict and asks for one more read; a conclusive one ends the re-read.
     func testABusyHelperKeepsItsVerdictAndIsReadAgain() async throws {
         let harness = try makeHarness()
