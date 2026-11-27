@@ -1316,17 +1316,26 @@ final class AppState: ObservableObject {
         submitConfiguration()
     }
 
-    /// Waits for the Settings save and the commands already out, so none of them lands after the last check.
+    /// Waits for the Settings save, a reload and the commands already out, so none of them lands after the last check.
     private func drainDNSWriters() async {
-        await editor?.settle()
-        while dispatchesInFlight > 0 {
+        while true {
+            await editor?.settle()
+            if let reloadTask {
+                await reloadTask.value
+                continue
+            }
+            guard dispatchesInFlight > 0 else { return }
             await withCheckedContinuation { dispatchDrainWaiters.append($0) }
         }
     }
 
+    /// With Manage system DNS on, a running forwarder lets a network or location notification point a newly eligible service at the
+    /// relay at any time, the password prompt included, so the uninstall stops DNS even when the first check finds nothing.
     private func releaseSystemDNSForHelperRemoval() async -> Bool {
         guard var release = await readableSystemDNSRelease() else { return false }
-        if !release.isReleased, !quitFence {
+        let managesSystemDNS = platformConfig.manageSystemDNS || editor?.ledger.saved.platform.manageSystemDNS == true
+        let mayApply = managesSystemDNS && MenuBarPresentation.moduleToggleAction(for: runtime.dnsRunState) == .stop
+        if !release.isReleased || mayApply, !quitFence {
             recordHelperEvent(RuntimeEvent(kind: .lifecycle, event: "helper.uninstall_restoring_dns",
                                            detail: Self.releaseDetail(release)), level: .notice)
             _ = await stopDNSForHelperRemoval()
