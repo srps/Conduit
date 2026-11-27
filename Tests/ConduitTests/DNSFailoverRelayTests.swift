@@ -733,6 +733,80 @@ final class DNSFailoverRelayTests: XCTestCase {
         XCTAssertEqual(relay.recheck(.tcp), .answered)
     }
 
+    func testAPipelinedQueryIsAnsweredWhileAnEarlierOneIsPending() throws {
+        let conduit = try standIn(conduitIP, tcp: true)
+        let slowName = "slow.example.com"
+        conduit.delay(1.5, for: slowName)
+        let relay = try relay(conduitPort: conduit.port, servers: [:])
+        let fd = try connectTCP(relay)
+        defer { close(fd) }
+        let slow = DNSWireFormat.buildQuery(domain: slowName, txID: 0x0101)
+        let fast = DNSWireFormat.buildQuery(domain: queryName, txID: 0x0202)
+        let both = [slow, fast].flatMap { [UInt8($0.count >> 8), UInt8($0.count & 0xFF)] + $0 }
+        let began = Date()
+        XCTAssertEqual(write(fd, both, both.count), both.count)
+
+        let first = try XCTUnwrap(readFrame(fd))
+        XCTAssertTrue(DNSWireFormat.isResponse(first, to: fast), "the second query's answer comes first")
+        XCTAssertLessThan(Date().timeIntervalSince(began), 0.75, "without waiting on the first")
+        let second = try XCTUnwrap(readFrame(fd))
+        XCTAssertTrue(DNSWireFormat.isResponse(second, to: slow))
+        XCTAssertEqual(relay.conduitProgress(.tcp), DNSFailoverProgress(answered: 2, unanswered: 0, lastUnanswered: false))
+    }
+
+    func testASessionToConduitHasAtMostItsCapWaitingAndReadsTheNextOnceOneIsAnswered() throws {
+        let conduit = try standIn(conduitIP, tcp: true)
+        let slowName = "slow.example.com"
+        conduit.delay(1, for: slowName)
+        let relay = try relay(conduitPort: conduit.port, servers: [:])
+        let fd = try connectTCP(relay)
+        defer { close(fd) }
+        let cap = DNSFailoverTCPRelay.maximumQueriesPerSession
+        let queries = (0..<cap).map { DNSWireFormat.buildQuery(domain: slowName, txID: UInt16(0x1000 + $0)) }
+            + [DNSWireFormat.buildQuery(domain: queryName, txID: 0x2000)]
+        let framed = queries.flatMap { [UInt8($0.count >> 8), UInt8($0.count & 0xFF)] + $0 }
+        XCTAssertEqual(write(fd, framed, framed.count), framed.count)
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(conduit.asked(slowName), cap)
+        XCTAssertEqual(conduit.asked(queryName), 0, "the query past the cap waits in the client's stream")
+        for _ in queries { XCTAssertNotNil(readFrame(fd)) }
+        XCTAssertEqual(conduit.asked(queryName), 1, "and is sent once one is answered")
+        XCTAssertEqual(relay.conduitProgress(.tcp).answered, cap + 1)
+    }
+
+    func testEveryQueryOnASessionToConduitIsCounted() throws {
+        let conduit = try standIn(conduitIP, tcp: true)
+        let relay = try relay(conduitPort: conduit.port, servers: [:])
+        let fd = try connectTCP(relay)
+        defer { close(fd) }
+        XCTAssertEqual(try exchange(fd), conduitIP)
+        conduit.dropsRealTCPQueries = true
+        XCTAssertNil(try exchange(fd, edns: true), "Conduit drops the session's second query")
+        XCTAssertEqual(
+            relay.conduitProgress(.tcp), DNSFailoverProgress(answered: 1, unanswered: 1, lastUnanswered: true),
+            "the second query counts as the first did"
+        )
+        conduit.dropsRealTCPQueries = false
+        XCTAssertEqual(relay.recheck(.tcp), .answered, "and is the one the recheck replays")
+        XCTAssertEqual(conduit.asked(queryName), 3)
+    }
+
+    func testAQueryLeftWaitingOnASessionPastItsLifetimeIsCountedAndTheSessionClosed() throws {
+        let conduit = try standIn(conduitIP, tcp: true)
+        let relay = try relay(conduitPort: conduit.port, servers: [:])
+        let fd = try connectTCP(relay)
+        defer { close(fd) }
+        XCTAssertEqual(try exchange(fd), conduitIP)
+        conduit.delay = 4
+        let query = DNSWireFormat.buildQuery(domain: queryName, txID: 0x0303)
+        let framed = [UInt8(query.count >> 8), UInt8(query.count & 0xFF)] + query
+        XCTAssertEqual(write(fd, framed, framed.count), framed.count)
+        var readiness = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        XCTAssertEqual(poll(&readiness, 1, 3_000), 1)
+        XCTAssertNil(readFrame(fd), "closed at the lifetime, so the resolver's retry goes elsewhere")
+        XCTAssertEqual(relay.conduitProgress(.tcp), DNSFailoverProgress(answered: 1, unanswered: 1, lastUnanswered: true))
+    }
+
     func testATCPSessionTakesTheModeAtConnect() throws {
         let conduit = try standIn(conduitIP, tcp: true)
         let vpn = try standIn(vpnIP, tcp: true)
@@ -792,6 +866,13 @@ final class DNSFailoverRelayTests: XCTestCase {
         var reply = [UInt8](repeating: 0, count: Int(header[0]) << 8 | Int(header[1]))
         guard StandInDNS.readFully(fd, &reply) else { return nil }
         return DNSWireFormat.firstIPv4Answer(in: reply)?.ip
+    }
+
+    private func readFrame(_ fd: Int32) -> [UInt8]? {
+        var header = [UInt8](repeating: 0, count: 2)
+        guard StandInDNS.readFully(fd, &header) else { return nil }
+        var reply = [UInt8](repeating: 0, count: Int(header[0]) << 8 | Int(header[1]))
+        return StandInDNS.readFully(fd, &reply) ? reply : nil
     }
 
     private func askTCP(_ relay: DNSFailoverRelay, edns: Bool = false, padding: Int = 0) throws -> String? {

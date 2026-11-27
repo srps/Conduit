@@ -766,6 +766,9 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
 
 /// The TCP half: a session takes the mode at connect, and a session to Conduit is closed when the mode switches.
 package final class DNSFailoverTCPRelay: @unchecked Sendable {
+    /// The queries one session to Conduit may have waiting at once, each kept whole for the recheck.
+    package static let maximumQueriesPerSession = 8
+
     private final class Sessions: @unchecked Sendable {
         struct Session {
             var target: Int32 = -1
@@ -988,27 +991,57 @@ package final class DNSFailoverTCPRelay: @unchecked Sendable {
             sessions.leave(client)
             return
         }
-        if toConduit, !isProbe, !answerFirstFromConduit(first, client: client, target: target) {
-            sessions.leave(client)
-            return
+        if toConduit, !isProbe {
+            relayCounted(first, client: client, target: target)
+        } else {
+            TCPRelay.relayBidirectional(fd1: client, fd2: target)
         }
-        TCPRelay.relayBidirectional(fd1: client, fd2: target)
         sessions.leave(client)
     }
 
-    /// Conduit's reply to a session's first query is counted, as the UDP half counts each query: answered, or left
-    /// unanswered when Conduit closes or the lifetime passes before the relay switches away from it.
-    private func answerFirstFromConduit(_ first: [UInt8], client: Int32, target: Int32) -> Bool {
-        let lifetime = FailoverSocket.milliseconds(timing.entryLifetime)
-        guard let reply = FailoverSocket.readFramed(target, timeoutMilliseconds: lifetime),
-              DNSWireFormat.responseQuestionMatches(query: first, response: reply) else {
-            if route.mode == .conduit, DNSWireFormat.headerAndQuestion(of: first) != nil {
-                route.conduitLeftUnanswered(first, over: .tcp)
+    /// A session to Conduit, a frame at a time each way, so each query counts as the UDP half counts each: answered by
+    /// the reply that matches it, or left unanswered when Conduit closes, answers what was not asked, or lets the oldest
+    /// wait out its lifetime, while the relay is still on Conduit. The session then closes, so the resolver's retry
+    /// takes the relay's mode. At most `maximumQueriesPerSession` wait; the client's next frame is read once one is
+    /// answered.
+    private func relayCounted(_ first: [UInt8], client: Int32, target: Int32) {
+        let lifetime = FailoverSocket.nanoseconds(timing.entryLifetime)
+        let frameWait = FailoverSocket.milliseconds(timing.connectTimeout)
+        var waiting: [(query: [UInt8], sentAt: UInt64)] = [(first, FailoverSocket.now)]
+        func leftUnanswered() {
+            guard route.mode == .conduit else { return }
+            for query in waiting.map(\.query) where DNSWireFormat.headerAndQuestion(of: query) != nil {
+                route.conduitLeftUnanswered(query, over: .tcp)
             }
-            return false
         }
-        route.conduitAnswered(.tcp)
-        return FailoverSocket.writeFramed(client, reply)
+        var fds = [pollfd(fd: client, events: Int16(POLLIN), revents: 0), pollfd(fd: target, events: Int16(POLLIN), revents: 0)]
+        while true {
+            let now = FailoverSocket.now
+            var wait: Int32 = 30_000
+            if let oldest = waiting.first {
+                guard now - oldest.sentAt < lifetime else { return leftUnanswered() }
+                wait = Int32(clamping: max(1, (oldest.sentAt + lifetime - now) / 1_000_000))
+            }
+            fds[0].fd = waiting.count < Self.maximumQueriesPerSession ? client : -1
+            fds[0].revents = 0
+            fds[1].revents = 0
+            let ready = poll(&fds, 2, wait)
+            if ready < 0, errno == EINTR { continue }
+            guard ready >= 0 else { return }
+            if fds[1].revents != 0 {
+                guard let reply = FailoverSocket.readFramed(target, timeoutMilliseconds: frameWait),
+                      let index = waiting.firstIndex(where: { DNSWireFormat.responseQuestionMatches(query: $0.query, response: reply) })
+                else { return leftUnanswered() }
+                waiting.remove(at: index)
+                route.conduitAnswered(.tcp)
+                guard FailoverSocket.writeFramed(client, reply) else { return }
+            }
+            if fds[0].revents != 0 {
+                guard let query = FailoverSocket.readFramed(client, timeoutMilliseconds: frameWait),
+                      FailoverSocket.writeFramed(target, query) else { return }
+                waiting.append((query, FailoverSocket.now))
+            }
+        }
     }
 }
 
