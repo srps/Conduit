@@ -17,17 +17,15 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   the helper serves. Uninstall Helper in Settings now restores the DNS servers
   Conduit recorded first, in every location, and keeps the helper, saying
   what is left, when any service still points at Conduit.
-  While it works, Conduit does not start DNS or reload, and holds a save that
-  turns Manage system DNS on until it ends. `uninstall-helper.sh` refuses
-  while a service uses 127.0.0.1 for DNS, or when it cannot read the network
-  settings, unless you pass `--force`. Both stop without deleting anything
-  unless macOS confirms the helper is unloaded.
+  While it works, Conduit does not start DNS, reload or save Settings; your
+  Settings changes stay in place to save once it ends. `uninstall-helper.sh`
+  refuses while a service uses 127.0.0.1 for DNS, or when it cannot read the
+  network settings, unless you pass `--force`. Both stop without deleting
+  anything unless macOS confirms the helper is unloaded.
 - Stopping DNS no longer leaves DNS dead when Conduit cannot restore your DNS
   settings. While a network service still uses Conduit's resolver, DNS keeps
   running, stays on after a relaunch, and Conduit says why; stop DNS again to
   retry. No other service is pointed at the resolver meanwhile.
-- Changing the DNS forwarder's port no longer leaves the services on
-  127.0.0.1 without an answer: the helper's relay follows the new port.
 
 ## 0.7.0
 
