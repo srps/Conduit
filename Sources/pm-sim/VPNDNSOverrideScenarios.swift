@@ -271,7 +271,7 @@ enum VPNDNSOverrideScenarios {
             rig.conduit.probeOnly = true
             check("the probe still answers, so the relay waits on Conduit and the lookup is lost",
                   try await rig.lookup().answer == nil)
-            check("the lost lookup is counted", rig.relay.conduitProgress.unanswered == 1)
+            check("the lost lookup is counted", rig.relay.conduitProgress(.udp).unanswered == 1)
             for tick in 1...2 {
                 rig.machine.tickVPNDNSOverride()
                 check("tick \(tick): the answered probe does not send the lookups back to Conduit", rig.relay.mode == .vpn)
@@ -284,7 +284,7 @@ enum VPNDNSOverrideScenarios {
             rig.machine.tickVPNDNSOverride()
             check("a probe answer alone does not bring it back", rig.machine.vpnDNSStore.ownKey == nil
                 && rig.machine.vpnDNSOverrideOutcomes.contains { outcome in
-                    if case .queriesUnanswered(_, 0, .silent) = outcome { true } else { false }
+                    if case .queriesUnanswered(_, .udp, 0, .silent) = outcome { true } else { false }
                 })
             rig.conduit.probeOnly = false
             rig.machine.tickVPNDNSOverride()

@@ -850,10 +850,10 @@ package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked S
     private var _servers: [String] = []
     private var _verdict: DNSFailoverProbeOutcome = .answered
     private var _tcpVerdict: DNSFailoverProbeOutcome?
-    private var _progress = DNSFailoverProgress(answered: 0, unanswered: 0, lastUnanswered: false)
+    private var _progress: [DNSFailoverTransport: DNSFailoverProgress] = [:]
     private var _probes = 0
     private var _recheck: DNSFailoverProbeOutcome = .silent
-    private var _rechecks = 0
+    private var _rechecked: [DNSFailoverTransport] = []
     private var _socketRenewals = 0
 
     package init() {}
@@ -884,9 +884,13 @@ package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked S
         set { lock.withLock { _tcpVerdict = newValue } }
     }
 
-    package var conduitProgress: DNSFailoverProgress {
+    package var progress: [DNSFailoverTransport: DNSFailoverProgress] {
         get { lock.withLock { _progress } }
         set { lock.withLock { _progress = newValue } }
+    }
+
+    package func conduitProgress(_ transport: DNSFailoverTransport) -> DNSFailoverProgress {
+        lock.withLock { _progress[transport] ?? .zero }
     }
 
     package var tcpBindFails: Bool {
@@ -907,11 +911,11 @@ package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked S
         set { lock.withLock { _recheck = newValue } }
     }
 
-    package var rechecks: Int { lock.withLock { _rechecks } }
+    package var rechecked: [DNSFailoverTransport] { lock.withLock { _rechecked } }
 
-    package func recheck() -> DNSFailoverProbeOutcome {
+    package func recheck(_ transport: DNSFailoverTransport) -> DNSFailoverProbeOutcome {
         lock.withLock {
-            _rechecks += 1
+            _rechecked.append(transport)
             return _recheck
         }
     }

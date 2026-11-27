@@ -12,6 +12,7 @@ private final class StandInDNS: @unchecked Sendable {
     private let lock = NSLock()
     private var _silent = false
     private var _dropsRealQueries = false
+    private var _dropsRealTCPQueries = false
     private var _delay: TimeInterval = 0
     private var _asked: [String: Int] = [:]
     private var stopped = false
@@ -51,6 +52,12 @@ private final class StandInDNS: @unchecked Sendable {
         set { lock.withLock { _dropsRealQueries = newValue } }
     }
 
+    /// Answers real queries over UDP and drops them over TCP.
+    var dropsRealTCPQueries: Bool {
+        get { lock.withLock { _dropsRealTCPQueries } }
+        set { lock.withLock { _dropsRealTCPQueries = newValue } }
+    }
+
     var delay: TimeInterval {
         get { lock.withLock { _delay } }
         set { lock.withLock { _delay = newValue } }
@@ -83,14 +90,15 @@ private final class StandInDNS: @unchecked Sendable {
     }
 
     /// A query whose section counts do not match its bytes is dropped, as a strict server drops it.
-    private func answer(_ query: [UInt8]) -> (reply: [UInt8], delay: TimeInterval)? {
+    private func answer(_ query: [UInt8], overTCP: Bool = false) -> (reply: [UInt8], delay: TimeInterval)? {
         guard let question = DNSWireFormat.headerAndQuestion(of: query),
               (question.count < query.count) == query[6..<12].contains(where: { $0 != 0 }) else { return nil }
         let name = DNSWireFormat.extractDomainName(from: query).lowercased()
         let isProbe = name == DNSWireFormat.forwarderProbeDomain.lowercased()
         let (silent, delay) = lock.withLock { () -> (Bool, TimeInterval) in
             _asked[name, default: 0] += 1
-            return (_silent || (_dropsRealQueries && !isProbe), isProbe ? 0 : _delay)
+            let drops = _dropsRealQueries || (overTCP && _dropsRealTCPQueries)
+            return (_silent || (drops && !isProbe), isProbe ? 0 : _delay)
         }
         guard !silent else { return nil }
         // As the forwarder does: the reserved probe name is answered NXDOMAIN at once.
@@ -140,7 +148,7 @@ private final class StandInDNS: @unchecked Sendable {
             var header = [UInt8](repeating: 0, count: 2)
             guard Self.readFully(client, &header) else { return }
             var query = [UInt8](repeating: 0, count: Int(header[0]) << 8 | Int(header[1]))
-            guard Self.readFully(client, &query), let (reply, _) = answer(query) else { return }
+            guard Self.readFully(client, &query), let (reply, _) = answer(query, overTCP: true) else { return }
             let framed = [UInt8(reply.count >> 8), UInt8(reply.count & 0xFF)] + reply
             guard write(client, framed, framed.count) == framed.count else { return }
         }
@@ -512,27 +520,30 @@ final class DNSFailoverRelayTests: XCTestCase {
         XCTAssertNil(ask(relay, timeout: 0.5).ip)
         XCTAssertEqual(relay.mode, .conduit, "the in-relay probe answered, so the relay stays")
         Thread.sleep(forTimeInterval: 2.2)
-        XCTAssertEqual(relay.conduitProgress, DNSFailoverProgress(answered: 0, unanswered: 1, lastUnanswered: true))
+        XCTAssertEqual(relay.conduitProgress(.udp), DNSFailoverProgress(answered: 0, unanswered: 1, lastUnanswered: true))
         XCTAssertEqual(relay.probe().verdict, .answered, "the probe alone cannot see it")
         conduit.dropsRealQueries = false
         XCTAssertEqual(ask(relay).ip, conduitIP)
-        XCTAssertEqual(relay.conduitProgress, DNSFailoverProgress(answered: 1, unanswered: 1, lastUnanswered: false))
+        XCTAssertEqual(relay.conduitProgress(.udp), DNSFailoverProgress(answered: 1, unanswered: 1, lastUnanswered: false))
+        XCTAssertEqual(relay.conduitProgress(.tcp), .zero)
     }
 
     func testATCPQueryConduitNeverAnswersIsCountedAndAskedAgain() throws {
         let conduit = try standIn(conduitIP, tcp: true)
         conduit.dropsRealQueries = true
         let relay = try relay(conduitPort: conduit.port, servers: [:])
-        XCTAssertEqual(relay.recheck(), .notRunning, "nothing left unanswered yet")
+        XCTAssertEqual(relay.recheck(.tcp), .notRunning, "nothing left unanswered yet")
         XCTAssertNil(try askTCP(relay))
-        XCTAssertEqual(relay.conduitProgress, DNSFailoverProgress(answered: 0, unanswered: 1, lastUnanswered: true), "TCP lookups count too")
+        XCTAssertEqual(relay.conduitProgress(.tcp), DNSFailoverProgress(answered: 0, unanswered: 1, lastUnanswered: true), "TCP lookups count too")
+        XCTAssertEqual(relay.conduitProgress(.udp), .zero, "apart from UDP's")
+        XCTAssertEqual(relay.recheck(.udp), .notRunning)
         let asked = conduit.asked(queryName)
-        XCTAssertEqual(relay.recheck(), .silent)
-        XCTAssertEqual(conduit.asked(queryName), asked + 1, "the recheck asks Conduit the question it dropped")
+        XCTAssertEqual(relay.recheck(.tcp), .refused, "Conduit closes the session it will not answer")
+        XCTAssertEqual(conduit.asked(queryName), asked + 1, "the recheck asks Conduit the question it dropped, over TCP")
         conduit.dropsRealQueries = false
-        XCTAssertEqual(relay.recheck(), .answered)
+        XCTAssertEqual(relay.recheck(.tcp), .answered)
         XCTAssertEqual(try askTCP(relay), conduitIP)
-        XCTAssertEqual(relay.conduitProgress, DNSFailoverProgress(answered: 1, unanswered: 1, lastUnanswered: false))
+        XCTAssertEqual(relay.conduitProgress(.tcp), DNSFailoverProgress(answered: 1, unanswered: 1, lastUnanswered: false))
     }
 
     /// The publisher over a real relay, on a clock the test moves a tick at a time.
@@ -589,6 +600,30 @@ final class DNSFailoverRelayTests: XCTestCase {
         XCTAssertNotNil(store.ownKey, "Conduit answered the question it had dropped")
         XCTAssertEqual(relay.mode, .conduit)
         XCTAssertEqual(ask(relay).ip, conduitIP)
+    }
+
+    func testAForwarderThatDropsOnlyTCPLookupsLosesTheKeyWhileUDPAnswers() throws {
+        let conduit = try standIn(conduitIP, tcp: true)
+        let vpn = try standIn(vpnIP, tcp: true)
+        let relay = try relay(conduitPort: conduit.port, servers: ["192.0.2.53": vpn])
+        let override = Override(relay: relay)
+
+        conduit.dropsRealTCPQueries = true
+        XCTAssertNil(try askTCP(relay))
+        XCTAssertEqual(ask(relay).ip, conduitIP, "UDP is still answered")
+        override.tick()
+        XCTAssertEqual(relay.mode, .vpn, "a UDP answer does not end a TCP failure")
+        XCTAssertEqual(try askTCP(relay), vpnIP)
+        override.tick()
+        XCTAssertEqual(relay.mode, .vpn, "nor does the recheck while Conduit still drops TCP")
+        override.tick()
+        XCTAssertNil(override.store.ownKey, "withdrawn within the bound")
+
+        conduit.dropsRealTCPQueries = false
+        override.tick()
+        XCTAssertNotNil(override.store.ownKey, "the recheck over TCP is answered")
+        XCTAssertEqual(relay.mode, .conduit)
+        XCTAssertEqual(try askTCP(relay), conduitIP)
     }
 
     func testTheRecheckOfAnEDNSQuestionIsAQueryAStrictForwarderAnswers() throws {

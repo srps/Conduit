@@ -63,10 +63,10 @@ package protocol VPNDNSFailoverRelay: AnyObject {
     func renewServerSockets()
     /// Asks the reserved probe name through the relay's own UDP and TCP listener.
     func probe() -> DNSFailoverProbe
-    /// Asks Conduit again, directly, the last real question it left unanswered.
-    func recheck() -> DNSFailoverProbeOutcome
-    /// Real queries Conduit answered and left unanswered, both monotonic.
-    var conduitProgress: DNSFailoverProgress { get }
+    /// Asks Conduit again, directly and over the same half, the last real question it left unanswered there.
+    func recheck(_ transport: DNSFailoverTransport) -> DNSFailoverProbeOutcome
+    /// Real queries Conduit answered and left unanswered over one half, both monotonic.
+    func conduitProgress(_ transport: DNSFailoverTransport) -> DNSFailoverProgress
 }
 
 package struct VPNDNSOverrideArm: Equatable, Sendable {
@@ -94,8 +94,9 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
     case probeMissed(service: String, probe: DNSFailoverProbe, consecutive: Int)
     /// The VPN's key could not be read: the relay keeps the servers it last read from it.
     case failoverServersKept(service: String, reason: String)
-    /// The probe answered, but Conduit last left real queries unanswered and answered none since, nor the recheck.
-    case queriesUnanswered(service: String, unanswered: Int, recheck: DNSFailoverProbeOutcome)
+    /// The probe answered, but Conduit last left real queries over this half unanswered and answered none since, nor
+    /// the recheck over it.
+    case queriesUnanswered(service: String, transport: DNSFailoverTransport, unanswered: Int, recheck: DNSFailoverProbeOutcome)
     /// `stop-dns-relay` came while a cleanup was pending: the relay stays up on the VPN's servers until it completes.
     case relayStopDeferred(service: String)
     case relayStoppedAfterCleanup(service: String)
@@ -123,8 +124,9 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
         case .failoverServersKept(let service, let reason):
             return "\(prefix) failover_servers_kept service=\(HelperAudit.safe(service)) reason=\"\(HelperAudit.bounded(reason))\"; "
                 + "the VPN's key is unreadable"
-        case .queriesUnanswered(let service, let unanswered, let recheck):
-            return "\(prefix) queries_unanswered service=\(HelperAudit.safe(service)) unanswered=\(unanswered) "
+        case .queriesUnanswered(let service, let transport, let unanswered, let recheck):
+            return "\(prefix) queries_unanswered service=\(HelperAudit.safe(service)) transport=\(transport.rawValue) "
+                + "unanswered=\(unanswered) "
                 + "recheck=\(recheck.word); counted as silent"
         case .relayStopDeferred(let service):
             return "\(prefix) relay_stop_deferred service=\(HelperAudit.safe(service)); "
@@ -189,11 +191,12 @@ package final class VPNDNSOverridePublisher {
     private var lastVerdict: DNSFailoverProbeOutcome?
     private var consecutiveRefused = 0
     private var consecutiveSilent = 0
-    /// Conduit left real queries unanswered and has answered none since: a probe answer alone does not confirm it, and
-    /// the relay stays on the VPN's servers, until it answers a real query or the recheck.
-    private var realQueriesFailing = false
+    /// The halves over which Conduit left real queries unanswered and has answered none since: a probe answer alone
+    /// does not confirm it, and the relay stays on the VPN's servers, until it answers a real query over that half or
+    /// the recheck over it.
+    private var failing: Set<DNSFailoverTransport> = []
     private var lastConfirmed: UInt64?
-    private var lastProgress = DNSFailoverProgress(answered: 0, unanswered: 0, lastUnanswered: false)
+    private var lastProgress: [DNSFailoverTransport: DNSFailoverProgress] = [:]
     private var lastPrimary: String??
     private var serversUnreadable = false
     private let now: () -> UInt64
@@ -228,8 +231,8 @@ package final class VPNDNSOverridePublisher {
         failoverService = service
         consecutiveRefused = 0
         consecutiveSilent = 0
-        let verdict = screened(relay.probe().verdict, service: service, unanswered: 0)
-        lastProgress = relay.conduitProgress
+        let verdict = screened(relay.probe().verdict, service: service, unanswered: [:])
+        for transport in DNSFailoverTransport.allCases { lastProgress[transport] = relay.conduitProgress(transport) }
         lastVerdict = verdict
         probeOK = verdict == .answered
         lastConfirmed = probeOK ? now() : nil
@@ -293,11 +296,7 @@ package final class VPNDNSOverridePublisher {
             return
         }
         let probe = relay.probe()
-        let progress = relay.conduitProgress
-        let unanswered = progress.unanswered - lastProgress.unanswered
-        let answered = progress.answered - lastProgress.answered
-        lastProgress = progress
-        if answered > 0 || unanswered > 0 { realQueriesFailing = progress.lastUnanswered }
+        let unanswered = consumeProgress()
         let verdict = screened(probe.verdict, service: arm.service, unanswered: unanswered)
         switch verdict {
         case .answered:
@@ -451,17 +450,38 @@ package final class VPNDNSOverridePublisher {
         lastPrimary = primary
     }
 
-    /// A synthetic answer must not hide a forwarder that drops real queries, nor end that failure while the lookups go
-    /// to the VPN's servers and Conduit gets none to answer: only the recheck can.
-    private func screened(_ verdict: DNSFailoverProbeOutcome, service: String, unanswered: Int) -> DNSFailoverProbeOutcome {
-        guard verdict == .answered, realQueriesFailing else { return verdict }
-        let recheck = relay.recheck()
-        if recheck == .answered {
-            realQueriesFailing = false
-            return .answered
+    /// What the relay counted since the last read, per half: a half whose latest real query went unanswered is failing,
+    /// one whose latest was answered is not. Returns the unanswered queries per half.
+    private func consumeProgress() -> [DNSFailoverTransport: Int] {
+        var unanswered: [DNSFailoverTransport: Int] = [:]
+        for transport in DNSFailoverTransport.allCases {
+            let progress = relay.conduitProgress(transport)
+            let last = lastProgress[transport] ?? .zero
+            lastProgress[transport] = progress
+            guard progress.answered != last.answered || progress.unanswered != last.unanswered else { continue }
+            unanswered[transport] = progress.unanswered - last.unanswered
+            if progress.lastUnanswered { failing.insert(transport) } else { failing.remove(transport) }
         }
-        report(.queriesUnanswered(service: service, unanswered: unanswered, recheck: recheck))
-        return .silent
+        return unanswered
+    }
+
+    /// A synthetic answer must not hide a forwarder that drops real queries, nor end that failure while the lookups go
+    /// to the VPN's servers and Conduit gets none to answer: only the recheck over the failing half can.
+    private func screened(
+        _ verdict: DNSFailoverProbeOutcome, service: String, unanswered: [DNSFailoverTransport: Int]
+    ) -> DNSFailoverProbeOutcome {
+        guard verdict == .answered, !failing.isEmpty else { return verdict }
+        for transport in DNSFailoverTransport.allCases where failing.contains(transport) {
+            let recheck = relay.recheck(transport)
+            if recheck == .answered {
+                failing.remove(transport)
+            } else {
+                report(.queriesUnanswered(
+                    service: service, transport: transport, unanswered: unanswered[transport] ?? 0, recheck: recheck
+                ))
+            }
+        }
+        return failing.isEmpty ? .answered : .silent
     }
 
     private var confirmedWithinBound: Bool {
@@ -470,7 +490,7 @@ package final class VPNDNSOverridePublisher {
 
     /// While a cleanup is pending, or Conduit drops real queries, the relay stays on the VPN's servers.
     private func toConduit() {
-        if !cleanupPending, !realQueriesFailing { relay.setMode(.conduit) }
+        if !cleanupPending, failing.isEmpty { relay.setMode(.conduit) }
     }
 
     private func resetProbe() {
