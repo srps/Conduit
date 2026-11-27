@@ -484,6 +484,18 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         XCTAssertEqual(rig.store.ownKey, key, "a real query Conduit answered ends it")
     }
 
+    func testAQueryLostBetweenTicksIsSeenByAReArmAndTheTickAfterIt() {
+        let rig = armed(rig())
+        rig.tick()
+        rig.relay.progress[.udp] = DNSFailoverProgress(answered: 0, unanswered: 1, lastUnanswered: true)
+        XCTAssertTrue(rig.publisher.arm(service: service, servers: servers, owner: owner))
+        XCTAssertNil(rig.store.ownKey, "the re-arm's probe is screened against the loss")
+        rig.tick()
+        XCTAssertNil(rig.store.ownKey, "and the tick after it still sees it")
+        XCTAssertEqual(rig.relay.mode, .vpn)
+        XCTAssertEqual(rig.relay.rechecked, [.udp, .udp])
+    }
+
     func testSomeUnansweredQueriesBesideAnsweredOnesAreProgress() {
         let rig = armed(rig())
         for tick in 1...4 {

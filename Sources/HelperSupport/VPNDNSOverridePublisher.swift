@@ -231,8 +231,8 @@ package final class VPNDNSOverridePublisher {
         failoverService = service
         consecutiveRefused = 0
         consecutiveSilent = 0
-        let verdict = screened(relay.probe().verdict, service: service, unanswered: [:])
-        for transport in DNSFailoverTransport.allCases { lastProgress[transport] = relay.conduitProgress(transport) }
+        let probe = relay.probe()
+        let verdict = screened(probe.verdict, service: service, unanswered: consumeProgress())
         lastVerdict = verdict
         probeOK = verdict == .answered
         lastConfirmed = probeOK ? now() : nil
