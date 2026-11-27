@@ -122,7 +122,7 @@ enum PMSim {
               dns-own-key-conduit-gone DNS: with Conduit gone the relay fails each lookup over to the VPN at once; the owner's exit withdraws the key (0049)
               dns-own-key-conduit-hung DNS: a hung Conduit's lookup is answered by the VPN within the probe budget; three silent ticks withdraw the key (0049)
               dns-own-key-conduit-probe-only DNS: a forwarder that answers only the probe name loses the lookups and the key, and gets them back only once it answers a real query (0049)
-              dns-legacy-record-awaits-recovery DNS: an older helper's record is reported at start and the VPN's key is written only by the owner's explicit recovery (0049)
+              dns-legacy-record-awaits-recovery DNS: an older helper's record is reported at start with the reconnect, and nothing writes the VPN's key (0049)
               dns-own-key-helper-dies DNS: configd removes a dead helper's key; the app re-arms the fresh helper and the key returns (0049)
               dns-own-key-configd-restart DNS: a configd restart that drops the key is answered by one republish, with no new arm (0049)
               dns-own-key-cleanup-pending DNS: a Stop whose removal the store refuses keeps the relay on the VPN's servers until a tick removes the key (0049)

@@ -129,7 +129,7 @@ Synced at e638f26c, the combined design with the #330 review follow-ups (pending
 
 ## What it leaves out
 
-Two VPN services and split tunnels; the primary-service lag behind a reading; fields other than `ServerAddresses`; the relay's port; reboots; a hung helper; a relay that cannot re-bind; the resolver order and the app's `not_first` check (`Sources/PlatformMac/ResolverOrder.swift`); the legacy restore (`VPNDNSOverrideLegacyRestore`), which writes the VPN's key only when the owner runs `ConduitHelper --restore-legacy-vpn-dns` after a helper from the rewrite left `127.0.0.1` in it (at start the helper only reports the record); DoH and the forwarder's own routing.
+Two VPN services and split tunnels; the primary-service lag behind a reading; fields other than `ServerAddresses`; the relay's port; reboots; a hung helper; a relay that cannot re-bind; the resolver order and the app's `not_first` check (`Sources/PlatformMac/ResolverOrder.swift`); the legacy record's check (`VPNDNSOverrideLegacyCheck`), which only reports at start a record a helper from the rewrite left, and writes nothing; DoH and the forwarder's own routing.
 
 One difference from `HAccept`: the model's arm takes `probeOK` from the forwarder's state at once, while the code probes through the relay, so an arm made before `start-dns-relay` publishes only after the next answered tick. It delays a publish and cannot publish a key the model would not.
 

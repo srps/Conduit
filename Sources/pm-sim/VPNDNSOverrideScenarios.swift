@@ -194,7 +194,6 @@ enum VPNDNSOverrideScenarios {
 
             stage.machine.killVPNDNSOverrideHelper()
             check("configd removes the dead session's key", stage.ownKey == nil)
-            check("the VPN's key was never written", stage.machine.vpnDNSStore.vpnKeyWrites.isEmpty)
             check("the app restarts the relay, re-arms the fresh helper and the key returns",
                   try await stage.until(seconds: 60) { stage.ownKey != nil && stage.arms.count == 2 })
             check("lookups resolve again", try await stage.resolve(internalName) == corpIP)
@@ -217,7 +216,6 @@ enum VPNDNSOverrideScenarios {
             stage.machine.vpnDNSStore.configdRestart()
             check("the helper republishes the key a configd restart dropped", stage.ownKey != nil)
             check("on its own, with no new arm", stage.arms.count == arms)
-            check("the VPN's key was never written", stage.machine.vpnDNSStore.vpnKeyWrites.isEmpty)
             let published = stage.machine.vpnDNSOverrideOutcomes.filter { if case .published = $0 { true } else { false } }
             check("two publishes, one store call each", published.count == 2)
         } verify: { events, check in
@@ -330,8 +328,8 @@ enum VPNDNSOverrideScenarios {
         }
     }
 
-    /// An older helper's record on a scratch path: the helper's start, its ticks and store changes leave the VPN's key
-    /// alone, and only the owner's explicit recovery writes it, once.
+    /// An older helper's record on a scratch path: the helper's start reports it and names the reconnect, and nothing
+    /// writes the VPN's key or the record.
     @RuntimeActor
     static func legacyRecordAwaitsRecovery() async throws -> ScenarioResult {
         let began = Date()
@@ -349,18 +347,13 @@ enum VPNDNSOverrideScenarios {
         let store = machine.vpnDNSStore
         store.connectFullTunnel(service, servers: ["127.0.0.1"])
 
-        let started = machine.checkLegacyVPNDNSRecord(file)
-        check("the start reports the record and names the manual step", started == .awaitingRecovery(service: service)
-            && started.logLine.contains(VPNDNSOverrideLegacyRestore.flag))
+        let started = VPNDNSOverrideLegacyCheck.check(file: file) { _ in }
+        check("the start reports the record and names the reconnect", started == .awaitingRecovery(service: service)
+            && started.logLine.contains("Reconnect the VPN"))
         machine.tickVPNDNSOverride()
         store.configdRestart()
-        check("no start, tick or store change writes the VPN's key", store.vpnKeyWrites.isEmpty
-            && store.serverAddresses(service) == ["127.0.0.1"])
-        check("the record is kept for the recovery", FileManager.default.fileExists(atPath: file.path))
-        check("the explicit recovery puts the originals back", machine.runLegacyVPNDNSRestore(file) == .restored(service: service)
-            && store.serverAddresses(service) == tunnelServers)
-        check("with one write, and the record goes", store.vpnKeyWrites == [service] && !FileManager.default.fileExists(atPath: file.path))
-        check("a second recovery finds nothing to do", machine.runLegacyVPNDNSRestore(file) == .noRecord && store.vpnKeyWrites.count == 1)
+        check("no start, tick or store change touches the VPN's key", store.serverAddresses(service) == ["127.0.0.1"])
+        check("the record stays where it is", FileManager.default.fileExists(atPath: file.path))
         return result(name: "dns-legacy-record-awaits-recovery", began: began, assertions: assertions, notes: [])
     }
 
@@ -687,7 +680,6 @@ enum VPNDNSOverrideScenarios {
         let flush = await host.flushEvents()
         check("the host settles and flushes", settled == .settled && flush.allConfirmed)
         check("no own key is left after the Stop", machine.vpnDNSStore.ownKey == nil)
-        check("the VPN's keys were never written", machine.vpnDNSStore.vpnKeyWrites.isEmpty)
         do {
             let events = try String(contentsOf: environment.eventsFile, encoding: .utf8).split(separator: "\n").map {
                 try CanonicalJSON.decoder().decode(RuntimeEvent.self, from: Data($0.utf8))
@@ -786,7 +778,6 @@ enum VPNDNSOverrideScenarios {
             notes.append("failed: \(error)")
             check("the scenario ran to its end", false)
         }
-        check("the VPN's key was never written", machine.vpnDNSStore.vpnKeyWrites.isEmpty)
         notes.append("conduit asked: \(conduit.total); vpn asked: \(vpnServer.total)")
         return result(name: name, began: began, assertions: assertions, notes: notes)
     }

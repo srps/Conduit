@@ -88,7 +88,7 @@ enum HelperDaemon {
             lastConsoleUID = consoleAtStart
         }
         callerIdentity = loadCallerIdentity()
-        VPNDNSOverrideLegacyRestore.check(file: VPNDNSOverrideLegacyFile(), report: logLegacyRestore)
+        VPNDNSOverrideLegacyCheck.check(file: VPNDNSOverrideLegacyFile()) { HelperLog.error($0.logLine) }
         let store = SCDynamicStoreVPNDNSStore(changed: loop.storeTrigger)
         let expiry = VPNDNSOverrideExpiry()
         vpnDNSOverride = VPNDNSOverridePublisher(store: store, relay: failoverRelay, expiry: expiry, report: logVPNDNSOverride)
@@ -597,11 +597,6 @@ enum HelperDaemon {
         } else {
             HelperLog.notice(outcome.logLine)
         }
-    }
-
-    /// A record awaiting recovery is logged as an error: lookups may still go to the older helper's `127.0.0.1`.
-    static func logLegacyRestore(_ outcome: VPNDNSOverrideLegacyRestore.Outcome) {
-        if outcome.isFailure || outcome.keepsRecord { HelperLog.error(outcome.logLine) } else { HelperLog.notice(outcome.logLine) }
     }
 
     /// Set in `run` before the first request is served.

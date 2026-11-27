@@ -524,18 +524,6 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
         vpnDNSLock.withLock { vpnDNSPublisher = makeVPNDNSPublisher() }
     }
 
-    /// What a fresh helper does with a legacy record at start: reports it, writing nothing.
-    @discardableResult
-    package func checkLegacyVPNDNSRecord(_ file: any VPNDNSOverrideLegacyRecordFile) -> VPNDNSOverrideLegacyRestore.Outcome {
-        VPNDNSOverrideLegacyRestore.check(file: file) { _ in }
-    }
-
-    /// The owner's `--restore-legacy-vpn-dns`.
-    @discardableResult
-    package func runLegacyVPNDNSRestore(_ file: any VPNDNSOverrideLegacyRecordFile) -> VPNDNSOverrideLegacyRestore.Outcome {
-        VPNDNSOverrideLegacyRestore.run(store: vpnDNSStore, file: file) { _ in }
-    }
-
     @discardableResult
     private func withVPNDNSPublisher<T>(_ body: (VPNDNSOverridePublisher) throws -> T) rethrows -> T {
         try vpnDNSLock.withLock { try body(vpnDNSPublisher) }
@@ -668,7 +656,7 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
 }
 
 /// The helper's store session over an in-memory store: the VPN's keys, and one temporary key that dies with the session.
-package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked Sendable {
+package final class FakeVPNDNSStore: VPNDNSStore, @unchecked Sendable {
     package struct Tunnel: Equatable, Sendable {
         package var dns: [String: VPNDNSValue]?
         package var ipv4: Bool
@@ -685,7 +673,6 @@ package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked 
     private var _services: [String: Tunnel] = [:]
     private var _primary: String?
     private var _ownKey: [String: VPNDNSValue]?
-    private var _vpnKeyWrites: [String] = []
     private var _failsRemove = false
     private var _failsPublish = false
     private var _failsRead = false
@@ -755,9 +742,6 @@ package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked 
 
     package var ownKey: [String: VPNDNSValue]? { lock.withLock { _ownKey } }
 
-    /// Writes to any VPN key; only the legacy restore makes one.
-    package var vpnKeyWrites: [String] { lock.withLock { _vpnKeyWrites } }
-
     package var failsRemove: Bool {
         get { lock.withLock { _failsRemove } }
         set { lock.withLock { _failsRemove = newValue } }
@@ -792,10 +776,6 @@ package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked 
             guard !_failsVPNRead else { return .unreadable("read failed") }
             return _services[service]?.dns.map(VPNDNSRead.value) ?? .absent
         }
-    }
-
-    package func legacyDNS(service: String) -> VPNDNSRead {
-        dns(service: service)
     }
 
     package func overridesPrimary(service: String) -> Bool {
@@ -847,16 +827,6 @@ package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked 
     package var closeLeavesKey: Bool {
         get { lock.withLock { _closeLeavesKey } }
         set { lock.withLock { _closeLeavesKey = newValue } }
-    }
-
-    package func setDNS(_ value: [String: VPNDNSValue], service: String) -> Bool {
-        lock.withLock {
-            _vpnKeyWrites.append(service)
-            var tunnel = _services[service] ?? Tunnel(dns: nil, ipv4: false, overridePrimary: false)
-            tunnel.dns = value
-            _services[service] = tunnel
-            return true
-        }
     }
 }
 

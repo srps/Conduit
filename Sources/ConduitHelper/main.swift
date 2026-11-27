@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import ConduitShared
-import HelperSupport
 
 let rawArgs = Array(CommandLine.arguments.dropFirst())
 
@@ -14,18 +13,6 @@ if rawArgs.first == "--daemon" {
     // app restarts them.
     signal(SIGPIPE, SIG_IGN)
     HelperDaemon.run()
-}
-
-if rawArgs == [VPNDNSOverrideLegacyRestore.flag] {
-    guard geteuid() == 0 else {
-        fputs("ConduitHelper error: \(VPNDNSOverrideLegacyRestore.flag) needs root\n", stderr)
-        exit(EXIT_FAILURE)
-    }
-    let outcome = VPNDNSOverrideLegacyRestore.run(store: SCDynamicStoreLegacyVPNDNSStore(), file: VPNDNSOverrideLegacyFile()) {
-        HelperDaemon.logLegacyRestore($0)
-        print($0.logLine)
-    }
-    exit(outcome.isFailure ? EXIT_FAILURE : EXIT_SUCCESS)
 }
 
 if
@@ -43,6 +30,5 @@ if
 } else {
     fputs("Usage: ConduitHelper <command> [args...]\n", stderr)
     fputs("       ConduitHelper --daemon\n", stderr)
-    fputs("       ConduitHelper \(VPNDNSOverrideLegacyRestore.flag)\n", stderr)
     exit(EXIT_FAILURE)
 }

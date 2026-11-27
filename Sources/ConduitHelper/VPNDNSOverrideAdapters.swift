@@ -115,7 +115,7 @@ final class SCDynamicStoreVPNDNSStore: VPNDNSStore, @unchecked Sendable {
         }
     }
 
-    fileprivate static var lastError: String {
+    private static var lastError: String {
         String(cString: SCErrorString(SCError()))
     }
 }
@@ -144,37 +144,6 @@ enum VPNDNSOverrideWatchdog {
         thread.name = "vpn-dns-override-expiry"
         thread.qualityOfService = .userInitiated
         thread.start()
-    }
-}
-
-/// The one write a VPN client's key ever gets: the legacy restore a person runs with `--restore-legacy-vpn-dns`.
-struct SCDynamicStoreLegacyVPNDNSStore: VPNDNSLegacyStore {
-    private let store = SCDynamicStoreCreate(nil, "io.github.srps.Conduit.Helper.vpn-dns-override-legacy" as CFString, nil, nil)
-
-    func legacyDNS(service: String) -> VPNDNSRead {
-        guard let store else { return .unreadable("store: \(SCDynamicStoreVPNDNSStore.lastError)") }
-        guard let copied = SCDynamicStoreCopyValue(store, "State:/Network/Service/\(service)/DNS" as CFString) else {
-            let status = SCError()
-            return status == kSCStatusNoKey ? .absent : .unreadable("copy: \(String(cString: SCErrorString(status)))")
-        }
-        guard let raw = copied as? [String: Any] else { return .unreadable("not a dictionary") }
-        var value: [String: VPNDNSValue] = [:]
-        for (field, item) in raw {
-            // A field this type cannot write back makes the key unreadable, so nothing is written over it.
-            guard let converted = VPNDNSPropertyList.value(item) else { return .unreadable("field \(field) cannot be written back") }
-            value[field] = converted
-        }
-        return .value(value)
-    }
-
-    func setDNS(_ value: [String: VPNDNSValue], service: String) -> Bool {
-        guard let store else { return false }
-        let dictionary = value.mapValues(VPNDNSPropertyList.object) as NSDictionary
-        guard SCDynamicStoreSetValue(store, "State:/Network/Service/\(service)/DNS" as CFString, dictionary) else {
-            HelperLog.error("vpn-dns-override legacy: SCDynamicStoreSetValue failed: \(SCDynamicStoreVPNDNSStore.lastError)")
-            return false
-        }
-        return true
     }
 }
 

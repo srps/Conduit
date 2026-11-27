@@ -316,7 +316,6 @@ final class HelperVPNDNSOverrideTests: XCTestCase {
         XCTAssertNil(machine.vpnDNSStore.ownKey, "configd removes the dead session's key")
         XCTAssertNil(machine.vpnDNSOverrideArm)
         XCTAssertFalse(machine.dnsRelayRunning, "the relays died with the helper")
-        XCTAssertEqual(machine.vpnDNSStore.vpnKeyWrites, [])
     }
 
     func testFakeMachineHoldsTheKeyBackWhenTCPCouldNotBind() throws {

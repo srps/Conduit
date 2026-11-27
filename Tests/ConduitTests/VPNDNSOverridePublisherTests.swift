@@ -67,7 +67,6 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
             .armed(service: service, servers: 2, owner: owner),
             .published(service: service, port: HelperConstants.vpnDNSOverrideRelayPort),
         ])
-        XCTAssertEqual(rig.store.vpnKeyWrites, [])
         XCTAssertEqual(rig.publisher.status(caller: owner), HelperVPNDNSOverrideStatus(
             serviceID: service, servers: servers, published: true, owned: true, port: HelperConstants.vpnDNSOverrideRelayPort
         ))

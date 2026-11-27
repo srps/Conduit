@@ -57,7 +57,7 @@ MODEL = ["formal/vpn-detection/VPNDetection.tla", "formal/vpn-detection/check.py
 OVERRIDE_COVERED = [
     "Sources/HelperSupport/VPNDNSOverridePublisher.swift",
     "Sources/ConduitShared/VPNDNSOverrideValidation.swift",
-    "Sources/HelperSupport/VPNDNSOverrideLegacyRestore.swift",
+    "Sources/HelperSupport/VPNDNSOverrideLegacyCheck.swift",
     "Sources/ConduitHelper/HelperDaemon.swift",
     "Sources/ConduitHelper/HelperEventLoop.swift",
     "Sources/ConduitHelper/VPNDNSOverrideAdapters.swift",
