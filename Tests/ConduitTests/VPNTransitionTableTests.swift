@@ -132,15 +132,15 @@ final class VPNTransitionTableTests: XCTestCase {
     /// see a new cause while the signal still says settled: the signal is
     /// stamped before the cause is published, entering or leaving (#97).
     @RuntimeActor func testDirectModeChangeStampsTheSignalBeforePublishingTheCause() async {
-        let box = NIOLockedValueBox<(isDirect: Bool, cause: DirectModeCause)>((true, .upstreamsUnreachable))
+        let box = NIOLockedValueBox(ProxyOrchestrator.PublishedRouting(cause: .upstreamsUnreachable))
         let seenAtStamp = NIOLockedValueBox<[DirectModeCause]>([])
         let signal = RoutingTransitionSignal(now: {
             seenAtStamp.withLockedValue { $0.append(box.withLockedValue { $0.cause }) }
             return Date()
         })
-        XCTAssertEqual(ProxyOrchestrator.publishDirectMode(.none, to: box, stamping: signal), .upstreamsUnreachable)
-        XCTAssertEqual(ProxyOrchestrator.publishDirectMode(.vpnDisconnected, to: box, stamping: signal), .none)
-        XCTAssertEqual(ProxyOrchestrator.publishDirectMode(.vpnDisconnected, to: box, stamping: signal), .vpnDisconnected)
+        XCTAssertEqual(ProxyOrchestrator.publishDirectMode(.none, to: box, stamping: signal).cause, .upstreamsUnreachable)
+        XCTAssertEqual(ProxyOrchestrator.publishDirectMode(.vpnDisconnected, to: box, stamping: signal).cause, .none)
+        XCTAssertEqual(ProxyOrchestrator.publishDirectMode(.vpnDisconnected, to: box, stamping: signal).cause, .vpnDisconnected)
         XCTAssertEqual(seenAtStamp.withLockedValue { $0 }, [.upstreamsUnreachable, .none],
                        "the new cause was visible before the signal was stamped")
         XCTAssertEqual(box.withLockedValue { $0.cause }, .vpnDisconnected)

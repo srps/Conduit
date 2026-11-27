@@ -1116,11 +1116,18 @@ package final class ProxyOrchestrator {
     /// accept `pacRoutingEngine: PACRoutingEngine?`, so the nil branch
     /// is not new.
     private let pacEvaluator: (any PacEvaluator)?
-    /// Tuple form `(isDirect, cause)` so the read-side closure consumed by
-    /// HTTPProxyHandler / SOCKS5Server can branch on cause without a separate
-    /// state lookup. Invariant: `isDirect == cause.isDirect`. Mutated only
-    /// via `setDirectMode(_:)`.
-    private let directModeBox = NIOLockedValueBox<(isDirect: Bool, cause: DirectModeCause)>((false, .none))
+    /// What the handlers and DoH lookups off the owner read about routing: the direct-mode cause, and the VPN verdict the
+    /// DoH route is derived from with it. One value, so a reader that sees a new cause sees its route. Written only by
+    /// `setDirectMode(_:)` and `publishVPNVerdictForDNS(connected:)`.
+    package struct PublishedRouting: Equatable, Sendable {
+        package var cause: DirectModeCause = .none
+        /// Whether the last definite VPN verdict is `.connected`.
+        package var vpnConnected = false
+
+        package var doHRoute: DoHRoute { .for(vpnConnected: vpnConnected, directMode: cause) }
+    }
+
+    private let routingBox = NIOLockedValueBox(PublishedRouting())
 
     /// Advances on every VPN state change `handleVPNStateChange` acts on. A
     /// connectivity probe captures it first and commits nothing if it
@@ -1176,12 +1183,7 @@ package final class ProxyOrchestrator {
     /// The confirmed transition whose sweeps have not all run: a flap holds
     /// them, and its recovery runs the re-sweeps.
     private var strandedSweepsOwed: String?
-    /// Whether the last definite VPN verdict is `.connected`. With the direct-mode cause it picks the DoH route.
-    private var vpnConnectedForDNS = false
-    /// The DoH route the forwarder and the origin resolver read, in a box because their lookups run off the owner. Written
-    /// only by `publishDoHRoute`, before `directModeBox` on a direct-mode change.
-    private let doHRouteBox = NIOLockedValueBox(DoHRoute.proxyAndDirect)
-    /// The forwarder's split-DNS table, in a box for the same reason. Written only by `swapSplitDNSTable`.
+    /// The forwarder's split-DNS table, in a box because its lookups run off the owner. Written only by `swapSplitDNSTable`.
     private let splitDNSBox: NIOLockedValueBox<SplitDNSState>
     private let dnsForwarderTuning: DNSForwarderTuning
 
@@ -1261,7 +1263,7 @@ package final class ProxyOrchestrator {
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
         splitDNSProvider: { [splitDNSBox] in splitDNSBox.withLockedValue { $0.table } },
-        doHRoute: { [doHRouteBox] in doHRouteBox.withLockedValue { $0 } },
+        doHRoute: { [routingBox] in routingBox.withLockedValue { $0.doHRoute } },
         localProxyPort: { [server = localProxyServer] in server.listeningPort },
         // A signal only: the hop reads the running core's counters when it runs. A stop clears them, and a later start's core counts
         // from zero, so a hop that lands after either publishes that operation's counts, never the ones it was queued with.
@@ -1281,8 +1283,8 @@ package final class ProxyOrchestrator {
     lazy var localProxyServer = LocalProxyServer(
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
-        directModeProvider: { [directModeBox] in
-            directModeBox.withLockedValue { ($0.isDirect, $0.cause) }
+        directModeProvider: { [routingBox] in
+            routingBox.withLockedValue { ($0.cause.isDirect, $0.cause) }
         },
         authenticatorProvider: lateBoundAuthenticatorProvider,
         directConnectDetector: directConnectDetector,
@@ -1388,7 +1390,7 @@ package final class ProxyOrchestrator {
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
         localProxyPort: { [server = localProxyServer] in server.listeningPort },
-        doHRoute: { [doHRouteBox] in doHRouteBox.withLockedValue { $0 } },
+        doHRoute: { [routingBox] in routingBox.withLockedValue { $0.doHRoute } },
         eventSink: { [eventLog] event in eventLog.append(event) }
     )
 
@@ -1398,8 +1400,8 @@ package final class ProxyOrchestrator {
         connectionPool: tunnelConnectionPool,
         logger: logStore,
         originResolver: originResolver,
-        directModeProvider: { [directModeBox] in
-            directModeBox.withLockedValue { $0.cause }
+        directModeProvider: { [routingBox] in
+            routingBox.withLockedValue { $0.cause }
         },
         strictModeProvider: { [configBox] in configBox.current.strictMode },
         gatewayModeProvider: { [configBox] in configBox.current.gatewayMode },
@@ -2324,8 +2326,7 @@ package final class ProxyOrchestrator {
             $0.vpnState = vpn.observed
             $0.vpnInterfaceName = vpn.shownTunnel
         }
-        vpnConnectedForDNS = true
-        refreshDoHRoute()
+        publishVPNVerdictForDNS(connected: true)
         // A recovery like a monitor's `.connected`: the sweeps the flap held,
         // or the address-only pass, run from here, since the monitor's own
         // `.connected` will now find nothing changed.
@@ -2434,8 +2435,7 @@ package final class ProxyOrchestrator {
         routingGeneration &+= 1
         let generation = routingGeneration
 
-        vpnConnectedForDNS = state == .connected
-        refreshDoHRoute()
+        publishVPNVerdictForDNS(connected: state == .connected)
         mutateSnapshot {
             $0.vpnState = vpn.observed
             $0.vpnInterfaceName = vpn.shownTunnel
@@ -3479,52 +3479,43 @@ package final class ProxyOrchestrator {
     /// from the cause via `cause.isDirect` everywhere it's needed; there is no
     /// duplicate stored field.
     private func setDirectMode(_ cause: DirectModeCause) {
-        // The route goes first: a handler that reads the new cause and starts a DoH lookup must find the route derived from it.
-        let priorRoute = publishDoHRoute(directMode: cause)
-        let prior = Self.publishDirectMode(cause, to: directModeBox, stamping: routingTransitions)
-        if prior != cause {
-            logDirectModeEntry(from: prior, to: cause)
+        let prior = Self.publishDirectMode(cause, to: routingBox, stamping: routingTransitions)
+        if prior.cause != cause {
+            logDirectModeEntry(from: prior.cause, to: cause)
         }
-        reportDoHRouteChange(from: priorRoute, directMode: cause)
+        reportDoHRouteChange(from: prior)
         mutateSnapshot { $0.directModeCause = cause }
     }
 
-    /// After a VPN verdict changes `vpnConnectedForDNS`, with the direct-mode cause unchanged.
-    private func refreshDoHRoute() {
-        let cause = snapshot.directModeCause
-        reportDoHRouteChange(from: publishDoHRoute(directMode: cause), directMode: cause)
+    private func publishVPNVerdictForDNS(connected: Bool) {
+        let prior = routingBox.withLockedValue { box in defer { box.vpnConnected = connected }; return box }
+        reportDoHRouteChange(from: prior)
     }
 
-    /// Writes the route for `directMode` and the current VPN verdict to the box the DoH consumers read, and returns the route it replaced.
-    private func publishDoHRoute(directMode: DirectModeCause) -> DoHRoute {
-        let route = DoHRoute.for(vpnConnected: vpnConnectedForDNS, directMode: directMode)
-        return doHRouteBox.withLockedValue { box in defer { box = route }; return box }
-    }
-
-    private func reportDoHRouteChange(from prior: DoHRoute, directMode: DirectModeCause) {
-        let route = doHRouteBox.withLockedValue { $0 }
-        guard prior != route else { return }
+    private func reportDoHRouteChange(from prior: PublishedRouting) {
+        let current = routingBox.withLockedValue { $0 }
+        guard prior.doHRoute != current.doHRoute else { return }
         emitEvent(
             .routing, "dns.doh_route_changed",
-            detail: "route=\(route.rawValue) prior=\(prior.rawValue) vpn=\(vpnConnectedForDNS ? "connected" : "not_connected") direct_mode=\(directMode.rawValue)"
+            detail: "route=\(current.doHRoute.rawValue) prior=\(prior.doHRoute.rawValue) vpn=\(current.vpnConnected ? "connected" : "not_connected") direct_mode=\(current.cause.rawValue)"
         )
-        logStore.log(.info, "DNS: DoH lookups now use route \(route.rawValue) (was \(prior.rawValue)).", category: .network)
+        logStore.log(.info, "DNS: DoH lookups now use route \(current.doHRoute.rawValue) (was \(prior.doHRoute.rawValue)).", category: .network)
     }
 
     /// Publishes `cause` to the box NIO handlers read, and returns the
-    /// cause it replaced. A change (entering direct mode, or upstreams
+    /// routing it replaced. A change (entering direct mode, or upstreams
     /// recovering out of it) stamps `signal` first (#97): a handler reads
     /// the cause, then the signal, so a new cause it can see always comes
     /// with the stamp. The read and the write are separate because the
     /// orchestrator is the only writer and calls this on its owner.
     package static func publishDirectMode(
         _ cause: DirectModeCause,
-        to box: NIOLockedValueBox<(isDirect: Bool, cause: DirectModeCause)>,
+        to box: NIOLockedValueBox<PublishedRouting>,
         stamping signal: RoutingTransitionSignal
-    ) -> DirectModeCause {
-        let prior = box.withLockedValue { $0.cause }
-        if prior != cause { signal.mark() }
-        box.withLockedValue { $0 = (cause.isDirect, cause) }
+    ) -> PublishedRouting {
+        let prior = box.withLockedValue { $0 }
+        if prior.cause != cause { signal.mark() }
+        box.withLockedValue { $0.cause = cause }
         return prior
     }
 

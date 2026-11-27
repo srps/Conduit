@@ -64,6 +64,49 @@ final class VPNReconnectRoutingTests: XCTestCase {
         ], "the re-probe off the VPN keeps both routes; direct routing drops the proxy")
     }
 
+    /// A handler that reads the new direct-mode cause and starts a DoH lookup finds the route derived from that cause, even
+    /// read from another thread while the transition is being published.
+    @RuntimeActor func testAReaderThatSeesTheNewCauseFindsItsDoHRoute() async throws {
+        var config = ProxyConfig()
+        config.localPort = 0
+        config.localPACEnabled = false
+        config.upstreams = [UpstreamProxy(name: "corporate", host: "127.0.0.1", port: 9, priority: 0)]
+        let reachable = NIOLockedValueBox(true)
+        let orchestrator = ProxyOrchestrator(config: config, pacEvaluator: StaticPAC(), connectivityProbe: { upstreams in
+            let answers = reachable.withLockedValue { $0 }
+            return UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: answers) })
+        })
+        addTeardownBlock { @RuntimeActor in await orchestrator.stopProxy() }
+        try await orchestrator.startProxy()
+        let server = orchestrator.localProxyServer
+        let forwarder = orchestrator.dnsForwarder
+
+        for round in 0..<200 {
+            reachable.withLockedValue { $0 = true }
+            await orchestrator.handleVPNStateChange(.connected)
+            XCTAssertNotEqual(server.directModeForNewConnections, .vpnDisconnected)
+            let reader = NIOLockedValueBox<(spinning: Bool, route: DoHRoute?, done: Bool)>((false, nil, false))
+            Thread.detachNewThread {
+                let deadline = ContinuousClock.now + .seconds(10)
+                reader.withLockedValue { $0.spinning = true }
+                var spins = 0
+                while server.directModeForNewConnections != .vpnDisconnected {
+                    spins += 1
+                    if spins % 4_096 == 0, ContinuousClock.now > deadline { break }
+                }
+                let route = forwarder.doHRouteForNewLookups
+                reader.withLockedValue { $0 = (true, route, true) }
+            }
+            while !reader.withLockedValue({ $0.spinning }) { await Task.yield() }
+            reachable.withLockedValue { $0 = false }
+            await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
+            while !reader.withLockedValue({ $0.done }) { try await Task.sleep(for: .milliseconds(1)) }
+            let route = reader.withLockedValue { $0.route }
+            XCTAssertEqual(route, .directOnly, "round \(round): the reader saw the new cause with an older route")
+            if route != .directOnly { break }
+        }
+    }
+
     /// The orchestrator hands its route to both DoH consumers: once client traffic routes directly, a fresh lookup from
     /// either one leaves the local proxy alone.
     @RuntimeActor func testFreshLookupsFromBothDoHConsumersFollowTheRoute() async throws {
