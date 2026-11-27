@@ -33,8 +33,16 @@ then leaves the resolver order alone.
   lookups are never worse off than without the override. Conduit reports when
   macOS stops putting the entry first (`dns.vpn_override_not_first`). The
   helper's DNS relays carry TCP as well as UDP. A helper that rewrote the VPN's
-  DNS key in an earlier build of this change has its saved servers put back once,
-  at start (decision 0049).
+  DNS key in an earlier build of this change has its saved servers put back,
+  retried with a bound while the key or its record cannot be read; a malformed
+  record is set aside, not deleted (decision 0049). The helper checks Conduit
+  through its relay over both UDP and TCP, as macOS reaches it, and withdraws
+  its entry after 30 s without a confirmed answer, whatever the reason, or
+  when Conduit answers the check but no real lookup. It takes the override only
+  from an app whose exit it can watch. An entry whose removal the system
+  refuses keeps the relay up on the VPN's servers until a later try removes it.
+  A VPN DNS server the relay cannot reach is skipped and tried again with
+  backoff instead of stalling every lookup.
 - The DNS forwarder serves up to 256 lookups at once, up from 64. With the
   full-tunnel override every lookup on the Mac reaches it, and a reconnect
   burst went past 64 and was answered SERVFAIL (#328). Past the limit a lookup
@@ -56,6 +64,11 @@ then leaves the resolver order alone.
   Conduit retries the PAC and the upstream probe at once instead of after the
   PAC's failure backoff, and the DNS health check no longer restarts a relay
   that only had slow upstreams (decision 0050).
+- The upstream proxy hostnames a PAC answer named stop resolving through the
+  VPN's servers once PAC is turned off, its URL changes or its script is
+  replaced; an answer still being worked out at that moment no longer adds
+  its proxy. Configured upstreams keep resolving through the tunnel
+  (decision 0051).
 
 ## 0.7.0
 
