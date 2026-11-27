@@ -155,6 +155,35 @@ final class DNSForwarderProxyHostTests: XCTestCase {
         XCTAssertEqual(doh.requestCount(), 0, "an expanded proxy name never goes to DoH")
     }
 
+    /// The PAC file decides routing and names the proxies Conduit authenticates to. Its exact host keeps the public
+    /// path, so a public PAC host still loads through a tunnel whose servers know only internal names.
+    func testASearchExpandedPACHostOnATunnelAsksThePushedServersAndNeverDoH() async throws {
+        let tunnel = try await tunnelDNS(answering: "wpad.lan.example")
+        let doh = try await dohProvider()
+        let port = try await start(
+            dohPort: doh.port, endpoints: [Self.firstPushed: tunnel.port, Self.secondPushed: tunnel.port],
+            table: Self.fullTunnel, configure: { $0.routing.pacURL = "http://wpad/proxy.pac" }
+        )
+
+        let attacker = try await rawReply("wpad.attacker.example", port: port, txID: 0x5D03)
+        XCTAssertEqual(attacker.map(DNSWireFormat.extractRCode), 3, "the pushed servers' NXDOMAIN is the answer")
+        XCTAssertEqual(doh.requestCount(), 0, "an expanded PAC host never goes to DoH")
+        let expanded = try await SplitDNSProbe.resolve("wpad.lan.example", port: port, txID: 0x5D04)
+        XCTAssertEqual(expanded, Self.tunnelIP)
+    }
+
+    func testAnExactPublicPACHostOnATunnelKeepsThePublicPath() async throws {
+        let first = try await silentServer()
+        let doh = try await dohProvider()
+        let port = try await start(
+            dohPort: doh.port, endpoints: [Self.firstPushed: first.port, Self.secondPushed: first.port],
+            table: Self.fullTunnel, configure: { $0.routing.pacURL = "https://pac.example.net/proxy.pac" }
+        )
+
+        let answer = try await SplitDNSProbe.resolve("pac.example.net", port: port)
+        XCTAssertEqual(answer, Self.publicIP, "DoH still answers the PAC host itself")
+    }
+
     func testAPACLearnedProxyHostIsIncluded() async throws {
         let first = try await silentServer()
         let second = try await tunnelDNS(answering: "pac-proxy.example.org")
@@ -265,13 +294,15 @@ final class DNSForwarderProxyHostTests: XCTestCase {
         endpoints: [String: Int],
         table: SplitDNSTable,
         hosts: ProxyHostNames = .empty,
-        hostsProvider: (@Sendable () -> ProxyHostNames)? = nil
+        hostsProvider: (@Sendable () -> ProxyHostNames)? = nil,
+        configure: (inout ProxyConfig) -> Void = { _ in }
     ) async throws -> Int {
         var config = ProxyConfig.testFixture()
         config.upstreams = []
         config.dohProviders = ["http://127.0.0.1:\(dohPort)/dns-query"]
         config.localHost = "127.0.0.1"
         config.localPort = 9
+        configure(&config)
         let frozen = config
         var tuning = SplitDNSProbe.tuning(endpoints)
         tuning.internalAttemptTimeout = .milliseconds(200)

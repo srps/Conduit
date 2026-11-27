@@ -990,7 +990,7 @@ final class DNSResolutionCore: @unchecked Sendable {
         let rule = table.rule(matching: domain)
         let isMulticast = DNSWireFormat.isMulticastDNSName(domain)
         let isProxyHostViaTunnel = rule == nil && table.usesPushedServers
-            && (proxyHostsProvider?().containsOrSearchExpands(domain) ?? false)
+            && (proxyHostsProvider?().containsOrSearchExpands(domain) == true || Self.credentialHosts(config).searchExpands(domain))
         let isInternal = rule != nil || isMulticast || isProxyHostViaTunnel
         let queryType = DNSWireFormat.extractQueryType(from: queryBytes)
         let cacheKey = DNSCacheKey(domain: domain.lowercased(), queryType: queryType)
