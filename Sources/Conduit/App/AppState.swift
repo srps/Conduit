@@ -1279,7 +1279,7 @@ final class AppState: ObservableObject {
                     }
                 )?.value
             }
-            self.liftHelperUninstallFence()
+            await self.liftHelperUninstallFence()
         }
     }
 
@@ -1308,12 +1308,34 @@ final class AppState: ObservableObject {
         lastErrorMessage = Self.helperUninstallFencedMessage
     }
 
-    /// Ends the fence, then submits the Settings save it deferred.
-    private func liftHelperUninstallFence() {
+    /// Ends the fence, then submits the Settings save it deferred. A restoring Stop that failed costs the editor its baseline, so the draft
+    /// is first carried over a fresh read rather than refused for a reload that would discard it.
+    private func liftHelperUninstallFence() async {
         helperUninstallFence = false
         guard configurationDeferredByUninstall else { return }
         configurationDeferredByUninstall = false
+        if let editor, !editor.ledger.filesNeedingReload.isEmpty { await carryDraftsOverAFreshRead() }
         submitConfiguration()
+    }
+
+    /// One fresh editor read rebuilds the baselines, and the drafts go back over it as edits. Nothing is rebuilt under a save in flight.
+    private func carryDraftsOverAFreshRead() async {
+        guard let editor, let editorClient, let incarnation else { return }
+        await editor.settle()
+        let drafts = (config: config, platform: platformConfig, preferences: appPreferences)
+        do {
+            let deadline = RuntimeDeadline.after(RuntimeEditorSession.exchangeBudget, from: .now)
+            let observation = try await read(editorClient, incarnation: incarnation, deadline: deadline)
+            guard !quitFence, editor.isIdle, let ledger = seed(observation) else { return }
+            editor.rebuild(ledger)
+            assignDrafts(drafts.config, drafts.platform, drafts.preferences)
+            followHostOwnedIntent()
+            editor.edited(.configuration)
+            refreshReloadNeed()
+        } catch {
+            lastErrorMessage = "The configuration could not be read again (\(error)), so the Settings change held during Uninstall Helper "
+                + "was not saved."
+        }
     }
 
     /// Waits for the Settings save, a reload and the commands already out, so none of them lands after the last check.
