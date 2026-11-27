@@ -100,7 +100,7 @@ SAFETY = ["TypeOK", "NoEntryFilesOffVPN", "GateFollowsLastPublished", "NothingPu
           "OrchestratorFollowsLastPublished", "ApplyOnlyFromCurrentSession"]
 LIVENESS = ["NoStuckUnknown", "FilesFollowVPN", "VPNReconnects"]
 OVERRIDE_SAFETY = ["TypeOK", "KeyAnswered", "VPNKeyUntouched", "NoLoopbackTarget", "KeyWithdrawn",
-                   "InternalNamesServed", "NoSelfReference"]
+                   "InternalNamesServed", "NoSelfReference", "BoundHeld"]
 OVERRIDE_LIVENESS = ["EventuallyWithdrawn", "KeyReturns"]
 TEMPORAL = set(LIVENESS) | set(OVERRIDE_LIVENESS)
 
@@ -162,7 +162,7 @@ CHECKS = [
 OVERRIDE_NONE = dict(MaxVersions=1, MaxDisconnects=0, MaxGateFlaps=0, MaxIPv4Flaps=0, MaxLoopbackLists=0,
                      MaxConfigdRestarts=0, MaxOwnerExits=0, MaxHelperCrashes=0, MaxRelayDeaths=0,
                      MaxForwarderFaults=0, MaxDNSStops=0, MaxLostReplies=0, MaxRemovalRefusals=0,
-                     MaxProbeSocketFailures=0)
+                     MaxProbeSocketFailures=0, MaxBusyCommands=0)
 OVERRIDE_CLIENT = dict(OVERRIDE_NONE, MaxVersions=3, MaxDisconnects=1, MaxGateFlaps=1, MaxIPv4Flaps=1,
                        MaxLoopbackLists=1, MaxConfigdRestarts=1, MaxDNSStops=1)
 OVERRIDE_PROCESS = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxIPv4Flaps=1, MaxOwnerExits=1,
@@ -172,7 +172,7 @@ OVERRIDE_RELAY = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxGateFla
 OVERRIDE_LIVE = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxIPv4Flaps=1, MaxConfigdRestarts=1,
                      MaxOwnerExits=1, MaxRelayDeaths=1, MaxForwarderFaults=1)
 OVERRIDE_HELPER_FAULTS = dict(OVERRIDE_NONE, MaxVersions=1, MaxDisconnects=1, MaxOwnerExits=1, MaxForwarderFaults=1,
-                              MaxDNSStops=1, MaxRemovalRefusals=1, MaxProbeSocketFailures=1)
+                              MaxDNSStops=1, MaxRemovalRefusals=1, MaxProbeSocketFailures=1, MaxBusyCommands=1)
 CHECKS += [
     Check("override-safety-client", OVERRIDE_CLIENT, invariants=OVERRIDE_SAFETY,
           full=dict(OVERRIDE_CLIENT, MaxVersions=4, MaxOwnerExits=1), spec=OVERRIDE),
@@ -325,6 +325,7 @@ OVERRIDE_LOST_REPLY = dict(OVERRIDE_NONE, MaxVersions=2, MaxGateFlaps=1, MaxLost
 OVERRIDE_REFUSED_STOP = dict(OVERRIDE_NONE, MaxVersions=1, MaxDNSStops=1, MaxRemovalRefusals=2)
 OVERRIDE_REFUSED_EXIT = dict(OVERRIDE_NONE, MaxVersions=1, MaxOwnerExits=1, MaxRemovalRefusals=1)
 OVERRIDE_SOCKET_FAILS = dict(OVERRIDE_NONE, MaxVersions=1, MaxForwarderFaults=1, MaxProbeSocketFailures=1)
+OVERRIDE_BUSY = dict(OVERRIDE_NONE, MaxVersions=1, MaxBusyCommands=1)
 
 # The combined design (0049 as revised in #330): each `swift` text names the change in the code that breaks it.
 MUTANTS += [
@@ -398,15 +399,17 @@ MUTANTS += [
         "ov-tick-ignores-refused",
         "VPNDNSOverridePublisher.tick: a refusal never clears `probeOK`, so the streak of "
         "`refusedTicksToWithdraw` (2) never withdraws the key, with the `unverifiedSecondsToWithdraw` "
-        "backstop removed too, since it alone would still withdraw",
-        [("!.probeOK = @ /\\ h.refused + 1 < 2", "!.probeOK = @"), ("ProbeBounded == TRUE", "ProbeBounded == FALSE")],
+        "backstop removed too, in the tick and in `hold`, since it alone would still withdraw",
+        [("!.probeOK = @ /\\ h.refused + 1 < 2", "!.probeOK = @"), ("ProbeBounded == TRUE", "ProbeBounded == FALSE"),
+         ("AgeGate == TRUE", "AgeGate == FALSE")],
         "EventuallyWithdrawn", bounds=OVERRIDE_FORWARDER_ONLY),
     override_mutant(
         "ov-tick-ignores-silent",
         "VPNDNSOverridePublisher.tick: a silence never clears `probeOK`, so the streak of "
         "`silentTicksToWithdraw` (3) never withdraws the key, with the `unverifiedSecondsToWithdraw` "
-        "backstop removed too, since it alone would still withdraw",
-        [("!.probeOK = @ /\\ h.silent + 1 < 3", "!.probeOK = @"), ("ProbeBounded == TRUE", "ProbeBounded == FALSE")],
+        "backstop removed too, in the tick and in `hold`, since it alone would still withdraw",
+        [("!.probeOK = @ /\\ h.silent + 1 < 3", "!.probeOK = @"), ("ProbeBounded == TRUE", "ProbeBounded == FALSE"),
+         ("AgeGate == TRUE", "AgeGate == FALSE")],
         "EventuallyWithdrawn", bounds=OVERRIDE_FORWARDER_ONLY),
     override_mutant(
         "ov-stop-ignores-pending-cleanup",
@@ -423,9 +426,37 @@ MUTANTS += [
     override_mutant(
         "ov-failed-probe-keeps-key",
         "VPNDNSOverridePublisher.tick: a `.failed` probe keeps `probeOK` and nothing bounds the time since the "
-        "last confirmed answer, so a helper whose probe socket keeps failing holds the key for a silent Conduit",
-        [("ProbeBounded == TRUE", "ProbeBounded == FALSE")],
+        "last confirmed answer, in the tick or in `hold`, so a helper whose probe socket keeps failing holds the key "
+        "for a silent Conduit",
+        [("ProbeBounded == TRUE", "ProbeBounded == FALSE"),
+         ("AgeGate == TRUE", "AgeGate == FALSE")],
         "EventuallyWithdrawn", bounds=OVERRIDE_SOCKET_FAILS),
+    override_mutant(
+        "ov-real-query-failure-per-interval",
+        "VPNDNSOverridePublisher.tick: `realQueriesFailing = answered == 0 && unanswered > 0`, judged one interval "
+        "at a time, so once the relay is on the VPN's servers the next answered probe sends the lookups back to a "
+        "forwarder that answers only the probe name, and the key is never withdrawn",
+        [("SticksRealQueryFailure == TRUE", "SticksRealQueryFailure == FALSE")],
+        "EventuallyWithdrawn"),
+    override_mutant(
+        "ov-relay-stopped-after-publish",
+        "VPNDNSOverridePublisher.stopRelay and .withdraw: the helper stops a relay deferred for a pending cleanup "
+        "after the sync that completed the cleanup, with no hold on publishing and no cancel by a Start, so a key "
+        "published by an arm during the deferred stop names a relay that is then stopped",
+        [("StopsBeforePublish == TRUE", "StopsBeforePublish == FALSE")],
+        "KeyAnswered", bounds=OVERRIDE_REFUSED_STOP),
+    override_mutant(
+        "ov-no-expiry-watchdog",
+        "HelperDaemon.run: delete `VPNDNSOverrideWatchdog.start`, so a command that holds the loop keeps a key past "
+        "`unverifiedSecondsToWithdraw` with no confirmed answer",
+        [("Watchdog == TRUE", "Watchdog == FALSE")],
+        "BoundHeld", bounds=OVERRIDE_BUSY),
+    override_mutant(
+        "ov-no-age-gate",
+        "VPNDNSOverridePublisher.hold: `guard probeOK, confirmedWithinBound` becomes `guard probeOK`, so the sync "
+        "after a held loop republishes the key the watchdog removed, on an answer older than the bound",
+        [("AgeGate == TRUE", "AgeGate == FALSE")],
+        "BoundHeld", bounds=OVERRIDE_BUSY),
 ]
 
 
