@@ -82,15 +82,6 @@ package enum DNSFailoverServerSocket: Equatable, Sendable {
 package enum DNSFailoverTransport: String, CaseIterable, Sendable {
     case udp
     case tcp
-
-    /// The largest request left unanswered over this half that is kept to replay. A larger one is counted, and the half
-    /// then has none to replay.
-    var largestKeptRequest: Int {
-        switch self {
-        case .udp: 512
-        case .tcp: 4_096
-        }
-    }
 }
 
 /// Counters of real queries one half sent to Conduit.
@@ -143,7 +134,7 @@ package final class DNSFailoverRoute: @unchecked Sendable {
         lock.withLock {
             _progress[transport, default: .zero].unanswered += 1
             _progress[transport]?.lastUnanswered = true
-            _lastUnanswered[transport] = request.count <= transport.largestKeptRequest ? request : nil
+            _lastUnanswered[transport] = request
         }
     }
 

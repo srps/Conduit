@@ -681,7 +681,7 @@ final class DNSFailoverRelayTests: XCTestCase {
         XCTAssertEqual(try askTCP(relay, edns: true), conduitIP)
     }
 
-    func testARequestTooLargeToKeepIsCountedAndNotReplacedByAnOlderOne() throws {
+    func testTheLargestRequestATCPSessionCanSendIsKeptAndReplayed() throws {
         let conduit = try standIn(conduitIP, tcp: true)
         conduit.dropsRealQueries = true
         let relay = try relay(conduitPort: conduit.port, servers: [:])
@@ -689,7 +689,7 @@ final class DNSFailoverRelayTests: XCTestCase {
         XCTAssertNil(try askTCP(relay, edns: true, padding: 4_200))
         XCTAssertEqual(relay.conduitProgress(.tcp), DNSFailoverProgress(answered: 0, unanswered: 2, lastUnanswered: true))
         conduit.dropsRealQueries = false
-        XCTAssertEqual(relay.recheck(.tcp), .notRunning, "the plain request before it is not replayed in its place")
+        XCTAssertEqual(relay.recheck(.tcp), .answered, "a large failed request is still there to show the recovery")
     }
 
     func testATCPSessionTakesTheModeAtConnect() throws {
