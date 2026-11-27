@@ -864,6 +864,8 @@ final class DNSFailoverRelayTests: XCTestCase {
         try send(fd, DNSWireFormat.buildQuery(domain: queryName, txID: 0x0909))
         let reply = try XCTUnwrap(readFrame(fd))
         XCTAssertEqual(Array(reply[0..<2]), [0x09, 0x09])
+        var readiness = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        XCTAssertEqual(poll(&readiness, 1, 3_000), 1)
         XCTAssertNil(readFrame(fd), "closed at the first query's lifetime")
         let kept = try XCTUnwrap(relay.route.lastUnansweredRequest(.tcp))
         XCTAssertEqual(Array(kept[0..<2]), [0x08, 0x08], "the unanswered one is kept, not the one that was answered")
