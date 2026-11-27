@@ -1481,6 +1481,22 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(state.eventLog.events.contains { $0.event == "helper.uninstall_restoring_dns" })
     }
 
+    /// An unsaved Manage system DNS checkbox is not what the host applies, so the uninstall stops nothing for it: a forwarder that does
+    /// not need the helper keeps running.
+    func testAnUnsavedManageSystemDNSCheckboxDoesNotStopTheForwarder() async throws {
+        let harness = try makeHarness()
+        harness.locationStore = NetworkLocationFixture.store()
+        let state = await harness.ready()
+        state.toggleDNS()
+        await harness.settle("DNS runs") { state.runtime.dnsRunState == .running }
+        state.platformConfig.manageSystemDNS = true
+
+        state.uninstallHelper()
+        await harness.settle("the helper was removed") { harness.helper.uninstalls == 1 }
+        XCTAssertEqual(state.runtime.dnsRunState, .running)
+        XCTAssertFalse(state.eventLog.events.contains { $0.event == "helper.uninstall_restoring_dns" })
+    }
+
     /// A check that cannot read the settings proves nothing either way, so the uninstall refuses at once and stops nothing: a forwarder
     /// that does not need the helper keeps running.
     func testAnUnreadableReleaseCheckRefusesTheUninstallWithoutStoppingDNS() async throws {
