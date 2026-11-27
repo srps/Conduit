@@ -1,7 +1,8 @@
 #!/bin/bash
 # Runs probe-network.sh against stubbed system tools, one network state per case, and checks the verdict and exit status.
-# The stubs follow the tools macOS ships: dig 9.10 (no -r, reads ~/.digrc) and curl 8 (reads ~/.curlrc unless -q is first,
-# expands {a,b} in a URL into one transfer each unless -g is given).
+# The stubs follow the tools macOS ships: dig 9.10 (no -r, reads ~/.digrc, retries over TCP after a truncated reply unless
+# +ignore is given) and curl 8 (reads ~/.curlrc unless -q is first, expands {a,b} in a URL into one transfer each unless -g
+# is given, reads options from stdin with -K -, writes TLS keys to $SSLKEYLOGFILE).
 set -euo pipefail
 
 probe="$(cd "$(dirname "$0")" && pwd)/probe-network.sh"
@@ -40,12 +41,14 @@ stub ping <<'SH'
 { printf 'ping'; printf ' [%s]' "$@"; echo; } >>"$FAKE_LOG"
 exit "$FAKE_PING"
 SH
-# FAKE_HTTP lists the direct targets that answer, as host=CODE. FAKE_PROXY lists the proxies that answer, as
+# FAKE_HTTP lists the direct targets that answer, as host=CODE, or host=CODE/EXIT for a reply curl reports with that exit
+# status, such as 200/18 for a body cut off. FAKE_PROXY lists the proxies that answer, as
 # host:port=CONNECT/FINAL/EXIT: curl's %{http_connect}, %{http_code} and exit status, which real curl reports apart.
 # An HTTP URL through a proxy has CONNECT 000. host:port=unresolved is a proxy name the system resolver cannot resolve.
 # Any other target or proxy does not answer.
 stub curl <<'SH'
 { printf 'curl'; printf ' [%s]' "$@"; echo; } >>"$FAKE_LOG"
+[ -z "${SSLKEYLOGFILE:-}" ] || echo "CLIENT_RANDOM 00 00" >>"$SSLKEYLOGFILE"
 if [ "${1:-}" != -q ] && [ -r "$HOME/.curlrc" ]; then
     while read -r option value; do [ "$option" = --trace-ascii ] && : >"$value"; done <"$HOME/.curlrc"
 fi
@@ -55,6 +58,20 @@ while [ $# -gt 0 ]; do
         -x) proxy="${2#http://}"; shift ;;
         -w) format="$2"; shift ;;
         --url) url="$2"; shift ;;
+        -K) if [ "$2" = - ]; then
+                # A quoted value ends at the first unescaped quote; a backslash takes the next character as it is.
+                while IFS= read -r line; do
+                    [[ "$line" =~ ^url\ =\ \"(.*)$ ]] || continue
+                    rest="${BASH_REMATCH[1]}" url=""
+                    while [ -n "$rest" ]; do
+                        c="${rest:0:1}" rest="${rest:1}"
+                        [ "$c" = '"' ] && break
+                        [ "$c" = '\' ] && { c="${rest:0:1}" rest="${rest:1}"; }
+                        url+="$c"
+                    done
+                done
+            fi
+            shift ;;
         -g) globoff=1 ;;
         -o|-m|--interface|--noproxy) shift ;;
         -*) ;;
@@ -83,7 +100,10 @@ for one in "${urls[@]}"; do
             *) IFS=/ read -r connect code status <<<"$reply" ;;
         esac
     else
-        for entry in $FAKE_HTTP; do [ "${entry%=*}" = "$host" ] && { code="${entry##*=}"; status=0; }; done
+        for entry in $FAKE_HTTP; do
+            [ "${entry%=*}" = "$host" ] || continue
+            IFS=/ read -r code status <<<"${entry##*=}"; status="${status:-0}"
+        done
     fi
     out="${format//'%{http_code}'/$code}"
     printf '%s' "${out//'%{http_connect}'/$connect}"
@@ -91,10 +111,11 @@ done
 exit "$status"
 SH
 # FAKE_DIG lists the servers that answer, as server:port=STATUS. NOERROR answers one A record, EMPTY is NOERROR with none,
-# and any other status has no answer. Any other server times out. Like dig, it prints a space in a name as \032.
+# TRUNC is a truncated NOERROR over UDP from a server that drops DNS over TCP, and any other status has no answer.
+# Any other server times out. Like dig, it prints a space in a name as \032.
 stub dig <<'SH'
 { printf 'dig'; printf ' [%s]' "$@"; echo; } >>"$FAKE_LOG"
-server="" port=53 name="" short=""
+server="" port=53 name="" short="" ignore=""
 [ -r "$HOME/.digrc" ] && grep -q '+short' "$HOME/.digrc" && short=1
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -103,6 +124,7 @@ while [ $# -gt 0 ]; do
         -q) name="$2"; shift ;;
         -b|-t) shift ;;
         +short) short=1 ;;
+        +ignore) ignore=1 ;;
         +*) ;;
         -*) echo "Invalid option: $1"; exit 1 ;;
         *) [ -z "$name" ] && name="$1" ;;
@@ -115,14 +137,29 @@ esac
 echo "query $server:$port [$name]" >>"$FAKE_LOG"
 status=""
 for entry in $FAKE_DIG; do [ "${entry%=*}" = "$server:$port" ] && status="${entry##*=}"; done
+if [ "$status" = TRUNC ]; then
+    [ -n "$ignore" ] || { echo "tcp retry $server:$port" >>"$FAKE_LOG"; status=""; }
+fi
 [ -n "$status" ] || { echo ";; connection timed out; no servers could be reached"; exit 9; }
 answers=0
+[ "$status" = TRUNC ] && status=NOERROR
 [ "$status" = NOERROR ] && answers=1
 [ "$status" = EMPTY ] && status=NOERROR
 if [ -n "$short" ]; then [ "$answers" = 1 ] && echo 192.0.2.10; exit 0; fi
 printf ';; Got answer:\n;; ->>HEADER<<- opcode: QUERY, status: %s, id: 1\n;; flags: qr rd ra; QUERY: 1, ANSWER: %s, AUTHORITY: 0, ADDITIONAL: 1\n\n' "$status" "$answers"
 [ "$answers" = 1 ] && printf ';; ANSWER SECTION:\n%s.\t\t60\tIN\tA\t192.0.2.10\n\n' "${name// /\\032}"
 exit 0
+SH
+# Logs whether the config reader asks for isolation and no bytecode. The Python that macOS ships skips bytecode under -I on
+# its own, and others do not, so this reads the options the probe passes rather than what this interpreter does.
+stub python3 <<'SH'
+isolated=0 nobytecode=0
+for a in "$@"; do
+    case "$a" in -c) break ;; -*I*) isolated=1 ;; esac
+    case "$a" in -*B*) nobytecode=1 ;; esac
+done
+echo "python isolated=$isolated nobytecode=$nobytecode" >>"$FAKE_LOG"
+exec /usr/bin/python3 "$@"
 SH
 
 # Every case runs with these in HOME, so a probe that reads either one changes its answers or writes the trace file.
@@ -162,6 +199,22 @@ JSON
 )"
 option_health="$(config option-health <<'JSON'
 {"healthCheckURL": "--config=/optsentinel", "upstreams": [{"host": "proxy.corp.example", "port": 8080, "priority": 0}]}
+JSON
+)"
+token_health="$(config token-health <<'JSON'
+{"healthCheckURL": "http://health.example/check?token=argvsentinel", "upstreams": [{"host": "proxy.corp.example", "port": 8080, "priority": 0}]}
+JSON
+)"
+quoted_health="$(config quoted-health <<'JSON'
+{"healthCheckURL": "http://health.example/a\"b\\c", "upstreams": [{"host": "proxy.corp.example", "port": 8080, "priority": 0}]}
+JSON
+)"
+scoped_health="$(config scoped-health <<'JSON'
+{"healthCheckURL": "http://[fe80::1%25scopesentinel]/", "upstreams": [{"host": "proxy.corp.example", "port": 8080, "priority": 0}]}
+JSON
+)"
+split_only="$(config split-only <<'JSON'
+{"dnsEntries": [{"domain": "corp.example", "servers": ["10.0.0.53"]}]}
 JSON
 )"
 five_proxies="$(config five-proxies <<'JSON'
@@ -221,10 +274,10 @@ failures=0 args=() shows="" absent="" logged=""
 run_case() { # <label> <expected exit> <expected Location/Verdict substring> then env assignments
     local label="$1" want_rc="$2" want="$3"; shift 3
     local out rc=0 problems=""
-    rm -f "$log" "$stubs/curl-trace"; : >"$log"
+    rm -f "$log" "$stubs/curl-trace" "$stubs/keylog"; : >"$log"
     out="$(/usr/bin/perl -e 'alarm 30; exec @ARGV or die' env -i PATH="$stubs:/usr/bin:/bin" HOME="$stubs" FAKE_LOG="$log" \
         FAKE_IFACES=en0 FAKE_IP=192.168.1.20 FAKE_GW=192.168.1.1 FAKE_NETDNS=192.168.1.1 FAKE_DEFAULT_IF=en0 FAKE_PING=0 \
-        FAKE_HTTP="1.1.1.1=301 9.9.9.9=404" FAKE_PROXY= FAKE_DIG= FAKE_DNS_CONFIG= "$@" \
+        FAKE_HTTP="1.1.1.1=301 9.9.9.9=404" FAKE_PROXY= FAKE_DIG= FAKE_DNS_CONFIG= SSLKEYLOGFILE="$stubs/keylog" "$@" \
         /bin/zsh "$probe" ${args[@]+"${args[@]}"} 2>&1)" || rc=$?
     local verdict; verdict="$(printf '%s\n' "$out" | grep -E '^(Location|Verdict):' | tr '\n' ' ' || true)"
     [ "$rc" -eq "$want_rc" ] || problems+=" exit $rc, wanted $want_rc;"
@@ -233,6 +286,9 @@ run_case() { # <label> <expected exit> <expected Location/Verdict substring> the
     [ -z "$absent" ] || [[ "$out" != *"$absent"* ]] || problems+=" output shows: $absent;"
     [ -z "$logged" ] || grep -qxF -- "$logged" "$log" || problems+=" no stub call: $logged;"
     [ ! -e "$stubs/curl-trace" ] || problems+=" curl read ~/.curlrc;"
+    [ ! -e "$stubs/keylog" ] || problems+=" curl wrote \$SSLKEYLOGFILE;"
+    ! grep '^curl ' "$log" | grep -qE 'health\.example|/library/test/' || problems+=" the health URL is on curl's argv;"
+    ! grep '^python ' "$log" | grep -qvx 'python isolated=1 nobytecode=1' || problems+=" $(grep '^python ' "$log" | head -1);"
     ! grep -q '^resolve ' "$log" || problems+=" dig resolved a server name: $(grep '^resolve ' "$log" | head -1);"
     ! grep '^ping ' "$log" | grep -qvF ' [-n] ' || problems+=" ping without -n;"
     if [ -z "$problems" ]; then
@@ -268,6 +324,12 @@ run_case "one blocked address is not a dead network" 0 "$healthy" \
 shows="OK    direct HTTPS to 1.1.1.1 or 9.9.9.9 1.1.1.1 HTTP 301"
 run_case "the first direct target that answers is enough" 0 "$healthy" \
     FAKE_HTTP="1.1.1.1=301" FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
+shows="no complete HTTP response from either in 5 s"
+run_case "a direct response cut off before it completes is not a working network" 2 "no web request got through" \
+    FAKE_HTTP="1.1.1.1=200/18 9.9.9.9=200/18" FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
+shows="OK    direct HTTPS to 1.1.1.1 or 9.9.9.9 9.9.9.9 HTTP 404"
+run_case "a cut-off first target does not hide a complete second one" 0 "$healthy" \
+    FAKE_HTTP="1.1.1.1=200/18 9.9.9.9=404" FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
 run_case "an office proxy's 407 shows only that the network reaches it" 1 "Location: corporate network (experimental" \
     "$corp" FAKE_HTTP= FAKE_PROXY="proxy.corp.example:8080=000/407/0" FAKE_DIG="192.168.1.1:53=NOERROR 10.0.0.53:53=NOERROR" \
     FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
@@ -296,6 +358,9 @@ run_case "NXDOMAIN is not resolution" 2 "answered with NXDOMAIN for www.apple.co
     FAKE_DIG="192.168.1.1:53=NXDOMAIN 1.1.1.1:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
 run_case "NOERROR with no address is not resolution" 2 "answers with no address for www.apple.com." \
     FAKE_DIG="192.168.1.1:53=EMPTY 1.1.1.1:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
+shows="OK    network's DNS answers              @192.168.1.1 NOERROR"
+run_case "a truncated UDP reply is an answer, with no retry over TCP" 0 "$healthy" \
+    FAKE_DIG="192.168.1.1:53=TRUNC 1.1.1.1:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
 args=(--name +time=60) logged="query 1.1.1.1:53 [+time=60]"
 run_case "the query name reaches dig as a name, never as an option" 0 "Names resolve and" \
     FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
@@ -303,8 +368,12 @@ args=(--name "two words") logged="query 1.1.1.1:53 [two words]"
 run_case "the query name reaches dig as one argument" 0 "Names resolve and" \
     FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
 
+absent="inconclusive"
 run_case "Conduit's resolver with a silent forwarder names Conduit" 2 "Conduit's DNS forwarder is not answering" \
     "$conduit_dns" FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 127.0.0.1)"
+absent="will not help"
+run_case "a silent Conduit resolver is named first, with public reachability inconclusive" 2 "Conduit's DNS forwarder is not answering. Use Restore DNS Settings in Conduit, or turn off Manage system DNS. Whether this network reaches the internet is inconclusive" \
+    "$conduit_dns" FAKE_HTTP= FAKE_DIG="192.168.1.1:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config 127.0.0.1)"
 run_case "manageSystemDNS in an older config.json without platform.json still makes it Conduit's" 2 "Conduit's DNS forwarder is not answering" \
     "$legacy_dns" FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 127.0.0.1)"
 shows="resolver 127.0.0.1 (local)" absent="Restore DNS Settings"
@@ -331,14 +400,28 @@ run_case "a local resolver on another loopback address is not Conduit's" 2 "127.
     "$conduit_dns" FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 127.0.0.2)"
 run_case "a network whose own DNS is dead says so" 2 "its DNS server does not answer" \
     FAKE_DIG="1.1.1.1:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
+run_case "a silent DHCP server is not blamed for another resolver's NXDOMAIN" 2 "The system resolver 10.1.1.1 answered with NXDOMAIN for www.apple.com." \
+    FAKE_DIG="10.1.1.1:53=NXDOMAIN 1.1.1.1:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config 10.1.1.1)"
+run_case "a silent DHCP server is not blamed for another resolver's silence" 2 "The system resolver 10.1.1.1 does not answer." \
+    FAKE_DIG="1.1.1.1:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config 10.1.1.1)"
 run_case "a resolver #1 without a server is no default resolver, whatever later blocks hold" 2 "No default resolver is configured" \
     FAKE_IFACES="en0 utun6" FAKE_DIG="$all_answer 10.53.53.53:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config "" "" utun6 10.53.53.53)"
 
-run_case "a VPN whose DNS servers are silent names the tunnel" 2 "The VPN's DNS servers do not answer (none of the 1 tried)" \
+vpn_dns_timeout="The VPN's DNS servers do not answer (none of the 1 tried), and the system resolver 127.0.0.1:15353 does not answer."
+absent="may not be carrying"
+run_case "silent VPN DNS on a full tunnel is a DNS timeout, with the tunnel unverified" 2 "$vpn_dns_timeout Whether the tunnel carries traffic is unverified" \
     "${vpn_up[@]}" FAKE_DIG= FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
+absent="may not be carrying"
+run_case "a proxy name that silent VPN DNS cannot resolve leaves the tunnel unverified" 2 "$vpn_dns_timeout Whether the tunnel carries traffic is unverified" \
+    "$https_health" "${vpn_up[@]}" FAKE_PROXY="proxy.corp.example:8080=unresolved" FAKE_DIG= \
+    FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
+run_case "a silent proxy beside silent VPN DNS says the tunnel may not carry traffic" 2 "$vpn_dns_timeout No corporate endpoint answers through the tunnel either" \
+    "$https_health" "${vpn_up[@]}" FAKE_DIG= FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
+run_case "a silent internal DNS server beside silent VPN DNS says the tunnel may not carry traffic" 2 "$vpn_dns_timeout No corporate endpoint answers through the tunnel either" \
+    "$split_only" "${vpn_up[@]}" FAKE_DIG= FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
 absent="not carrying traffic"
-run_case "internal DNS answering through the tunnel is not a dead tunnel" 2 "Conduit's DNS forwarder is not answering" \
-    "$corp" "${vpn_up[@]}" FAKE_DIG="10.0.0.53:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
+run_case "internal DNS answering through the tunnel is not a dead tunnel" 2 "Verdict: The system resolver 10.53.53.53 does not answer." \
+    "$split_only" "${vpn_up[@]}" FAKE_DIG="10.0.0.53:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config 10.53.53.53 "" utun6 10.53.53.53)"
 run_case "a full tunnel with no proxy to test through leaves web traffic unverified" 1 "Location: VPN Verdict: $unverified_tunnel" \
     "${vpn_up[@]}" FAKE_DIG="10.53.53.53:53=NOERROR 127.0.0.1:15353=NOERROR" \
     FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
@@ -363,8 +446,8 @@ shows="OK    VPN's DNS answers                  @10.53.53.53:5353 NOERROR"
 run_case "a VPN's DNS server is asked on its own port" 1 "$unverified_tunnel" \
     "${vpn_up[@]}" FAKE_DIG="10.53.53.53:5353=NOERROR 127.0.0.1:15353=NOERROR" \
     FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53 5353)"
-run_case "a corporate proxy answering through the tunnel means the tunnel carries traffic" 2 "Conduit's DNS forwarder is not answering" \
-    "$corp" "${vpn_up[@]}" FAKE_PROXY="proxy.corp.example:8080=000/407/0" FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
+run_case "a corporate proxy answering through the tunnel means the tunnel carries traffic" 2 "Verdict: The system resolver 10.53.53.53 does not answer." \
+    "$https_health" "${vpn_up[@]}" FAKE_PROXY="proxy.corp.example:8080=000/407/0" FAKE_DNS_CONFIG="$(dns_config 10.53.53.53 "" utun6 10.53.53.53)"
 run_case "a tunnel where no VPN DNS server or proxy answers needs reconnecting" 2 "neither the VPN's DNS servers nor a corporate proxy answer through the tunnel (none of the 1 tried)" \
     "$corp" "${vpn_up[@]}" FAKE_DIG="127.0.0.1:15353=NOERROR" FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
 run_case "internal DNS answering through the tunnel keeps it from being called dead" 2 "Names resolve, but no corporate proxy answers through the VPN (none of the 1 tried)" \
@@ -408,6 +491,15 @@ run_case "a healthy VPN with a request through its proxy and internal DNS passes
 logged="transfer http://health.example/{a,b}"
 run_case "a health URL with {a,b} is one transfer, not a glob" 0 "Location: corporate network (experimental" \
     "$glob_health" FAKE_PROXY="proxy.corp.example:8080=000/200/0" FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
+absent="argvsentinel" logged="transfer http://health.example/check?token=argvsentinel"
+run_case "a health URL with a token reaches curl over stdin, never its argv" 0 "Location: corporate network (experimental" \
+    "$token_health" FAKE_PROXY="proxy.corp.example:8080=000/200/0" FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
+logged='transfer http://health.example/a"b\c'
+run_case "a health URL with a quote and a backslash reaches curl intact" 0 "Location: corporate network (experimental" \
+    "$quoted_health" FAKE_PROXY="proxy.corp.example:8080=000/200/0" FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
+shows="health-check URL is not a plain http(s) URL" absent="scopesentinel" logged="transfer http://www.apple.com/library/test/success.html"
+run_case "a health URL with a scoped IPv6 host is refused and never printed" 0 "$healthy" \
+    "$scoped_health" FAKE_PROXY="proxy.corp.example:8080=000/200/0" FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
 shows="health-check URL is not a plain http(s) URL" absent="urlsentinel" logged="transfer http://www.apple.com/library/test/success.html"
 run_case "a health URL carrying credentials is refused and never printed" 0 "$healthy" \
     "$userinfo_health" FAKE_PROXY="proxy.corp.example:8080=000/200/0" FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"

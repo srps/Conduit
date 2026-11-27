@@ -8,7 +8,7 @@
 # answers are ambiguous. It comes from which configured endpoints answer, not from routes. CONDUIT_CONFIG names
 # another config.json.
 # Exit status: 0 when names resolve and a web request completed, 1 when nothing failed but no web request could be
-# verified, 2 when a check fails, 64 on a usage error. It has no overall deadline; it takes about 45 s at worst.
+# verified, 2 when a check fails, 64 on a usage error. It has no overall deadline; it takes about 50 s at worst.
 # It diagnoses IPv4 only, and says so on a network with only IPv6. The system check queries the default resolver
 # directly with dig, which gives up after 2 s. It does not go through the macOS resolver, so apps can get a cached
 # or supplemental answer that this check does not see.
@@ -36,7 +36,7 @@ dns_query() { # <server> <port> <name> [source address]
     local out source=()
     [[ -n "${4:-}" ]] && source=(-b "$4")
     # An empty HOME keeps ~/.digrc out, since the dig macOS ships has no -r.
-    out="$(HOME=/var/empty dig +time=2 +tries=1 +noall +comments +answer $source -p "$2" "@$1" -q "$3" -t A 2>&1)"
+    out="$(HOME=/var/empty dig +time=2 +tries=1 +ignore +noall +comments +answer $source -p "$2" "@$1" -q "$3" -t A 2>&1)"
     rcode=timeout
     [[ "$out" =~ 'status: ([A-Z]+)' ]] && rcode="$match[1]"
     addresses="$(print -r -- "$out" | awk '!/^;/ && $4 == "A" { n++ } END { print n + 0 }')"
@@ -112,7 +112,7 @@ config="${CONDUIT_CONFIG:-$HOME/Library/Application Support/Conduit/config.json}
 if [[ -e "$config" ]]; then
     # One tab-separated line per field. Hosts, servers and the URL are checked here, so nothing else from the files
     # reaches the output or a command line. Manage system DNS lives in platform.json, or in config.json before it.
-    if settings="$(python3 -I -c '
+    if settings="$(python3 -I -B -c '
 import ipaddress, json, os, re, stat, sys
 from urllib.parse import urlsplit
 
@@ -133,7 +133,8 @@ def is_ip(s):
 def is_url(s):
     try:
         u = urlsplit(s)
-        return s.isprintable() and u.scheme in ("http", "https") and bool(u.hostname) and "@" not in u.netloc
+        return (s.isprintable() and u.scheme in ("http", "https") and bool(u.hostname) and "@" not in u.netloc
+                and "%" not in u.hostname)
     except ValueError:
         return False
 
@@ -150,7 +151,8 @@ port, url = c.get("dnsForwarderPort"), c.get("healthCheckURL")
 if isinstance(port, int):
     print("port", port, sep="\t")
 if isinstance(url, str) and is_url(url):
-    print("health", url, sep="\t")
+    # Quoted for the curl config syntax: curl reads the URL from stdin, so a token in it never shows in ps.
+    print("health", url.replace("\\", "\\\\").replace("\"", "\\\""), sep="\t")
 elif url:
     print("health-invalid")
 ordered = []
@@ -245,13 +247,14 @@ else
     # Two targets, so one blocked address is not read as a dead network.
     direct=""
     for target in 1.1.1.1 9.9.9.9; do
-        code="$(curl -q --interface "$physical" --noproxy '*' -m 5 -s -o /dev/null -w '%{http_code}' "https://$target" 2>/dev/null)"
-        if [[ "$code" == <100-599> ]]; then direct="$target HTTP $code"; break; fi
+        code="$(env -u SSLKEYLOGFILE curl -q --interface "$physical" --noproxy '*' -m 5 -s -o /dev/null -w '%{http_code}' \
+            "https://$target" 2>/dev/null)"
+        if (( $? == 0 )) && [[ "$code" == <100-599> ]]; then direct="$target HTTP $code"; break; fi
     done
     if [[ -n "$direct" ]]; then
         check internet "direct HTTPS to 1.1.1.1 or 9.9.9.9" ok "$direct"
     else
-        check internet "direct HTTPS to 1.1.1.1 or 9.9.9.9" fail "no HTTP response from either in 5 s"
+        check internet "direct HTTPS to 1.1.1.1 or 9.9.9.9" fail "no complete HTTP response from either in 5 s"
     fi
     dns_check public_dns "public DNS 1.1.1.1 answers" 1.1.1.1 53 "$address"
 fi
@@ -280,7 +283,7 @@ fi
 # A 407 or a CONNECT reply shows only that the proxy answered; a request through it completes when the destination
 # replies, which needs a final status after CONNECT 200, or a 2xx or 3xx for an HTTP URL.
 # Names here resolve through the system resolver, so on a network with dead DNS these fail too.
-proxy_passes=false proxies_tried=0
+proxy_passes=false proxy_silent=false proxies_tried=0
 if [[ "$config_state" == unreadable ]]; then
     check corp_proxy "corporate proxy answers" skip "Conduit config unreadable"
 elif (( $#upstreams )); then
@@ -288,9 +291,10 @@ elif (( $#upstreams )); then
     (( $#upstreams > 3 )) && subset="; tried the first 3 by priority of $#upstreams"
     for upstream in "${(@)upstreams[1,3]}"; do
         (( proxies_tried++ ))
-        # -g and --url keep curl from reading the URL as a glob pattern or an option.
-        reply="$(curl -q -g --noproxy '' -x "http://$upstream" -m 4 -s -o /dev/null -w '%{http_connect} %{http_code}' \
-            --url "${health_url:-http://www.apple.com/library/test/success.html}" 2>/dev/null)"
+        # -g keeps curl from reading the URL as a glob pattern.
+        reply="$(print -r -- "url = \"${health_url:-http://www.apple.com/library/test/success.html}\"" |
+            env -u SSLKEYLOGFILE curl -q -K - -g --noproxy '' -x "http://$upstream" -m 4 -s -o /dev/null \
+            -w '%{http_connect} %{http_code}' 2>/dev/null)"
         curl_status=$?
         connect="${reply%% *}" code="${reply#* }" answer=""
         [[ "$connect" == <100-599> ]] && answer+=" CONNECT $connect"
@@ -304,7 +308,11 @@ elif (( $#upstreams )); then
             fi
             break
         fi
-        if (( curl_status == 5 )); then misses+=("$upstream name does not resolve"); else misses+=("$upstream no answer in 4 s"); fi
+        if (( curl_status == 5 )); then
+            misses+=("$upstream name does not resolve")
+        else
+            misses+=("$upstream no answer in 4 s") proxy_silent=true
+        fi
     done
     if [[ -n "$proxy_answered" ]]; then
         check corp_proxy "corporate proxy answers" ok "$proxy_answered"
@@ -382,6 +390,14 @@ if failed link; then
     verdict="No network connection: ${detail[link]}. Join a network first."
 elif [[ "${result[link]}" == skip ]]; then
     exit_code=1 verdict="IPv4 diagnostics unavailable: ${detail[link]}."
+elif $uses_conduit && [[ "${rcodes[system]}" == timeout ]]; then
+    if [[ "${rcodes[forwarder]}" == timeout ]]; then
+        verdict="The system resolver points at Conduit, and Conduit's DNS forwarder is not answering. Use Restore DNS Settings in Conduit, or turn off Manage system DNS."
+    else
+        verdict="The system resolver points at Conduit ($system_shown) and gets no answer, though the forwarder answers directly. Use Restore DNS Settings in Conduit, or turn off Manage system DNS."
+    fi
+    failed internet && failed public_dns &&
+        verdict+=" Whether this network reaches the internet is inconclusive: $direct also fail, which a network that blocks direct traffic causes too."
 elif ! $vpn_full && failed internet && failed public_dns && ! reaches_beyond; then
     if answered network_dns && { ! answered system || [[ "$system_dns" == "${network_dns%% *}" ]] }; then
         verdict="This network is not reaching the internet: $direct all fail, and only its own DNS server answers, maybe from a cache. Switch networks or restart the hotspot or router. Restarting the Mac or Conduit will not help."
@@ -391,7 +407,12 @@ elif ! $vpn_full && failed internet && failed public_dns && ! reaches_beyond; th
         verdict="Inconclusive: names resolve through $system_shown, but $direct all fail. This network may block those addresses, or the answer came from a cache."
     fi
 elif $vpn_full && failed vpn_dns && failed system && ! answered corp_proxy && ! answered corp_dns; then
-    verdict="The VPN's DNS servers do not answer (none of the $vpn_tried tried), so the tunnel is not carrying traffic. Reconnect the VPN, or disconnect it if the network underneath changed."
+    verdict="The VPN's DNS servers do not answer (none of the $vpn_tried tried), and the system resolver $system_shown $system_result."
+    if $proxy_silent || failed corp_dns; then
+        verdict+=" No corporate endpoint answers through the tunnel either, so it may not be carrying traffic. Reconnect the VPN, or disconnect it if the network underneath changed."
+    else
+        verdict+=" Whether the tunnel carries traffic is unverified: no check independent of DNS ran through it. Reconnect the VPN if this persists."
+    fi
 elif answered system && ! web_request && ! answered corp_proxy && ! $vpn_full && failed internet; then
     verdict="Names resolve, maybe from a cache, but no web request got through: direct HTTPS to 1.1.1.1 and 9.9.9.9 fails$proxies_failed."
 elif answered system && $vpn_full && failed corp_proxy && ! answered vpn_dns && ! answered corp_dns; then
@@ -413,13 +434,9 @@ elif [[ -z "$system_dns" ]]; then
 elif $uses_conduit && [[ "${rcodes[system]}" == SERVFAIL ]]; then
     verdict="The system resolver points at Conduit ($system_shown), which answered with SERVFAIL, so it or a DNS server it forwards to failed. See the network's and the VPN's DNS checks above."
     [[ "${rcodes[forwarder]}" == timeout ]] && verdict+=" Conduit's DNS forwarder on :$forwarder_port does not answer directly."
-elif $uses_conduit && [[ "${rcodes[system]}" == timeout && "${rcodes[forwarder]}" == timeout ]]; then
-    verdict="The system resolver points at Conduit, and Conduit's DNS forwarder is not answering. Use Restore DNS Settings in Conduit, or turn off Manage system DNS."
-elif $uses_conduit && [[ "${rcodes[system]}" == timeout ]]; then
-    verdict="The system resolver points at Conduit ($system_shown) and gets no answer, though the forwarder answers directly. Use Restore DNS Settings in Conduit, or turn off Manage system DNS."
 elif $system_local && ! $uses_conduit; then
     verdict="The system resolver $system_shown is a local resolver, and it $system_result. Check the program that serves it."
-elif ! $vpn_full && answered internet && failed network_dns; then
+elif ! $vpn_full && answered internet && [[ "${rcodes[system]}" == timeout && "$system_shown" == "${network_dns%% *}" ]]; then
     verdict="The network passes traffic but its DNS server does not answer. Use another DNS server, or let Conduit manage DNS."
 else
     verdict="The system resolver $system_shown $system_result."
