@@ -72,3 +72,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0046](0046-bound-what-grows.md) | Bound what grows, validate what a trusted local source replaces | accepted | implemented | none |
 | [0047](0047-vpn-blind-gap-and-local-captures.md) | A blind gap is measured from the last good VPN reading, and store captures stay local | accepted | implemented | none |
 | [0048](0048-store-read-schedule.md) | Retry a failed store reading with backoff, audit a healthy one every 60 s, and withhold split DNS while blind | accepted | implemented | none |
+| [0049](0049-keep-dns-serving-while-a-service-uses-it.md) | Keep DNS serving while a service still uses it, and fence Uninstall Helper | proposed | implemented | none |
