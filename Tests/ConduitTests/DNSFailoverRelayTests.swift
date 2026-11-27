@@ -82,7 +82,10 @@ private final class StandInDNS: @unchecked Sendable {
         if tcp != nil { Thread { [self] in acceptTCP() }.start() }
     }
 
+    /// A query whose section counts do not match its bytes is dropped, as a strict server drops it.
     private func answer(_ query: [UInt8]) -> (reply: [UInt8], delay: TimeInterval)? {
+        guard let question = DNSWireFormat.headerAndQuestion(of: query),
+              (question.count < query.count) == query[6..<12].contains(where: { $0 != 0 }) else { return nil }
         let name = DNSWireFormat.extractDomainName(from: query).lowercased()
         let isProbe = name == DNSWireFormat.forwarderProbeDomain.lowercased()
         let (silent, delay) = lock.withLock { () -> (Bool, TimeInterval) in
@@ -218,19 +221,25 @@ final class DNSFailoverRelayTests: XCTestCase {
         return relay
     }
 
-    private func ask(_ relay: DNSFailoverRelay, timeout: TimeInterval = 3) -> (ip: String?, seconds: Double) {
+    private func ask(_ relay: DNSFailoverRelay, timeout: TimeInterval = 3, edns: Bool = false) -> (ip: String?, seconds: Double) {
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         defer { close(fd) }
-        return ask(relay, on: fd, timeout: timeout)
+        return ask(relay, on: fd, timeout: timeout, edns: edns)
     }
 
-    private func ask(_ relay: DNSFailoverRelay, on fd: Int32, timeout: TimeInterval = 3) -> (ip: String?, seconds: Double) {
+    private func ask(
+        _ relay: DNSFailoverRelay, on fd: Int32, timeout: TimeInterval = 3, edns: Bool = false
+    ) -> (ip: String?, seconds: Double) {
         var address = sockaddr_in()
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = UInt16(relay.listeningPort ?? 0).bigEndian
         address.sin_addr.s_addr = inet_addr("127.0.0.1")
-        let query = DNSWireFormat.buildQuery(domain: queryName, txID: UInt16.random(in: 1...UInt16.max))
+        var query = DNSWireFormat.buildQuery(domain: queryName, txID: UInt16.random(in: 1...UInt16.max))
+        if edns {
+            query[11] = 1
+            query += [0x00, 0x00, 0x29, 0x10, 0x00, 0, 0, 0, 0, 0x00, 0x00]
+        }
         let began = Date()
         _ = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sendto(fd, query, query.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
@@ -526,48 +535,75 @@ final class DNSFailoverRelayTests: XCTestCase {
         XCTAssertEqual(relay.conduitProgress, DNSFailoverProgress(answered: 1, unanswered: 1, lastUnanswered: false))
     }
 
-    /// The publisher over the real relay, with a forwarder that answers the probe name and nothing else.
+    /// The publisher over a real relay, on a clock the test moves a tick at a time.
+    private final class Override: @unchecked Sendable {
+        let service = "com.cisco.anyconnect"
+        let store = FakeVPNDNSStore()
+        var now: UInt64 = 1_000_000_000_000
+        var outcomes: [VPNDNSOverrideOutcome] = []
+        var publisher: VPNDNSOverridePublisher!
+
+        init(relay: DNSFailoverRelay) {
+            store.connectFullTunnel(service, servers: ["192.0.2.53"])
+            publisher = VPNDNSOverridePublisher(store: store, relay: relay, now: { [unowned self] in now }) { [unowned self] in
+                outcomes.append($0)
+            }
+            XCTAssertTrue(publisher.arm(service: service, servers: ["192.0.2.53"], owner: 1))
+            XCTAssertNotNil(store.ownKey)
+        }
+
+        func tick() {
+            now += UInt64(VPNDNSOverridePublisher.tickSeconds) * 1_000_000_000
+            publisher.tick()
+        }
+    }
+
+    /// A forwarder that answers the probe name and nothing else.
     func testAProbeOnlyForwarderLosesTheKeyByTheBoundAndNeverGetsTheLookupsBack() throws {
         let conduit = try standIn(conduitIP, tcp: true)
         let vpn = try standIn(vpnIP, tcp: true)
         let relay = try relay(conduitPort: conduit.port, servers: ["192.0.2.53": vpn])
-        let service = "com.cisco.anyconnect"
-        let store = FakeVPNDNSStore()
-        store.connectFullTunnel(service, servers: ["192.0.2.53"])
-        final class Clock: @unchecked Sendable { var now: UInt64 = 1_000_000_000_000 }
-        let clock = Clock()
-        var outcomes: [VPNDNSOverrideOutcome] = []
-        let publisher = VPNDNSOverridePublisher(store: store, relay: relay, now: { clock.now }) { outcomes.append($0) }
-        func tick() {
-            clock.now += UInt64(VPNDNSOverridePublisher.tickSeconds) * 1_000_000_000
-            publisher.tick()
-        }
-        XCTAssertTrue(publisher.arm(service: service, servers: ["192.0.2.53"], owner: 1))
-        XCTAssertNotNil(store.ownKey)
+        let override = Override(relay: relay)
+        let store = override.store
 
         conduit.dropsRealQueries = true
         XCTAssertNil(ask(relay, timeout: 0.5).ip, "the lookups of the interval before the tick are lost")
         Thread.sleep(forTimeInterval: 2.2)
-        tick()
+        override.tick()
         XCTAssertEqual(relay.mode, .vpn)
         XCTAssertEqual(ask(relay).ip, vpnIP, "the next lookup goes to the VPN's servers")
         XCTAssertNotNil(store.ownKey)
-        tick()
+        override.tick()
         XCTAssertEqual(relay.mode, .vpn, "an answered probe does not send the lookups back to a forwarder that drops them")
         XCTAssertEqual(ask(relay).ip, vpnIP)
         XCTAssertNotNil(store.ownKey)
-        tick()
+        override.tick()
         XCTAssertNil(store.ownKey, "withdrawn 30 s after the last confirmed answer")
-        XCTAssertEqual(outcomes.last, .withdrawn(service: service, reason: .targetSilent))
-        tick()
+        XCTAssertEqual(override.outcomes.last, .withdrawn(service: override.service, reason: .targetSilent))
+        override.tick()
         XCTAssertNil(store.ownKey, "a probe answer alone does not bring it back")
         XCTAssertEqual(relay.mode, .vpn)
 
         conduit.dropsRealQueries = false
-        tick()
+        override.tick()
         XCTAssertNotNil(store.ownKey, "Conduit answered the question it had dropped")
         XCTAssertEqual(relay.mode, .conduit)
         XCTAssertEqual(ask(relay).ip, conduitIP)
+    }
+
+    func testTheRecheckOfAnEDNSQuestionIsAQueryAStrictForwarderAnswers() throws {
+        let conduit = try standIn(conduitIP, tcp: true)
+        let vpn = try standIn(vpnIP, tcp: true)
+        let relay = try relay(conduitPort: conduit.port, servers: ["192.0.2.53": vpn])
+        let override = Override(relay: relay)
+
+        conduit.dropsRealQueries = true
+        _ = ask(relay, timeout: 3, edns: true)
+        conduit.dropsRealQueries = false
+        override.tick()
+        XCTAssertEqual(relay.mode, .conduit, "the recovered forwarder answers the replayed question")
+        XCTAssertFalse(override.outcomes.contains { if case .queriesUnanswered = $0 { true } else { false } })
+        XCTAssertNotNil(override.store.ownKey)
     }
 
     func testATCPSessionTakesTheModeAtConnect() throws {

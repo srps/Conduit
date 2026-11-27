@@ -1090,8 +1090,10 @@ package final class DNSFailoverRelay: @unchecked Sendable {
     /// answer of any kind is evidence it answers real queries again. It waits the silence a real query fails over on.
     /// Not running when there is no such question.
     package func recheck() -> DNSFailoverProbeOutcome {
-        guard let port = target, let question = route.lastUnansweredQuestion else { return .notRunning }
-        return Self.ask(question, port: port, boundMilliseconds: Int(FailoverSocket.milliseconds(timing.silenceBeforeProbe)))
+        guard let port = target, var query = route.lastUnansweredQuestion else { return .notRunning }
+        // Only the header and question were kept, so no answer, authority or additional record follows them.
+        query.replaceSubrange(6..<12, with: repeatElement(0, count: 6))
+        return Self.ask(query, port: port, boundMilliseconds: Int(FailoverSocket.milliseconds(timing.silenceBeforeProbe)))
     }
 
     static func verdict(_ response: [UInt8], to query: [UInt8]) -> DNSFailoverProbeOutcome? {
