@@ -219,6 +219,10 @@ final class DNSFailoverRelayTests: XCTestCase {
     private func ask(_ relay: DNSFailoverRelay, timeout: TimeInterval = 3) -> (ip: String?, seconds: Double) {
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         defer { close(fd) }
+        return ask(relay, on: fd, timeout: timeout)
+    }
+
+    private func ask(_ relay: DNSFailoverRelay, on fd: Int32, timeout: TimeInterval = 3) -> (ip: String?, seconds: Double) {
         var address = sockaddr_in()
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         address.sin_family = sa_family_t(AF_INET)
@@ -395,8 +399,11 @@ final class DNSFailoverRelayTests: XCTestCase {
         let quick = try standIn("198.51.100.2")
         let relay = try relay(conduitPort: conduit.port, servers: ["192.0.2.1": slow, "192.0.2.2": quick], order: ["192.0.2.1", "192.0.2.2"])
         relay.setMode(.vpn)
-        XCTAssertEqual(ask(relay).ip, "198.51.100.2")
-        Thread.sleep(forTimeInterval: 0.4)
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        defer { close(fd) }
+        XCTAssertEqual(ask(relay, on: fd).ip, "198.51.100.2")
+        var readiness = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        XCTAssertEqual(poll(&readiness, 1, 600), 0, "the slow server's later reply never reaches the client")
         XCTAssertEqual(slow.total, 1)
     }
 
