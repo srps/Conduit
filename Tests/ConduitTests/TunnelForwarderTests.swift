@@ -121,6 +121,7 @@ final class TunnelForwarderTests: XCTestCase {
         let result = await forwarder.start(
             tunnels: [
                 TunnelDefinition(localPort: 0, remoteHost: "db.corp.example\r\nX-Injected: 1", remotePort: 5432, proxied: true, label: "crlf"),
+                TunnelDefinition(localPort: 0, remoteHost: "fd00::5%\u{301}X-Zone", remotePort: 5432, proxied: true, label: "zone"),
                 TunnelDefinition(localPort: 0, remoteHost: "db.corp.example", remotePort: 5432, proxied: true, label: "proxied"),
                 TunnelDefinition(localPort: 0, remoteHost: "fd00::5", remotePort: 5432, proxied: true, label: "proxied-v6"),
                 TunnelDefinition(localPort: 0, remoteHost: "bücher.corp.example", remotePort: 5432, proxied: false, label: "direct"),
@@ -130,13 +131,16 @@ final class TunnelForwarderTests: XCTestCase {
         await forwarder.stop()
 
         XCTAssertEqual(result.bindings.map(\.label), ["proxied", "proxied-v6", "direct"])
-        XCTAssertEqual(result.refused, 1)
+        XCTAssertEqual(result.refused, 2)
         XCTAssertEqual(result.failed, 0, "a refused tunnel is not a bind failure")
         XCTAssertEqual(
             events.withLockedValue { $0 }.filter { $0.event == "tunnel.start_refused" }.map(\.detail),
-            ["localPort=0 remotePort=5432 reason=remote_host_not_a_host"]
+            Array(repeating: "localPort=0 remotePort=5432 reason=remote_host_not_a_host", count: 2)
         )
-        XCTAssertFalse(logger.entries().contains { $0.message.contains("X-Injected") }, "the refusal never logs the host")
+        XCTAssertFalse(
+            logger.entries().contains { $0.message.contains("X-Injected") || $0.message.contains("X-Zone") },
+            "the refusal never logs the host"
+        )
     }
 
     // MARK: - Proxied tunnel through production TunnelForwarder

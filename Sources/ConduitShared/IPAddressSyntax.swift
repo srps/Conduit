@@ -43,11 +43,12 @@ public enum IPAddressSyntax {
 
     /// Unbracketed, and without a zone index. Darwin's `inet_pton` accepts
     /// `fe80::1%en0` (it is what `getaddrinfo` would hand back for a
-    /// link-local scope), so the `%` is refused here explicitly: it is what a
+    /// link-local scope), so the `%` byte is refused here explicitly: it is what a
     /// shell-adjacent consumer would misread, and no caller has a use for a
-    /// link-local server.
+    /// link-local server. It is searched as a byte, because a combining mark
+    /// after it makes one Character that a Character search does not match.
     public static func isIPv6(_ address: String) -> Bool {
-        guard !address.contains("%"), !address.utf8.contains(0) else { return false }
+        guard !address.utf8.contains(0x25), !address.utf8.contains(0) else { return false }
         var buffer = in6_addr()
         return inet_pton(AF_INET6, address, &buffer) == 1
     }
