@@ -20,13 +20,18 @@ calls="$scratch/calls"
 # STUB_SCUTIL_FAIL_ON: a command that makes the scutil session fail.
 # STUB_SCUTIL_DIAGNOSE_ON: a command whose session prints a diagnostic and an
 # empty dictionary, and still exits 0. STUB_SCUTIL_NOTE_ON: one whose session
-# prints a diagnostic before its real output.
+# prints a diagnostic before its real output. STUB_SCUTIL_INSIDE_ON: one whose
+# session prints an indented diagnostic inside an otherwise empty dictionary.
 cat > "$stubs/scutil" <<'STUB'
 #!/bin/bash
 session="$(cat)"
 if [ -n "${STUB_SCUTIL_FAIL_ON:-}" ] && [[ "$session" == *"$STUB_SCUTIL_FAIL_ON"* ]]; then exit 1; fi
 if [ -n "${STUB_SCUTIL_DIAGNOSE_ON:-}" ] && [[ "$session" == *"$STUB_SCUTIL_DIAGNOSE_ON"* ]]; then
     printf '  Permission denied\n<dictionary> {\n}\n'
+    exit 0
+fi
+if [ -n "${STUB_SCUTIL_INSIDE_ON:-}" ] && [[ "$session" == *"$STUB_SCUTIL_INSIDE_ON"* ]]; then
+    printf '<dictionary> {\n  Permission denied\n}\n'
     exit 0
 fi
 if [ -n "${STUB_SCUTIL_NOTE_ON:-}" ] && [[ "$session" == *"$STUB_SCUTIL_NOTE_ON"* ]]; then echo "  Permission denied"; fi
@@ -131,6 +136,8 @@ expect "a diagnostic beside a service is refused"      1 "$scratch/clean.plist" 
     STUB_SCUTIL_DIAGNOSE_ON="get /NetworkServices/S2"
 expect "a diagnostic beside the location listing is refused" 1 "$scratch/office.plist" "Could not read the network settings" "must be run with sudo" \
     STUB_SCUTIL_NOTE_ON="list /Sets"
+expect "an indented diagnostic inside a service's DNS is refused" 1 "$scratch/office.plist" "Could not read the network settings" \
+    "must be run with sudo" STUB_SCUTIL_INSIDE_ON="get /NetworkServices/S1/DNS"
 expect "a scalar ServerAddresses is refused"           1 "$scratch/scalar.plist" "Could not read the network settings" "must be run with sudo"
 expect "a failed read of a service is refused"         1 "$scratch/clean.plist"  "Could not read the network settings" "must be run with sudo" \
     STUB_SCUTIL_FAIL_ON="get /NetworkServices/S3"
