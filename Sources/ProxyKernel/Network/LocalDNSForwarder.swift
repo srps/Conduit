@@ -478,7 +478,7 @@ struct DoHFailureSignature: Equatable {
             proxyCauses.append("a proxy on the route asked for authentication and Conduit refused the challenge instead of asking macOS for a credential (auth.proxy_challenge_refused names the proxy)")
         }
         if !tunnelRefusedBy.isEmpty {
-            proxyCauses.append("Conduit's listener at \(tunnelRefusedBy.joined(separator: ", ")) could not open the tunnel to a provider (CFNetwork error 310, which does not carry the listener's status): the upstream behind it refused or blocked the provider, or could not reach it")
+            proxyCauses.append("the CONNECT through Conduit's listener at \(tunnelRefusedBy.joined(separator: ", ")) failed for a provider (CFNetwork error 310, which does not carry the listener's status); one possible cause is the upstream behind it refusing, blocking or failing to reach the provider")
         }
         let advice = "Public names cannot be resolved until a reachable provider is configured (IP-literal endpoints avoid both failure modes)."
         let proxies = proxyCauses.joined(separator: "; also, ")

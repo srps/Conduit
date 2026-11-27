@@ -19,10 +19,10 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   could fail. On the VPN, and on a corporate network without it, each lookup
   still asks the proxy and direct at the same time (`dns.doh_route_changed`).
 
-- When every DNS-over-HTTPS provider fails and Conduit's listener could not
-  open the tunnel to one of them, the warning now names that listener and says
-  the upstream behind it refused, blocked or could not reach the provider. It
-  used to call the providers unreachable.
+- When every DNS-over-HTTPS provider fails and the CONNECT through Conduit's
+  listener to one of them failed, the warning now names that listener and
+  gives the upstream behind it refusing, blocking or failing to reach the
+  provider as one possible cause. It used to call the providers unreachable.
 
 - The transparent proxy's DNS-over-HTTPS lookups through Conduit's listener
   open one connection per provider instead of two. Each one is a tunnel the

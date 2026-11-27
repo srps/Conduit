@@ -397,12 +397,15 @@ final class ProxyChallengeRefusalTests: XCTestCase {
     }
 
     /// A listener that answers the CONNECT with an error fails the request with CFNetwork error 310, which carries no
-    /// status. The warning names that listener instead of calling the providers unreachable.
+    /// status. The warning names that listener instead of calling the providers unreachable. Here the listener refuses
+    /// with no upstream behind it, so the warning offers the upstream as one possible cause, not as the cause.
     func testTheAllProvidersFailedWarningNamesAListenerThatRefusedTheTunnel() async throws {
         let proxy = try await ChallengingProxy.start(group: group, answering: "403 Forbidden")
         let warning = try await allProvidersFailedWarning(through: proxy)
-        XCTAssertTrue(warning.contains("Conduit's listener at 127.0.0.1:\(proxy.port) could not open the tunnel"), warning)
+        XCTAssertTrue(warning.contains("the CONNECT through Conduit's listener at 127.0.0.1:\(proxy.port) failed"), warning)
         XCTAssertTrue(warning.contains("CFNetwork error 310"), warning)
+        XCTAssertTrue(warning.contains("one possible cause is the upstream behind it"), warning)
+        XCTAssertFalse(warning.contains("the upstream behind it refused"), warning)
         XCTAssertFalse(warning.contains("the providers were unreachable"), warning)
         XCTAssertFalse(warning.contains("refused the challenge"), warning)
     }
