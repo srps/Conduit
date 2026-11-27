@@ -15,6 +15,7 @@ private final class StandInDNS: @unchecked Sendable {
     private var _dropsRealTCPQueries = false
     private var _dropsEDNSOverTCP = false
     private var _delay: TimeInterval = 0
+    private var _delays: [String: TimeInterval] = [:]
     private var _asked: [String: Int] = [:]
     private var stopped = false
     private let udp: Int32
@@ -70,6 +71,9 @@ private final class StandInDNS: @unchecked Sendable {
         set { lock.withLock { _delay = newValue } }
     }
 
+    /// A delay for one name, over the one all real queries take.
+    func delay(_ seconds: TimeInterval, for name: String) { lock.withLock { _delays[name] = seconds } }
+
     var total: Int { lock.withLock { _asked.values.reduce(0, +) } }
     func asked(_ name: String) -> Int { lock.withLock { _asked[name] ?? 0 } }
 
@@ -106,7 +110,7 @@ private final class StandInDNS: @unchecked Sendable {
             _asked[name, default: 0] += 1
             let edns = query[10] | query[11] != 0
             let drops = _dropsRealQueries || (overTCP && (_dropsRealTCPQueries || (_dropsEDNSOverTCP && edns)))
-            return (_silent || (drops && !isProbe), isProbe ? 0 : _delay)
+            return (_silent || (drops && !isProbe), isProbe ? 0 : _delays[name] ?? _delay)
         }
         guard !silent else { return nil }
         // As the forwarder does: the reserved probe name is answered NXDOMAIN at once.
@@ -146,19 +150,32 @@ private final class StandInDNS: @unchecked Sendable {
         while true {
             let client = accept(tcp, nil, nil)
             guard client >= 0 else { return }
+            var on: Int32 = 1
+            setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
             Thread { [self] in serveTCP(client) }.start()
         }
     }
 
+    /// Each query is answered after its own delay, so pipelined queries can be answered out of order, as the
+    /// forwarder answers them. A query it drops closes the session.
     private func serveTCP(_ client: Int32) {
-        defer { close(client) }
+        let replies = DispatchGroup()
+        let writing = NSLock()
+        defer {
+            replies.wait()
+            close(client)
+        }
         while true {
             var header = [UInt8](repeating: 0, count: 2)
             guard Self.readFully(client, &header) else { return }
             var query = [UInt8](repeating: 0, count: Int(header[0]) << 8 | Int(header[1]))
-            guard Self.readFully(client, &query), let (reply, _) = answer(query, overTCP: true) else { return }
+            guard Self.readFully(client, &query), let (reply, delay) = answer(query, overTCP: true) else { return }
             let framed = [UInt8(reply.count >> 8), UInt8(reply.count & 0xFF)] + reply
-            guard write(client, framed, framed.count) == framed.count else { return }
+            replies.enter()
+            DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
+                writing.withLock { _ = write(client, framed, framed.count) }
+                replies.leave()
+            }
         }
     }
 
@@ -225,16 +242,23 @@ final class DNSFailoverRelayTests: XCTestCase {
         dropped: (@Sendable (Int) -> Void)? = nil
     ) throws -> DNSFailoverRelay {
         let ports = servers.mapValues(\.port)
-        let relay = DNSFailoverRelay(
-            listenPort: 0, maximumTCPSessions: 4, timing: timing,
-            serverEndpoint: { DNSFailoverEndpoint(host: "127.0.0.1", port: ports[$0] ?? 9) },
-            droppedAtCapacity: dropped ?? { _ in }
-        )
-        relays.append(relay)
-        XCTAssertEqual(relay.start(targetPort: conduitPort), [])
-        relay.setFailoverServers(order ?? servers.keys.sorted())
-        XCTAssertNotNil(relay.listeningPort)
-        return relay
+        // TCP takes the port UDP picked, which a TCP socket elsewhere can hold, as the stand-in's own ports can.
+        for _ in 0..<20 {
+            let relay = DNSFailoverRelay(
+                listenPort: 0, maximumTCPSessions: 4, timing: timing,
+                serverEndpoint: { DNSFailoverEndpoint(host: "127.0.0.1", port: ports[$0] ?? 9) },
+                droppedAtCapacity: dropped ?? { _ in }
+            )
+            guard relay.start(targetPort: conduitPort).isEmpty else {
+                relay.stop()
+                continue
+            }
+            relays.append(relay)
+            relay.setFailoverServers(order ?? servers.keys.sorted())
+            XCTAssertNotNil(relay.listeningPort)
+            return relay
+        }
+        throw XCTSkip("no port free on both UDP and TCP")
     }
 
     private func ask(_ relay: DNSFailoverRelay, timeout: TimeInterval = 3, edns: Bool = false) -> (ip: String?, seconds: Double) {
@@ -690,6 +714,23 @@ final class DNSFailoverRelayTests: XCTestCase {
         XCTAssertEqual(relay.conduitProgress(.tcp), DNSFailoverProgress(answered: 0, unanswered: 2, lastUnanswered: true))
         conduit.dropsRealQueries = false
         XCTAssertEqual(relay.recheck(.tcp), .answered, "a large failed request is still there to show the recovery")
+    }
+
+    /// The forwarder never caches a split-DNS answer, so a slow one is as slow at every recheck.
+    func testARecheckWaitsOutTheForwardersAttemptForAnInternalName() throws {
+        let conduit = try standIn(conduitIP, tcp: true)
+        conduit.dropsRealQueries = true
+        let relay = try relay(conduitPort: conduit.port, servers: [:])
+        XCTAssertNil(ask(relay, timeout: 0.5).ip)
+        XCTAssertNil(try askTCP(relay))
+        Thread.sleep(forTimeInterval: 2.2)
+        XCTAssertTrue(relay.conduitProgress(.udp).lastUnanswered)
+        XCTAssertTrue(relay.conduitProgress(.tcp).lastUnanswered)
+
+        conduit.dropsRealQueries = false
+        conduit.delay = Double(DNSForwarderTuning().internalDomainTimeout.nanoseconds) / 1e9 - 0.2
+        XCTAssertEqual(relay.recheck(.udp), .answered, "a healthy internal server just inside the forwarder's timeout")
+        XCTAssertEqual(relay.recheck(.tcp), .answered)
     }
 
     func testATCPSessionTakesTheModeAtConnect() throws {

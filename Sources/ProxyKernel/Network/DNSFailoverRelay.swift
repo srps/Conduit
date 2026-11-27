@@ -182,6 +182,9 @@ package struct DNSFailoverTiming: Sendable {
     /// How long a query to Conduit waits, with no reply from Conduit since it was sent, before the probe.
     package var silenceBeforeProbe: Duration = .seconds(1)
     package var probeBound: Duration = .milliseconds(500)
+    /// How long a recheck waits for Conduit: the forwarder's attempt for a split-DNS name, whose answer it never caches,
+    /// so a slow one is as slow at every recheck, and a margin.
+    package var recheckBound: Duration = .nanoseconds(DNSForwarderTuning.standardInternalDomainTimeout.nanoseconds) + .milliseconds(500)
     package var serverSpacing: Duration = .seconds(1)
     package var entryLifetime: Duration = .seconds(UDPRelay.staleTimeoutSeconds)
     package var connectTimeout: Duration = .seconds(1)
@@ -1108,10 +1111,10 @@ package final class DNSFailoverRelay: @unchecked Sendable {
 
     /// Asks Conduit's forwarder directly, not through either listener and over the half it failed on, the last real
     /// query it left unanswered there, as its client sent it: an answer of any kind is evidence it answers that half's
-    /// real queries again. It waits the silence a real query fails over on. Not running when no such query is kept.
+    /// real queries again. Not running when no such query is kept.
     package func recheck(_ transport: DNSFailoverTransport) -> DNSFailoverProbeOutcome {
         guard let port = target, let query = route.lastUnansweredRequest(transport) else { return .notRunning }
-        let bound = Int(FailoverSocket.milliseconds(timing.silenceBeforeProbe))
+        let bound = Int(FailoverSocket.milliseconds(timing.recheckBound))
         switch transport {
         case .udp: return Self.ask(query, port: port, boundMilliseconds: bound)
         case .tcp: return Self.askTCP(query, port: port, boundMilliseconds: bound)

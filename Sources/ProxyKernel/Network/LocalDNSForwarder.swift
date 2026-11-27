@@ -31,7 +31,8 @@ package struct DNSForwarderTuning: Sendable {
     package var internalServerEndpoint: (@Sendable (_ server: String) -> (host: String, port: Int))?
     /// How long an internal server may take for a name under a managed
     /// domain. Its reply is the answer; only its silence goes on to DoH.
-    package var internalDomainTimeout: TimeAmount = .milliseconds(2000)
+    package var internalDomainTimeout: TimeAmount = Self.standardInternalDomainTimeout
+    package static let standardInternalDomainTimeout: TimeAmount = .milliseconds(2000)
     /// How long the internal attempt for any other name may take before the
     /// DoH stage begins.
     package var internalAttemptTimeout: TimeAmount = .milliseconds(1500)
