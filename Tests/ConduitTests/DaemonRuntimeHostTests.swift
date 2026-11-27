@@ -2356,6 +2356,27 @@ final class DaemonRuntimeHostTests: XCTestCase {
         host.orchestrator.eventLog.events.filter { $0.event == "platform.dns_restore_kept_serving" }.compactMap(\.detail)
     }
 
+    /// The release check says whether the host still applies system DNS: while it manages a running forwarder, and no longer once a Stop
+    /// fences DNS, a Stop that kept DNS serving included.
+    @RuntimeActor func testTheReleaseCheckSaysWhetherTheHostStillAppliesSystemDNS() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        let running = await host.checkSystemDNSRelease()
+        XCTAssertTrue(running.appliesSystemDNS)
+
+        let kept = await host.stopDNS()
+        XCTAssertEqual(kept.keptServing, [.dns])
+        let fenced = await host.checkSystemDNSRelease()
+        XCTAssertFalse(fenced.appliesSystemDNS, "a kept Stop points no new service at the relay")
+        XCTAssertFalse(fenced.isReleased)
+
+        locations.refuseWrites(false)
+        _ = await host.stopDNS()
+        let stopped = await host.checkSystemDNSRelease()
+        XCTAssertFalse(stopped.appliesSystemDNS)
+        XCTAssertTrue(stopped.isReleased)
+        await host.stopRuntime()
+    }
+
     /// A DNS Stop whose restore fails while a service still points at 127.0.0.1 leaves the relay and the forwarder serving it, says so,
     /// and keeps the record; the next Stop retries and stops both.
     @RuntimeActor func testADNSStopWhoseRestoreFailsKeepsTheRelayAndTheForwarderServing() async throws {

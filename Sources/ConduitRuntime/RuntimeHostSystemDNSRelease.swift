@@ -30,30 +30,31 @@ extension RuntimeHost {
                         level: .warning)
     }
 
-    /// One read of what Conduit still has in system DNS, under the manager's lock so no restore or apply lands inside it. Each service
-    /// still on the loopback resolver is an event, then the verdict, before any log line.
+    /// One read of what Conduit still has in system DNS, under the manager's lock so no restore or apply lands inside it, and whether the
+    /// host still applies system DNS. Each service still on the loopback resolver is an event, then the verdict, before any log line.
     func checkSystemDNSRelease() async -> ControlSystemDNSRelease {
         let manager = systemDNSManager
         let reading = await platformWork.run { manager.releaseReading() }
+        let applies = systemDNSReconcileIsDue
         let release: ControlSystemDNSRelease
         let detail: String
         switch reading {
         case .released:
-            release = Self.release(settingsRead: true, recordsKept: 0, loopbackServices: 0)
+            release = Self.release(settingsRead: true, recordsKept: 0, loopbackServices: 0, applies: applies)
             detail = "outcome=released"
         case .remaining(let recordsKept, let residue):
             for service in residue.prefix(Self.maximumReportedDNSResidue) {
                 recordLifecycle(RuntimeEvent(kind: .config, event: "platform.dns_release_residue", detail: Self.residueDetail(service)),
                                 level: .warning)
             }
-            release = Self.release(settingsRead: true, recordsKept: recordsKept, loopbackServices: residue.count)
+            release = Self.release(settingsRead: true, recordsKept: recordsKept, loopbackServices: residue.count, applies: applies)
             let unreported = max(0, residue.count - Self.maximumReportedDNSResidue)
             detail = "outcome=remaining records=\(recordsKept) loopback_services=\(residue.count) unreported=\(unreported)"
         case .unreadable(let reason):
-            release = Self.release(settingsRead: false, recordsKept: 0, loopbackServices: 0)
+            release = Self.release(settingsRead: false, recordsKept: 0, loopbackServices: 0, applies: applies)
             detail = "outcome=unreadable reason=\(reason)"
         }
-        recordLifecycle(RuntimeEvent(kind: .config, event: "platform.dns_release_checked", detail: detail),
+        recordLifecycle(RuntimeEvent(kind: .config, event: "platform.dns_release_checked", detail: detail + " applies=\(applies)"),
                         level: release.isReleased ? .notice : .warning)
         return release
     }
@@ -67,10 +68,10 @@ extension RuntimeHost {
         return fields.joined(separator: " ")
     }
 
-    private static func release(settingsRead: Bool, recordsKept: Int, loopbackServices: Int) -> ControlSystemDNSRelease {
+    private static func release(settingsRead: Bool, recordsKept: Int, loopbackServices: Int, applies: Bool) -> ControlSystemDNSRelease {
         do {
             return ControlSystemDNSRelease(settingsRead: settingsRead, recordsKept: try ControlCount(recordsKept),
-                                           loopbackServices: try ControlCount(loopbackServices))
+                                           loopbackServices: try ControlCount(loopbackServices), appliesSystemDNS: applies)
         } catch {
             preconditionFailure("a count read off the machine is never negative")
         }

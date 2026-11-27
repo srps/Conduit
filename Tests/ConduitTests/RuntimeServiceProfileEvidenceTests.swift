@@ -548,7 +548,8 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
             ("set-launch-at-login", try completed(.setLaunchAtLogin, .platformWrite(platform))),
             ("reload", try completed(.reload, .reload(reload))),
             ("check-system-dns-release", try completed(.checkSystemDNSRelease, .systemDNSRelease(ControlSystemDNSRelease(
-                settingsRead: false, recordsKept: try ControlCount(Int.max), loopbackServices: try ControlCount(Int.max)
+                settingsRead: false, recordsKept: try ControlCount(Int.max), loopbackServices: try ControlCount(Int.max),
+                appliesSystemDNS: false
             )))),
             ("partially-completed", .partiallyCompleted(partial)),
             ("failed", .failed(try widest(ControlFailureCode.allCases))),

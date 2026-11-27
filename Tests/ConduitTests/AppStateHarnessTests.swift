@@ -1518,7 +1518,9 @@ final class AppStateHarnessTests: XCTestCase {
 
     /// The refusal tells the user how much the event log names, and how a resolver of their own on 127.0.0.1 gets the helper removed.
     func testTheRefusalSaysWhatTheLogNamesAndHowToRemoveTheHelperAnyway() throws {
-        let release = ControlSystemDNSRelease(settingsRead: true, recordsKept: try ControlCount(0), loopbackServices: try ControlCount(17))
+        let release = ControlSystemDNSRelease(
+            settingsRead: true, recordsKept: try ControlCount(0), loopbackServices: try ControlCount(17), appliesSystemDNS: false
+        )
         let message = AppState.helperUninstallRefusedMessage(release)
         XCTAssertTrue(message.contains("names up to \(ControlSystemDNSRelease.maximumNamedServices) of those services"), message)
         XCTAssertTrue(message.contains("counts the rest"), message)

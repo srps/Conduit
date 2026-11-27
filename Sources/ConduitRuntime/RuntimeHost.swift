@@ -1680,7 +1680,7 @@ package final class RuntimeHost {
         dnsReconcileWanted = false
     }
 
-    private var systemDNSReconcileIsDue: Bool {
+    var systemDNSReconcileIsDue: Bool {
         platformConfig.manageSystemDNS && orchestrator.snapshot.dnsRunState == .running && !workflow.dnsIntent.fenced
     }
 

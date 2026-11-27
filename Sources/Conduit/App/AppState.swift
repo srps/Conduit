@@ -1317,13 +1317,12 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// With Manage system DNS on, a running forwarder lets a network or location notification point a newly eligible service at the
-    /// relay at any time, the password prompt included, so the uninstall stops DNS even when the first check finds nothing.
+    /// While the host applies system DNS, a network or location notification can point a newly eligible service at the relay at any
+    /// time, the password prompt included, so the uninstall stops DNS even when the first check finds nothing. The last check must find
+    /// the host no longer applying it: a Stop that never ran, or ran and was undone, refuses the removal.
     private func releaseSystemDNSForHelperRemoval() async -> Bool {
         guard var release = await readableSystemDNSRelease() else { return false }
-        let managesSystemDNS = platformConfig.manageSystemDNS || editor?.ledger.saved.platform.manageSystemDNS == true
-        let mayApply = managesSystemDNS && MenuBarPresentation.moduleToggleAction(for: runtime.dnsRunState) == .stop
-        if !release.isReleased || mayApply, !quitFence {
+        if !release.isReleased || release.appliesSystemDNS, !quitFence {
             recordHelperEvent(RuntimeEvent(kind: .lifecycle, event: "helper.uninstall_restoring_dns",
                                            detail: Self.releaseDetail(release)), level: .notice)
             _ = await stopDNSForHelperRemoval()
@@ -1333,6 +1332,10 @@ final class AppState: ObservableObject {
         guard release.isReleased else {
             refuseHelperUninstall(detail: "reason=system_dns_not_released " + Self.releaseDetail(release),
                                   message: Self.helperUninstallRefusedMessage(release))
+            return false
+        }
+        guard !release.appliesSystemDNS else {
+            refuseHelperUninstall(detail: "reason=dns_still_applied", message: Self.helperUninstallStillAppliedMessage)
             return false
         }
         return true
@@ -1382,6 +1385,9 @@ final class AppState: ObservableObject {
 
     static let helperUninstallUncheckedMessage = "The helper was not uninstalled: Conduit could not confirm that your network services "
         + "no longer use its DNS resolver. Turn off Manage system DNS, then try again."
+
+    static let helperUninstallStillAppliedMessage = "The helper was not uninstalled: Conduit could not confirm that DNS stopped, so it "
+        + "could still point a network service at the helper's resolver. Stop DNS, then try again."
 
     static let helperUninstallFencedMessage = "Uninstall Helper is checking your DNS settings, so nothing that could point them back at "
         + "Conduit starts or reloads until it finishes. Try again then."

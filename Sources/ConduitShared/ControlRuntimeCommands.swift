@@ -363,11 +363,15 @@ package struct ControlSystemDNSRelease: Codable, Sendable, Equatable {
     package var recordsKept: ControlCount
     /// Services, in any location, whose DNS servers are the loopback resolver alone.
     package var loopbackServices: ControlCount
+    /// Whether the host would point a newly eligible service at the relay: it applies Manage system DNS, the forwarder runs, and no Stop
+    /// fences it.
+    package var appliesSystemDNS: Bool
 
-    package init(settingsRead: Bool, recordsKept: ControlCount, loopbackServices: ControlCount) {
+    package init(settingsRead: Bool, recordsKept: ControlCount, loopbackServices: ControlCount, appliesSystemDNS: Bool) {
         self.settingsRead = settingsRead
         self.recordsKept = recordsKept
         self.loopbackServices = loopbackServices
+        self.appliesSystemDNS = appliesSystemDNS
     }
 
     package var isReleased: Bool { settingsRead && recordsKept.rawValue == 0 && loopbackServices.rawValue == 0 }
