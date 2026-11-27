@@ -179,12 +179,14 @@ struct RuntimeModuleIntents: Equatable, Sendable {
     }
 
     /// The one rule for a verified runtime write's DNS bit, a Start's or a save's, staged under `intentRevision`. A save has no Start of its
-    /// own, so it is never `ownEnable`.
+    /// own, so it is never `ownEnable`. While a Stop's save is owed under that intent, `dnsConfigured` is the bit it owes: a write of that
+    /// bit, or a DNS Start's own enable, ends the obligation, and a write of the other bit, staged before a kept Stop turned the intent back
+    /// on, changes nothing.
     mutating func recordVerifiedDNSWrite(_ enabled: Bool, intentRevision: Int?, ownEnable: Bool) {
         guard let intentRevision, dnsIntentRevision == intentRevision else { return }
-        dnsConfigured = enabled
         switch modules.dns.pending {
-        case .stopSave(let revision) where (!enabled || ownEnable) && revision == intentRevision:
+        case .stopSave(let revision) where revision == intentRevision:
+            guard enabled == dnsConfigured || ownEnable else { return }
             modules.dns.pending = nil
         case .start(var start) where start.displacesOwedSave:
             start.displacesOwedSave = false
@@ -192,6 +194,7 @@ struct RuntimeModuleIntents: Equatable, Sendable {
         case .stopSave, .start, nil:
             break
         }
+        dnsConfigured = enabled
     }
 
     // MARK: - Admission
