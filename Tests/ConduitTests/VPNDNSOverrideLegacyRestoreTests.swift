@@ -93,7 +93,7 @@ final class VPNDNSOverrideLegacyRestoreTests: XCTestCase {
         XCTAssertEqual(file.deletes, 0, "the originals stay for the next start")
     }
 
-    func testARestoreTheStoreRefusesKeepsTheRecordForTheNextStart() {
+    func testARestoreTheStoreRefusesKeepsTheRecordForAnotherRecovery() {
         let file = RecordFile(record)
         let outcome = VPNDNSOverrideLegacyRestore.run(store: RefusingStore(dns: ["ServerAddresses": .strings(["127.0.0.1"])]), file: file) { _ in }
         XCTAssertEqual(outcome, .restoreFailed(service: service))
@@ -115,49 +115,34 @@ final class VPNDNSOverrideLegacyRestoreTests: XCTestCase {
         let file = RecordFile(.unreadable("open: Permission denied"))
         let outcome = VPNDNSOverrideLegacyRestore.run(store: FakeVPNDNSStore(), file: file) { _ in }
         XCTAssertEqual(outcome, .recordUnreadable("open: Permission denied"))
-        XCTAssertTrue(outcome.needsRetry)
+        XCTAssertTrue(outcome.keepsRecord)
         XCTAssertEqual(file.deletes + file.setAsides, 0)
     }
 
-    func testAFailedRestoreIsTriedAgainOnTheBackoffAndOnAStoreChangeReadingBothAfresh() {
+    func testAtStartARecordIsReportedAndNothingIsWrittenOrDeleted() {
+        let store = FakeVPNDNSStore()
+        store.connectFullTunnel(service, servers: ["127.0.0.1"])
         let file = RecordFile(record)
-        let store = RefusingStore(read: .unreadable("copy: Failed!"))
-        var retry = VPNDNSOverrideLegacyRetry()
         var reported: [VPNDNSOverrideLegacyRestore.Outcome] = []
-        retry.attempt(.start, now: 100, store: store, file: file) { reported.append($0) }
-        XCTAssertEqual(retry.attempts, 1)
-        retry.attempt(.tick, now: 105, store: store, file: file) { reported.append($0) }
-        retry.attempt(.storeChanged, now: 105, store: store, file: file) { reported.append($0) }
-        XCTAssertEqual(retry.attempts, 1, "neither is due within the first delay")
-        retry.attempt(.tick, now: 110, store: store, file: file) { reported.append($0) }
-        XCTAssertEqual(retry.attempts, 2)
-        retry.attempt(.tick, now: 125, store: store, file: file) { reported.append($0) }
-        XCTAssertEqual(retry.attempts, 2, "the delay doubled to 20 s")
-
-        let recovered = FakeVPNDNSStore()
-        recovered.connectFullTunnel(service, servers: ["127.0.0.1"])
-        retry.attempt(.storeChanged, now: 121, store: recovered, file: file) { reported.append($0) }
-        XCTAssertEqual(retry.attempts, 3)
-        XCTAssertEqual(recovered.serverAddresses(service), originals)
-        XCTAssertEqual(file.loads, 3, "the record is read before every attempt")
-        XCTAssertFalse(retry.pending)
-        XCTAssertEqual(reported.last, .restored(service: service))
+        let outcome = VPNDNSOverrideLegacyRestore.check(file: file) { reported.append($0) }
+        XCTAssertEqual(outcome, .awaitingRecovery(service: service))
+        XCTAssertEqual(reported, [outcome])
+        XCTAssertTrue(outcome.keepsRecord)
+        XCTAssertTrue(outcome.logLine.contains("sudo \(HelperConstants.binaryInstallPath) --restore-legacy-vpn-dns"))
+        XCTAssertEqual(store.vpnKeyWrites, [], "the VPN's key is written only when a person asks")
+        XCTAssertEqual(file.deletes + file.setAsides, 0)
+        XCTAssertEqual(store.serverAddresses(service), ["127.0.0.1"])
     }
 
-    func testTheRetryStopsAtItsBoundAndSaysSo() {
-        let file = RecordFile(.unreadable("read: Input/output error"))
-        var retry = VPNDNSOverrideLegacyRetry()
-        var reported: [VPNDNSOverrideLegacyRestore.Outcome] = []
-        var now: UInt64 = 0
-        for _ in 0..<100 {
-            retry.attempt(.tick, now: now, store: FakeVPNDNSStore(), file: file) { reported.append($0) }
-            retry.attempt(.start, now: now, store: FakeVPNDNSStore(), file: file) { reported.append($0) }
-            now += 60
-        }
-        XCTAssertEqual(retry.attempts, VPNDNSOverrideLegacyRetry.maximumAttempts)
-        XCTAssertFalse(retry.pending)
-        XCTAssertEqual(reported.last, .gaveUp(attempts: VPNDNSOverrideLegacyRetry.maximumAttempts))
-        XCTAssertEqual(file.deletes + file.setAsides, 0)
+    func testAtStartNoRecordIsQuietAndAMalformedOneIsSetAside() {
+        XCTAssertEqual(VPNDNSOverrideLegacyRestore.check(file: RecordFile(.none)) { _ in XCTFail("nothing to report") }, .noRecord)
+        let broken = RecordFile(.malformed("not a record"))
+        XCTAssertEqual(VPNDNSOverrideLegacyRestore.check(file: broken) { _ in }, .malformedSetAside("not a record"))
+        XCTAssertEqual(broken.setAsides, 1)
+        XCTAssertEqual(broken.deletes, 0)
+        let unreadable = RecordFile(.unreadable("open: Permission denied"))
+        XCTAssertEqual(VPNDNSOverrideLegacyRestore.check(file: unreadable) { _ in }, .recordUnreadable("open: Permission denied"))
+        XCTAssertEqual(unreadable.deletes + unreadable.setAsides, 0)
     }
 
     func testADeleteThatFailsIsReported() {

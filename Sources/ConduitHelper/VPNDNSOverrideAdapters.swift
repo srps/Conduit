@@ -147,7 +147,7 @@ enum VPNDNSOverrideWatchdog {
     }
 }
 
-/// The one write a VPN client's key ever gets: the legacy restore at start.
+/// The one write a VPN client's key ever gets: the legacy restore a person runs with `--restore-legacy-vpn-dns`.
 struct SCDynamicStoreLegacyVPNDNSStore: VPNDNSLegacyStore {
     private let store = SCDynamicStoreCreate(nil, "io.github.srps.Conduit.Helper.vpn-dns-override-legacy" as CFString, nil, nil)
 

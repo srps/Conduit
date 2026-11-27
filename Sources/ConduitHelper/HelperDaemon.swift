@@ -88,7 +88,7 @@ enum HelperDaemon {
             lastConsoleUID = consoleAtStart
         }
         callerIdentity = loadCallerIdentity()
-        retryLegacyRestore(.start)
+        VPNDNSOverrideLegacyRestore.check(file: VPNDNSOverrideLegacyFile(), report: logLegacyRestore)
         let store = SCDynamicStoreVPNDNSStore(changed: loop.storeTrigger)
         let expiry = VPNDNSOverrideExpiry()
         vpnDNSOverride = VPNDNSOverridePublisher(store: store, relay: failoverRelay, expiry: expiry, report: logVPNDNSOverride)
@@ -96,7 +96,7 @@ enum HelperDaemon {
         HelperLog.notice("ConduitHelper daemon listening on \(socketPath)")
 
         while true {
-            switch loop.next(tickDue: vpnDNSOverride.wantsTicks || legacyRestore.pending) {
+            switch loop.next(tickDue: vpnDNSOverride.wantsTicks) {
             case .connection:
                 serveConnection(listenFD: serverFD)
             case .ownerExited(let pid):
@@ -104,10 +104,8 @@ enum HelperDaemon {
                 vpnDNSOverride.ownerExited(pid)
             case .storeChanged:
                 vpnDNSOverride.sync()
-                retryLegacyRestore(.storeChanged)
             case .tick:
                 vpnDNSOverride.tick()
-                retryLegacyRestore(.tick)
             case .signal(let number):
                 HelperLog.notice("ConduitHelper received signal \(number); stopping")
                 vpnDNSOverride.disarm(.helperStopping)
@@ -601,14 +599,9 @@ enum HelperDaemon {
         }
     }
 
-    nonisolated(unsafe) private static var legacyRestore = VPNDNSOverrideLegacyRetry()
-
-    private static func retryLegacyRestore(_ trigger: VPNDNSOverrideLegacyRetry.Trigger) {
-        legacyRestore.attempt(
-            trigger, now: DispatchTime.now().uptimeNanoseconds / 1_000_000_000, store: SCDynamicStoreLegacyVPNDNSStore(), file: VPNDNSOverrideLegacyFile()
-        ) {
-            if $0.isFailure { HelperLog.error($0.logLine) } else { HelperLog.notice($0.logLine) }
-        }
+    /// A record awaiting recovery is logged as an error: lookups may still go to the older helper's `127.0.0.1`.
+    static func logLegacyRestore(_ outcome: VPNDNSOverrideLegacyRestore.Outcome) {
+        if outcome.isFailure || outcome.keepsRecord { HelperLog.error(outcome.logLine) } else { HelperLog.notice(outcome.logLine) }
     }
 
     /// Set in `run` before the first request is served.

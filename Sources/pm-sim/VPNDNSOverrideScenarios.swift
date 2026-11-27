@@ -330,6 +330,40 @@ enum VPNDNSOverrideScenarios {
         }
     }
 
+    /// An older helper's record on a scratch path: the helper's start, its ticks and store changes leave the VPN's key
+    /// alone, and only the owner's explicit recovery writes it, once.
+    @RuntimeActor
+    static func legacyRecordAwaitsRecovery() async throws -> ScenarioResult {
+        let began = Date()
+        var assertions: [ScenarioAssertion] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("pm-legacy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer {
+            do { try FileManager.default.removeItem(at: scratch) } catch { fputs("scratch kept at \(scratch.path)\n", stderr) }
+        }
+        let file = VPNDNSOverrideLegacyFile(path: scratch.appendingPathComponent("record.json").path)
+        try JSONEncoder().encode(VPNDNSOverrideLegacyRecord(serviceID: service, originals: tunnelServers))
+            .write(to: URL(fileURLWithPath: file.path))
+        let machine = FakeMachine(resolverDirectory: scratch.appendingPathComponent("resolver", isDirectory: true))
+        let store = machine.vpnDNSStore
+        store.connectFullTunnel(service, servers: ["127.0.0.1"])
+
+        let started = machine.checkLegacyVPNDNSRecord(file)
+        check("the start reports the record and names the manual step", started == .awaitingRecovery(service: service)
+            && started.logLine.contains(VPNDNSOverrideLegacyRestore.flag))
+        machine.tickVPNDNSOverride()
+        store.configdRestart()
+        check("no start, tick or store change writes the VPN's key", store.vpnKeyWrites.isEmpty
+            && store.serverAddresses(service) == ["127.0.0.1"])
+        check("the record is kept for the recovery", FileManager.default.fileExists(atPath: file.path))
+        check("the explicit recovery puts the originals back", machine.runLegacyVPNDNSRestore(file) == .restored(service: service)
+            && store.serverAddresses(service) == tunnelServers)
+        check("with one write, and the record goes", store.vpnKeyWrites == [service] && !FileManager.default.fileExists(atPath: file.path))
+        check("a second recovery finds nothing to do", machine.runLegacyVPNDNSRestore(file) == .noRecord && store.vpnKeyWrites.count == 1)
+        return result(name: "dns-legacy-record-awaits-recovery", began: began, assertions: assertions, notes: [])
+    }
+
     /// The relay alone, with two VPN servers: the first's socket cannot be made until it can.
     @RuntimeActor
     static func failoverServerSocketRecovers() async throws -> ScenarioResult {

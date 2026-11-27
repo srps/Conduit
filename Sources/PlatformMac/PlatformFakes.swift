@@ -524,7 +524,13 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
         vpnDNSLock.withLock { vpnDNSPublisher = makeVPNDNSPublisher() }
     }
 
-    /// The legacy restore a fresh helper runs at start.
+    /// What a fresh helper does with a legacy record at start: reports it, writing nothing.
+    @discardableResult
+    package func checkLegacyVPNDNSRecord(_ file: any VPNDNSOverrideLegacyRecordFile) -> VPNDNSOverrideLegacyRestore.Outcome {
+        VPNDNSOverrideLegacyRestore.check(file: file) { _ in }
+    }
+
+    /// The owner's `--restore-legacy-vpn-dns`.
     @discardableResult
     package func runLegacyVPNDNSRestore(_ file: any VPNDNSOverrideLegacyRecordFile) -> VPNDNSOverrideLegacyRestore.Outcome {
         VPNDNSOverrideLegacyRestore.run(store: vpnDNSStore, file: file) { _ in }
