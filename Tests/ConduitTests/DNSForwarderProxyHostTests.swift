@@ -137,6 +137,24 @@ final class DNSForwarderProxyHostTests: XCTestCase {
         XCTAssertEqual(events(named: "dns.proxy_host_via_tunnel").count, 0)
     }
 
+    /// The system resolver asks for a relative upstream name with a search domain appended, and a network can set
+    /// that domain to a zone it owns, which DoH would answer faithfully.
+    func testASearchExpandedProxyHostOnATunnelAsksThePushedServersAndNeverDoH() async throws {
+        let tunnel = try await tunnelDNS(answering: "proxy.lan.example")
+        let doh = try await dohProvider()
+        let port = try await start(
+            dohPort: doh.port, endpoints: [Self.firstPushed: tunnel.port, Self.secondPushed: tunnel.port],
+            table: Self.fullTunnel, hosts: ProxyHostNames(names: ["proxy"])
+        )
+
+        let answer = try await SplitDNSProbe.resolve("proxy.lan.example", port: port)
+        let attacker = try await rawReply("proxy.attacker.example", port: port, txID: 0x5D02)
+
+        XCTAssertEqual(answer, Self.tunnelIP)
+        XCTAssertEqual(attacker.map(DNSWireFormat.extractRCode), 3, "the pushed servers' NXDOMAIN is the answer")
+        XCTAssertEqual(doh.requestCount(), 0, "an expanded proxy name never goes to DoH")
+    }
+
     func testAPACLearnedProxyHostIsIncluded() async throws {
         let first = try await silentServer()
         let second = try await tunnelDNS(answering: "pac-proxy.example.org")
