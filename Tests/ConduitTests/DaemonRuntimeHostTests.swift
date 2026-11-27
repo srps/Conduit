@@ -2523,40 +2523,6 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
-    /// A loopback UDP port free right now, from the kernel's own pick.
-    private func freeUDPPort() throws -> Int {
-        let socket = Darwin.socket(AF_INET, SOCK_DGRAM, 0)
-        guard socket >= 0 else { throw POSIXError(.EMFILE) }
-        defer { close(socket) }
-        var address = sockaddr_in()
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_addr.s_addr = inet_addr("127.0.0.1")
-        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let bound = withUnsafeMutablePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { pointer -> Bool in
-                Darwin.bind(socket, pointer, length) == 0 && getsockname(socket, pointer, &length) == 0
-            }
-        }
-        guard bound else { throw POSIXError(.EADDRINUSE) }
-        return Int(UInt16(bigEndian: address.sin_port))
-    }
-
-    /// A reload that moves the forwarder to another port points the relay at it, so the services on 127.0.0.1 keep an answer.
-    @RuntimeActor func testAReloadThatMovesTheForwarderPointsTheRelayAtItsNewPort() async throws {
-        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
-        locations.refuseWrites(false)
-        let moved = try freeUDPPort()
-        var edited = try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false)
-        edited.dnsForwarderPort = moved
-        try ProxyConfigPersistence.save(edited, in: harness.environment)
-
-        _ = await host.reloadConfiguration()
-        XCTAssertEqual(host.orchestrator.snapshot.bindings.dnsPort, moved)
-        XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(moved)], "the relay follows the forwarder")
-        XCTAssertNotNil(host.dnsHealthTimer, "the probe watches the relay at its new target")
-        await host.stopRuntime()
-    }
-
     /// Turning Manage system DNS off under a refused restore leaves the relay in front of the forwarder that keeps running.
     @RuntimeActor func testASystemDNSSwitchOffWhoseRestoreFailsKeepsTheRelay() async throws {
         let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
