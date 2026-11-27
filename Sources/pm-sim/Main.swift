@@ -123,6 +123,8 @@ enum PMSim {
               dns-own-key-conduit-hung DNS: a hung Conduit's lookup is answered by the VPN within the probe budget; three silent ticks withdraw the key (0049)
               dns-own-key-helper-dies DNS: configd removes a dead helper's key; the app re-arms the fresh helper and the key returns (0049)
               dns-own-key-configd-restart DNS: a configd restart that drops the key is answered by one republish, with no new arm (0049)
+              dns-own-key-cleanup-pending DNS: a Stop whose removal the store refuses keeps the relay on the VPN's servers until a tick removes the key (0049)
+              dns-failover-server-socket-recovers DNS: a VPN server with no socket is skipped, its socket made again with backoff, and asked once back (0049)
               observable-target-redaction  Query/fragment privacy across observations
               private-config-boundary  Private configuration frame: cap, read schedules, redaction and refusals
               private-editor-codec  Private editor read and reply: correlation, admission, observation, reply cap and kinds
@@ -346,6 +348,8 @@ enum PMSim {
         "dns-own-key-conduit-hung",
         "dns-own-key-helper-dies",
         "dns-own-key-configd-restart",
+        "dns-own-key-cleanup-pending",
+        "dns-failover-server-socket-recovers",
         "observable-target-redaction",
         "private-config-boundary",
         "private-editor-codec",
@@ -591,6 +595,10 @@ enum PMSim {
             return [try await VPNDNSOverrideScenarios.ownKeyConduitGone()]
         case "dns-own-key-conduit-hung":
             return [try await VPNDNSOverrideScenarios.ownKeyConduitHung()]
+        case "dns-own-key-cleanup-pending":
+            return [try await VPNDNSOverrideScenarios.ownKeyCleanupPending()]
+        case "dns-failover-server-socket-recovers":
+            return [try await VPNDNSOverrideScenarios.failoverServerSocketRecovers()]
         case "dns-own-key-helper-dies":
             return [try await VPNDNSOverrideScenarios.ownKeyHelperDies()]
         case "dns-own-key-configd-restart":

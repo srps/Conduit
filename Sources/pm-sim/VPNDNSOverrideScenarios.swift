@@ -265,6 +265,82 @@ enum VPNDNSOverrideScenarios {
     }
 
     @RuntimeActor
+    static func ownKeyCleanupPending() async throws -> ScenarioResult {
+        try await rig(name: "dns-own-key-cleanup-pending") { rig, check in
+            check("Conduit answers through the relay", try await rig.lookup().answer == publicIP)
+            let store = rig.machine.vpnDNSStore
+            store.failsRead = true
+            store.failsRemove = true
+            store.closeLeavesKey = true
+            try rig.machine.execute(.stopDNSRelay, values: [])
+            await rig.conduit.stop()
+            check("a removal nobody can confirm leaves the key pending", store.ownKey != nil
+                && rig.machine.vpnDNSOverrideOutcomes.contains { if case .cleanupPending = $0 { true } else { false } })
+            check("the relay the key names stays up, on the VPN's servers",
+                  rig.relay.listeningPort != nil && rig.relay.mode == .vpn)
+            check("so lookups are still answered", try await rig.lookup().answer == vpnAnswerIP)
+            rig.machine.tickVPNDNSOverride()
+            check("a tick that still cannot remove it keeps both", store.ownKey != nil && rig.relay.listeningPort != nil)
+            store.failsRead = false
+            store.failsRemove = false
+            rig.machine.tickVPNDNSOverride()
+            check("the next tick removes the key", store.ownKey == nil
+                && rig.machine.vpnDNSOverrideOutcomes.last == .withdrawn(service: service, reason: .relayStopped))
+            check("and only then stops the relay", rig.relay.listeningPort == nil)
+        }
+    }
+
+    /// The relay alone, with two VPN servers: the first's socket cannot be made until it can.
+    @RuntimeActor
+    static func failoverServerSocketRecovers() async throws -> ScenarioResult {
+        let began = Date()
+        var assertions: [ScenarioAssertion] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+        let group = MultiThreadedEventLoopGroup.singleton
+        let first = StandInDNSServer(ip: vpnAnswerIP)
+        let second = StandInDNSServer(ip: corpIP)
+        try await first.start(group: group)
+        ScenarioCleanup.register { await first.stop() }
+        try await second.start(group: group)
+        ScenarioCleanup.register { await second.stop() }
+        let broken = NIOLockedValueBox(true)
+        let changes = NIOLockedValueBox<[DNSFailoverServerSocket]>([])
+        let ports = ["192.0.2.53": first.port, "192.0.2.54": second.port]
+        var timing = DNSFailoverTiming()
+        timing.socketRetry = .milliseconds(200)
+        let relay = DNSFailoverRelay(
+            listenPort: 0, maximumTCPSessions: 8, timing: timing,
+            serverEndpoint: { server in
+                let down = server == "192.0.2.53" && broken.withLockedValue { $0 }
+                return DNSFailoverEndpoint(host: "127.0.0.1", port: down ? 0 : ports[server] ?? 9)
+            },
+            serverSocket: { change in changes.withLockedValue { $0.append(change) } }
+        )
+        defer { relay.stop() }
+        let conduit = StandInDNSServer(ip: publicIP)
+        try await conduit.start(group: group)
+        let conduitPort = conduit.port
+        await conduit.stop()
+        check("the relay starts", relay.start(targetPort: conduitPort).isEmpty)
+        relay.setFailoverServers(["192.0.2.53", "192.0.2.54"])
+        relay.setMode(.vpn)
+        try await Task.sleep(for: .milliseconds(100))
+
+        let skipped = try await Rig.lookup(relay)
+        check("the second server answers while the first has no socket", skipped.answer == corpIP)
+        check("at once, not after the server spacing", skipped.seconds < 0.9)
+        check("the missing socket is reported with its retry", changes.withLockedValue { $0 }.contains {
+            if case .unavailable(server: "192.0.2.53", _, _) = $0 { true } else { false }
+        })
+        broken.withLockedValue { $0 = false }
+        try await Task.sleep(for: .seconds(1))
+        check("the socket is made again on the backoff", changes.withLockedValue { $0 }.contains(.restored(server: "192.0.2.53")))
+        check("and the first server is asked first again", try await Rig.lookup(relay).answer == vpnAnswerIP)
+        return result(name: "dns-failover-server-socket-recovers", began: began, assertions: assertions,
+                      notes: ["first asked: \(first.total); second asked: \(second.total)"])
+    }
+
+    @RuntimeActor
     final class Stage {
         let host: RuntimeHost
         let control: any RuntimeClient
@@ -579,6 +655,10 @@ enum VPNDNSOverrideScenarios {
         }
 
         func lookup() async throws -> (answer: String?, seconds: Double) {
+            try await Self.lookup(relay)
+        }
+
+        static func lookup(_ relay: DNSFailoverRelay) async throws -> (answer: String?, seconds: Double) {
             guard let port = relay.listeningPort else { return (nil, 0) }
             let began = ContinuousClock.now
             let reply = try await DNSProbe.overUDP(
@@ -647,11 +727,13 @@ enum VPNDNSOverrideScenarios {
     }
 }
 
-/// A DNS server that answers every A query with one address, and can be made silent.
+/// A DNS server on UDP and TCP that answers every A query with one address, and the reserved probe name NXDOMAIN as
+/// Conduit's forwarder does; it can be made silent.
 final class StandInDNSServer: @unchecked Sendable {
     private let ip: String
     private let state = NIOLockedValueBox((silent: false, asked: 0))
     private let channel = NIOLockedValueBox<Channel?>(nil)
+    private let stream = NIOLockedValueBox<Int32>(-1)
 
     init(ip: String) {
         self.ip = ip
@@ -672,11 +754,73 @@ final class StandInDNSServer: @unchecked Sendable {
             .bind(host: "127.0.0.1", port: 0)
             .get()
         channel.withLockedValue { $0 = bound }
+        try listenTCP(port: bound.localAddress?.port ?? 0)
     }
 
     func stop() async {
+        let fd = stream.withLockedValue { current in defer { current = -1 }; return current }
+        if fd >= 0 {
+            shutdown(fd, SHUT_RDWR)
+            close(fd)
+        }
         guard let bound = channel.withLockedValue({ current in defer { current = nil }; return current }) else { return }
         do { try await bound.close() } catch { fputs("stand-in DNS server close failed: \(error)\n", stderr) }
+    }
+
+    fileprivate static func reply(to query: [UInt8], ip: String, state: NIOLockedValueBox<(silent: Bool, asked: Int)>) -> [UInt8]? {
+        let silent = state.withLockedValue { current in
+            current.asked += 1
+            return current.silent
+        }
+        guard !silent else { return nil }
+        if DNSWireFormat.isForwarderProbe(query) { return DNSWireFormat.emptyDNSResponse(originalQuery: query, rcode: 3) }
+        return DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: ip)
+    }
+
+    private func listenTCP(port: Int) throws {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = UInt16(port).bigEndian
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        guard fd >= 0, bound == 0, listen(fd, 16) == 0 else {
+            if fd >= 0 { close(fd) }
+            throw POSIXError(.EADDRINUSE)
+        }
+        stream.withLockedValue { $0 = fd }
+        let (ip, state) = (ip, state)
+        Thread {
+            while true {
+                let client = accept(fd, nil, nil)
+                guard client >= 0 else { return }
+                Thread { Self.serve(client, ip: ip, state: state) }.start()
+            }
+        }.start()
+    }
+
+    private static func serve(_ client: Int32, ip: String, state: NIOLockedValueBox<(silent: Bool, asked: Int)>) {
+        defer { close(client) }
+        func readFully(_ count: Int) -> [UInt8]? {
+            var bytes = [UInt8](repeating: 0, count: count)
+            var filled = 0
+            while filled < count {
+                let got = bytes.withUnsafeMutableBytes { read(client, $0.baseAddress! + filled, count - filled) }
+                guard got > 0 else { return nil }
+                filled += got
+            }
+            return bytes
+        }
+        while let prefix = readFully(2), let query = readFully(Int(prefix[0]) << 8 | Int(prefix[1])) {
+            guard let answer = reply(to: query, ip: ip, state: state) else { continue }
+            let framed = [UInt8(answer.count >> 8), UInt8(answer.count & 0xFF)] + answer
+            guard write(client, framed, framed.count) == framed.count else { return }
+        }
     }
 
     private final class Responder: ChannelInboundHandler, @unchecked Sendable {
@@ -695,11 +839,7 @@ final class StandInDNSServer: @unchecked Sendable {
             let envelope = unwrapInboundIn(data)
             var buffer = envelope.data
             let query = buffer.readBytes(length: buffer.readableBytes) ?? []
-            let silent = state.withLockedValue { current in
-                current.asked += 1
-                return current.silent
-            }
-            guard !silent, let answer = DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: ip) else { return }
+            guard let answer = StandInDNSServer.reply(to: query, ip: ip, state: state) else { return }
             var out = context.channel.allocator.buffer(capacity: answer.count)
             out.writeBytes(answer)
             context.writeAndFlush(wrapOutboundOut(AddressedEnvelope(remoteAddress: envelope.remoteAddress, data: out)), promise: nil)
