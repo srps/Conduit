@@ -23,12 +23,17 @@ package struct VPNDNSOverrideLegacyRecord: Codable, Equatable, Sendable {
 package enum VPNDNSOverrideLegacyStoredRecord: Equatable, Sendable {
     case none
     case record(VPNDNSOverrideLegacyRecord)
-    case undecodable(String)
+    /// The file is there but could not be read; it is kept and read again.
+    case unreadable(String)
+    /// Read, but not a record: a link, too large, not JSON or out of shape.
+    case malformed(String)
 }
 
 package protocol VPNDNSOverrideLegacyRecordFile {
     func load() -> VPNDNSOverrideLegacyStoredRecord
     func delete() throws
+    /// Moves a malformed record out of the way, kept for a person to read, so it is never read again.
+    func setAside() throws
 }
 
 package enum VPNDNSLegacyRead: Equatable, Sendable {
@@ -55,8 +60,13 @@ package enum VPNDNSOverrideLegacyRestore {
         case keyUnreadable(service: String, reason: String)
         /// The record stays, for the next start.
         case restoreFailed(service: String)
-        case undecodable(String)
+        /// The record stays.
+        case recordUnreadable(String)
+        case malformedSetAside(String)
+        case setAsideFailed(String)
         case deleteFailed(String)
+        /// `VPNDNSOverrideLegacyRetry.maximumAttempts` tries all failed; the record stays for the next start.
+        case gaveUp(attempts: Int)
 
         package var logLine: String {
             let prefix = "vpn-dns-override legacy"
@@ -68,20 +78,34 @@ package enum VPNDNSOverrideLegacyRestore {
             case .keyUnreadable(let service, let reason):
                 return "\(prefix) key_unreadable service=\(HelperAudit.safe(service)) reason=\"\(HelperAudit.bounded(reason))\"; record kept"
             case .restoreFailed(let service): return "\(prefix) restore_failed service=\(HelperAudit.safe(service)); record kept"
-            case .undecodable(let why): return "\(prefix) record undecodable, deleted: \"\(HelperAudit.bounded(why))\""
+            case .recordUnreadable(let why): return "\(prefix) record_unreadable reason=\"\(HelperAudit.bounded(why))\"; record kept"
+            case .malformedSetAside(let why):
+                return "\(prefix) record_malformed reason=\"\(HelperAudit.bounded(why))\"; set aside as \(VPNDNSOverrideLegacyFile.setAsideSuffix)"
+            case .setAsideFailed(let why): return "\(prefix) record set aside failed: \"\(HelperAudit.bounded(why))\""
             case .deleteFailed(let why): return "\(prefix) record delete failed: \"\(HelperAudit.bounded(why))\""
+            case .gaveUp(let attempts): return "\(prefix) gave_up attempts=\(attempts); record kept for the next start"
             }
         }
 
         package var isFailure: Bool {
             switch self {
-            case .keyUnreadable, .restoreFailed, .undecodable, .deleteFailed: return true
+            case .noRecord, .restored, .keyChanged, .keyGone: return false
+            default: return true
+            }
+        }
+
+        /// The record is still where it is read from, so another attempt may finish it.
+        package var needsRetry: Bool {
+            switch self {
+            case .keyUnreadable, .restoreFailed, .recordUnreadable, .setAsideFailed, .deleteFailed: return true
             default: return false
             }
         }
     }
 
-    /// Compare-then-write: the originals go back only over the `127.0.0.1` the older helper wrote; nothing is deleted.
+    /// Reads the record and the key afresh on every call. Compare-then-write, not atomic: the originals go back only over
+    /// the `127.0.0.1` the older helper wrote, read just before, and nothing is deleted from the key. A client that writes
+    /// between the read and the write loses to the restore; the client rewrites its key on its own next change.
     @discardableResult
     package static func run(
         store: any VPNDNSLegacyStore,
@@ -92,16 +116,22 @@ package enum VPNDNSOverrideLegacyRestore {
         switch file.load() {
         case .none:
             return .noRecord
-        case .undecodable(let why):
-            outcome = .undecodable(why)
+        case .unreadable(let why):
+            outcome = .recordUnreadable(why)
+        case .malformed(let why):
+            do {
+                try file.setAside()
+                outcome = .malformedSetAside(why)
+            } catch {
+                outcome = .setAsideFailed("\(why); \(error.localizedDescription)")
+            }
+            report(outcome)
+            return outcome
         case .record(let record):
             outcome = restore(record, store: store)
         }
         report(outcome)
-        switch outcome {
-        case .restoreFailed, .keyUnreadable: return outcome
-        default: break
-        }
+        if outcome.needsRetry { return outcome }
         do {
             try file.delete()
         } catch {
@@ -126,9 +156,59 @@ package enum VPNDNSOverrideLegacyRestore {
     }
 }
 
+/// Runs the restore at start, then again while it needs one: on a store change at most every `firstDelaySeconds`, and
+/// on the helper's tick once its backoff is due, doubling to `maximumDelaySeconds`, for at most `maximumAttempts`.
+package struct VPNDNSOverrideLegacyRetry: Sendable {
+    package enum Trigger: Sendable {
+        case start
+        case storeChanged
+        case tick
+    }
+
+    package static let firstDelaySeconds: UInt64 = 10
+    package static let maximumDelaySeconds: UInt64 = 300
+    package static let maximumAttempts = 12
+
+    package private(set) var attempts = 0
+    package private(set) var pending = true
+    private var lastAttempt: UInt64 = 0
+    private var delay = Self.firstDelaySeconds
+
+    package init() {}
+
+    /// `now` is monotonic seconds.
+    package mutating func attempt(
+        _ trigger: Trigger,
+        now: UInt64,
+        store: any VPNDNSLegacyStore,
+        file: any VPNDNSOverrideLegacyRecordFile,
+        report: (VPNDNSOverrideLegacyRestore.Outcome) -> Void
+    ) {
+        guard pending else { return }
+        switch trigger {
+        case .start: guard attempts == 0 else { return }
+        case .storeChanged: guard now >= lastAttempt + Self.firstDelaySeconds else { return }
+        case .tick: guard now >= lastAttempt + delay else { return }
+        }
+        if attempts > 0 { delay = min(delay * 2, Self.maximumDelaySeconds) }
+        attempts += 1
+        lastAttempt = now
+        let outcome = VPNDNSOverrideLegacyRestore.run(store: store, file: file, report: report)
+        guard outcome.needsRetry else {
+            pending = false
+            return
+        }
+        if attempts >= Self.maximumAttempts {
+            pending = false
+            report(.gaveUp(attempts: attempts))
+        }
+    }
+}
+
 /// The older helper's record under `/var/run`, root-owned 0600.
 package struct VPNDNSOverrideLegacyFile: VPNDNSOverrideLegacyRecordFile {
     package static let maximumBytes = 16_384
+    package static let setAsideSuffix = ".malformed"
 
     package let path: String
 
@@ -139,8 +219,11 @@ package struct VPNDNSOverrideLegacyFile: VPNDNSOverrideLegacyRecordFile {
     package func load() -> VPNDNSOverrideLegacyStoredRecord {
         let fd = open(path, O_RDONLY | O_NOFOLLOW)
         guard fd >= 0 else {
-            if errno == ENOENT { return .none }
-            return .undecodable("open: \(String(cString: strerror(errno)))")
+            switch errno {
+            case ENOENT: return .none
+            case ELOOP: return .malformed("a link, not a file")
+            default: return .unreadable("open: \(String(cString: strerror(errno)))")
+            }
         }
         defer { close(fd) }
         var data = Data()
@@ -149,11 +232,11 @@ package struct VPNDNSOverrideLegacyFile: VPNDNSOverrideLegacyRecordFile {
             let count = read(fd, &buffer, buffer.count)
             if count < 0 {
                 if errno == EINTR { continue }
-                return .undecodable("read: \(String(cString: strerror(errno)))")
+                return .unreadable("read: \(String(cString: strerror(errno)))")
             }
             if count == 0 { break }
             data.append(contentsOf: buffer[0..<count])
-            if data.count > Self.maximumBytes { return .undecodable("larger than \(Self.maximumBytes) bytes") }
+            if data.count > Self.maximumBytes { return .malformed("larger than \(Self.maximumBytes) bytes") }
         }
         return Self.decode(data)
     }
@@ -163,10 +246,17 @@ package struct VPNDNSOverrideLegacyFile: VPNDNSOverrideLegacyRecordFile {
         do {
             decoded = try JSONDecoder().decode(VPNDNSOverrideLegacyRecord.self, from: data)
         } catch {
-            return .undecodable("not a record: \(error.localizedDescription)")
+            return .malformed("not a record: \(error.localizedDescription)")
         }
-        guard decoded.isValid else { return .undecodable("record out of shape") }
+        guard decoded.isValid else { return .malformed("record out of shape") }
         return .record(decoded)
+    }
+
+    /// A rename within the record's directory, replacing an earlier one; a link is moved, never followed.
+    package func setAside() throws {
+        guard rename(path, path + Self.setAsideSuffix) == 0 || errno == ENOENT else {
+            throw VPNDNSOverrideLegacyFileError.system("rename \(path)", errno)
+        }
     }
 
     package func delete() throws {

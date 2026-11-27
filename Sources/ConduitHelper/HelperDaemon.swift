@@ -88,16 +88,14 @@ enum HelperDaemon {
             lastConsoleUID = consoleAtStart
         }
         callerIdentity = loadCallerIdentity()
-        VPNDNSOverrideLegacyRestore.run(store: SCDynamicStoreLegacyVPNDNSStore(), file: VPNDNSOverrideLegacyFile()) {
-            if $0.isFailure { HelperLog.error($0.logLine) } else { HelperLog.notice($0.logLine) }
-        }
+        retryLegacyRestore(.start)
         vpnDNSOverride = VPNDNSOverridePublisher(
             store: SCDynamicStoreVPNDNSStore(changed: loop.storeTrigger), relay: failoverRelay, report: logVPNDNSOverride
         )
         HelperLog.notice("ConduitHelper daemon listening on \(socketPath)")
 
         while true {
-            switch loop.next(tickDue: vpnDNSOverride.wantsTicks) {
+            switch loop.next(tickDue: vpnDNSOverride.wantsTicks || legacyRestore.pending) {
             case .connection:
                 serveConnection(listenFD: serverFD)
             case .ownerExited(let pid):
@@ -105,8 +103,10 @@ enum HelperDaemon {
                 vpnDNSOverride.ownerExited(pid)
             case .storeChanged:
                 vpnDNSOverride.sync()
+                retryLegacyRestore(.storeChanged)
             case .tick:
                 vpnDNSOverride.tick()
+                retryLegacyRestore(.tick)
             case .signal(let number):
                 HelperLog.notice("ConduitHelper received signal \(number); stopping")
                 vpnDNSOverride.disarm(.helperStopping)
@@ -598,6 +598,16 @@ enum HelperDaemon {
             HelperLog.error(outcome.logLine)
         } else {
             HelperLog.notice(outcome.logLine)
+        }
+    }
+
+    nonisolated(unsafe) private static var legacyRestore = VPNDNSOverrideLegacyRetry()
+
+    private static func retryLegacyRestore(_ trigger: VPNDNSOverrideLegacyRetry.Trigger) {
+        legacyRestore.attempt(
+            trigger, now: DispatchTime.now().uptimeNanoseconds / 1_000_000_000, store: SCDynamicStoreLegacyVPNDNSStore(), file: VPNDNSOverrideLegacyFile()
+        ) {
+            if $0.isFailure { HelperLog.error($0.logLine) } else { HelperLog.notice($0.logLine) }
         }
     }
 
