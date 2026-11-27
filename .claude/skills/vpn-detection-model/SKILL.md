@@ -15,7 +15,7 @@ It does if it changes the behaviour of any function in the coverage record below
 python3 formal/vpn-detection/check.py --changed 54f49441
 ```
 
-It prints the files in `COVERED` in `check.py` that differ from the commit, and the model's own files (`formal/vpn-detection/`, this skill). `COVERED` is the one list of covered files: CI reads it to choose the tier, so a file added to the coverage record table must be added there too, and `--changed` fails if a listed file no longer exists.
+It prints the files in `COVERED` in `check.py` that differ from the commit, and the model's own files (`VPNDetection.tla`, `check.py`, this skill), together with those of the 0049 override spec (skill `vpn-dns-override-model`, `OVERRIDE_COVERED`). `COVERED` is the one list of this spec's covered files: CI reads it through `check.py --full-for`, which names the specs whose files changed, to choose each spec's tier, so a file added to the coverage record table must be added there too, and `--changed` fails if a listed file no longer exists.
 
 `RuntimeHost.swift`, `RuntimeHostLifecycle.swift` and `ProxyOrchestrator.swift` are large; only the functions named below matter.
 
@@ -29,7 +29,7 @@ python3 formal/vpn-detection/check.py --only safety-core # one check or mutant (
 
 It needs Java 11 or later. The first run fetches `tla2tools.jar` v1.7.4 from the TLA+ GitHub release into `formal/.tools/` and checks its SHA-256. Each check writes `formal/vpn-detection/.out/<check>/tlc.out`. A check's TLC state files can reach a few GB while it runs and are removed after.
 
-CI runs it in the `vpn-detection-model` job of `.github/workflows/swift.yml`. Every pull request and push to main runs the default tier. When `check.py --changed` against the base lists any file, or a push has no commit before it, the job runs the full tier instead; if `--changed` fails, the job fails. A nightly schedule runs the full tier on main. Run the full tier yourself after a change to the repair, the platform queue, the start or its correction. Timings are under Bounds.
+CI runs it in the `vpn-model (detection)` job of `.github/workflows/swift.yml`, beside a parallel `vpn-model (override)` job. Every pull request and push to main runs this spec's default tier (`--spec detection`, which also limits a local run to this one). The full tier (`--full=detection`) runs nightly on main when the spec's covered or model files changed since the last green nightly run, when the workflow is started by hand, and in `release.yml` on a tag, where it gates the draft release. CI does not run it for a pull request, so run it yourself when `check.py --full-for origin/main` names this spec, and always after a change to the repair, the platform queue, the start or its correction. Timings are under Bounds.
 
 Read every result with the `/statechart` skill: give it the spec and the config from `.out/<check>/`, and it shows each violation as its shortest path in plain words, or charts the states when the check passes (make the bounds smaller first; the chart budget is small). Before you trust a path, replay it against the Swift, one step per action, in a `VPNStatusMonitorTests` or `RuntimeHost` test over `FakeTunnelStore` and `FakeStoreObserverClock`.
 
@@ -121,7 +121,7 @@ Each atomic step and why it is one:
 - A Stop of DNS or tunnels alone (the model's Stops take down everything, or the proxy alone), a Stop during a Start, lifecycle-lane supersession, the DNS and tunnel members (only the time their starts take, as `HStartObservers`), intercept resolver files and their refresh retry in `settleResolverSwitchBaseline`, residue, config reloads and the resolver switch, launch recovery, and files left by a crash.
 - What `handleVPNStateChange` does after the orchestrator returns (`reconcileSystemDNSIfRunning`) and the orchestrator's work after its first suspension.
 - The orchestrator's routing, probes and direct mode; only `VPNReactionHistory` and the sweeps are modelled, in their own check.
-- `LiveSplitDNSDetection` and `PushedResolverMonitor` (decision 0044), which share the barrier but not this gate. That includes `stopVPNMonitor`'s `splitDNSDetection.vpnObserverStopped()` and `applyPendingSplitDNSDetection()`, so `LiveSplitDNSDetection.swift` is not in `COVERED`.
+- `LiveSplitDNSDetection` and `PushedResolverMonitor` (decision 0044), which share the barrier but not this gate. The 0049 override that builds on them is its own spec, `VPNDNSOverride.tla` (skill `vpn-dns-override-model`). That includes `stopVPNMonitor`'s `splitDNSDetection.vpnObserverStopped()` and `applyPendingSplitDNSDetection()`, so `LiveSplitDNSDetection.swift` is not in `COVERED`.
 - A wake-up that re-reads an unchanged store does not fire (`WakeFire` needs `~ghost.fresh`). That is sound because a reconcile on the same reading is idempotent, which the timer tests check.
 
 ## A real bug or a modeling error?

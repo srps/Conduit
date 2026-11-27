@@ -177,10 +177,12 @@ final class FakeHelper: @unchecked Sendable {
     private let lock = NSLock()
     private var seen = 0
     private var commands: [HelperCommand?] = []
+    private var values: [[String]] = []
     private var running = true
 
     var requestsSeen: Int { lock.withLock { seen } }
     var commandsSeen: [HelperCommand?] { lock.withLock { commands } }
+    var valuesSeen: [[String]] { lock.withLock { values } }
 
     init(replies: [HelperResponse?]) throws {
         // sun_path is 104 bytes; /tmp keeps it short.
@@ -211,10 +213,12 @@ final class FakeHelper: @unchecked Sendable {
             var byte: UInt8 = 0
             var line = Data()
             while Darwin.read(client, &byte, 1) == 1, byte != UInt8(ascii: "\n") { line.append(byte) }
-            let command = (try? JSONDecoder().decode(HelperRequest.self, from: line))?.command
+            let request = try? JSONDecoder().decode(HelperRequest.self, from: line)
+            let command = request?.command
             let index = lock.withLock { () -> Int in
                 defer { seen += 1 }
                 commands.append(command)
+                values.append(request?.values ?? [])
                 return seen
             }
             if index < replies.count, let reply = replies[index],

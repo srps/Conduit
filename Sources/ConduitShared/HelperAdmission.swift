@@ -16,11 +16,11 @@ public enum HelperAdmission {
     public static func isTeardownOnly(_ command: HelperCommand) -> Bool {
         switch command {
         case .ping, .dnsRelayStatus, .removeDNS, .clearSystemProxy, .disableAutoproxy,
-             .stopDNSRelay, .stopTCPRelay:
+             .stopDNSRelay, .stopTCPRelay, .vpnDNSOverrideStatus, .vpnDNSOverrideDisarm:
             return true
         case .applyDNS, .applySystemProxy, .startDNSRelay, .startTCPRelay,
              .setWebProxyEndpoint, .setAutoproxyURL, .setAutoproxy,
-             .setProxyBypass, .setDNSServers, .compareNetworkSettings:
+             .setProxyBypass, .setDNSServers, .compareNetworkSettings, .vpnDNSOverrideArm:
             return false
         }
     }

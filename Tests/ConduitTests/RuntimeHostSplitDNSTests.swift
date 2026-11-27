@@ -444,4 +444,36 @@ final class RuntimeHostSplitDNSTests: XCTestCase {
         await running.report(.connected, live: ["utun6"])
         XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS.state, .inUse, "the new session's report puts it in use")
     }
+
+    private func lan(_ servers: [String], skipped: Int = 0) -> NetworkResolver {
+        NetworkResolver(serviceID: "wifi", interface: "en0", servers: servers, skipped: skipped)
+    }
+
+    @RuntimeActor func testTheNetworkServersReachTheForwarderWhateverTheVPNVerdict() async throws {
+        let running = try await start()
+        await running.report(.disconnected(reason: .userInitiated), live: [])
+
+        await running.push(PushedResolverReading(network: lan(["192.0.2.1"], skipped: 1)))
+
+        XCTAssertEqual(running.host.orchestrator.networkResolverServers, ["192.0.2.1"], "off the VPN, the gate withholds nothing here")
+        XCTAssertEqual(running.events("dns.network_resolver_changed"), ["interface=en0 servers=1 skipped=1"], "counts, never addresses")
+        XCTAssertEqual(running.events("dns.split_table_changed"), [], "the split-DNS table is not touched")
+
+        await running.push(PushedResolverReading(network: lan(["192.0.2.1"], skipped: 1)))
+        XCTAssertEqual(running.events("dns.network_resolver_changed").count, 1, "an unchanged set is not reported again")
+
+        await running.push(PushedResolverReading(failure: .storeRead))
+        XCTAssertEqual(running.host.orchestrator.networkResolverServers, [], "a failed reading vouches for nothing")
+        XCTAssertEqual(running.events("dns.network_resolver_changed").last, "interface=none servers=0 skipped=0")
+    }
+
+    @RuntimeActor func testStoppingDetectionClearsTheNetworkServers() async throws {
+        let running = try await start(primed: PushedResolverReading(network: lan(["192.0.2.1"])))
+        XCTAssertEqual(running.host.orchestrator.networkResolverServers, ["192.0.2.1"])
+
+        _ = await running.host.stopDNS()
+        await running.host.deliveries.drain()
+
+        XCTAssertEqual(running.host.orchestrator.networkResolverServers, [])
+    }
 }

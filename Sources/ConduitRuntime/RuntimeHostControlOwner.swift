@@ -501,10 +501,9 @@ extension RuntimeHost: ControlCommandOwner {
 
     /// The app's Test DNS probe of `port`, run as the host's own DNS health timer runs its probe: through the injected probe on a
     /// global queue, never on `platformWork`, so a probe waiting out its timeout cannot hold a Stop's or a quit's teardown there. One
-    /// physical probe runs at a time. A request for the latest probe's port joins it, and one for another port runs after it, so each
-    /// answer is for the port its request chose and the probes waiting are bounded by the service's ordinary capacity.
+    /// physical probe runs at a time, and each request runs its own after the latest, never joining one already out: that one may
+    /// describe a DNS run or a verdict from before this request. The probes waiting are bounded by the service's ordinary capacity.
     private func dnsLiveness(port: Int) -> Task<Bool, Never> {
-        if let latest = dnsLivenessProbe, latest.port == port { return latest.answer }
         let previous = dnsLivenessProbe?.answer
         let identity = UUID()
         let manager = systemDNSManager
@@ -516,7 +515,7 @@ extension RuntimeHost: ControlCommandOwner {
             if self?.dnsLivenessProbe?.identity == identity { self?.dnsLivenessProbe = nil }
             return answered
         }
-        dnsLivenessProbe = (port, identity, answer)
+        dnsLivenessProbe = (identity, answer)
         return answer
     }
 

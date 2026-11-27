@@ -752,6 +752,39 @@ package final class ProxyOrchestrator {
         }
     }
 
+    package var detectedSplitDNSRules: [SplitDNSRule] {
+        splitDNSBox.withLockedValue { $0.detected }
+    }
+
+    /// Never restarts the forwarder; safe before it has started. The host validates `servers`.
+    @discardableResult
+    package func applyNetworkResolverServers(_ servers: [String]) -> Bool {
+        networkResolverBox.withLockedValue { current in
+            guard current != servers else { return false }
+            current = servers
+            return true
+        }
+    }
+
+    package var networkResolverServers: [String] {
+        networkResolverBox.withLockedValue { $0 }
+    }
+
+    func handleDNSResolutionRecovered(_ recovery: DNSResolutionRecovery) async {
+        let pac = pacRoutingEngine != nil && config.pacRoutingEnabled && !config.pacURL.isEmpty
+        let reprobe = isProxyActive && snapshot.directModeCause.usesDirectReprobeTimer
+        let detail = "unanswered=\(recovery.unansweredBefore) via=\(recovery.viaNetworkResolver ? "network_resolver" : "upstream") "
+            + "pac=\(pac ? "refresh" : "off") reprobe=\(reprobe ? "started" : "not_direct")"
+        emitEvent(.health, "dns.resolution_recovered", detail: detail)
+        logStore.log(.notice, "DNS is answering on this path again; retrying what failed meanwhile: \(detail)", category: .network)
+        if pac {
+            await refreshPACRouting(force: true, honorBackoff: false)
+        }
+        if reprobe {
+            directModeReprobeTick(armedAs: directModeReprobeGeneration)
+        }
+    }
+
     /// Rebuilds the merged table from the current config and `detected`, or the stored rules when nil.
     private func swapSplitDNSTable(detected: [SplitDNSRule]? = nil, reason: String) {
         let manual = configBox.current.dnsEntries
@@ -1185,6 +1218,10 @@ package final class ProxyOrchestrator {
     private var strandedSweepsOwed: String?
     /// The forwarder's split-DNS table, in a box because its lookups run off the owner. Written only by `swapSplitDNSTable`.
     private let splitDNSBox: NIOLockedValueBox<SplitDNSState>
+    /// In a box for the same reason. Written only by `applyNetworkResolverServers`.
+    private let networkResolverBox = NIOLockedValueBox<[String]>([])
+    /// The proxy hosts PAC answers named, for the forwarder's proxy-host path (decision 0051).
+    private let pacProxyHosts = PACProxyHosts()
     private let dnsForwarderTuning: DNSForwarderTuning
 
     /// Phase 4: Monotonic instant of the most recent `.connected → .reasserting`
@@ -1253,7 +1290,8 @@ package final class ProxyOrchestrator {
             configProvider: { [configBox] in configBox.current },
             resolver: pacEvaluator,
             logger: logStore,
-            eventSink: { [eventLog] event in eventLog.append(event) }
+            eventSink: { [eventLog] event in eventLog.append(event) },
+            proxyHosts: pacProxyHosts
         )
     }()
 
@@ -1263,6 +1301,14 @@ package final class ProxyOrchestrator {
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
         splitDNSProvider: { [splitDNSBox] in splitDNSBox.withLockedValue { $0.table } },
+        networkResolverProvider: { [networkResolverBox] in networkResolverBox.withLockedValue { $0 } },
+        proxyHostsProvider: { [configBox, pacProxyHosts] in
+            let config = configBox.current
+            return ProxyHostNames(config: config, pacHosts: pacProxyHosts.current(for: config))
+        },
+        onResolutionRecovered: { [weak self] recovery in
+            Task { @RuntimeActor in await self?.handleDNSResolutionRecovered(recovery) }
+        },
         doHRoute: { [routingBox] in routingBox.withLockedValue { $0.doHRoute } },
         localProxyPort: { [server = localProxyServer] in server.listeningPort },
         // A signal only: the hop reads the running core's counters when it runs. A stop clears them, and a later start's core counts

@@ -6,8 +6,9 @@ import XCTest
 @testable import ProxyKernel
 
 /// The forwarder across network changes (#292, #296, #290 part 1): an
-/// unsatisfied path answers at once, a transports reset cancels the lookups
-/// in flight, no entry means no internal attempt, a silent internal server
+/// unsatisfied path drops a lookup at once, a transports reset cancels the
+/// lookups in flight and re-runs them once on the fresh transports, never
+/// answering SERVFAIL for it, no entry means no internal attempt, a silent internal server
 /// opens its circuit, an entry's servers are tried in order and the longest
 /// suffix wins. Every server is a loopback fake; nothing leaves the machine.
 final class DNSForwarderHealthTests: XCTestCase {
@@ -36,7 +37,7 @@ final class DNSForwarderHealthTests: XCTestCase {
     // MARK: - #292: an unsatisfied path
 
     @MainActor
-    func testUnsatisfiedPathAnswersServfailAtOnceWithoutAnAttempt() async throws {
+    func testUnsatisfiedPathDropsTheLookupAtOnceWithoutAnAttempt() async throws {
         let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
         let doh = try await provider(ip: "198.51.100.7")
         let port = try await startForwarder(
@@ -47,14 +48,14 @@ final class DNSForwarderHealthTests: XCTestCase {
 
         var queries = (0..<16).map { DNSWireFormat.buildQuery(domain: "public-\($0).example", txID: 0x7000 + UInt16($0)) }
         queries.append(DNSWireFormat.buildQuery(domain: "intranet.corp.example", txID: 0x70FF))
-        let replies = try await askAll(queries, port: port)
+        let collector = try await client(sending: queries, to: port)
+        try await settle(until: { self.ownedForwarder?.metricCounts?.queries == queries.count }, "every lookup is handled")
+        try await settle(until: { self.ownedForwarder?.inFlightQueryCount == 0 }, "no slot is held")
 
-        XCTAssertEqual(replies.count, queries.count, "every refused lookup is answered")
-        XCTAssertEqual(Set(replies.map(DNSWireFormat.extractRCode)), [2], "SERVFAIL, nothing else")
+        XCTAssertEqual(collector.replies().count, 0, "a dropped lookup gets no reply a stub could cache")
         XCTAssertEqual(internalServer.queryCount, 0, "no internal attempt while the path is down")
         XCTAssertEqual(doh.requestCount(), 0, "no DoH attempt while the path is down")
-        XCTAssertEqual(ownedForwarder?.inFlightQueryCount, 0, "no slot is held")
-        let refused = events(named: "dns.unsatisfied_path_servfail")
+        let refused = events(named: "dns.unsatisfied_path_dropped")
         XCTAssertEqual(refused.count, 1, "the burst reports once inside the window")
         XCTAssertEqual(refused.first?.kind, .routing)
         XCTAssertEqual(refused.first?.detail?.hasSuffix(" suppressed=0"), true)
@@ -85,12 +86,13 @@ final class DNSForwarderHealthTests: XCTestCase {
     }
 
     @MainActor
-    func testTransportsResetCancelsLookupsInFlightAndFreesTheirSlots() async throws {
+    func testTransportsResetReRunsLookupsAndASecondResetDropsThemAndFreesTheirSlots() async throws {
         let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
         let doh = try await provider(ip: "198.51.100.7")
         let port = try await startForwarder(
             entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
-            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .seconds(20)
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .seconds(20),
+            rerunSleep: Self.windowNeverElapses
         )
         let forwarder = try XCTUnwrap(ownedForwarder)
         let queries = (0..<8).map { DNSWireFormat.buildQuery(domain: "host-\($0).corp.example", txID: 0x7200 + UInt16($0)) }
@@ -103,11 +105,93 @@ final class DNSForwarderHealthTests: XCTestCase {
 
         forwarder.resetUpstreamTransports(reason: "network_change")
 
-        try await settle(until: { collector.replies().count == queries.count }, "every cancelled lookup answers")
-        XCTAssertEqual(Set(collector.replies().map(DNSWireFormat.extractRCode)), [2], "a cancelled lookup answers SERVFAIL")
+        try await settle(until: { internalServer.queryCount == 2 * queries.count }, "every cancelled lookup is re-run on the fresh transports")
+        XCTAssertEqual(forwarder.inFlightQueryCount, queries.count, "a re-run keeps its lookup's slot")
+        XCTAssertEqual(collector.replies().count, 0, "a cancelled lookup gets no SERVFAIL")
+
+        forwarder.resetUpstreamTransports(reason: "network_change")
+
         try await settle(until: { forwarder.inFlightQueryCount == 0 }, "every slot is released")
+        XCTAssertEqual(internalServer.queryCount, 2 * queries.count, "a lookup is re-run once")
+        XCTAssertEqual(collector.replies().count, 0, "a lookup whose re-run is cancelled too gets no reply")
         XCTAssertEqual(doh.requestCount(), 0, "a cancelled lookup starts no fallback")
         XCTAssertEqual(events(named: "dns.split_dns_doh_fallback").count, 0)
+        let decisions = events(named: "dns.reset_lookup_rerun").compactMap(\.detail)
+        XCTAssertEqual(decisions.count, 2, "one event per outcome inside the window: \(decisions)")
+        XCTAssertEqual(decisions.first.map { $0.contains(" outcome=rerun ") && $0.hasSuffix(" suppressed=0") }, true)
+        XCTAssertEqual(decisions.last.map { $0.contains(" outcome=dropped cause=reset_again ") }, true)
+        XCTAssertEqual(forwarder.metricCounts?.queries, queries.count, "each lookup counts once")
+    }
+
+    @MainActor
+    func testLookupCancelledByAResetIsAnsweredByItsReRunOnTheFreshTransports() async throws {
+        let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: 1, answering: "192.0.2.80")
+        let doh = try await provider(ip: "198.51.100.7")
+        let port = try await startForwarder(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .seconds(20),
+            rerunSleep: Self.windowNeverElapses
+        )
+        let forwarder = try XCTUnwrap(ownedForwarder)
+        let collector = try await client(sending: [DNSWireFormat.buildQuery(domain: "app.corp.example", txID: 0x7250)], to: port)
+        try await settle(until: { internalServer.queryCount == 1 }, "the lookup is waiting on the server")
+
+        forwarder.resetUpstreamTransports(reason: "network_change")
+
+        try await settle(until: { collector.replies().count == 1 }, "the re-run answers")
+        XCTAssertEqual(collector.replies().map(DNSWireFormat.extractRCode), [0], "the only reply is the answer")
+        XCTAssertEqual(collector.replies().first.flatMap(DNSWireFormat.firstIPv4Answer)?.ip, "192.0.2.80")
+        XCTAssertEqual(internalServer.queryCount, 2)
+        let outcomes = events(named: "dns.reset_lookup_rerun").compactMap(\.detail)
+        XCTAssertEqual(outcomes.count, 2, "\(outcomes)")
+        XCTAssertEqual(outcomes.first?.hasPrefix("name=app.corp.example outcome=rerun remaining_ms="), true)
+        XCTAssertEqual(outcomes.last, "name=app.corp.example outcome=answered suppressed=0")
+    }
+
+    @MainActor
+    func testLookupCancelledWithNoTimeLeftInItsWindowIsDroppedWithoutAReRun() async throws {
+        let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: 1, answering: "192.0.2.80")
+        let doh = try await provider(ip: "198.51.100.7")
+        let port = try await startForwarder(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .seconds(20),
+            lookupWindow: .zero, rerunSleep: Self.windowNeverElapses
+        )
+        let forwarder = try XCTUnwrap(ownedForwarder)
+        let collector = try await client(sending: [DNSWireFormat.buildQuery(domain: "late.corp.example", txID: 0x7260)], to: port)
+        try await settle(until: { internalServer.queryCount == 1 }, "the lookup is waiting on the server")
+
+        forwarder.resetUpstreamTransports(reason: "network_change")
+
+        try await settle(until: { forwarder.inFlightQueryCount == 0 }, "its slot is released")
+        XCTAssertEqual(collector.replies().count, 0, "no SERVFAIL, no reply")
+        XCTAssertEqual(internalServer.queryCount, 1, "no re-run")
+        XCTAssertEqual(
+            events(named: "dns.reset_lookup_rerun").compactMap(\.detail),
+            ["name=late.corp.example outcome=dropped cause=no_time_left remaining_ms=0 suppressed=0"]
+        )
+    }
+
+    @MainActor
+    func testReRunThatOutlastsItsWindowIsDropped() async throws {
+        let internalServer = try await ScriptedInternalServer.start(group: group, silentFor: .max, answering: "192.0.2.80")
+        let doh = try await provider(ip: "198.51.100.7")
+        let port = try await startForwarder(
+            entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .seconds(20),
+            rerunSleep: { _ in }
+        )
+        let forwarder = try XCTUnwrap(ownedForwarder)
+        let collector = try await client(sending: [DNSWireFormat.buildQuery(domain: "slow.corp.example", txID: 0x7270)], to: port)
+        try await settle(until: { internalServer.queryCount == 1 }, "the lookup is waiting on the server")
+
+        forwarder.resetUpstreamTransports(reason: "network_change")
+
+        try await settle(until: { forwarder.inFlightQueryCount == 0 }, "its slot is released")
+        XCTAssertEqual(collector.replies().count, 0, "no SERVFAIL, no reply")
+        let outcomes = events(named: "dns.reset_lookup_rerun").compactMap(\.detail)
+        XCTAssertEqual(outcomes.last, "name=slow.corp.example outcome=dropped cause=window_elapsed suppressed=0", "\(outcomes)")
+        XCTAssertEqual(doh.requestCount(), 0)
     }
 
     @MainActor
@@ -121,9 +205,9 @@ final class DNSForwarderHealthTests: XCTestCase {
         let forwarder = try XCTUnwrap(ownedForwarder)
         forwarder.updateNetworkPath(satisfied: false)
         let burst = (0..<48).map { DNSWireFormat.buildQuery(domain: "burst-\($0).example", txID: 0x7300 + UInt16($0)) }
-        let refused = try await askAll(burst, port: port)
-        XCTAssertEqual(refused.count, burst.count)
-        XCTAssertEqual(Set(refused.map(DNSWireFormat.extractRCode)), [2])
+        let refused = try await client(sending: burst, to: port)
+        try await settle(until: { forwarder.metricCounts?.queries == burst.count }, "every lookup in the burst is dropped")
+        XCTAssertEqual(refused.replies().count, 0)
 
         forwarder.updateNetworkPath(satisfied: true)
         forwarder.resetUpstreamTransports(reason: "network_change")
@@ -143,7 +227,8 @@ final class DNSForwarderHealthTests: XCTestCase {
         let doh = try await provider(ip: "198.51.100.7", silent: true)
         let port = try await startForwarder(
             entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
-            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .milliseconds(50)
+            endpoints: ["192.0.2.1": internalServer.port], dohPort: doh.port, internalTimeout: .milliseconds(50),
+            rerunSleep: Self.windowNeverElapses
         )
         let forwarder = try XCTUnwrap(ownedForwarder)
         let queries = [
@@ -152,12 +237,14 @@ final class DNSForwarderHealthTests: XCTestCase {
         ]
         let collector = try await client(sending: queries, to: port)
         try await settle(until: { doh.requestCount() >= queries.count }, "both lookups are waiting on the provider")
+        let firstRequests = doh.requestCount()
 
         forwarder.resetUpstreamTransports(reason: "network_change")
+        try await settle(until: { doh.requestCount() >= firstRequests + queries.count }, "both re-runs are waiting on the provider")
+        forwarder.resetUpstreamTransports(reason: "network_change")
 
-        try await settle(until: { collector.replies().count == queries.count }, "every cancelled lookup answers")
-        XCTAssertEqual(Set(collector.replies().map(DNSWireFormat.extractRCode)), [2], "SERVFAIL for a cancelled lookup")
         try await settle(until: { forwarder.inFlightQueryCount == 0 }, "every slot is released")
+        XCTAssertEqual(collector.replies().count, 0, "no SERVFAIL for a cancelled lookup")
         XCTAssertFalse(log.containsMessage("DoH provider(s) failed", at: .warning), "a cancellation is no provider failure")
         XCTAssertTrue(log.containsMessage("DoH lookup for intranet.corp.example cancelled", at: .debug))
         XCTAssertTrue(log.containsMessage("DoH lookup for news.example cancelled", at: .debug))
@@ -172,7 +259,7 @@ final class DNSForwarderHealthTests: XCTestCase {
     /// one event loop that the test holds while the reset lands, so the
     /// connect is pending by construction, every iteration.
     @MainActor
-    func testResetWhileTheConnectIsPendingAnswersTheLookupOnce() async throws {
+    func testResetWhileTheConnectIsPendingEndsTheLookupOnce() async throws {
         let loopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         ownedGroups.append(loopGroup)
         let doh = try await provider(ip: "198.51.100.7")
@@ -181,7 +268,7 @@ final class DNSForwarderHealthTests: XCTestCase {
         let port = try await startForwarder(
             entries: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])],
             endpoints: ["192.0.2.1": 5353], dohPort: doh.port, internalTimeout: .seconds(5),
-            group: loopGroup,
+            rerunSleep: { _ in }, group: loopGroup,
             beforeInternalConnect: {
                 if let hold = gate.withLockedValue({ $0 }) {
                     loopGroup.next().execute { hold.wait() }
@@ -202,12 +289,12 @@ final class DNSForwarderHealthTests: XCTestCase {
             // held loop; neither waits on anything but the CPU.
             try await Task.sleep(for: .milliseconds(50))
 
+            gate.withLockedValue { $0 = nil }
             forwarder.resetUpstreamTransports(reason: "network_change")
             hold.signal()
 
-            try await settle(until: { collector.replies().count == 1 }, "the cancelled lookup answers")
-            XCTAssertEqual(collector.replies().map(DNSWireFormat.extractRCode), [2], "SERVFAIL, iteration \(iteration)")
-            try await settle(until: { forwarder.inFlightQueryCount == 0 }, "its slot is released")
+            try await settle(until: { forwarder.inFlightQueryCount == 0 }, "its slot is released, iteration \(iteration)")
+            XCTAssertEqual(collector.replies().count, 0, "no reply, iteration \(iteration)")
         }
     }
 
@@ -469,7 +556,8 @@ final class DNSForwarderHealthTests: XCTestCase {
     /// configured server address reached on its loopback port in
     /// `endpoints`, one cleartext DoH provider on `dohPort`, and both internal
     /// timeouts set to `internalTimeout` unless `internalDomainTimeout` sets
-    /// the split-DNS one apart. The internal stage budget is the production
+    /// the split-DNS one apart. `lookupWindow` and `rerunSleep` replace the
+    /// window a reset's re-run gets and how it waits that window out. The internal stage budget is the production
     /// default, widened when one attempt would not fit it, unless
     /// `internalStageBudget` sets it. `beforeInternalConnect` runs on the
     /// lookup's task right before each internal datagram connect. Returns
@@ -484,6 +572,8 @@ final class DNSForwarderHealthTests: XCTestCase {
         internalStageBudget: TimeAmount? = nil,
         interceptRules: [DNSInterceptRule] = [],
         defaultInternalPort: Int = 53,
+        lookupWindow: TimeAmount? = nil,
+        rerunSleep: (@Sendable (TimeAmount) async throws -> Void)? = nil,
         group: EventLoopGroup? = nil,
         beforeInternalConnect: (@Sendable () -> Void)? = nil
     ) async throws -> Int {
@@ -505,6 +595,8 @@ final class DNSForwarderHealthTests: XCTestCase {
         tuning.internalAttemptTimeout = internalTimeout
         tuning.internalStageBudget = internalStageBudget
             ?? max(tuning.internalStageBudget, tuning.internalDomainTimeout, tuning.internalAttemptTimeout)
+        if let lookupWindow { tuning.lookupWindow = lookupWindow }
+        if let rerunSleep { tuning.sleep = rerunSleep }
         let events = events
         let forwarder = LocalDNSForwarder(
             group: group ?? self.group,
@@ -516,6 +608,11 @@ final class DNSForwarderHealthTests: XCTestCase {
         ownedForwarder = forwarder
         try await forwarder.start(host: "127.0.0.1", port: 0)
         return try XCTUnwrap(forwarder.listeningPort)
+    }
+
+    /// A re-run's window that only ends when the re-run does.
+    private static let windowNeverElapses: @Sendable (TimeAmount) async throws -> Void = { _ in
+        try await Task.sleep(for: .seconds(3600))
     }
 
     @MainActor
