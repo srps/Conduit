@@ -77,14 +77,14 @@ final class SCDynamicStoreVPNDNSStore: VPNDNSStore {
         return status == kSCStatusNoKey ? .absent : .unreadable(String(cString: SCErrorString(status)))
     }
 
-    func publishOwnKey(_ value: [String: VPNDNSValue]) -> Bool {
-        guard let store else { return false }
+    func publishOwnKey(_ value: [String: VPNDNSValue]) -> VPNDNSPublishResult {
+        guard let store else { return .failed }
         let dictionary = value.mapValues(VPNDNSPropertyList.object) as NSDictionary
-        if SCDynamicStoreAddTemporaryValue(store, Self.ownKey, dictionary) { return true }
-        // Adding fails over a key that exists; this session's own key with the same value is published.
-        if let current = copy(Self.ownKey), NSDictionary(dictionary: current).isEqual(dictionary) { return true }
-        HelperLog.error("vpn-dns-override: SCDynamicStoreAddTemporaryValue failed: \(Self.lastError)")
-        return false
+        if SCDynamicStoreAddTemporaryValue(store, Self.ownKey, dictionary) { return .added }
+        let status = SCError()
+        if status == kSCStatusKeyExists { return .collision }
+        HelperLog.error("vpn-dns-override: SCDynamicStoreAddTemporaryValue failed: \(String(cString: SCErrorString(status)))")
+        return .failed
     }
 
     func removeOwnKey() -> Bool {

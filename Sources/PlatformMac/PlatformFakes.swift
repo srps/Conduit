@@ -818,12 +818,19 @@ package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked 
         }
     }
 
-    package func publishOwnKey(_ value: [String: VPNDNSValue]) -> Bool {
+    /// As `SCDynamicStoreAddTemporaryValue`: an add over any existing key fails, this session's own included.
+    package func publishOwnKey(_ value: [String: VPNDNSValue]) -> VPNDNSPublishResult {
         lock.withLock {
-            guard !_failsPublish else { return false }
+            guard !_failsPublish else { return .failed }
+            guard _ownKey == nil else { return .collision }
             _ownKey = value
-            return true
+            return .added
         }
+    }
+
+    /// Another session's key at the own key's path.
+    package func placeForeignKey(_ value: [String: VPNDNSValue]) {
+        lock.withLock { _ownKey = value }
     }
 
     package func removeOwnKey() -> Bool {

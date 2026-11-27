@@ -200,6 +200,23 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         XCTAssertTrue(rig.publisher.published, "the arm publishes once the old key is gone")
     }
 
+    func testAnEqualKeyThisSessionDidNotAddIsACollisionNotAPublication() {
+        let rig = rig()
+        rig.store.placeForeignKey(key)
+        rig.store.failsRemove = true
+        _ = armed(rig)
+        XCTAssertFalse(rig.publisher.published, "equal contents do not make the key this session's")
+        XCTAssertEqual(Array(rig.outcomes.suffix(2)), [.publishCollision(service: service), .publishFailed(service: service)])
+
+        rig.store.failsRemove = false
+        rig.publisher.sync()
+        XCTAssertTrue(rig.publisher.published)
+        XCTAssertEqual(Array(rig.outcomes.suffix(2)), [
+            .publishCollision(service: service), .published(service: service, port: HelperConstants.vpnDNSOverrideRelayPort),
+        ])
+        XCTAssertEqual(rig.store.ownKey, key, "removed, then added by this session")
+    }
+
     func testAPublishTheStoreRefusesIsReportedAndRetriedOnTheNextSync() {
         let rig = rig()
         rig.store.failsPublish = true
