@@ -12,6 +12,19 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   update, no longer stalls Conduit. Each handshake waits for that read off
   Swift's shared threads, so the rest of Conduit keeps running and every
   handshake gets the password once it arrives (#327).
+- Uninstalling the helper no longer leaves DNS dead. With Manage system DNS
+  on, your network services point at Conduit's resolver on 127.0.0.1, which
+  the helper serves. Uninstall Helper in Settings now restores the DNS servers
+  Conduit recorded first, in every location, and keeps the helper, saying
+  what is left, when any service still points at Conduit.
+  While it works, Conduit does not start DNS or reload, and holds a save that
+  turns Manage system DNS on until it ends. `uninstall-helper.sh` refuses
+  while a service uses 127.0.0.1 for DNS, or when it cannot read the network
+  settings, unless you pass `--force`. Both stop without deleting anything
+  unless macOS confirms the helper is unloaded.
+- Stopping DNS no longer leaves DNS dead when Conduit cannot restore your DNS
+  settings. While a network service still uses Conduit's resolver, DNS keeps
+  running and Conduit says why; stop DNS again to retry.
 
 ## 0.7.0
 
