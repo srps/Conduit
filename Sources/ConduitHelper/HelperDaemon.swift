@@ -96,7 +96,7 @@ enum HelperDaemon {
         HelperLog.notice("ConduitHelper daemon listening on \(socketPath)")
 
         while true {
-            switch loop.next(tickDue: vpnDNSOverride.arm != nil) {
+            switch loop.next(tickDue: vpnDNSOverride.wantsTicks) {
             case .connection:
                 serveConnection(listenFD: serverFD)
             case .ownerExited(let pid):
@@ -118,6 +118,7 @@ enum HelperDaemon {
                 exit(EXIT_FAILURE)
             }
             restartDeadFailoverHalves()
+            stopFailoverRelayOnceClean()
             loop.watchOwner(vpnDNSOverride.arm?.owner) {
                 HelperLog.notice("vpn-dns-override owner pid=\($0) already gone")
                 vpnDNSOverride.ownerExited($0)
@@ -491,6 +492,7 @@ enum HelperDaemon {
     static let dnsTCPRelayMaximumSessions = 64
 
     private static func startDNSRelay(targetPort: Int, caller: pid_t?) -> HelperResponse {
+        failoverStopPending = false
         startFailoverRelay(targetPort: targetPort)
         vpnDNSOverride.relayStarted(caller: caller)
         let udpUnchanged = relay?.isRunning == true && currentDNSRelayTarget == targetPort
@@ -638,14 +640,29 @@ enum HelperDaemon {
         return (response, .ok)
     }
 
-    /// Every relay: the key is never left on half a relay.
+    /// Every relay: the key is never left on half a relay. While a key the session may still hold awaits cleanup,
+    /// the fail-safe relay keeps answering it, on the VPN's servers, and stops once a read shows the key gone.
     private static func stopDNSRelay() {
         stopUDPDNSRelay()
         stopDNSTCPRelay()
-        if failoverRelay.target != nil {
-            failoverRelay.stop()
-            HelperLog.notice("DNS failover relay stopped")
+        guard failoverRelay.target != nil else { return }
+        if vpnDNSOverride.cleanupPending {
+            failoverRelay.setMode(.vpn)
+            failoverStopPending = true
+            HelperLog.warning("DNS failover relay kept on the VPN's servers until the key's cleanup completes")
+            return
         }
+        failoverRelay.stop()
+        HelperLog.notice("DNS failover relay stopped")
+    }
+
+    nonisolated(unsafe) private static var failoverStopPending = false
+
+    private static func stopFailoverRelayOnceClean() {
+        guard failoverStopPending, !vpnDNSOverride.cleanupPending else { return }
+        failoverStopPending = false
+        failoverRelay.stop()
+        HelperLog.notice("DNS failover relay stopped after the key's cleanup")
     }
 
     private static func stopUDPDNSRelay() {

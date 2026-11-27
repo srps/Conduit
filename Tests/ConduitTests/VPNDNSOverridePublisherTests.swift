@@ -152,6 +152,54 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         ])
     }
 
+    func testAFailedReadDuringStopStillRemovesThePublishedKey() {
+        let rig = armed(rig())
+        rig.store.failsRead = true
+        rig.publisher.disarm(.relayStopped)
+        XCTAssertNil(rig.store.ownKey, "a failed read is not absence")
+        XCTAssertFalse(rig.publisher.cleanupPending)
+        XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .relayStopped))
+    }
+
+    func testARefusedRemovalNobodyCanConfirmStaysPendingUntilAReadShowsTheKeyGone() {
+        let rig = armed(rig())
+        rig.store.failsRead = true
+        rig.store.failsRemove = true
+        rig.publisher.disarm(.relayStopped)
+        XCTAssertEqual(rig.store.sessionsClosed, 1)
+        XCTAssertTrue(rig.publisher.cleanupPending)
+        XCTAssertTrue(rig.publisher.wantsTicks, "the pending cleanup keeps the ticks going without an arm")
+        XCTAssertEqual(Array(rig.outcomes.suffix(2)), [
+            .removalRefused(service: service), .cleanupPending(service: service, reason: .relayStopped),
+        ])
+        XCTAssertFalse(rig.outcomes.contains(.withdrawn(service: service, reason: .relayStopped)), "not reported withdrawn")
+
+        rig.publisher.tick()
+        XCTAssertTrue(rig.publisher.cleanupPending)
+        XCTAssertEqual(rig.outcomes.filter { $0 == .removalRefused(service: service) }.count, 1, "reported once")
+
+        rig.store.failsRead = false
+        rig.publisher.tick()
+        XCTAssertFalse(rig.publisher.cleanupPending)
+        XCTAssertFalse(rig.publisher.wantsTicks)
+        XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .relayStopped))
+    }
+
+    func testAKeyAClosedSessionStillHoldsIsRemovedOnTheNextTickAndNothingIsPublishedMeanwhile() {
+        let rig = armed(rig())
+        rig.store.failsRemove = true
+        rig.store.closeLeavesKey = true
+        rig.publisher.disarm(.disarmed)
+        XCTAssertTrue(rig.publisher.cleanupPending)
+        XCTAssertNotNil(rig.store.ownKey)
+        XCTAssertTrue(rig.publisher.arm(service: service, servers: servers, owner: owner))
+        XCTAssertFalse(rig.publisher.published, "no publish over a key awaiting cleanup")
+        rig.store.failsRemove = false
+        rig.publisher.tick()
+        XCTAssertFalse(rig.publisher.cleanupPending)
+        XCTAssertTrue(rig.publisher.published, "the arm publishes once the old key is gone")
+    }
+
     func testAPublishTheStoreRefusesIsReportedAndRetriedOnTheNextSync() {
         let rig = rig()
         rig.store.failsPublish = true

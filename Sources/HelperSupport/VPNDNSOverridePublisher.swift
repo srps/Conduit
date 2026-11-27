@@ -14,14 +14,22 @@ package enum VPNDNSValue: Equatable, Sendable {
     case numbers([Int])
 }
 
+/// What a read of the own key found. A failed read is not absence.
+package enum VPNDNSOwnKeyState: Equatable, Sendable {
+    case present
+    case absent
+    case unreadable(String)
+}
+
 /// The dynamic store as the publisher sees it: the VPN's keys read-only, and one key of its own.
 package protocol VPNDNSStore: AnyObject {
     func dns(service: String) -> [String: VPNDNSValue]?
     func overridesPrimary(service: String) -> Bool
     func primaryService() -> String?
-    func ownKeyExists() -> Bool
+    func ownKeyState() -> VPNDNSOwnKeyState
     /// A temporary value of this store's session, which configd removes when the session ends.
     func publishOwnKey(_ value: [String: VPNDNSValue]) -> Bool
+    /// True once the key is gone, an absent key included.
     func removeOwnKey() -> Bool
     /// Ends the session, so configd removes its temporary key, and opens a fresh one.
     func closeSession()
@@ -56,6 +64,8 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
     case publishFailed(service: String)
     case withdrawn(service: String, reason: VPNDNSOverrideReason)
     case removalRefused(service: String)
+    /// The session was closed after a refused removal, and no read has yet shown the key gone; retried each tick.
+    case cleanupPending(service: String, reason: VPNDNSOverrideReason)
     case probeMissed(service: String, verdict: DNSFailoverProbeOutcome, consecutive: Int)
 
     package var logLine: String {
@@ -71,6 +81,8 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
             return "\(prefix) withdrawn service=\(HelperAudit.safe(service)) reason=\(reason.rawValue)"
         case .removalRefused(let service):
             return "\(prefix) removal_refused service=\(HelperAudit.safe(service)); session closed"
+        case .cleanupPending(let service, let reason):
+            return "\(prefix) cleanup_pending service=\(HelperAudit.safe(service)) reason=\(reason.rawValue)"
         case .probeMissed(let service, let verdict, let consecutive):
             return "\(prefix) probe service=\(HelperAudit.safe(service)) verdict=\(verdict.word) consecutive=\(consecutive)"
         }
@@ -78,7 +90,7 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
 
     package var isFailure: Bool {
         switch self {
-        case .publishFailed, .removalRefused: return true
+        case .publishFailed, .removalRefused, .cleanupPending: return true
         default: return false
         }
     }
@@ -116,6 +128,9 @@ package final class VPNDNSOverridePublisher {
     private let report: (VPNDNSOverrideOutcome) -> Void
     package private(set) var arm: VPNDNSOverrideArm?
     package private(set) var published = false
+    /// The key may still exist after a refused removal; nothing is published until a read shows it gone.
+    package private(set) var cleanupPending = false
+    private var pendingReason: VPNDNSOverrideReason = .disarmed
     private var publishedPort: Int?
     private var failoverService: String?
     private var probeOK = false
@@ -180,8 +195,14 @@ package final class VPNDNSOverridePublisher {
         sync()
     }
 
+    /// Every 10 s while armed or while a cleanup is pending.
+    package var wantsTicks: Bool { arm != nil || cleanupPending }
+
     package func tick() {
-        guard let arm else { return }
+        guard let arm else {
+            sync()
+            return
+        }
         let verdict = relay.probe()
         switch verdict {
         case .answered:
@@ -215,6 +236,10 @@ package final class VPNDNSOverridePublisher {
     /// After any event: publishes, republishes or withdraws the key to match what holds now.
     package func sync() {
         refreshFailoverServers()
+        if cleanupPending {
+            withdraw(pendingReason)
+            if cleanupPending { return }
+        }
         guard let arm else {
             withdraw(.disarmed)
             return
@@ -223,7 +248,7 @@ package final class VPNDNSOverridePublisher {
             withdraw(hold)
             return
         }
-        guard !published || !store.ownKeyExists(), let port = relay.listeningPort else { return }
+        guard !published || store.ownKeyState() == .absent, let port = relay.listeningPort else { return }
         if store.publishOwnKey(Self.ownKey(port: port)) {
             published = true
             publishedPort = port
@@ -255,15 +280,28 @@ package final class VPNDNSOverridePublisher {
         return nil
     }
 
+    /// Removes the key whenever this session may own it: published, pending cleanup, or present. A read that fails is not
+    /// taken for absence; the removal is tried anyway, and a refused one closes the session and stays pending until a read
+    /// shows the key gone.
     private func withdraw(_ reason: VPNDNSOverrideReason) {
-        let exists = store.ownKeyExists()
-        guard published || exists else { return }
-        if exists, !store.removeOwnKey() {
-            report(.removalRefused(service: failoverService ?? "none"))
+        let service = failoverService ?? "none"
+        let state = store.ownKeyState()
+        guard published || cleanupPending || state == .present else { return }
+        if state != .absent, !store.removeOwnKey() {
+            if !cleanupPending { report(.removalRefused(service: service)) }
             store.closeSession()
+            published = false
+            if store.ownKeyState() != .absent {
+                if !cleanupPending || pendingReason != reason { report(.cleanupPending(service: service, reason: reason)) }
+                cleanupPending = true
+                pendingReason = reason
+                return
+            }
         }
+        let shown = cleanupPending ? pendingReason : reason
         published = false
-        report(.withdrawn(service: failoverService ?? "none", reason: reason))
+        cleanupPending = false
+        report(.withdrawn(service: service, reason: shown))
     }
 
     private func refreshFailoverServers() {

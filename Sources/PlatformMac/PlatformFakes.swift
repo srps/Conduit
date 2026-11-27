@@ -232,6 +232,7 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     private var _vpnDNSOverrideSupported = true
     private var _callerPID: pid_t = 4_242
     private var _resolverOrderIgnoresOwnKey = false
+    private var _failoverStopPending = false
 
     package init(
         services: [String] = ["Wi-Fi"], resolverDirectory: URL,
@@ -497,11 +498,24 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
 
     package func tickVPNDNSOverride() {
         withVPNDNSPublisher { $0.tick() }
+        stopFailoverRelayOnceClean()
     }
 
     /// A store notification reaching the helper's loop.
     package func syncVPNDNSOverride() {
         withVPNDNSPublisher { $0.sync() }
+        stopFailoverRelayOnceClean()
+    }
+
+    /// The helper's stop of the fail-safe relay, deferred while its key's cleanup is pending.
+    private func stopFailoverRelayOnceClean() {
+        let pending = withVPNDNSPublisher { $0.cleanupPending }
+        let stop = lock.withLock { () -> Bool in
+            guard _failoverStopPending, !pending else { return false }
+            _failoverStopPending = false
+            return true
+        }
+        if stop { vpnDNSRelay.stop() }
     }
 
     /// `NOTE_EXIT` for the pid that armed.
@@ -580,6 +594,7 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
             guard let domain = values.first else { return }
             try? FileManager.default.removeItem(at: resolverDirectory.appendingPathComponent(domain))
         case .startDNSRelay:
+            lock.withLock { _failoverStopPending = false }
             let target = values.first.flatMap { Int($0) }
             if let target { _ = vpnDNSRelay.start(targetPort: target) }
             let caller = callerPID
@@ -593,8 +608,16 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
                 if !tcpUnchanged { _dnsTCPRelayRunning = !_dnsTCPRelayBindFails }
             }
         case .stopDNSRelay:
-            withVPNDNSPublisher { $0.disarm(.relayStopped) }
-            vpnDNSRelay.stop()
+            let pending = withVPNDNSPublisher { publisher -> Bool in
+                publisher.disarm(.relayStopped)
+                return publisher.cleanupPending
+            }
+            if pending {
+                vpnDNSRelay.setMode(.vpn)
+                lock.withLock { _failoverStopPending = true }
+            } else {
+                vpnDNSRelay.stop()
+            }
             lock.withLock { _dnsRelayRunning = false; _dnsRelayTargetPort = nil; _dnsTCPRelayRunning = false }
         case .startTCPRelay, .stopTCPRelay, .ping:
             break
@@ -680,6 +703,8 @@ package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked 
     private var _vpnKeyWrites: [String] = []
     private var _failsRemove = false
     private var _failsPublish = false
+    private var _failsRead = false
+    private var _closeLeavesKey = false
     private var _sessionsClosed = 0
     private var _onChange: (@Sendable () -> Void)?
 
@@ -752,6 +777,12 @@ package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked 
         set { lock.withLock { _failsRemove = newValue } }
     }
 
+    /// Every read of the own key fails, as `SCDynamicStoreCopyValue` can while configd is busy.
+    package var failsRead: Bool {
+        get { lock.withLock { _failsRead } }
+        set { lock.withLock { _failsRead = newValue } }
+    }
+
     package var failsPublish: Bool {
         get { lock.withLock { _failsPublish } }
         set { lock.withLock { _failsPublish = newValue } }
@@ -780,8 +811,11 @@ package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked 
         lock.withLock { _primary }
     }
 
-    package func ownKeyExists() -> Bool {
-        lock.withLock { _ownKey != nil }
+    package func ownKeyState() -> VPNDNSOwnKeyState {
+        lock.withLock {
+            guard !_failsRead else { return .unreadable("read failed") }
+            return _ownKey == nil ? .absent : .present
+        }
     }
 
     package func publishOwnKey(_ value: [String: VPNDNSValue]) -> Bool {
@@ -803,8 +837,14 @@ package final class FakeVPNDNSStore: VPNDNSStore, VPNDNSLegacyStore, @unchecked 
     package func closeSession() {
         lock.withLock {
             _sessionsClosed += 1
-            _ownKey = nil
+            if !_closeLeavesKey { _ownKey = nil }
         }
+    }
+
+    /// configd has not yet removed a closed session's key.
+    package var closeLeavesKey: Bool {
+        get { lock.withLock { _closeLeavesKey } }
+        set { lock.withLock { _closeLeavesKey = newValue } }
     }
 
     package func setDNS(_ value: [String: VPNDNSValue], service: String) -> Bool {

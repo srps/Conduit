@@ -232,6 +232,23 @@ final class HelperVPNDNSOverrideTests: XCTestCase {
         XCTAssertNil(machine.vpnDNSOverrideArm)
     }
 
+    func testFakeMachineKeepsTheFailoverRelayWhileTheKeysCleanupIsPending() throws {
+        let machine = machine()
+        try machine.execute(.startDNSRelay, values: ["5053"])
+        _ = try machine.vpnDNSOverride(.arm(service: service, servers: servers))
+        XCTAssertNotNil(machine.vpnDNSStore.ownKey)
+        machine.vpnDNSStore.failsRemove = true
+        machine.vpnDNSStore.closeLeavesKey = true
+        try machine.execute(.stopDNSRelay, values: [])
+        XCTAssertNotNil(machine.vpnDNSStore.ownKey)
+        XCTAssertNotNil(machine.vpnDNSRelay.listeningPort, "the key still names the relay, so the relay answers")
+        XCTAssertEqual(machine.vpnDNSRelay.mode, .vpn)
+        machine.vpnDNSStore.failsRemove = false
+        machine.tickVPNDNSOverride()
+        XCTAssertNil(machine.vpnDNSStore.ownKey)
+        XCTAssertNil(machine.vpnDNSRelay.listeningPort, "stopped once the key is gone")
+    }
+
     func testFakeMachineAnswersStatusForTheCallerThatArmed() throws {
         let machine = machine()
         try machine.execute(.startDNSRelay, values: ["5053"])

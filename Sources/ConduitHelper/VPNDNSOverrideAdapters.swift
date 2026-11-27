@@ -70,8 +70,11 @@ final class SCDynamicStoreVPNDNSStore: VPNDNSStore {
         copy("State:/Network/Global/IPv4" as CFString)?["PrimaryService"] as? String
     }
 
-    func ownKeyExists() -> Bool {
-        copy(Self.ownKey) != nil
+    func ownKeyState() -> VPNDNSOwnKeyState {
+        guard let store else { return .unreadable("no session") }
+        if SCDynamicStoreCopyValue(store, Self.ownKey) != nil { return .present }
+        let status = SCError()
+        return status == kSCStatusNoKey ? .absent : .unreadable(String(cString: SCErrorString(status)))
     }
 
     func publishOwnKey(_ value: [String: VPNDNSValue]) -> Bool {
@@ -87,6 +90,7 @@ final class SCDynamicStoreVPNDNSStore: VPNDNSStore {
     func removeOwnKey() -> Bool {
         guard let store else { return false }
         guard SCDynamicStoreRemoveValue(store, Self.ownKey) else {
+            if SCError() == kSCStatusNoKey { return true }
             HelperLog.error("vpn-dns-override: SCDynamicStoreRemoveValue failed: \(Self.lastError)")
             return false
         }
