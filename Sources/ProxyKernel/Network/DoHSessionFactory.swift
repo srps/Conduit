@@ -31,22 +31,18 @@ enum DoHSessionFactory {
         let proxy: (host: String, port: Int)?
     }
 
-    /// The routes to a public resolver, in the order they are worth trying.
+    /// The routes to a public resolver that `route` allows. Callers race them all.
     ///
-    /// Direct first, because on an unrestricted network it is the fastest and
+    /// Direct is always one: on an unrestricted network it is the fastest and
     /// involves no third party. But direct is also the route that dies first:
     /// under a full-tunnel VPN, outbound 443 to a public resolver is commonly
     /// dropped outright, and on a split-DNS corporate network the provider's
     /// own hostname may not resolve.
-    ///
-    /// Callers race all of these concurrently, so the order is a tiebreak among
-    /// simultaneous successes rather than a sequence of fallbacks.
-    static func routes(for config: ProxyConfig, localProxyPort: Int?) -> [Route] {
-        var routes = [Route(proxy: nil)]
-        if let local = localProxyRoute(config: config, boundPort: localProxyPort) {
-            routes.append(local)
+    static func routes(for config: ProxyConfig, localProxyPort: Int?, route: DoHRoute) -> [Route] {
+        guard route == .proxyAndDirect, let local = localProxyRoute(config: config, boundPort: localProxyPort) else {
+            return [Route(proxy: nil)]
         }
-        return routes
+        return [Route(proxy: nil), local]
     }
 
     static func localProxyRoute(config: ProxyConfig, boundPort: Int?) -> Route? {

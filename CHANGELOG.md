@@ -13,11 +13,11 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   Swift's shared threads, so the rest of Conduit keeps running and every
   handshake gets the password once it arrives (#327).
 
-- Off the VPN, when client traffic routes directly, DNS-over-HTTPS lookups no
-  longer also go through the corporate proxy. That route only repeated the
-  direct attempt through one more hop that could fail. On the VPN, and on a
-  corporate network without it, each lookup still asks the proxy and direct at
-  the same time (`dns.doh_route_changed`).
+- Off the VPN, when client traffic routes directly, DNS-over-HTTPS lookups,
+  the transparent proxy's included, no longer also go through the corporate
+  proxy. That route only repeated the direct attempt through one more hop that
+  could fail. On the VPN, and on a corporate network without it, each lookup
+  still asks the proxy and direct at the same time (`dns.doh_route_changed`).
 
 ## 0.7.0
 

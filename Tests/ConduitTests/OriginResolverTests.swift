@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
+import NIOConcurrencyHelpers
+import NIOCore
+import NIOPosix
 import XCTest
 @testable import ProxyKernel
 
@@ -56,6 +59,61 @@ final class OriginResolverTests: XCTestCase {
                 "\(ip) must be refused as a relay target",
                 file: file, line: line
             )
+        }
+    }
+}
+
+/// The transparent proxy's direct path resolves through the same DoH route as the forwarder. With client traffic routed
+/// directly, the local proxy would only repeat the direct attempt.
+final class OriginResolverRouteTests: XCTestCase {
+    func testADirectOnlyRouteNeverAsksTheLocalProxy() async throws {
+        let connections = try await listenerConnectionsAfterACacheMiss(route: .directOnly)
+        XCTAssertEqual(connections, 0, "no origin lookup went through the local proxy")
+    }
+
+    func testAProxyAndDirectRouteAsksTheLocalProxy() async throws {
+        let connections = try await listenerConnectionsAfterACacheMiss(route: .proxyAndDirect)
+        XCTAssertGreaterThan(connections, 0, "the local proxy is one of the raced routes")
+    }
+
+    private func listenerConnectionsAfterACacheMiss(route: DoHRoute) async throws -> Int {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let accepted = NIOLockedValueBox(0)
+        let listener = try await ServerBootstrap(group: group)
+            .childChannelInitializer { $0.pipeline.addHandler(CountAndClose(accepted: accepted)) }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        let listenerPort = listener.localAddress?.port
+        var config = ProxyConfig.testFixture()
+        config.localHost = "127.0.0.1"
+        config.localPort = 0
+        // Not loopback: CFNetwork would bypass the proxy for it.
+        config.dohProviders = ["https://192.0.2.10/dns-query"]
+        let frozen = config
+        let resolver = DoHOriginResolver(
+            logger: RecordingLogSink(minLevel: .debug), configProvider: { frozen },
+            localProxyPort: { listenerPort }, doHRoute: { route }
+        )
+
+        do {
+            _ = try await resolver.resolveOrigin(host: "origin.example", port: 443, on: group.next()).get()
+            XCTFail("no provider can answer")
+        } catch {
+            XCTAssertEqual(error as? OriginResolverError, .unresolved(host: "origin.example"))
+        }
+        try await listener.close().get()
+        return accepted.withLockedValue { $0 }
+    }
+
+    private final class CountAndClose: ChannelInboundHandler, Sendable {
+        typealias InboundIn = ByteBuffer
+        let accepted: NIOLockedValueBox<Int>
+
+        init(accepted: NIOLockedValueBox<Int>) { self.accepted = accepted }
+
+        func channelActive(context: ChannelHandlerContext) {
+            accepted.withLockedValue { $0 += 1 }
+            context.close(promise: nil)
         }
     }
 }

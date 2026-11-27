@@ -63,6 +63,7 @@ package final class DoHOriginResolver: OriginResolving {
     private let logger: any LogSink
     private let configProvider: @Sendable () -> ProxyConfig
     private let localProxyPort: @Sendable () -> Int?
+    private let doHRoute: @Sendable () -> DoHRoute
     private let cache = NIOLockedValueBox<[String: CacheEntry]>([:])
     private let negativeCache = NIOLockedValueBox(NegativeAnswerCache(ttl: 5))
     private let proxyChallengeDelegate: ProxyChallengeRefusingDelegate
@@ -71,10 +72,12 @@ package final class DoHOriginResolver: OriginResolving {
     /// provider needs the proxy routes too (see `DoHSessionFactory.routes`).
     package init(logger: any LogSink, configProvider: @escaping @Sendable () -> ProxyConfig,
                  localProxyPort: @escaping @Sendable () -> Int? = { nil },
+                 doHRoute: @escaping @Sendable () -> DoHRoute = { .proxyAndDirect },
                  eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil) {
         self.logger = logger
         self.configProvider = configProvider
         self.localProxyPort = localProxyPort
+        self.doHRoute = doHRoute
         self.proxyChallengeDelegate = ProxyChallengeRefusingDelegate(client: .originResolver) { event in
             eventSink?(event)
             logger.log(
@@ -162,8 +165,8 @@ package final class DoHOriginResolver: OriginResolving {
     /// A records only. The transparent proxy binds an IPv4 loopback listener and
     /// its clients reached it over IPv4, so an IPv6 origin buys nothing here.
     ///
-    /// Every provider is tried in both encodings over every route, first usable
-    /// answer wins.
+    /// Every provider is tried in both encodings over every route `doHRoute`
+    /// allows, first usable answer wins.
     ///
     /// Neither encoding is universal: Quad9 and dns.google reply `400` to
     /// `dns-json` GETs while accepting RFC 8484 wire format. A JSON-only
@@ -183,7 +186,7 @@ package final class DoHOriginResolver: OriginResolving {
         let providers = config.dohProviders.isEmpty
             ? DNSSection.defaultDoHProviders
             : config.dohProviders
-        let routes = DoHSessionFactory.routes(for: config, localProxyPort: localProxyPort())
+        let routes = DoHSessionFactory.routes(for: config, localProxyPort: localProxyPort(), route: doHRoute())
         let encoded = host.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? host
         let query = DNSWireFormat.buildQuery(domain: host, qtype: 1)
         let delegate = proxyChallengeDelegate

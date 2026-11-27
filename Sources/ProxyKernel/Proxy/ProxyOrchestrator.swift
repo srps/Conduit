@@ -1178,7 +1178,8 @@ package final class ProxyOrchestrator {
     private var strandedSweepsOwed: String?
     /// Whether the last definite VPN verdict is `.connected`. With the direct-mode cause it picks the DoH route.
     private var vpnConnectedForDNS = false
-    /// The forwarder's DoH route, in a box because its lookups run off the owner. Written only by `refreshDoHRoute`.
+    /// The DoH route the forwarder and the origin resolver read, in a box because their lookups run off the owner. Written
+    /// only by `refreshDoHRoute`.
     private let doHRouteBox = NIOLockedValueBox(DoHRoute.proxyAndDirect)
     /// The forwarder's split-DNS table, in a box for the same reason. Written only by `swapSplitDNSTable`.
     private let splitDNSBox: NIOLockedValueBox<SplitDNSState>
@@ -1386,6 +1387,7 @@ package final class ProxyOrchestrator {
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
         localProxyPort: { [server = localProxyServer] in server.listeningPort },
+        doHRoute: { [doHRouteBox] in doHRouteBox.withLockedValue { $0 } },
         eventSink: { [eventLog] event in eventLog.append(event) }
     )
 
