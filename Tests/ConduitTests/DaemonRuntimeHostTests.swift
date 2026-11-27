@@ -2391,6 +2391,23 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
+    /// While a kept Stop is pending, a service that becomes eligible keeps its own DNS: only the services already on the relay use it.
+    @RuntimeActor func testAKeptStopPointsNoNewServiceAtTheRelay() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        let kept = await host.stopDNS()
+        XCTAssertEqual(kept.keptServing, [.dns])
+        locations.refuseWrites(false)
+        locations.edit { snapshot in
+            snapshot.services.append(.init(locationID: NetworkLocationFixture.home, serviceID: "77777777-7777-7777-7777-777777777777",
+                                           name: "Ethernet", enabled: true, proxies: [:], dns: ["ServerAddresses": .list(["192.0.2.7"])]))
+        }
+
+        await host.reconcileSystemDNSIfRunning()
+        XCTAssertEqual(try locations.snapshot().services.last?.dns["ServerAddresses"], .list(["192.0.2.7"]))
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running)
+        await host.stopRuntime()
+    }
+
     /// Turning Manage system DNS off under a refused restore leaves the relay in front of the forwarder that keeps running.
     @RuntimeActor func testASystemDNSSwitchOffWhoseRestoreFailsKeepsTheRelay() async throws {
         let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
