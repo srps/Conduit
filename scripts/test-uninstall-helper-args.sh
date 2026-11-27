@@ -18,10 +18,16 @@ mkdir -p "$stubs"
 calls="$scratch/calls"
 
 # STUB_SCUTIL_FAIL_ON: a command that makes the scutil session fail.
+# STUB_SCUTIL_DIAGNOSE_ON: a command whose session prints a diagnostic and an
+# empty dictionary, and still exits 0.
 cat > "$stubs/scutil" <<'STUB'
 #!/bin/bash
 session="$(cat)"
 if [ -n "${STUB_SCUTIL_FAIL_ON:-}" ] && [[ "$session" == *"$STUB_SCUTIL_FAIL_ON"* ]]; then exit 1; fi
+if [ -n "${STUB_SCUTIL_DIAGNOSE_ON:-}" ] && [[ "$session" == *"$STUB_SCUTIL_DIAGNOSE_ON"* ]]; then
+    printf '  Permission denied\n<dictionary> {\n}\n'
+    exit 0
+fi
 printf '%s\n' "$session" | /usr/sbin/scutil --prefs "$STUB_PREFERENCES"
 STUB
 # STUB_ROOT=1 answers id -u as root.
@@ -79,6 +85,7 @@ preferences "$scratch/office.plist" "$loopback" "$own"
 preferences "$scratch/home.plist" "$own" "$loopback"
 preferences "$scratch/mixed.plist" "$loopback<string>192.0.2.1</string>" "$own"
 preferences "$scratch/no-dns-key.plist" "$own" "$own" ""
+preferences "$scratch/scalar.plist" "$own" "$own" "<key>DNS</key><dict><key>ServerAddresses</key>$loopback</dict>"
 
 failures=0
 # <label> <exit> <preferences> <expected substring> <unexpected substring> [VAR=value...] [-- args...]
@@ -116,6 +123,11 @@ expect "a failed location listing is refused"          1 "$scratch/office.plist"
     STUB_SCUTIL_FAIL_ON="list /Sets"
 expect "a failed read of a service's DNS is refused"   1 "$scratch/office.plist" "Could not read the network settings" "must be run with sudo" \
     STUB_SCUTIL_FAIL_ON="get /NetworkServices/S1/DNS"
+expect "a diagnostic beside a service's DNS is refused" 1 "$scratch/office.plist" "Could not read the network settings" "must be run with sudo" \
+    STUB_SCUTIL_DIAGNOSE_ON="get /NetworkServices/S1/DNS"
+expect "a diagnostic beside a service is refused"      1 "$scratch/clean.plist"  "Could not read the network settings" "must be run with sudo" \
+    STUB_SCUTIL_DIAGNOSE_ON="get /NetworkServices/S2"
+expect "a scalar ServerAddresses is refused"           1 "$scratch/scalar.plist" "Could not read the network settings" "must be run with sudo"
 expect "a failed read of a service is refused"         1 "$scratch/clean.plist"  "Could not read the network settings" "must be run with sudo" \
     STUB_SCUTIL_FAIL_ON="get /NetworkServices/S3"
 expect "--force goes on past a failed read"            1 "$scratch/clean.plist"  "must be run with sudo" "" \
