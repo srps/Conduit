@@ -96,6 +96,7 @@ enum PMSim {
               audit-hop-response      Audit: proxied HTTP response hop-by-hop header leak
               audit-socks5-rsv        Audit: SOCKS5 CONNECT non-zero RSV handling
               tunnel-target-crlf      Security: a SOCKS5 name that is not a host is refused before any log line or upstream
+              tunnel-remote-host-refused  Tunnels: a proxied tunnel whose remote host is not a host is refused alone, blocking nothing else
               audit-expect-trailers   Audit: Expect: 100-continue answered, trailers passed through
               dns-doh-blocked         DNS: internal server dead + DoH answering 404 still answers the client
               dns-doh-upstream-407    DNS: DoH never reaches a 407-answering upstream directly; a proxy challenge is refused, never handed to macOS (0045)
@@ -323,6 +324,7 @@ enum PMSim {
         "audit-hop-response",
         "audit-socks5-rsv",
         "tunnel-target-crlf",
+        "tunnel-remote-host-refused",
         "audit-expect-trailers",
         "dns-doh-blocked",
         "dns-doh-upstream-407",
@@ -549,6 +551,8 @@ enum PMSim {
             return [try await AuditScenarios.socks5NonZeroRSV(verbose: verbose)]
         case "tunnel-target-crlf":
             return [try await TunnelTargetScenarios.crlfTargetRefused(verbose: verbose)]
+        case "tunnel-remote-host-refused":
+            return [try await TunnelTargetScenarios.proxiedRemoteHostRefused(verbose: verbose)]
         case "audit-expect-trailers":
             return [try await AuditScenarios.expectContinueAndTrailers(verbose: verbose)]
         case "dns-doh-blocked":

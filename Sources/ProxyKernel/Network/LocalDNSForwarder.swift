@@ -446,11 +446,14 @@ private struct DoHTransports: @unchecked Sendable {
     let direct: URLSession
     let localProxy: URLSession?
     let localProxyPort: Int?
+    /// `host:port` of the listener `localProxy` dials, for the warning when it refuses a tunnel.
+    let localProxyEndpoint: String?
 
     init(config: ProxyConfig, boundPort: Int?, delegate: ProxyChallengeRefusingDelegate, timeout: TimeInterval) {
         self.direct = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil), delegate: delegate, timeout: timeout)
         let localRoute = DoHSessionFactory.localProxyRoute(config: config, boundPort: boundPort)
         self.localProxyPort = localRoute?.proxy?.port
+        self.localProxyEndpoint = localRoute?.proxy.map { "\($0.host):\($0.port)" }
         self.localProxy = localRoute.map { DoHSessionFactory.session(for: $0, delegate: delegate, timeout: timeout) }
     }
 
@@ -461,9 +464,26 @@ private struct DoHTransports: @unchecked Sendable {
         localProxy?.invalidateAndCancel()
     }
 
-    func sessions(for route: DoHRoute) -> [URLSession] {
-        guard let localProxy, route == .proxyAndDirect else { return [direct] }
-        return [direct, localProxy]
+    /// Each session with the proxy it dials, nil for direct.
+    func sessions(for route: DoHRoute) -> [(session: URLSession, proxy: String?)] {
+        guard let localProxy, route == .proxyAndDirect else { return [(direct, nil)] }
+        return [(direct, nil), (localProxy, localProxyEndpoint)]
+    }
+}
+
+/// What the fetches of one lookup saw besides an answer.
+private struct DoHFetchObservations: Sendable {
+    var statuses: Set<Int> = []
+    /// The proxies that refused a tunnel to a provider.
+    var tunnelRefusedBy: Set<String> = []
+
+    /// CFNetwork fails a request with error 310 when the proxy answers the CONNECT for an HTTPS provider with anything but
+    /// success, and the error carries no status.
+    mutating func record(_ error: Error, proxy: String?) {
+        let error = error as NSError
+        guard let proxy, error.domain == kCFErrorDomainCFNetwork as String,
+              error.code == Int(CFNetworkErrors.cfErrorHTTPSProxyConnectionFailure.rawValue) else { return }
+        tunnelRefusedBy.insert(proxy)
     }
 }
 
@@ -474,18 +494,27 @@ struct DoHFailureSignature: Equatable {
     /// A proxy on one of the routes asked for authentication and the session
     /// cancelled the request (`auth.proxy_challenge_refused`).
     let proxyChallengeRefused: Bool
+    /// The listeners that refused a tunnel to a provider (`DoHFetchObservations.record`), sorted.
+    var tunnelRefusedBy: [String] = []
 
     var explanation: String {
-        let refusal = "a proxy on the route asked for authentication and Conduit refused the challenge instead of asking macOS for a credential (auth.proxy_challenge_refused names the proxy)"
+        var proxyCauses: [String] = []
+        if proxyChallengeRefused {
+            proxyCauses.append("a proxy on the route asked for authentication and Conduit refused the challenge instead of asking macOS for a credential (auth.proxy_challenge_refused names the proxy)")
+        }
+        if !tunnelRefusedBy.isEmpty {
+            proxyCauses.append("the CONNECT through Conduit's listener at \(tunnelRefusedBy.joined(separator: ", ")) failed for a provider (CFNetwork error 310, which does not carry the listener's status); one possible cause is the upstream behind it refusing, blocking or failing to reach the provider")
+        }
         let advice = "Public names cannot be resolved until a reachable provider is configured (IP-literal endpoints avoid both failure modes)."
-        switch (statuses.isEmpty, proxyChallengeRefused) {
-        case (true, true):
-            return "\(refusal), and no other route got an HTTP response. Public names cannot be resolved until a route to a provider works without that proxy."
+        let proxies = proxyCauses.joined(separator: "; also, ")
+        switch (statuses.isEmpty, proxyCauses.isEmpty) {
         case (true, false):
+            return "\(proxies), and no other route got an HTTP response. Public names cannot be resolved until a route to a provider works without that proxy."
+        case (true, true):
             return "no HTTP response at all — the providers were unreachable, timed out, or their hostnames did not resolve. \(advice)"
-        case (false, let refused):
+        case (false, let noProxyCause):
             let answered = "every attempt that got a response answered HTTP \(statuses.map(String.init).joined(separator: "/")) instead of a DNS payload, which is what a DoH-blocking proxy looks like"
-            return refused ? "\(answered); also, \(refusal). \(advice)" : "\(answered). \(advice)"
+            return noProxyCause ? "\(answered). \(advice)" : "\(answered); also, \(proxies). \(advice)"
         }
     }
 }
@@ -1566,7 +1595,7 @@ final class DNSResolutionCore: @unchecked Sendable {
         // provider means something answered on their behalf, i.e. a filtering
         // proxy is intercepting DoH. Without this the failure is 18 silent nils
         // and an NXDOMAIN the user cannot account for.
-        let observedStatuses = NIOLockedValueBox<Set<Int>>([])
+        let observed = NIOLockedValueBox(DoHFetchObservations())
 
         // Snapshot the current transport handle and hold a use window open for
         // the duration of this query. A concurrent `resetUpstreamTransports`/
@@ -1594,17 +1623,17 @@ final class DNSResolutionCore: @unchecked Sendable {
         let answer: [UInt8]? = await withTaskGroup(of: [UInt8]?.self) { group -> [UInt8]? in
             for provider in providers {
                 let dohURL = "\(provider)?name=\(encodedDomain)&type=\(typeName)"
-                for session in sessions {
+                for (session, proxy) in sessions {
                     group.addTask {
                         await Self.tryDoHJSONFetch(
-                            dohURL: dohURL, session: session, query: query,
-                            queryType: qtype, statuses: observedStatuses
+                            dohURL: dohURL, session: session, proxy: proxy, query: query,
+                            queryType: qtype, observed: observed
                         )
                     }
                     group.addTask {
                         await Self.tryDoHWireFetch(
-                            provider: provider, session: session, query: query,
-                            statuses: observedStatuses
+                            provider: provider, session: session, proxy: proxy, query: query,
+                            observed: observed
                         )
                     }
                 }
@@ -1620,19 +1649,21 @@ final class DNSResolutionCore: @unchecked Sendable {
 
         if let answer { return .answered(answer) }
 
-        // A cancelled fetch throws too, and `try?` makes that nil: not a
-        // provider failure, so neither the warning nor its counter.
+        // A cancelled fetch throws too and answers nil: not a provider
+        // failure, so neither the warning nor its counter.
         if Task.isCancelled {
             logger.log(.debug, "DNS: DoH lookup for \(domain) cancelled by a transports reset.", category: .network)
             return .cancelled
         }
 
-        let statuses = observedStatuses.withLockedValue { $0 }.sorted()
+        let seen = observed.withLockedValue { $0 }
         // Refusals are counted across lookups, so a concurrent lookup's
         // refusal can be named here too. The warning is shared between
         // lookups already, and its cause is the same proxy either way.
         let refused = proxyChallengeDelegate.refusalCount > refusalsBefore
-        let signature = DoHFailureSignature(statuses: statuses, proxyChallengeRefused: refused)
+        let signature = DoHFailureSignature(
+            statuses: seen.statuses.sorted(), proxyChallengeRefused: refused, tunnelRefusedBy: seen.tunnelRefusedBy.sorted()
+        )
         if let failures = doHFailureCountToReport(signature: signature) {
             let alsoFailed = failures > 1
                 ? " (and \(failures - 1) other name(s) since the last such warning)"
@@ -1647,22 +1678,35 @@ final class DNSResolutionCore: @unchecked Sendable {
         return .unanswered
     }
 
+    /// One request. A thrown error is a route that did not answer, a cancelled fetch included; `observed` keeps what it says
+    /// about the proxy on the route, and the status of any response.
+    private static func fetch(
+        _ request: URLRequest, session: URLSession, proxy: String?, observed: NIOLockedValueBox<DoHFetchObservations>
+    ) async -> (Data, HTTPURLResponse)? {
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else { return nil }
+            observed.withLockedValue { _ = $0.statuses.insert(httpResponse.statusCode) }
+            return (data, httpResponse)
+        } catch {
+            observed.withLockedValue { $0.record(error, proxy: proxy) }
+            return nil
+        }
+    }
+
     private static func tryDoHJSONFetch(
         dohURL: String,
         session: URLSession,
+        proxy: String?,
         query: [UInt8],
         queryType: UInt16,
-        statuses: NIOLockedValueBox<Set<Int>>
+        observed: NIOLockedValueBox<DoHFetchObservations>
     ) async -> [UInt8]? {
         guard let url = URL(string: dohURL) else { return nil }
         var request = URLRequest(url: url)
         request.setValue("application/dns-json", forHTTPHeaderField: "Accept")
 
-        guard let (data, response) = try? await session.data(for: request),
-              let httpResponse = response as? HTTPURLResponse else {
-            return nil
-        }
-        statuses.withLockedValue { _ = $0.insert(httpResponse.statusCode) }
+        guard let (data, httpResponse) = await fetch(request, session: session, proxy: proxy, observed: observed) else { return nil }
 
         guard httpResponse.statusCode == 200, !data.isEmpty else {
             return nil
@@ -1678,8 +1722,9 @@ final class DNSResolutionCore: @unchecked Sendable {
     private static func tryDoHWireFetch(
         provider: String,
         session: URLSession,
+        proxy: String?,
         query: [UInt8],
-        statuses: NIOLockedValueBox<Set<Int>>
+        observed: NIOLockedValueBox<DoHFetchObservations>
     ) async -> [UInt8]? {
         guard let url = URL(string: provider) else { return nil }
         var request = URLRequest(url: url)
@@ -1688,11 +1733,7 @@ final class DNSResolutionCore: @unchecked Sendable {
         request.setValue("application/dns-message", forHTTPHeaderField: "Accept")
         request.httpBody = Data(query)
 
-        guard let (data, response) = try? await session.data(for: request),
-              let httpResponse = response as? HTTPURLResponse else {
-            return nil
-        }
-        statuses.withLockedValue { _ = $0.insert(httpResponse.statusCode) }
+        guard let (data, httpResponse) = await fetch(request, session: session, proxy: proxy, observed: observed) else { return nil }
 
         guard httpResponse.statusCode == 200, data.count >= 12 else {
             return nil

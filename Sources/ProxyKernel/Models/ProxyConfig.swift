@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import ConduitShared
 import Foundation
 
 package struct ProxyConfig: Codable, Equatable {
@@ -838,6 +839,19 @@ package struct TunnelDefinition: Codable, Equatable, Hashable, Identifiable {
 
     package var description: String {
         "\(localPort):\(remoteHost):\(remotePort)"
+    }
+
+    /// A proxied tunnel writes `remoteHost` into the CONNECT it sends, so it must be a host name or an IP literal. A
+    /// direct tunnel hands it to getaddrinfo, which also reads a scoped address or a Unicode name. An empty host is a row
+    /// not yet typed into, which the tunnel start refuses on its own.
+    package var proxiedRemoteHostIsNotAHost: Bool {
+        guard proxied, !remoteHost.isEmpty else { return false }
+        return !IPAddressSyntax.isLiteral(remoteHost) && !DomainNameSyntax.isValid(Self.hostNameForValidation(remoteHost))
+    }
+
+    /// A fully qualified name's one trailing dot is still a host name.
+    package static func hostNameForValidation(_ host: String) -> String {
+        host.hasSuffix(".") ? String(host.dropLast()) : host
     }
 
     /// Whether replacing `existing` (same ID) with this definition closes

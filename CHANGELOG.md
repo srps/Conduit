@@ -87,6 +87,22 @@ then leaves the resolver order alone.
   could fail. On the VPN, and on a corporate network without it, each lookup
   still asks the proxy and direct at the same time (`dns.doh_route_changed`).
 
+- When every DNS-over-HTTPS provider fails and the CONNECT through Conduit's
+  listener to one of them failed, the warning now names that listener and
+  gives the upstream behind it refusing, blocking or failing to reach the
+  provider as one possible cause. It used to call the providers unreachable.
+
+- The transparent proxy's DNS-over-HTTPS lookups through Conduit's listener
+  share one session per route, so a provider's two encodings can reuse one
+  connection instead of opening one each. Each connection is a tunnel the
+  corporate proxy authenticates, so a lookup can cost fewer authentications.
+
+- A proxied port tunnel whose remote host is not a host name or IP address is
+  flagged on its row in the tunnel editor. The tunnel start refuses that tunnel
+  alone and starts the rest (`tunnel.start_refused`), and the tunnels' status
+  says it was refused instead of calling it a bind failure. It used to bind and
+  then fail every connection.
+
 ## 0.7.0
 
 This release makes Conduit's VPN on/off verdict, and the split DNS that depends

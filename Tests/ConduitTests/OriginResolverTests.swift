@@ -99,6 +99,36 @@ final class OriginResolverRouteTests: XCTestCase {
         XCTAssertGreaterThan(accepted.withLockedValue { $0 }, 0, "the next lookup asked the proxy")
     }
 
+    /// Every connection to the listener is a CONNECT it authenticates upstream, so one resolution shares one per route.
+    func testAResolutionAsksBothEncodingsOverOneListenerConnection() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let accepted = NIOLockedValueBox(0)
+        let requests = NIOLockedValueBox(0)
+        let listener = try await ServerBootstrap(group: group)
+            .childChannelInitializer { channel in
+                accepted.withLockedValue { $0 += 1 }
+                return channel.pipeline.addHandler(AnswerEveryRequest400(requests: requests))
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        var config = ProxyConfig.testFixture()
+        config.localHost = "127.0.0.1"
+        config.localPort = 0
+        // Plain HTTP so the listener reads each request itself, and not loopback: CFNetwork would bypass the proxy for it.
+        config.dohProviders = ["http://192.0.2.10/dns-query"]
+        let frozen = config
+        let listenerPort = listener.localAddress?.port
+        let resolver = DoHOriginResolver(
+            logger: RecordingLogSink(minLevel: .debug), configProvider: { frozen },
+            localProxyPort: { listenerPort }, doHRoute: { .proxyAndDirect }
+        )
+
+        await Self.expectUnresolved(resolver.resolveOrigin(host: "origin.example", port: 443, on: group.next()))
+        try await listener.close().get()
+        XCTAssertEqual(requests.withLockedValue { $0 }, 2, "the listener answered both encodings")
+        XCTAssertEqual(accepted.withLockedValue { $0 }, 1, "both encodings rode one listener connection")
+    }
+
     private func listenerConnectionsAfterACacheMiss(route: DoHRoute) async throws -> Int {
         let group = MultiThreadedEventLoopGroup.singleton
         let accepted = NIOLockedValueBox(0)
@@ -136,6 +166,41 @@ final class OriginResolverRouteTests: XCTestCase {
             XCTFail("no provider can answer")
         } catch {
             XCTAssertEqual(error as? OriginResolverError, .unresolved(host: "origin.example"))
+        }
+    }
+
+    /// Answers each request on a kept-alive connection with an empty 400, as a provider that rejects the encoding would.
+    private final class AnswerEveryRequest400: ChannelInboundHandler, @unchecked Sendable {
+        typealias InboundIn = ByteBuffer
+        typealias OutboundOut = ByteBuffer
+        let requests: NIOLockedValueBox<Int>
+        private var pending: [UInt8] = []
+
+        init(requests: NIOLockedValueBox<Int>) { self.requests = requests }
+
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+            var buffer = unwrapInboundIn(data)
+            pending += buffer.readBytes(length: buffer.readableBytes) ?? []
+            while let end = Self.endOfRequest(in: pending) {
+                pending.removeFirst(end)
+                requests.withLockedValue { $0 += 1 }
+                let response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
+                var out = context.channel.allocator.buffer(capacity: response.utf8.count)
+                out.writeString(response)
+                context.writeAndFlush(wrapOutboundOut(out), promise: nil)
+            }
+        }
+
+        private static func endOfRequest(in bytes: [UInt8]) -> Int? {
+            let separator: [UInt8] = Array("\r\n\r\n".utf8)
+            guard let headEnd = (0...max(0, bytes.count - separator.count)).first(where: {
+                bytes.count >= separator.count && Array(bytes[$0..<$0 + separator.count]) == separator
+            }) else { return nil }
+            let head = String(decoding: bytes[..<headEnd], as: UTF8.self).lowercased()
+            let length = head.split(separator: "\r\n").first { $0.hasPrefix("content-length:") }
+                .flatMap { Int($0.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)) } ?? 0
+            let end = headEnd + separator.count + length
+            return bytes.count >= end ? end : nil
         }
     }
 

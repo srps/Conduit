@@ -1428,7 +1428,8 @@ package final class ProxyOrchestrator {
         connectCoordinator: tunnelCoordinator,
         connectionPool: tunnelConnectionPool,
         logger: logStore,
-        resolverManager: resolverManager
+        resolverManager: resolverManager,
+        eventSink: { [eventLog] event in eventLog.append(event) }
     )
 
     /// Readable in-module so a test can start a lookup through the production wiring.
@@ -2040,6 +2041,22 @@ package final class ProxyOrchestrator {
         }
     }
 
+    /// What the tunnels' status line says about tunnels that did not start, or nil when every one did. A refused tunnel was
+    /// never bound (`tunnel.start_refused`), so it is not called a bind failure.
+    private static func tunnelStartProblem(failed: Int, refused: Int, noneStarted: Bool) -> String? {
+        let refusedText = "\(refused) proxied tunnel(s) refused because the remote host is not a host name or IP address"
+        switch (failed, refused) {
+        case (0, 0):
+            return noneStarted ? "All tunnel listeners failed to bind." : nil
+        case (0, _):
+            return noneStarted ? "No tunnel started: \(refusedText)." : "\(refusedText)."
+        case (_, 0):
+            return noneStarted ? "All tunnel listeners failed to bind." : "\(failed) tunnel(s) failed to bind — check logs."
+        default:
+            return "\(failed) tunnel(s) failed to bind and \(refusedText) — check logs."
+        }
+    }
+
     /// The tunnel start's one physical effect for `epoch`: bind the listeners, then publish what bound.
     private func bindTunnelListeners(_ activeTunnels: [TunnelDefinition], config currentConfig: ProxyConfig, epoch: Int) async {
         await runInfallibleEffect(tunnelLifecycle, epoch: epoch, category: .tunnel) {
@@ -2061,7 +2078,7 @@ package final class ProxyOrchestrator {
             if result.started == 0 {
                 self.mutateSnapshot {
                     $0.tunnelsRunState = .failed
-                    $0.tunnelsError = "All tunnel listeners failed to bind."
+                    $0.tunnelsError = Self.tunnelStartProblem(failed: result.failed, refused: result.refused, noneStarted: true)
                     $0.tunnelActiveCount = 0
                     $0.tunnelSessionCount = 0
                     $0.tunnelDNSOverrideStatus = .notNeeded
@@ -2074,13 +2091,13 @@ package final class ProxyOrchestrator {
                     $0.tunnelSessionCount = self.tunnelForwarder.sessionTracker.totalActiveSessions
                     $0.tunnelsRunState = .running
                     $0.tunnelActiveCount = result.started
-                    if result.failed > 0 {
-                        $0.tunnelsError = "\(result.failed) tunnel(s) failed to bind — check logs."
+                    if let problem = Self.tunnelStartProblem(failed: result.failed, refused: result.refused, noneStarted: false) {
+                        $0.tunnelsError = problem
                     }
                 }
             }
 
-            self.logStore.log(.notice, "Protocol tunnels started: \(result.started) active, \(result.failed) failed.", category: .tunnel)
+            self.logStore.log(.notice, "Protocol tunnels started: \(result.started) active, \(result.failed) failed to bind, \(result.refused) refused.", category: .tunnel)
 
             if result.started > 0 {
                 self.startTunnelHealthProbing(epoch: epoch)
@@ -2220,9 +2237,9 @@ package final class ProxyOrchestrator {
                 } else {
                     $0.tunnelsRunState = .running
                 }
-                $0.tunnelsError = result.failed > 0 ? "\(result.failed) tunnel(s) failed — check logs." : nil
+                $0.tunnelsError = Self.tunnelStartProblem(failed: result.failed, refused: result.refused, noneStarted: false)
             }
-            self.logStore.log(.notice, "Tunnel reconciliation: \(result.started) active, \(result.failed) failed.", category: .tunnel)
+            self.logStore.log(.notice, "Tunnel reconciliation: \(result.started) active, \(result.failed) failed to bind, \(result.refused) refused.", category: .tunnel)
 
             // Re-snapshot the prober targets against the reconciled binding set.
             // `startTunnelHealthProbing` captures `bindings` at call time, so without this
@@ -3894,7 +3911,8 @@ package final class ProxyOrchestrator {
         var seenLocalPorts: Set<Int> = []
         for tunnel in tunnels {
             let label = tunnel.effectiveLabel
-            if tunnel.remoteHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // A proxied row whose host is not a host is refused alone when the tunnels bind (`tunnel.start_refused`).
+            if !tunnel.proxiedRemoteHostIsNotAHost, tunnel.remoteHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 errors.append("Tunnel \(label): remote host is empty.")
             }
             if tunnel.remotePort <= 0 || tunnel.remotePort > 65535 {

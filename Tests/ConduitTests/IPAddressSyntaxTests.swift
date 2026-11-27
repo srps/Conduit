@@ -12,4 +12,13 @@ final class IPAddressSyntaxTests: XCTestCase {
         XCTAssertFalse(IPAddressSyntax.isIPv4("192.0.2.1\0"))
         XCTAssertFalse(IPAddressSyntax.isIPv6("2001:db8::1\0"))
     }
+
+    /// A combining mark after the `%` joins it into one Character, which a Character search misses; `inet_pton` reads the
+    /// bytes and accepts the address before the zone.
+    func testAZoneIndexIsRefusedWhateverFollowsThePercentSign() {
+        for address in ["fe80::1%en0", "fd00::5%\u{301}en0", "fd00::5%\u{301}"] {
+            XCTAssertFalse(IPAddressSyntax.isIPv6(address), address.debugDescription)
+            XCTAssertFalse(IPAddressSyntax.isLiteral(address), address.debugDescription)
+        }
+    }
 }

@@ -12,6 +12,9 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
     /// budget range). Named by field only: the value is not echoed.
     case unrepresentableDuration(field: String)
     case invalidHost(field: String, value: String)
+    /// A proxied port tunnel's remote host that is not a host name or an IP literal. The tunnel start refuses that one
+    /// tunnel (`tunnel.start_refused`); the proxy and every other tunnel start.
+    case invalidTunnelRemoteHost(field: String, value: String)
     /// An intercept pattern whose derived resolver domain is unusable. Carries
     /// the index so the Settings row can be pointed at, and the reason so it
     /// can say which character to change.
@@ -60,6 +63,7 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
         case .invalidDuration(let field, _): return "invalid_duration field=\(Self.fieldPath(field))"
         case .unrepresentableDuration(let field): return "unrepresentable_duration field=\(Self.fieldPath(field))"
         case .invalidHost(let field, _): return "invalid_host field=\(Self.fieldPath(field))"
+        case .invalidTunnelRemoteHost(let field, _): return "invalid_tunnel_remote_host field=\(Self.fieldPath(field))"
         case .invalidInterceptPattern(let index, _, _): return "invalid_intercept_pattern field=dns.interceptRules[\(index)]"
         case .invalidInterceptIP(let index, _): return "invalid_intercept_ip field=dns.interceptRules[\(index)]"
         case .invalidTransparentProxyIP: return "invalid_transparent_proxy_ip field=dns.transparentProxyIP"
@@ -71,6 +75,23 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
     /// A field name without the label a tunnel's carries for the message
     /// (`tunnels.definitions[0](db.example:5432).localPort`), which names
     /// its remote when it has no label of its own.
+    private static func reasonWithoutValue(_ error: DomainNameError) -> String {
+        switch error {
+        case .empty, .emptyLabel, .trailingDot:
+            return "It has an empty label: a leading dot, '..', or more than one trailing dot."
+        case .tooLong:
+            return "It is longer than 253 characters."
+        case .labelTooLong:
+            return "A label is longer than 63 characters."
+        case .labelStartsWithHyphen, .labelEndsWithHyphen:
+            return "A label starts or ends with a hyphen."
+        case .invalidCharacter:
+            return "It holds a character other than letters, digits, '-', '_' and '.'."
+        case .nonASCII:
+            return "It is not ASCII. Supply the A-label form (the 'xn--' encoding, RFC 5890) instead of the Unicode spelling."
+        }
+    }
+
     package static func fieldPath(_ field: String) -> String {
         guard let open = field.firstIndex(of: "("), let close = field.lastIndex(of: ")"), open < close else {
             return field
@@ -84,6 +105,9 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
             // The transparent-proxy IP is in the same category: the listener
             // bound to it is `startTransparentProxy`, whose failure is already
             // a logged warning rather than a start failure.
+            return false
+        case .invalidTunnelRemoteHost:
+            // Only that tunnel sends it, and the tunnel start refuses it alone.
             return false
         case .invalidPort, .invalidLimit, .invalidDuration, .unrepresentableDuration, .invalidHost, .conflict:
             return true
@@ -108,6 +132,18 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
                 return "routing.pacURL must not include a username or password."
             }
             return "\(field): '\(value)' is not a valid host"
+        case .invalidTunnelRemoteHost(let field, let value):
+            // This message reaches log lines, so it names the field path and a reason and never the host: a blank label
+            // spells the host into `field`, and a domain-name error can quote a label.
+            let message = "\(Self.fieldPath(field)): the remote host is not a host name or IP address, which a proxied tunnel needs for its CONNECT."
+            do {
+                try DomainNameSyntax.validate(TunnelDefinition.hostNameForValidation(value))
+            } catch let error as DomainNameError {
+                return "\(message) \(Self.reasonWithoutValue(error))"
+            } catch {
+                return message
+            }
+            return message
         case .invalidInterceptPattern(let index, let pattern, let reason):
             return "dns.interceptRules[\(index)]: '\(pattern)' does not name a usable "
                  + "resolver domain. \(reason.localizedDescription)"
@@ -371,6 +407,9 @@ extension ProxyConfig {
             let label = tunnel.effectiveLabel
             validatePort("tunnels.definitions[\(i)](\(label)).localPort", tunnel.localPort, into: &errors)
             validatePort("tunnels.definitions[\(i)](\(label)).remotePort", tunnel.remotePort, into: &errors)
+            if tunnel.proxiedRemoteHostIsNotAHost {
+                errors.append(.invalidTunnelRemoteHost(field: "tunnels.definitions[\(i)](\(label)).remoteHost", value: tunnel.remoteHost))
+            }
         }
 
         if proxy.socksEnabled && proxy.socksPort == proxy.port && proxy.port != 0 {

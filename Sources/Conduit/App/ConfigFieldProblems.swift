@@ -26,7 +26,8 @@ struct ConfigFieldProblems {
                  .invalidLimit(let field, _, _),
                  .invalidDuration(let field, _),
                  .unrepresentableDuration(let field),
-                 .invalidHost(let field, _):
+                 .invalidHost(let field, _),
+                 .invalidTunnelRemoteHost(let field, _):
                 // First problem per field wins; a second one for the same
                 // field would only repeat the location.
                 if byField[field] == nil {
