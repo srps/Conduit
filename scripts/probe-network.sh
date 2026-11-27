@@ -3,6 +3,8 @@
 # and names the first layer that fails. Read-only: it changes no setting and needs no sudo.
 #
 # Usage: ./scripts/probe-network.sh [--name HOST]
+# It also asks Conduit's configured upstream proxies and first split-DNS server, and says whether this is the VPN,
+# a corporate network or outside. CONDUIT_CONFIG names another config.json.
 # Exit status: 0 when names resolve and the network passes traffic, 2 when a layer fails, 64 on a usage error.
 emulate -L zsh
 setopt pipefail
@@ -11,7 +13,7 @@ name=www.apple.com
 while (( $# )); do
     case "$1" in
         --name) [[ -n "${2:-}" ]] || { echo "--name needs a host" >&2; exit 64 }; name="$2"; shift 2 ;;
-        -h|--help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 64 ;;
     esac
 done
@@ -24,10 +26,10 @@ check() { # <id> <label> <ok|fail|skip> <detail>
 }
 
 # Prints the DNS status (NOERROR, NXDOMAIN, SERVFAIL...) or "timeout". Any status but SERVFAIL means the server answered.
-dns_status() { # <server> <port> [source address]
+dns_status() { # <server> <port> [source address] [name]
     local out source=()
     [[ -n "${3:-}" ]] && source=(-b "$3")
-    out="$(dig +time=2 +tries=1 +noall +comments $source -p "$2" "@$1" "$name" A 2>&1)"
+    out="$(dig +time=2 +tries=1 +noall +comments $source -p "$2" "@$1" "${4:-$name}" A 2>&1)"
     [[ "$out" =~ 'status: ([A-Z]+)' ]] && echo "$match[1]" || echo timeout
 }
 
@@ -76,10 +78,30 @@ if [[ -n "$vpn" ]]; then
 fi
 
 forwarder_port=5053
-config="$HOME/Library/Application Support/Conduit/config.json"
+upstreams=() split_dns=() health_url=""
+config="${CONDUIT_CONFIG:-$HOME/Library/Application Support/Conduit/config.json}"
 if [[ -r "$config" ]]; then
-    configured="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("dnsForwarderPort", ""))' "$config" 2>/dev/null)"
-    [[ "$configured" == <1-65535> ]] && forwarder_port="$configured"
+    # One line per field: the forwarder port, the health-check URL, then "upstream host:port" and "split domain server" lines.
+    settings=("${(@f)$(python3 -I -c '
+import json, sys
+c = json.load(open(sys.argv[1]))
+print(c.get("dnsForwarderPort", ""))
+print(c.get("healthCheckURL", ""))
+for u in c.get("upstreams", []):
+    if u.get("enabled", True) and u.get("host") and u.get("port"):
+        print("upstream", "%s:%s" % (u["host"], u["port"]))
+for e in c.get("dnsEntries", []):
+    if e.get("enabled", True) and e.get("domain") and e.get("servers"):
+        print("split", e["domain"], e["servers"][0])
+' "$config" 2>/dev/null)}")
+    [[ "${settings[1]:-}" == <1-65535> ]] && forwarder_port="${settings[1]}"
+    health_url="${settings[2]:-}"
+    for line in "${(@)settings[3,-1]}"; do
+        case "$line" in
+            upstream\ *) upstreams+=("${line#upstream }") ;;
+            split\ *) split_dns+=("${line#split }") ;;
+        esac
+    done
 fi
 
 echo "Conduit network probe  $(date -u '+%Y-%m-%d %H:%M:%S UTC')  name=$name"
@@ -125,6 +147,38 @@ if $on_vpn; then
     fi
 fi
 
+# The corporate side, from Conduit's configuration. An upstream proxy that answers off the VPN means a corporate network;
+# a 407 is an answer. Names here resolve through the system resolver, so on a network with dead DNS these fail too.
+if (( $#upstreams )); then
+    proxy_answered=""
+    for upstream in "${(@)upstreams[1,3]}"; do
+        code="$(curl --noproxy '' -x "http://$upstream" -m 4 -s -o /dev/null -w '%{http_code}' "${health_url:-http://www.apple.com/library/test/success.html}" 2>/dev/null)"
+        if [[ "$code" == <100-599> ]]; then proxy_answered="$upstream HTTP $code"; break; fi
+    done
+    if [[ -n "$proxy_answered" ]]; then
+        check corp_proxy "corporate proxy answers" ok "$proxy_answered"
+    elif ! $on_vpn; then
+        check corp_proxy "corporate proxy answers" skip "none answered: expected outside the corporate network"
+    else
+        check corp_proxy "corporate proxy answers" fail "none of ${(j:, :)${(@)upstreams[1,3]}} answered in 4 s"
+    fi
+else
+    check corp_proxy "corporate proxy answers" skip "no upstream proxy configured"
+fi
+if (( $#split_dns )); then
+    entry=(${=split_dns[1]})
+    answer="$(dns_status "${entry[2]}" 53 "" "${entry[1]}")"
+    if [[ "$answer" != timeout && "$answer" != SERVFAIL ]]; then
+        check corp_dns "internal DNS answers" ok "@${entry[2]} for ${entry[1]} $answer"
+    elif ! $on_vpn && [[ "${result[corp_proxy]}" != ok ]]; then
+        check corp_dns "internal DNS answers" skip "@${entry[2]} $answer: expected outside the corporate network"
+    else
+        check corp_dns "internal DNS answers" fail "@${entry[2]} for ${entry[1]} $answer"
+    fi
+else
+    check corp_dns "internal DNS answers" skip "no split-DNS entry configured"
+fi
+
 # Conduit's own layers, and the resolver apps actually use.
 uses_conduit=false
 [[ "$system_dns" == 127.* ]] && uses_conduit=true
@@ -155,6 +209,10 @@ elif ! $on_vpn && failed internet && failed public_dns && ! answered network_dns
     verdict="This network is not passing traffic: direct connections to 1.1.1.1 and its DNS both fail. Switch networks or restart the hotspot or router. Restarting the Mac or Conduit will not help."
 elif $on_vpn && failed vpn_dns && failed system; then
     verdict="The VPN's DNS servers do not answer, so the tunnel is not carrying traffic. Reconnect the VPN, or disconnect it if the network underneath changed."
+elif answered system && failed corp_proxy; then
+    verdict="Names resolve, but no corporate proxy answers through the VPN, so corporate sites may fail."
+elif answered system && failed corp_dns; then
+    verdict="Names resolve, but the internal DNS server does not answer, so internal names may fail."
 elif answered system; then
     verdict="Names resolve and the network passes traffic."
 elif $uses_conduit && failed forwarder; then
@@ -166,5 +224,13 @@ elif ! $on_vpn && answered internet && failed network_dns; then
 else
     verdict="The system resolver ${system_dns:-none} does not answer, though the network passes traffic."
 fi
+if $on_vpn; then
+    location="VPN"
+elif answered corp_proxy; then
+    location="corporate network (experimental: a corporate proxy answers without the VPN)"
+else
+    location="outside the corporate network"
+fi
+echo "Location: $location"
 echo "Verdict: $verdict"
 [[ "$verdict" == "Names resolve and the network passes traffic." ]] && exit 0 || exit 2

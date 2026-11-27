@@ -17,7 +17,9 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   internet using IP addresses only, so it works while DNS is down, and names
   the first one that fails. A network that has stopped passing traffic, such
   as a hotspot that lost its upstream, is reported as the network, so you know
-  to switch networks instead of restarting the Mac or Conduit.
+  to switch networks instead of restarting the Mac or Conduit. It also asks your
+  configured corporate proxies and internal DNS server, and says whether you
+  are on the VPN, on a corporate network without it (experimental) or outside.
 
 ## 0.7.0
 

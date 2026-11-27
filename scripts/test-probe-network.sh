@@ -11,7 +11,14 @@ stub scutil 'case "$1" in --nwi) echo "Network interfaces: $FAKE_IFACES" ;; --dn
 stub ipconfig 'case "$1:${3:-}" in getifaddr:) echo "$FAKE_IP" ;; getoption:router) echo "$FAKE_GW" ;; getoption:domain_name_server) echo "$FAKE_NETDNS" ;; esac'
 stub route 'echo "  interface: $FAKE_DEFAULT_IF"'
 stub ping 'exit "$FAKE_PING"'
-stub curl '[ -n "$FAKE_HTTP" ] && printf "%s" "$FAKE_HTTP"; exit 0'
+# FAKE_PROXY_HTTP answers a request sent through an upstream proxy (-x), FAKE_HTTP a direct one.
+stub curl 'answer="$FAKE_HTTP"; for a in "$@"; do [ "$a" = -x ] && answer="$FAKE_PROXY_HTTP"; done
+[ -n "$answer" ] && printf "%s" "$answer"; exit 0'
+cat >"$stubs/config.json" <<'JSON'
+{"dnsForwarderPort": 5053, "healthCheckURL": "http://health.example/",
+ "upstreams": [{"enabled": true, "host": "proxy.corp.example", "port": 8080}],
+ "dnsEntries": [{"enabled": true, "domain": "corp.example", "servers": ["10.0.0.53"]}]}
+JSON
 # FAKE_DIG lists the servers that answer, as server:port=STATUS separated by spaces; any other server times out.
 stub dig 'server="" port=53
 while [ $# -gt 0 ]; do case "$1" in @*) server="${1#@}" ;; -p) port="$2"; shift ;; -b) shift ;; esac; shift; done
@@ -33,8 +40,8 @@ run_case() { # <label> <expected exit> <expected verdict substring> then env ass
     local label="$1" want_rc="$2" want="$3"; shift 3
     local out rc=0
     out="$(env -i PATH="$stubs:/usr/bin:/bin" HOME="$stubs" FAKE_IFACES=en0 FAKE_IP=192.168.1.20 FAKE_GW=192.168.1.1 \
-        FAKE_NETDNS=192.168.1.1 FAKE_DEFAULT_IF=en0 FAKE_PING=0 FAKE_HTTP=301 FAKE_DIG= FAKE_DNS_CONFIG= "$@" /bin/zsh "$probe" 2>&1)" || rc=$?
-    local verdict; verdict="$(printf '%s\n' "$out" | grep '^Verdict:' || true)"
+        FAKE_NETDNS=192.168.1.1 FAKE_DEFAULT_IF=en0 FAKE_PING=0 FAKE_HTTP=301 FAKE_PROXY_HTTP= FAKE_DIG= FAKE_DNS_CONFIG= "$@" /bin/zsh "$probe" 2>&1)" || rc=$?
+    local verdict; verdict="$(printf '%s\n' "$out" | grep -E '^(Location|Verdict):' | tr '\n' ' ' || true)"
     if [ "$rc" -eq "$want_rc" ] && [[ "$verdict" == *"$want"* ]]; then
         echo "ok    $label"
     else
@@ -67,6 +74,20 @@ run_case "a healthy VPN passes" 0 "Names resolve" \
     FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
 run_case "no address means no network" 2 "No network connection" \
     FAKE_IP= FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
+
+corp="CONDUIT_CONFIG=$stubs/config.json"
+run_case "outside the office the corporate checks are expected to fail" 0 "Location: outside the corporate network Verdict: Names resolve and" \
+    "$corp" FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
+run_case "a corporate proxy answering without the VPN names a corporate network" 0 "Location: corporate network (experimental" \
+    "$corp" FAKE_PROXY_HTTP=407 FAKE_DIG="$all_answer 10.0.0.53:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
+run_case "on a corporate network a silent internal DNS server says so" 2 "the internal DNS server does not answer" \
+    "$corp" FAKE_PROXY_HTTP=407 FAKE_DIG="$all_answer" FAKE_DNS_CONFIG="$(dns_config 192.168.1.1)"
+run_case "on the VPN a silent corporate proxy says so" 2 "no corporate proxy answers through the VPN" \
+    "$corp" FAKE_IFACES="en0 utun6" FAKE_DEFAULT_IF=utun6 FAKE_DIG="10.53.53.53:53=NOERROR 10.0.0.53:53=NOERROR 127.0.0.1:15353=NOERROR" \
+    FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
+run_case "a healthy VPN with its proxy and internal DNS passes" 0 "Location: VPN Verdict: Names resolve and" \
+    "$corp" FAKE_IFACES="en0 utun6" FAKE_DEFAULT_IF=utun6 FAKE_PROXY_HTTP=407 \
+    FAKE_DIG="10.53.53.53:53=NOERROR 10.0.0.53:53=NOERROR 127.0.0.1:15353=NOERROR" FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
 
 out="$(/bin/zsh "$probe" --name 2>&1)" && rc=0 || rc=$?
 if [ "$rc" -eq 64 ] && [[ "$out" == *"--name needs a host"* ]]; then echo "ok    --name without a host is rejected"; else echo "FAIL  --name without a host (exit $rc): $out"; failures=$((failures + 1)); fi
