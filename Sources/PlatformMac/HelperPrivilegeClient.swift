@@ -475,6 +475,46 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         return nil
     }
 
+    /// No AppleScript fallback; an older helper that fails these but answers a ping reads `.unsupported`.
+    package func vpnDNSOverride(_ request: VPNDNSOverrideRequest) throws -> VPNDNSOverrideReply {
+        guard FileManager.default.fileExists(atPath: binaryPath) else { return .unsupported }
+        let (command, values) = request.wire
+        try validate(command: command, values: values)
+        let response = try sendRequest(HelperRequest(command: command, values: values))
+        if let refusal = response.refusal {
+            throw refused(refusal, command: command, message: response.errorMessage)
+        }
+        guard response.protocolVersion == HelperProtocolVersion.current else { return .unsupported }
+        if response.success {
+            switch request {
+            case .arm: return .armed
+            case .disarm: return .disarmed
+            case .status: return .status(try Self.overrideState(response.vpnDNSOverride))
+            }
+        }
+        let ping = try sendRequest(HelperRequest(command: .ping, values: []))
+        if ping.success, !(ping.features ?? []).contains(.vpnDNSOverride) {
+            return .unsupported
+        }
+        throw PrivilegeClientError.executionFailed(response.errorMessage ?? "VPN DNS override failed")
+    }
+
+    private static func overrideState(_ wire: HelperVPNDNSOverrideStatus?) throws -> VPNDNSOverrideState? {
+        guard let wire else { return nil }
+        guard VPNDNSOverrideValidation.isServiceID(wire.serviceID),
+              (1...VPNDNSOverrideValidation.maximumServers).contains(wire.servers.count),
+              wire.servers.allSatisfy(VPNDNSOverrideValidation.isTunnelServer) else {
+            throw PrivilegeClientError.communicationFailed("Unreadable VPN DNS override status from the helper")
+        }
+        return VPNDNSOverrideState(
+            serviceID: wire.serviceID, servers: wire.servers, published: wire.published,
+            reason: wire.reason.flatMap(VPNDNSOverrideReason.init(rawValue:))?.rawValue
+                ?? wire.reason.map { _ in "unknown" },
+            owned: wire.owned,
+            port: wire.port.flatMap { (1...65_535).contains($0) ? $0 : nil }
+        )
+    }
+
     private func failedStatusReason() -> String {
         do {
             let ping = try sendRequest(HelperRequest(command: .ping, values: []))
@@ -510,8 +550,13 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         case .compareNetworkSettings:
             guard values.count == 1 else { throw NetworkSettingsError.invalidRequest }
             _ = try NetworkSettingsRequest.decode(values[0])
-        case .ping, .dnsRelayStatus, .stopDNSRelay, .stopTCPRelay:
+        case .ping, .dnsRelayStatus, .stopDNSRelay, .stopTCPRelay, .vpnDNSOverrideDisarm, .vpnDNSOverrideStatus:
             return
+        case .vpnDNSOverrideArm:
+            guard (2...17).contains(values.count), VPNDNSOverrideValidation.isServiceID(values[0]),
+                  values.dropFirst().allSatisfy(VPNDNSOverrideValidation.isTunnelServer) else {
+                throw PrivilegeClientError.executionFailed("invalid VPN DNS override")
+            }
         case .startDNSRelay:
             guard values.count == 1, HelperInputValidator.validatePort(values[0]) else {
                 throw PrivilegeClientError.executionFailed("invalid DNS relay target port")
@@ -855,6 +900,16 @@ extension PrivilegeRefusal {
         switch wire {
         case .unauthorized: self = .unauthorized
         case .noConsoleUser: self = .noConsoleUser
+        }
+    }
+}
+
+extension VPNDNSOverrideRequest {
+    var wire: (HelperCommand, [String]) {
+        switch self {
+        case .arm(let service, let servers): return (.vpnDNSOverrideArm, [service] + servers)
+        case .disarm: return (.vpnDNSOverrideDisarm, [])
+        case .status: return (.vpnDNSOverrideStatus, [])
         }
     }
 }

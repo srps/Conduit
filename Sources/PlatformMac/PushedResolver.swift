@@ -39,6 +39,21 @@ package struct PushedResolver: Hashable, Sendable {
     }
 }
 
+package struct NetworkResolver: Hashable, Sendable {
+    package let serviceID: String
+    package let interface: String
+    package let servers: [String]
+    package let skipped: Int
+
+    package init(serviceID: String, interface: String, servers: [String], skipped: Int = 0) {
+        assert(servers.count <= PushedResolverReading.networkServerLimit, "network servers arrive capped")
+        self.serviceID = serviceID
+        self.interface = interface
+        self.servers = servers
+        self.skipped = skipped
+    }
+}
+
 /// Why a value was left out of a reading or of the table. The monitor has no
 /// event sink; the host reports these (`dns.split_resolver_ignored`).
 package struct PushedResolverRejection: Hashable, Sendable {
@@ -57,6 +72,7 @@ package struct PushedResolverRejection: Hashable, Sendable {
         case noMatchDomains = "no_match_domains"
         /// Past `SplitDNSLimits`; from `LiveSplitDNSPolicy`, not the parser.
         case overLimit = "over_limit"
+        case selfReferential = "self_referential"
     }
 
     package let serviceID: String
@@ -87,6 +103,7 @@ package struct PushedResolverReading: Hashable, Sendable {
     package var rejections: [PushedResolverRejection]
     /// Set when the store could not be created, subscribed to or read; `resolvers` is then empty.
     package var failure: Failure?
+    package var network: NetworkResolver?
     /// The run of failed attempts in a row this reading extends or ends (decision 0048). With a `failure`, how
     /// many have failed, this one included. Without one, how many failed before this reading succeeded: 0 when
     /// the reading before it succeeded too.
@@ -97,12 +114,14 @@ package struct PushedResolverReading: Hashable, Sendable {
         resolvers: [PushedResolver] = [],
         rejections: [PushedResolverRejection] = [],
         failure: Failure? = nil,
-        failedAttempts: Int? = nil
+        failedAttempts: Int? = nil,
+        network: NetworkResolver? = nil
     ) {
         precondition(failure == nil || (failedAttempts ?? 1) >= 1, "a failed reading is an attempt")
         self.resolvers = resolvers
         self.rejections = rejections
         self.failure = failure
+        self.network = failure == nil ? network : nil
         self.failedAttempts = failedAttempts ?? (failure == nil ? 0 : 1)
     }
 }
@@ -113,6 +132,9 @@ extension PushedResolverReading {
     package static let dnsKeyPattern = "State:/Network/Service/[^/]+/DNS"
     package static let ipv4KeyPattern = "State:/Network/Service/[^/]+/IPv4"
     package static let ipv6KeyPattern = "State:/Network/Service/[^/]+/IPv6"
+    package static let globalIPv4Key = "State:/Network/Global/IPv4"
+    /// The forwarder asks one per lookup; the rest serve when its circuit opens.
+    package static let networkServerLimit = 4
 
     private static let servicePrefix = "State:/Network/Service/"
 
@@ -128,7 +150,8 @@ extension PushedResolverReading {
     /// `no_match_domains`.
     package static func parse(store: [String: Any]) -> PushedResolverReading {
         var reading = PushedResolverReading()
-        for serviceID in serviceIDs(in: store) {
+        // The helper's own key (decision 0049) names Conduit's relay; it is never a pushed resolver.
+        for serviceID in serviceIDs(in: store) where serviceID != HelperConstants.vpnDNSOverrideServiceID {
             let dns = store[servicePrefix + serviceID + "/DNS"] as? [String: Any] ?? [:]
             let addressing = ["IPv4", "IPv6"].compactMap { store[servicePrefix + serviceID + "/" + $0] as? [String: Any] }
             guard let interface = addressing.lazy.compactMap({ $0["InterfaceName"] as? String }).first else {
@@ -142,7 +165,34 @@ extension PushedResolverReading {
                 serviceID: serviceID, interface: interface, dns: dns, overridesPrimary: overridesPrimary, into: &reading
             )
         }
+        reading.network = parseNetworkResolver(store: store)
         return reading
+    }
+
+    /// Reads the `State:` DNS key, never `Setup:`, which holds Conduit's own `127.0.0.1`.
+    package static func parseNetworkResolver(store: [String: Any]) -> NetworkResolver? {
+        guard let global = store[globalIPv4Key] as? [String: Any],
+              let serviceID = global["PrimaryService"] as? String,
+              !serviceID.isEmpty, !serviceID.contains("/") else { return nil }
+        let addressing = ["IPv4", "IPv6"].compactMap { store[servicePrefix + serviceID + "/" + $0] as? [String: Any] }
+        let interface = addressing.lazy.compactMap { $0["InterfaceName"] as? String }.first
+            ?? global["PrimaryInterface"] as? String
+        guard let interface, !interface.isEmpty, !isTunnelInterface(interface),
+              let dns = store[servicePrefix + serviceID + "/DNS"] as? [String: Any] else { return nil }
+        let listed: [Any] = switch dns["ServerAddresses"] {
+        case let list as [Any]: list
+        case let single?: [single]
+        case nil: []
+        }
+        var servers: [String] = []
+        for case let server as String in listed
+        where servers.count < networkServerLimit && IPAddressSyntax.isLiteral(server)
+            && !VPNDNSOverrideValidation.isLoopback(server) && !servers.contains(server) {
+            servers.append(server)
+        }
+        return NetworkResolver(
+            serviceID: serviceID, interface: interface, servers: servers, skipped: listed.count - servers.count
+        )
     }
 
     package static func isTunnelInterface(_ name: String) -> Bool {
@@ -209,16 +259,20 @@ extension PushedResolverReading {
         }
 
         var servers: [String] = []
+        var selfReferential = false
         for server in strings("ServerAddresses", .invalidServer) {
             if !IPAddressSyntax.isLiteral(server) {
                 reject(.invalidServer, server)
+            } else if !VPNDNSOverrideValidation.isTunnelServer(server) {
+                selfReferential = true
+                reject(.selfReferential, server)
             } else if !servers.contains(server) {
                 servers.append(server)
             }
         }
 
         guard !domains.isEmpty else { return reject(.noMatchDomains) }
-        guard !servers.isEmpty else { return reject(.invalidServer) }
+        guard !servers.isEmpty else { return reject(selfReferential ? .selfReferential : .invalidServer) }
         reading.resolvers.append(PushedResolver(
             serviceID: serviceID,
             searchOrder: (dns["SearchOrder"] as? NSNumber)?.intValue,

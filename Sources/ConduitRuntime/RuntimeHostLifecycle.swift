@@ -673,6 +673,7 @@ extension RuntimeHost {
         if platform.manageSystemDNS {
             // Whether or not `apply` succeeded: a refused or failed apply is what the probe's relay restart exists to retry.
             startDNSHealthTimer(forwarderPort: forwarderPort)
+            requestVPNDNSOverrideRun(pollStatus: true)
         }
         return .running
     }
@@ -791,6 +792,9 @@ extension RuntimeHost {
         let logger = self.logger
         let keepsServing = !terminal && Self.forwarderServes(orchestrator.snapshot.dnsRunState)
         stopDNSHealthTimer()
+        // Before the relay stops, and outside the guards below: the VPN's DNS must never point at a dying relay (0049).
+        await vpnDNSOverride.disarm(.stop)
+        vpnDNSOverride.dnsStopped()
         let restore = await platformWork.run { () -> SystemDNSTeardownRestore in
             systemDNS.serialized { () -> SystemDNSTeardownRestore in
                 guard terminal || !token.isSuperseded else { return .notRestored }

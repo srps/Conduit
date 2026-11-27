@@ -40,7 +40,7 @@ package enum HelperCallerPolicy: Equatable, Sendable {
 /// What the helper could learn about the program on the other end.
 /// Everything but `satisfiesRequirement` is for the audit line only.
 package struct HelperCallerIdentity: Equatable, Sendable {
-    /// From the audit token; diagnostics only, never a key for anything.
+    /// From the audit token; never a key for admission.
     package var pid: pid_t?
     /// Effective uid from the same token; for the audit line. Admission by
     /// uid stays with `getpeereid` and `HelperAdmission`.
@@ -200,6 +200,7 @@ package enum HelperAuditOutcome: String, CaseIterable, Sendable {
     case invalidArguments = "invalid-arguments"
     case commandFailed = "command-failed"
     case relayFailed = "relay-failed"
+    case declined
     case refusedNotConsoleUser = "refused-not-console-user"
     case deferredNoConsoleUser = "deferred-no-console-user"
     case refusedPolicyUntrusted = "refused-policy-untrusted"

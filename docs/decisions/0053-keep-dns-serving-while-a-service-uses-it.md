@@ -1,4 +1,4 @@
-# 0049: Keep DNS serving while a service still uses it, and fence Uninstall Helper
+# 0053: Keep DNS serving while a service still uses it, and fence Uninstall Helper
 
 - Date: 2026-11-27
 - Decision: proposed

@@ -756,9 +756,11 @@ package final class SystemDNSManager: @unchecked Sendable {
 
     /// The socket is connected, so a port nothing holds is refused at once
     /// instead of waited out.
+    ///
+    /// It asks the forwarder's own probe domain, so failing upstreams cannot get a healthy relay restarted.
     package static func dnsLiveness(onPort port: Int, timeoutMilliseconds: Int32 = 2_000) -> LoopbackLiveness {
         guard (1...65_535).contains(port) else { return .notLive }
-        let query = DNSWireFormat.buildQuery(domain: DNSWireFormat.livenessProbeDomain, txID: 0xFACE)
+        let query = DNSWireFormat.buildQuery(domain: DNSWireFormat.forwarderProbeDomain, txID: 0xFACE)
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { return .inconclusive }
         defer { close(fd) }

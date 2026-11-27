@@ -25,8 +25,9 @@ import RuntimeEvents
 /// then a stop admitted before a held start binds, and the next start; then the connection audit of one served loopback request and of
 /// a burst of connections under mixed-priority owner load; then
 /// a reload's flag action held on the platform queue while a Stop is admitted, with the main thread parked throughout; then a DNS Stop
-/// whose restore fails, which keeps the relay and the forwarder serving the service still on 127.0.0.1; and, last, a declined launch
-/// recovery whose restores the first location report withholds.
+/// whose restore fails, which keeps the relay and the forwarder serving the service still on 127.0.0.1; then a declined launch
+/// recovery whose restores the first location report withholds; and, last, two Test DNS presses and a DNS Stop and a quit while the
+/// first press's probe is held.
 /// Every path after
 /// the root is taken ends in one release step: the root's reference is dropped, a fresh acquisition proves the lease
 /// closed, and the scratch directory is removed only when that proof and the close-failure count both agree. A shutdown
@@ -169,9 +170,17 @@ enum RuntimeHostEffectsScenario {
                 assertions += declined.assertions
                 notes += declined.notes
             }
+            var probed = Shutdown(quiesced: false, assertions: [], notes: [], pinnedHost: nil)
             if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
                 && captured.quiesced && modules.quiesced && woken.quiesced && audited.quiesced && flagged.quiesced
                 && kept.quiesced && declined.quiesced {
+                probed = await exerciseHeldTestDNS(session: session!, environment: environment, fakes: fakes, home: home)
+                assertions += probed.assertions
+                notes += probed.notes
+            }
+            if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
+                && captured.quiesced && modules.quiesced && woken.quiesced && audited.quiesced && flagged.quiesced
+                && kept.quiesced && declined.quiesced && probed.quiesced {
                 notes.append("the owned upstream accepted \(upstream.accepted) connections")
                 releaseRoot(&session, environment: environment, scratch: scratch, releaseFailures: releaseFailures,
                             assertions: &assertions, notes: &notes)
@@ -179,7 +188,7 @@ enum RuntimeHostEffectsScenario {
                 // The host keeps its session, so the root stays claimed for the rest of the process. The slot is the
                 // only reference this scenario keeps, and the scratch directory stays on disk for inspection.
                 // The latest exercise's host first, as each one runs only after the one before it quiesced.
-                let exercises = [declined, kept, flagged, audited, woken, modules, captured, respelling, source, lifecycle, workflow, shutdown]
+                let exercises = [probed, declined, kept, flagged, audited, woken, modules, captured, respelling, source, lifecycle, workflow, shutdown]
                 unconfirmedHost = exercises.lazy.compactMap(\.pinnedHost).first
                 upstream.keepOpenForPinnedHost()
                 assertions.append(.init("the shutdown is confirmed", false))
@@ -207,7 +216,8 @@ enum RuntimeHostEffectsScenario {
         _ fakes: Fakes, home: URL, pac: (any PacEvaluator)? = nil, wake: FakeSystemWakeObserver = FakeSystemWakeObserver(),
         hold: HeldSetenv? = nil, vpn: FakeVPNStatusObserver = FakeVPNStatusObserver(),
         path: FakeNetworkPathObserver = FakeNetworkPathObserver(),
-        locations: FakeNetworkLocationStore? = nil
+        locations: FakeNetworkLocationStore? = nil,
+        dnsProbe: (@Sendable (Int) -> LoopbackLiveness)? = nil
     ) -> RuntimeHostEffects {
         let machine = fakes.machine
         return RuntimeHostEffects(
@@ -223,7 +233,7 @@ enum RuntimeHostEffectsScenario {
                 hold?.pass(launchPath, arguments)
                 return try machine.run(launchPath, arguments)
             },
-            dnsProbe: fakes.dns.liveness(onPort:),
+            dnsProbe: dnsProbe ?? fakes.dns.liveness(onPort:),
             relayRecheckPause: { _ in },
             networkPath: path,
             networkLocation: {
@@ -1964,6 +1974,161 @@ enum RuntimeHostEffectsScenario {
         return witness
     }
 
+    /// Test DNS through the actual host while a probe is held: a DNS Stop and a quit settle meanwhile, and a second press of the same port
+    /// gets a probe of its own. The held probe read silence before it parked and the fake answers after the release, so the second
+    /// press reports an answer only if it asked the port again.
+    @RuntimeActor
+    private static func exerciseHeldTestDNS(
+        session: StateRootSession,
+        environment: RuntimeEnvironment,
+        fakes: Fakes,
+        home: URL
+    ) async -> Shutdown {
+        var assertions: [ScenarioAssertion] = []
+        var notes: [String] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+        let probe = HeldDNSProbe()
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderEnabled = true
+        config.dnsForwarderPort = 0
+        config.localPACEnabled = false
+        config.pacRoutingEnabled = false
+        config.upstreams = [fakes.upstream.proxy]
+        let host: RuntimeHost
+        do {
+            try ProxyConfigPersistence.save(config, in: environment)
+            try PlatformConfigPersistence.save(PlatformIntegrationConfig(manageSystemProxy: true), in: environment)
+            host = try await RuntimeHost.open(
+                stateSession: session,
+                logger: DiscardingLogSink(),
+                startupAllowsMissing: false,
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                terminalExit: {},
+                effects: effects(fakes, home: home, dnsProbe: probe.liveness(onPort:))
+            )
+        } catch {
+            notes.append("Test DNS host did not open: \(error.localizedDescription)")
+            check("the Test DNS host opened over the saved configuration", false)
+            return Shutdown(quiesced: true, assertions: assertions, notes: notes, pinnedHost: nil)
+        }
+
+        var quiesced = false
+        do {
+            try await host.startRuntime()
+            let port = host.status().bindings.dnsPort
+            check("the Test DNS host runs its forwarder on a bound port", host.status().dnsRunState == "running" && port != nil)
+            guard let port else { throw ScenarioExecutionError(message: "the forwarder has no bound port") }
+            let clients = try host.makeInMemoryControlClient(
+                limits: try controlProfile(), clientFrameLimits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
+            )
+            let seen = try await testDNSTwiceWhileHeld(clients.control, host: host, probe: probe, port: port)
+            let wirePort = try ControlPort(port)
+            check("the first press's probe is held off the main thread", seen.held)
+            check("a DNS Stop settles while the probe is held", seen.stopSettledWhileHeld)
+            check("the Stop's teardown ends the forwarder meanwhile", seen.forwarderEndedWhileHeld)
+            check("a quit settles while the probe is held", seen.quitSettledWhileHeld)
+            check("the held press reports the silence its probe read",
+                  seen.first == ControlDNSLivenessProbe(port: wirePort, answered: false))
+            check("the second press reports the answer of its own probe, run after the held one",
+                  seen.second == ControlDNSLivenessProbe(port: wirePort, answered: true))
+            check("each press asked the port once", probe.probes == 2)
+            notes.append("Test DNS probes of the forwarder's port: \(probe.probes)")
+
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            check("the Test DNS host settles before its root is released", settled == .settled)
+            let flush = await host.flushEvents()
+            check("the Test DNS host's observability flush is confirmed", flush.allConfirmed)
+            quiesced = settled == .settled && flush.allConfirmed
+        } catch {
+            check("the Test DNS exercise completed without error", false)
+            notes.append("Test DNS exercise error: \(error.localizedDescription)")
+            await host.shutdown()
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            let flush = await host.flushEvents()
+            quiesced = settled == .settled && flush.allConfirmed
+            assertions.append(.init("the Test DNS error path settled the host and confirmed its flush", quiesced))
+        }
+        return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// What the client saw around the held Test DNS probe.
+    private struct HeldTestDNSWitness {
+        var held = false
+        var stopSettledWhileHeld = false
+        var forwarderEndedWhileHeld = false
+        var quitSettledWhileHeld = false
+        var first: ControlDNSLivenessProbe?
+        var second: ControlDNSLivenessProbe?
+    }
+
+    /// Two Test DNS presses through the framed client, the first one's probe of `port` held, then a DNS Stop and a quit, each read to its
+    /// settlement while the probe is held; then the fake starts answering, the probe is released, and both presses are read to theirs.
+    /// The stream ends here, so its release hop runs before the caller settles the host.
+    @RuntimeActor
+    private static func testDNSTwiceWhileHeld(
+        _ client: any RuntimeClient, host: RuntimeHost, probe: HeldDNSProbe, port: Int
+    ) async throws -> HeldTestDNSWitness {
+        defer { probe.release() }
+        var witness = HeldTestDNSWitness()
+        let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
+        let incarnation = try await client.readSnapshot(deadline: deadline).stamp.incarnation
+        let stream = try await client.subscribe(.live, deadline: deadline)
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline)
+        func submit(_ command: ControlRuntimeCommand) async throws -> ControlOperationID {
+            let admission = try await client.submit(
+                command, requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: incarnation, deadline: deadline
+            )
+            guard case .accepted(let operation) = admission else {
+                throw ScenarioExecutionError(message: "\(command.kind.rawValue) was not admitted: \(admission)")
+            }
+            return operation
+        }
+        var outcomes: [ControlOperationID: ControlOperationOutcome] = [:]
+        func read(until operation: ControlOperationID) async throws {
+            for _ in 0..<256 where outcomes[operation] == nil {
+                if case .operationFinished(let finished) = try await stream.next(deadline) {
+                    outcomes[finished.operationID] = finished.outcome
+                }
+            }
+        }
+        func completed(_ operation: ControlOperationID) -> ControlCompletion? {
+            guard case .completed(let completion)? = outcomes[operation] else { return nil }
+            return completion
+        }
+        func reading(_ operation: ControlOperationID) -> ControlDNSLivenessProbe? {
+            guard case .dnsLiveness(let probed)? = completed(operation)?.result else { return nil }
+            return probed
+        }
+
+        probe.arm(port: port)
+        let first = try await submit(.testDNS)
+        let reachedBy = ContinuousClock.now.advanced(by: .seconds(5))
+        while !probe.isHeld, ContinuousClock.now < reachedBy {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        witness.held = probe.isHeld && !probe.reachedOnMainThread
+        guard witness.held else { return witness }
+        let second = try await submit(.testDNS)
+
+        let stop = try await submit(.stop(.dns))
+        try await read(until: stop)
+        witness.stopSettledWhileHeld = completed(stop)?.command == .stop && outcomes[first] == nil && !probe.timedOut
+        witness.forwarderEndedWhileHeld = host.status().dnsRunState != "running" && !probe.timedOut
+        let quit = try await submit(.quit(total: try ControlWireBudget(30_000), flush: .none))
+        try await read(until: quit)
+        witness.quitSettledWhileHeld = completed(quit)?.command == .quit && outcomes[first] == nil && !probe.timedOut
+
+        probe.setAnswering([port])
+        probe.release()
+        try await read(until: first)
+        try await read(until: second)
+        witness.first = reading(first)
+        witness.second = reading(second)
+        return witness
+    }
+
     /// Every record in the owned events file, typed or legacy, decoded through the canonical decoder. A line that does not decode is an
     /// error, not a skipped record, so the caller reports it.
     private static func recordedEvents(in file: URL) throws -> [RuntimeEvent] {
@@ -2419,6 +2584,62 @@ private final class HeldSetenv: @unchecked Sendable {
     }
 
     /// Lets the parked write go on. Idempotent.
+    func release() {
+        let first = lock.withLock { () -> Bool in
+            defer { released = true }
+            return !released
+        }
+        if first { gate.signal() }
+    }
+}
+
+/// The Test DNS exercise's probe. It reads its answer before it parks, and parks only the first probe of the armed port after `arm`,
+/// for at most ten seconds, never on the main thread. It counts the probes of that port only.
+private final class HeldDNSProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let gate = DispatchSemaphore(value: 0)
+    private var answering: Set<Int> = []
+    private var watched: Int?
+    private var armed = false
+    private var reached = false
+    private var onMainThread = false
+    private var released = false
+    private var parkTimedOut = false
+    private var watchedProbes = 0
+
+    var isHeld: Bool { lock.withLock { reached } }
+    var reachedOnMainThread: Bool { lock.withLock { onMainThread } }
+    var timedOut: Bool { lock.withLock { parkTimedOut } }
+    var probes: Int { lock.withLock { watchedProbes } }
+
+    func arm(port: Int) {
+        lock.withLock {
+            watched = port
+            armed = true
+        }
+    }
+
+    func setAnswering(_ ports: Set<Int>) { lock.withLock { answering = ports } }
+
+    func liveness(onPort port: Int) -> LoopbackLiveness {
+        let isMain = Thread.isMainThread
+        let (answer, park) = lock.withLock { () -> (LoopbackLiveness, Bool) in
+            let answer: LoopbackLiveness = answering.contains(port) ? .live : .notLive
+            guard port == watched else { return (answer, false) }
+            watchedProbes += 1
+            guard armed else { return (answer, false) }
+            armed = false
+            reached = true
+            onMainThread = isMain
+            return (answer, !isMain)
+        }
+        if park, gate.wait(timeout: .now() + 10) == .timedOut {
+            lock.withLock { parkTimedOut = true }
+        }
+        return answer
+    }
+
+    /// Lets the parked probe answer. Idempotent.
     func release() {
         let first = lock.withLock { () -> Bool in
             defer { released = true }

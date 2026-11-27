@@ -82,9 +82,17 @@ let package = Package(
             dependencies: ["ProxyKernel"],
             path: "Sources/ProxyPAC"
         ),
+        // The helper's 0049 policy without its SystemConfiguration session, shared by
+        // ConduitHelper, PlatformMac's FakeMachine and pm-sim. The kernel never imports it.
+        .target(
+            name: "HelperSupport",
+            dependencies: ["ConduitShared", "ProxyKernel"],
+            path: "Sources/HelperSupport",
+            exclude: ["AGENTS.md"]
+        ),
         .target(
             name: "PlatformMac",
-            dependencies: ["ProxyKernel", "ConduitShared", "RuntimeEvents"],
+            dependencies: ["ProxyKernel", "ConduitShared", "RuntimeEvents", "HelperSupport"],
             path: "Sources/PlatformMac",
             exclude: ["AGENTS.md"]
         ),
@@ -132,7 +140,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "pm-sim",
-            dependencies: ["ProxyKernel", "ProxyAuth", "ProxyPAC", "ProxyControlBridge", "ConduitShared", "PlatformMac", "RuntimeEvents", "ConduitRuntime"] + nioProducts,
+            dependencies: ["ProxyKernel", "ProxyAuth", "ProxyPAC", "ProxyControlBridge", "ConduitShared", "PlatformMac", "RuntimeEvents", "ConduitRuntime", "HelperSupport"] + nioProducts,
             path: "Sources/pm-sim"
         ),
         .executableTarget(
@@ -167,7 +175,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "ConduitHelper",
-            dependencies: ["ConduitShared", "ProxyKernel"],
+            dependencies: ["ConduitShared", "ProxyKernel", "HelperSupport"],
             path: "Sources/ConduitHelper",
             exclude: ["AGENTS.md"]
         ),
@@ -181,6 +189,7 @@ let package = Package(
                 "ProxyPAC",
                 "PlatformMac",
                 "ConduitShared",
+                "HelperSupport",
                 "RuntimeEvents",
                 "ConduitDaemon",
                 "ConduitRuntime",

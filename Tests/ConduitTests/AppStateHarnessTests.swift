@@ -49,7 +49,7 @@ final class AppStateHarness {
         reapplyRetrySchedule: ConfigReapplyRetry.Schedule(delays: [.seconds(3600)]),
         splitDNSHelperCheckInterval: .seconds(3600)
     )
-    /// Holds one machine call, subprocess or privileged, when armed.
+    /// Holds one machine call, subprocess or privileged, when armed. Each DNS probe is offered to it as `("dns-probe", [port])`.
     let hold = HeldCall()
     /// Holds the app's file log at its next open while armed, inside the composition's app-log guard effect, before the authoritative
     /// guard is asked. Nothing is held unless a scenario arms it.
@@ -127,7 +127,10 @@ final class AppStateHarness {
                     hold.pass(launchPath, arguments)
                     return try machine.run(launchPath, arguments)
                 },
-                dnsProbe: dnsProbe.liveness(onPort:),
+                dnsProbe: { port in
+                    hold.pass("dns-probe", [String(port)])
+                    return dnsProbe.liveness(onPort: port)
+                },
                 relayRecheckPause: relayRecheckPause,
                 networkPath: FakeNetworkPathObserver(),
                 networkLocation: locationObserver,
