@@ -74,7 +74,7 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
     case armed(service: String, servers: Int, owner: pid_t)
     case published(service: String, port: Int)
     case publishFailed(service: String)
-    /// A key this session did not add held the path; it is removed and the add tried once more.
+    /// A key this session did not add holds the path: someone else's, so it is left alone and nothing is published.
     case publishCollision(service: String)
     case withdrawn(service: String, reason: VPNDNSOverrideReason)
     case removalRefused(service: String)
@@ -92,7 +92,7 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
         case .published(let service, let port):
             return "\(prefix) published service=\(HelperAudit.safe(service)) port=\(port)"
         case .publishCollision(let service):
-            return "\(prefix) publish_collision service=\(HelperAudit.safe(service)); removing the key this session did not add"
+            return "\(prefix) publish_collision service=\(HelperAudit.safe(service)); the key at the path is not this session's, left alone"
         case .publishFailed(let service):
             return "\(prefix) publish_failed service=\(HelperAudit.safe(service))"
         case .withdrawn(let service, let reason):
@@ -300,16 +300,15 @@ package final class VPNDNSOverridePublisher {
             return
         }
         guard !published || store.ownKeyState() == .absent, let port = relay.listeningPort else { return }
-        var result = store.publishOwnKey(Self.ownKey(port: port))
-        if result == .collision {
-            report(.publishCollision(service: arm.service))
-            result = store.removeOwnKey() ? store.publishOwnKey(Self.ownKey(port: port)) : .failed
-        }
-        if result == .added {
+        switch store.publishOwnKey(Self.ownKey(port: port)) {
+        case .added:
             published = true
             publishedPort = port
             report(.published(service: arm.service, port: port))
-        } else {
+        case .collision:
+            published = false
+            report(.publishCollision(service: arm.service))
+        case .failed:
             published = false
             report(.publishFailed(service: arm.service))
         }
@@ -342,13 +341,13 @@ package final class VPNDNSOverridePublisher {
         return nil
     }
 
-    /// Removes the key whenever this session may own it: published, pending cleanup, or present. A read that fails is not
-    /// taken for absence; the removal is tried anyway, and a refused one closes the session and stays pending until a read
-    /// shows the key gone.
+    /// Removes the key only while it is this session's: published, or awaiting a cleanup. A key at the path this session
+    /// did not add is never removed. A read that fails is not taken for absence; the removal is tried anyway, and a
+    /// refused one closes the session and stays pending until a read shows the key gone.
     private func withdraw(_ reason: VPNDNSOverrideReason) {
         let service = failoverService ?? "none"
+        guard published || cleanupPending else { return }
         let state = store.ownKeyState()
-        guard published || cleanupPending || state == .present else { return }
         if state != .absent, !store.removeOwnKey() {
             if !cleanupPending { report(.removalRefused(service: service)) }
             store.closeSession()

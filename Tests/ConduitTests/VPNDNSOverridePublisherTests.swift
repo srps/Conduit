@@ -229,21 +229,24 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         XCTAssertTrue(rig.publisher.published, "the arm publishes once the old key is gone")
     }
 
-    func testAnEqualKeyThisSessionDidNotAddIsACollisionNotAPublication() {
+    func testAKeyThisSessionDidNotAddIsACollisionAndIsLeftAlone() {
         let rig = rig()
-        rig.store.placeForeignKey(key)
-        rig.store.failsRemove = true
+        let foreign = VPNDNSOverridePublisher.ownKey(port: 5_300)
+        rig.store.placeForeignKey(foreign)
         _ = armed(rig)
-        XCTAssertFalse(rig.publisher.published, "equal contents do not make the key this session's")
-        XCTAssertEqual(Array(rig.outcomes.suffix(2)), [.publishCollision(service: service), .publishFailed(service: service)])
+        XCTAssertFalse(rig.publisher.published)
+        XCTAssertEqual(rig.outcomes.last, .publishCollision(service: service))
+        XCTAssertEqual(rig.store.ownKey, foreign, "someone else's key survives the arm")
 
-        rig.store.failsRemove = false
+        rig.tick()
+        rig.publisher.disarm(.disarmed)
         rig.publisher.sync()
-        XCTAssertTrue(rig.publisher.published)
-        XCTAssertEqual(Array(rig.outcomes.suffix(2)), [
-            .publishCollision(service: service), .published(service: service, port: HelperConstants.vpnDNSOverrideRelayPort),
-        ])
-        XCTAssertEqual(rig.store.ownKey, key, "removed, then added by this session")
+        XCTAssertEqual(rig.store.ownKey, foreign, "and the tick, the disarm and the sync after it")
+        XCTAssertFalse(rig.outcomes.contains { if case .withdrawn = $0 { true } else { false } })
+
+        rig.store.endSession()
+        XCTAssertTrue(rig.publisher.arm(service: service, servers: servers, owner: owner))
+        XCTAssertEqual(rig.store.ownKey, key, "once the path is free the arm publishes")
     }
 
     func testAPublishTheStoreRefusesIsReportedAndRetriedOnTheNextSync() {
@@ -411,11 +414,12 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         XCTAssertEqual(rig.outcomes.count, count, "nothing published, nothing withdrawn")
     }
 
-    func testAKeyLeftInTheSessionWithoutAnArmIsRemoved() {
+    func testWithoutAnArmAKeyThisSessionDidNotAddIsLeftAlone() {
         let rig = rig()
-        _ = rig.store.publishOwnKey(key)
+        rig.store.placeForeignKey(key)
         rig.publisher.sync()
-        XCTAssertNil(rig.store.ownKey)
+        rig.publisher.disarm(.disarmed)
+        XCTAssertEqual(rig.store.ownKey, key)
     }
 
     func testOutcomeLinesNameNoServerAddress() {
