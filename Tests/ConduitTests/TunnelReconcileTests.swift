@@ -61,6 +61,43 @@ final class TunnelReconcileTests: XCTestCase {
         await orchestrator.stopProxy()
     }
 
+    /// A whitespace-only host on a proxied row is a host the CONNECT cannot carry, not an empty draft: that row is refused
+    /// alone, on the start and on a reload, and the healthy row beside it runs.
+    @RuntimeActor
+    func testAProxiedRowWithAWhitespaceOnlyHostIsRefusedAloneOnStartAndReload() async throws {
+        let blank = TunnelDefinition(localPort: 0, remoteHost: "   ", remotePort: 5432, proxied: true, label: "BLANK")
+        let healthy = TunnelDefinition(localPort: 0, remoteHost: "db1.example.com", remotePort: 5432, proxied: false, label: "DB1")
+        var config = GenericDefaults.shared.makeConfig()
+        config.proxy.port = 0
+        config.tunnels.definitions = [blank, healthy]
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
+        addTeardownBlock { @RuntimeActor in
+            await orchestrator.stopTunnels()
+            await orchestrator.stopProxy()
+        }
+        try await orchestrator.startProxy()
+        func refusals() -> Int { orchestrator.eventLog.events.filter { $0.event == "tunnel.start_refused" }.count }
+
+        await orchestrator.startTunnels()
+        XCTAssertEqual(orchestrator.snapshot.bindings.tunnels.map(\.label), ["DB1"], "the healthy row starts beside the refused one")
+        XCTAssertEqual(refusals(), 1)
+        XCTAssertEqual(
+            orchestrator.snapshot.tunnelsError,
+            "1 proxied tunnel(s) refused because the remote host is not a host name or IP address."
+        )
+
+        await orchestrator.stopTunnels()
+        config.tunnels.definitions = [healthy]
+        orchestrator.config = config
+        await orchestrator.startTunnels()
+        config.tunnels.definitions = [healthy, blank]
+        orchestrator.config = config
+        await orchestrator.reconcileTunnels()
+        XCTAssertFalse(orchestrator.eventLog.events.contains { $0.event == "config.tunnels_reconcile_rejected" }, "the reload is not rejected")
+        XCTAssertEqual(orchestrator.snapshot.bindings.tunnels.map(\.label), ["DB1"])
+        XCTAssertEqual(refusals(), 2, "the reload refuses the row again")
+    }
+
     @RuntimeActor
     func testReconcileRemovesTunnel() async throws {
         let def1 = TunnelDefinition(localPort: 0, remoteHost: "db1.example.com", remotePort: 5432, proxied: false, label: "DB1")

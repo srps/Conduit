@@ -83,6 +83,7 @@ enum TunnelTargetScenarios {
             TunnelDefinition(localPort: 0, remoteHost: "db.corp.example\r\nX-Injected: 1", remotePort: 5432, proxied: true, label: "crlf"),
             TunnelDefinition(localPort: 0, remoteHost: "db.corp.example", remotePort: 5432, proxied: true, label: "proxied"),
             TunnelDefinition(localPort: 0, remoteHost: "bücher.corp.example", remotePort: 5432, label: "direct-unicode"),
+            TunnelDefinition(localPort: 0, remoteHost: "   ", remotePort: 5432, proxied: true, label: "blank"),
         ]
         let problems = config.validate().map(\.check)
         let logger = RecordingLogSink(minLevel: verbose ? .debug : .info)
@@ -109,12 +110,16 @@ enum TunnelTargetScenarios {
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
             assertions: [
-                .init("validation flags only the proxied row, and nothing blocks the proxy",
-                      problems == ["invalid_tunnel_remote_host field=tunnels.definitions[0].remoteHost"] && config.startBlockingProblems.isEmpty),
+                .init("validation flags only the proxied rows that are not hosts, and nothing blocks the proxy",
+                      problems == [
+                          "invalid_tunnel_remote_host field=tunnels.definitions[0].remoteHost",
+                          "invalid_tunnel_remote_host field=tunnels.definitions[3].remoteHost",
+                      ] && config.startBlockingProblems.isEmpty),
                 .init("every other tunnel binds, the direct Unicode row included", bound == ["proxied", "direct-unicode"]),
-                .init("one tunnel.start_refused, without the host", refused == ["localPort=0 remotePort=5432 reason=remote_host_not_a_host"]),
+                .init("one tunnel.start_refused per refused row, without the host",
+                      refused == Array(repeating: "localPort=0 remotePort=5432 reason=remote_host_not_a_host", count: 2)),
                 .init("the status says refused, not a bind failure",
-                      status == "1 proxied tunnel(s) refused because the remote host is not a host name or IP address."),
+                      status == "2 proxied tunnel(s) refused because the remote host is not a host name or IP address."),
                 .init("no log line or event holds the refused host's text", leaked.isEmpty),
             ],
             notes: ["problems=\(problems)", "bound=\(bound)", "status=\(status)", "refused=\(refused)", "leaked=\(leaked.count)"]

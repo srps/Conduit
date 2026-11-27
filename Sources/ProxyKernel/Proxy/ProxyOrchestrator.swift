@@ -3865,7 +3865,8 @@ package final class ProxyOrchestrator {
         var seenLocalPorts: Set<Int> = []
         for tunnel in tunnels {
             let label = tunnel.effectiveLabel
-            if tunnel.remoteHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // A proxied row whose host is not a host is refused alone when the tunnels bind (`tunnel.start_refused`).
+            if !tunnel.proxiedRemoteHostIsNotAHost, tunnel.remoteHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 errors.append("Tunnel \(label): remote host is empty.")
             }
             if tunnel.remotePort <= 0 || tunnel.remotePort > 65535 {
