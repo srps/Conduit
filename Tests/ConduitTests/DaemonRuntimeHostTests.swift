@@ -2403,6 +2403,31 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
+    /// A switch-off that keeps the relay for a service it has no record of leaves no record for a later Stop, and that Stop still keeps the
+    /// relay and the forwarder together.
+    @RuntimeActor func testAStopAfterASwitchOffKeptForAnUnrecordedServiceKeepsTheRelayWithTheForwarder() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        locations.refuseWrites(false)
+        locations.edit { snapshot in
+            snapshot.services.append(.init(locationID: "55555555-5555-5555-5555-555555555555", serviceID: "66666666-6666-6666-6666-666666666666",
+                                           name: "Wi-Fi", enabled: true, proxies: [:], dns: ["ServerAddresses": .list(["127.0.0.1"])]))
+        }
+        try await harness.flip(PlatformIntegrationConfig(manageSystemDNS: false), on: host)
+        XCTAssertTrue(harness.machine.dnsRelayRunning)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+
+        let stop = await host.stopDNS()
+        XCTAssertEqual(stop.keptServing, [.dns])
+        XCTAssertTrue(harness.machine.dnsRelayRunning)
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running, "the relay never outlives the forwarder")
+
+        locations.edit { $0.services[$0.services.count - 1].dns = ["ServerAddresses": .list(["192.0.2.3"])] }
+        let retried = await host.stopDNS()
+        XCTAssertTrue(retried.stopped.contains(.dns))
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        await host.stopRuntime()
+    }
+
     /// While a kept Stop is pending, a service that becomes eligible keeps its own DNS: only the services already on the relay use it.
     @RuntimeActor func testAKeptStopPointsNoNewServiceAtTheRelay() async throws {
         let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
