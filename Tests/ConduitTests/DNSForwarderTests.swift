@@ -1080,6 +1080,42 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         XCTAssertEqual(splitDNSFallbackEvents().count, 0)
     }
 
+    /// The internal NXDOMAIN a public name gets when no provider answers is a stand-in, not the name's answer: once
+    /// the DoH route widens, the next lookup of that name asks the providers again.
+    @MainActor
+    func testAnInternalNXDOMAINServedBecauseDoHFailedIsNotCached() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let corp = try await FakeSplitDNSServer.start(domain: "corp.example", ip: "198.51.100.10")
+        let proxy = try await AnsweringDoHProvider.start(group: group, ip: "203.0.113.7")
+        addTeardownBlock {
+            await corp.stop()
+            await proxy.channel.closeForTest()
+        }
+        let route = NIOLockedValueBox(DoHRoute.directOnly)
+        var config = ProxyConfig.testFixture()
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.53"])]
+        config.dohProviders = ["http://192.0.2.10/dns-query"]
+        config.localHost = "127.0.0.1"
+        config.localPort = proxy.port
+        let frozen = config
+        let forwarder = LocalDNSForwarder(
+            group: group, logger: RecordingLogSink(minLevel: .debug), configProvider: { frozen },
+            doHRoute: { route.withLockedValue { $0 } }, tuning: SplitDNSProbe.tuning(["192.0.2.53": corp.port])
+        )
+        ownedForwarder = forwarder
+        try await forwarder.start(host: "127.0.0.1", port: 0)
+        let port = try XCTUnwrap(forwarder.listeningPort)
+
+        let directOnly = try await SplitDNSProbe.resolve("public.example", port: port)
+        XCTAssertNil(directOnly, "no provider answers directly, so the internal NXDOMAIN stands in")
+        XCTAssertEqual(proxy.requestCount(), 0)
+        XCTAssertEqual(forwarder.cachedResponseCount, 0, "the stand-in is not cached")
+
+        route.withLockedValue { $0 = .proxyAndDirect }
+        let retry = try await SplitDNSProbe.resolve("public.example", port: port)
+        XCTAssertEqual(retry, "203.0.113.7", "the same name asks the providers on the wider route")
+    }
+
     /// Starts the owned forwarder with one split-DNS domain on the loopback
     /// internal server `tuning` names and one cleartext DoH provider on
     /// `dohPort`, and returns its UDP port.

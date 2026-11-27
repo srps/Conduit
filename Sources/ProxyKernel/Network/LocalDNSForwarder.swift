@@ -891,6 +891,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
 
         var response: [UInt8]?
         var usedDoH = false
+        var cacheable = !isInternal
 
         if isInternal {
             // A `.local` name under no entry is asked of the first servers,
@@ -947,8 +948,10 @@ private final class DNSResolutionCore: @unchecked Sendable {
                     // DNS-timeout. The wake/VPN-recovery
                     // `resetUpstreamTransports` path exists precisely so
                     // the *next* DoH lookup succeeds; this fallback keeps
-                    // the current one useful in the meantime.
+                    // the current one useful in the meantime. It is not
+                    // cached: a wider DoH route may answer the next lookup.
                     response = internalResponse
+                    cacheable = false
                 }
             } else {
                 response = internalResponse
@@ -978,7 +981,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
             return DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes)
         }
 
-        if !isInternal {
+        if cacheable {
             cacheResponse(responseBytes, for: cacheKey, matching: queryBytes)
         }
 
