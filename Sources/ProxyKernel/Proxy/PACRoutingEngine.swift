@@ -331,6 +331,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
                         scriptVersion &+= 1
                         routeCache.removeAll()
                         routeCacheOrder.removeAll()
+                        proxyHosts?.clear()
                     }
                     runningRefresh = nil
                     defer { pendingInvalidation = nil }
@@ -340,7 +341,6 @@ package final class PACRoutingEngine: @unchecked Sendable {
                     if deferSupersededFetch(operation, outcome: "fetch=succeeded") { return }
                     continue
                 }
-                if !installed.sameScript { proxyHosts?.clear() }
                 let redacted = Self.redactedURL(url)
                 let unchanged = installed.sameScript ? " script=unchanged" : ""
                 if let reason = installed.after {
@@ -472,6 +472,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
             if reason.dropsScript {
                 jsEvaluator = nil
                 loadedScript = nil
+                proxyHosts?.clear()
             }
             routeCache.removeAll()
             routeCacheOrder.removeAll()
@@ -500,10 +501,10 @@ package final class PACRoutingEngine: @unchecked Sendable {
         }
 
         refreshInBackgroundIfNeeded(for: config)
-        let stamp = proxyHosts?.stamp(pacURL: config.pacURL)
 
         let cacheKey = Self.routeCacheKey(for: requestURL, host: host)
-        switch cachedRoute(forKey: cacheKey) {
+        let (cachedAnswer, stamp) = cachedRoute(forKey: cacheKey, pacURL: config.pacURL)
+        switch cachedAnswer {
         case .fresh(let cached):
             return answer(PACDecision(chain: cached.limited(to: limit)), host: host, stamp: stamp)
         case .stale(let cached):
@@ -513,8 +514,8 @@ package final class PACRoutingEngine: @unchecked Sendable {
             break
         }
 
-        let (evaluator, evaluatedURL, generation, version) = lock.withLock {
-            (jsEvaluator, cachedPACURL, routeGeneration, scriptVersion)
+        let (evaluator, evaluatedURL, generation, version, evaluatedStamp) = lock.withLock {
+            (jsEvaluator, cachedPACURL, routeGeneration, scriptVersion, proxyHosts?.stamp(pacURL: config.pacURL))
         }
         guard let evaluator else { return answer(.noUsableAnswer(.notLoaded, rejected: []), host: host) }
 
@@ -548,7 +549,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
             if let first = chain.routes.first {
                 logger?.log(.debug, "PAC route for \(host): \(first) (chain entries: \(rawChain.count))", category: .pac)
             }
-            return answer(PACDecision(chain: chain.limited(to: limit)), host: host, stamp: stamp)
+            return answer(PACDecision(chain: chain.limited(to: limit)), host: host, stamp: evaluatedStamp)
         case .failure(let error):
             return answer(.noUsableAnswer(Self.noUsableReason(for: error), rejected: []), host: host, error: error)
         case nil:
@@ -636,10 +637,10 @@ package final class PACRoutingEngine: @unchecked Sendable {
         }
 
         refreshInBackgroundIfNeeded(for: config)
-        let stamp = proxyHosts?.stamp(pacURL: config.pacURL)
 
         let cacheKey = Self.routeCacheKey(for: requestURL, host: host)
-        switch cachedRoute(forKey: cacheKey) {
+        let (cachedAnswer, stamp) = cachedRoute(forKey: cacheKey, pacURL: config.pacURL)
+        switch cachedAnswer {
         case .fresh(let cached):
             return eventLoop.makeSucceededFuture(answer(PACDecision(chain: cached.limited(to: limit)), host: host, stamp: stamp))
         case .stale(let cached):
@@ -658,7 +659,8 @@ package final class PACRoutingEngine: @unchecked Sendable {
             // only (`EvaluationJob.pendingKey`).
             let job = EvaluationJob(
                 requestURL: requestURL, host: host, cacheKey: cacheKey, generation: routeGeneration,
-                evaluator: evaluator, evaluatedURL: cachedPACURL, scriptVersion: scriptVersion, stamp: stamp
+                evaluator: evaluator, evaluatedURL: cachedPACURL, scriptVersion: scriptVersion,
+                stamp: proxyHosts?.stamp(pacURL: config.pacURL)
             )
             guard let waiters = pendingEvaluations[job.pendingKey] else {
                 guard queuedEvaluations < queuedEvaluationLimit else {
@@ -872,13 +874,13 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 jsEvaluator = nil
                 routeCache.removeAll()
                 routeCacheOrder.removeAll()
+                proxyHosts?.clear()
             }
             guard runningRefresh == nil else { return (false, retired) }
             let needsRefresh = jsEvaluator == nil || !configured || refreshExpired(at: lastRefreshAt)
             guard needsRefresh else { return (false, retired) }
             return (!ExactText.same(lastAttemptedPACURL, config.pacURL) || backoffRemainingLocked(now: Date()) == nil, retired)
         }
-        if retired { proxyHosts?.clear() }
 
         guard shouldKickOff else { return }
         // Never waits: the request that noticed goes on without PAC routes.
@@ -903,17 +905,19 @@ package final class PACRoutingEngine: @unchecked Sendable {
             lastFailureAt = nil
             routeCache.removeAll()
             routeCacheOrder.removeAll()
+            proxyHosts?.clear()
         }
-        proxyHosts?.clear()
     }
 
-    private func cachedRoute(forKey key: String) -> CachedRoute {
+    /// The stamp is taken with the read, so an answer is recorded only in the set of the script that gave it.
+    private func cachedRoute(forKey key: String, pacURL: String) -> (CachedRoute, PACProxyHosts.Stamp?) {
         let now = self.now()
         return lock.withLock {
+            let stamp = proxyHosts?.stamp(pacURL: pacURL)
             purgeExpiredRouteCacheEntriesLocked(now: now)
-            guard let entry = routeCache[key] else { return .miss }
+            guard let entry = routeCache[key] else { return (.miss, stamp) }
             touchRouteCacheKeyLocked(key)
-            return now >= entry.revalidateAfter ? .stale(entry.chain) : .fresh(entry.chain)
+            return (now >= entry.revalidateAfter ? .stale(entry.chain) : .fresh(entry.chain), stamp)
         }
     }
 

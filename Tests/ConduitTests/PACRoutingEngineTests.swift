@@ -167,6 +167,78 @@ final class PACRoutingEngineTests: XCTestCase {
         XCTAssertEqual(hosts.current(for: config.withLockedValue { $0 }), [], "a changed URL empties it before the engine notices")
     }
 
+    func testADroppedScriptTakesItsProxyHostsWithItWhenTheRefetchFails() async throws {
+        var config = ProxyConfig.testFixture()
+        config.pacURL = "http://example.com/proxy.pac"
+        config.pacRoutingEnabled = true
+        let fails = NIOLockedValueBox(false)
+        let hosts = PACProxyHosts()
+        let engine = PACRoutingEngine(
+            configProvider: { config }, resolver: CFPACEvaluator(), refreshInterval: 300,
+            pacLoader: { _ in
+                if fails.withLockedValue({ $0 }) { throw URLError(.notConnectedToInternet) }
+                return #"function FindProxyForURL(url, host) { return "PROXY old.proxy.example.com:8080"; }"#
+            },
+            proxyHosts: hosts
+        )
+        try await engine.refresh(force: true)
+        _ = engine.route(for: "https://a.example.org/", host: "a.example.org")
+        XCTAssertEqual(hosts.current, ["old.proxy.example.com"])
+
+        fails.withLockedValue { $0 = true }
+        engine.invalidateRoutes(reason: .vpnConnected)
+        XCTAssertEqual(hosts.current, [], "the script that named it is gone")
+        do {
+            try await engine.refresh(force: true)
+            XCTFail("the refetch was meant to fail")
+        } catch {}
+        XCTAssertEqual(hosts.current(for: config), [], "a failed refetch leaves the dropped PAC's proxy a public name")
+    }
+
+    func testAnAnswerFromTheScriptInstalledDuringTheLookupIsRecorded() throws {
+        var config = ProxyConfig.testFixture()
+        config.pacURL = "http://example.com/proxy.pac"
+        config.pacRoutingEnabled = true
+        let script = NIOLockedValueBox(#"function FindProxyForURL(url, host) { return "PROXY old.proxy.example.com:8080"; }"#)
+        let hosts = PACProxyHosts()
+        let replaceOnNextRead = NIOLockedValueBox(false)
+        let engineBox = NIOLockedValueBox<PACRoutingEngine?>(nil)
+        @Sendable func refreshed(_ engine: PACRoutingEngine) {
+            let done = DispatchSemaphore(value: 0)
+            Task {
+                try? await engine.refresh(force: true)
+                done.signal()
+            }
+            done.wait()
+        }
+        let engine = PACRoutingEngine(
+            configProvider: { config }, resolver: CFPACEvaluator(), refreshInterval: 300,
+            pacLoader: { _ in script.withLockedValue { $0 } }, proxyHosts: hosts,
+            now: {
+                // The lookup's first clock read comes before it reads the cache: the new script lands right there.
+                let replace = Thread.isMainThread && replaceOnNextRead.withLockedValue { flag in
+                    defer { flag = false }
+                    return flag
+                }
+                if replace, let engine = engineBox.withLockedValue({ $0 }) { refreshed(engine) }
+                return Date()
+            }
+        )
+        engineBox.withLockedValue { $0 = engine }
+        refreshed(engine)
+        _ = engine.route(for: "https://a.example.org/", host: "a.example.org")
+        XCTAssertEqual(hosts.current, ["old.proxy.example.com"])
+
+        script.withLockedValue { $0 = #"function FindProxyForURL(url, host) { return "PROXY new.proxy.example.com:8080"; }"# }
+        replaceOnNextRead.withLockedValue { $0 = true }
+        XCTAssertEqual(
+            engine.route(for: "https://b.example.org/", host: "b.example.org"), .proxy(host: "new.proxy.example.com", port: 8080)
+        )
+        XCTAssertFalse(replaceOnNextRead.withLockedValue { $0 }, "the script was replaced during the lookup")
+        XCTAssertEqual(hosts.current, ["new.proxy.example.com"], "the new script's proxy is a tunnel name at once")
+        engineBox.withLockedValue { $0 = nil }
+    }
+
     func testACachedAnswerRecordsItsProxyHostAgainAfterEviction() async throws {
         var config = ProxyConfig.testFixture()
         config.pacURL = "http://example.com/proxy.pac"
