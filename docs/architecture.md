@@ -29,6 +29,7 @@ Conduit/
 │   ├── ConduitDaemon/        user-session daemon entry point
 │   ├── ConduitUpdater/       nested Sparkle updater
 │   ├── ConduitHelper/        privileged LaunchDaemon
+│   ├── HelperSupport/        the helper's 0049 publisher, shared with FakeMachine and pm-sim
 │   ├── pm-proxy/             headless HTTP/SOCKS5/DNS/tunnel CLI
 │   ├── pm-dns/               standalone DoH forwarder
 │   ├── pm-tunnel/            standalone TCP tunnel forwarder
@@ -63,6 +64,7 @@ graph TD
     Bridge["ProxyControlBridge<br/>(kernel to wire mapping)"]
     Platform["PlatformMac<br/>(Security, SC, SMAppService…)"]
     Runtime["ConduitRuntime<br/>(shared RuntimeHost)"]
+    HelperSupport["HelperSupport<br/>(0049 publisher policy)"]
 
     App["Conduit<br/>(SwiftUI GUI)"]
     Daemon["ConduitDaemon<br/>(entry point)"]
@@ -89,6 +91,9 @@ graph TD
     Platform --> Kernel
     Platform --> Shared
     Platform --> Events
+    Platform --> HelperSupport
+    HelperSupport --> Kernel
+    HelperSupport --> Shared
     Updater --> Shared
     Updater --> Platform
     Updater --> Sparkle
@@ -135,6 +140,7 @@ graph TD
     PMSim --> Platform
     PMSim --> Shared
     PMSim --> Events
+    PMSim --> HelperSupport
     PMSim --> SwiftNIO
 
     PMTunnel --> Kernel
@@ -150,6 +156,7 @@ graph TD
 
     Helper --> Kernel
     Helper --> Shared
+    Helper --> HelperSupport
 
     Tests --> App
     Tests --> Runtime
@@ -188,7 +195,7 @@ graph TD
 | `ConduitDaemon`        | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | ✓                  | ✓ | ✓    |
 | `ConduitTests`         | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | ✓                  | ✓ | ✓    |
 
-The matrix lists **direct** dependencies declared in `Package.swift`. `ConduitUpdater` is the only target that declares Sparkle. `Conduit` (app) and `ConduitDaemon` declare `ConduitShared` and `RuntimeEvents` themselves rather than reaching them through `PlatformMac`. Transitive reach is a separate question: `pm-proxy` declares no `PlatformMac`, and none of its declared targets (`ProxyKernel`, `ProxyAuth`, `ProxyPAC`, `ProxyControlBridge`, `ConduitShared`, `RuntimeEvents`) depends on it, so its closure contains no `PlatformMac`, Sparkle or `ConduitDaemon`. The kernel import fence in CI covers `ProxyKernel` and `RuntimeEvents`; the target graph is what keeps `PlatformMac` out of `pm-proxy`.
+The matrix lists **direct** dependencies declared in `Package.swift`. `HelperSupport` is left out of its columns: it depends on `ProxyKernel` and `ConduitShared`, and `ConduitHelper`, `PlatformMac`, `pm-sim` and `ConduitTests` declare it. `ConduitUpdater` is the only target that declares Sparkle. `Conduit` (app) and `ConduitDaemon` declare `ConduitShared` and `RuntimeEvents` themselves rather than reaching them through `PlatformMac`. Transitive reach is a separate question: `pm-proxy` declares no `PlatformMac`, and none of its declared targets (`ProxyKernel`, `ProxyAuth`, `ProxyPAC`, `ProxyControlBridge`, `ConduitShared`, `RuntimeEvents`) depends on it, so its closure contains no `PlatformMac`, Sparkle or `ConduitDaemon`. The kernel import fence in CI covers `ProxyKernel` and `RuntimeEvents`; the target graph is what keeps `PlatformMac` out of `pm-proxy`.
 
 `ConduitRuntime` contains the one `RuntimeHost` composed by the app and daemon. The app uses the actual framed in-memory `RuntimeClient` and private editor client over its service. Production daemon ownership and v2 socket adoption remain later work; the in-process client boundary prepares that transport change. The complete runtime control-owner cluster shares RuntimeActor; UI/AppKit and client presentation remain MainActor, NIO stays on its loops, and blocking effects use the injected physical workers. The global actor supplies isolation only; each host owns its resources explicitly.
 
@@ -202,7 +209,8 @@ The matrix lists **direct** dependencies declared in `Package.swift`. `ConduitUp
 - **`ProxyPAC`** — opt-in capability layer with the CFNetwork-backed `CFPACEvaluator` (`CFNetworkExecuteProxyAutoConfigurationScript` on a private CFRunLoop, paired with `CFPacScriptEvaluator`). This is the sole production `PacEvaluator` implementation after the CFNetwork evaluator graduated; the JavaScriptCore-backed resolver was removed.
 - **`PlatformMac`** — macOS-only glue. Keychain, `networksetup` wrappers, `SMAppService`, `SCDynamicStore`-based VPN monitor, `NWPathMonitor`, `/etc/resolver/*` writer, helper XPC client, shell runner, first-run example-corp preset injection. It depends on `ProxyKernel`, `ConduitShared` and `RuntimeEvents`, and is linked by the GUI app, `ConduitDaemon`, `ConduitUpdater`, `pm-sim`, `pm-vpn-check` and `pm-tls-check`. `pm-proxy` does not link it.
 - **`Conduit`** (app target) — SwiftUI GUI, editor drafts and app administration. `AppComposition` explicitly supplies host effects; `AppState` opens one host and uses its framed clients. `RuntimeObserver` feeds bounded wire snapshots/pages into `RuntimePresentationAdapter`, while `RuntimeEditorSession` and its ledger track draft and receipt authority. It also hosts `AppLogStore`, the MainActor ring-buffered log store. Direct dependencies are listed in the matrix above.
-- **`ConduitHelper`** — privileged LaunchDaemon at `/Library/PrivilegedHelperTools/io.github.srps.Conduit.Helper`. Communicates with the app over a Unix-domain socket at `/var/run/io.github.srps.Conduit.Helper.sock` using the `ConduitShared` contract. Depends on the kernel for `UDPRelay` / `TCPRelay` implementations.
+- **`HelperSupport`** — the helper's decision-0049 policy without its SystemConfiguration session: `VPNDNSOverridePublisher`, its `VPNDNSStore` protocol, the `VPNDNSFailoverRelay` protocol and `DNSFailoverRelay`'s conformance to it, and the start-up report of a legacy record, which writes nothing. `ConduitHelper` runs it over the real store; `PlatformMac`'s `FakeMachine` and pm-sim run it over a fake store, with pm-sim injecting the real relay. It keeps publication policy out of `ConduitShared`, which holds only IPC values, and out of the kernel, whose relay owns its own mode, probe outcome and server validation. Putting it in `PlatformMac` would link all of `PlatformMac` into the privileged helper.
+- **`ConduitHelper`** — privileged LaunchDaemon at `/Library/PrivilegedHelperTools/io.github.srps.Conduit.Helper`. Communicates with the app over a Unix-domain socket at `/var/run/io.github.srps.Conduit.Helper.sock` using the `ConduitShared` contract. Depends on the kernel for the `UDPRelay`, `TCPRelay` and `DNSFailoverRelay` implementations, and on `HelperSupport` for the override publisher.
 - **Executables: `pm-proxy`, `pm-dns`, `pm-tunnel`, `pm-sim`, `pm-vpn-check`, `pm-auth-check`** — each is a narrow tool. `pm-proxy` is the flagship: it runs the full HTTP/SOCKS5/DNS/tunnel stack off `ProxyKernel`, `ProxyAuth` and `ProxyPAC`, and declares `ProxyControlBridge` and `ConduitShared` for its control socket, with no system-side effects (no Keychain, no `networksetup`, no `/etc/resolver`). `pm-sim` is the fault-injection harness used by CI.
 - **`ConduitRuntime`** — the shared `RuntimeHost` and its RuntimeActor control-owner cluster, preserving lifecycle policy. It owns runtime composition with required explicit effects (decision0033), start-time and terminal-exit inputs. Both the app and daemon compose it; actual-host/client tests and scoped pm-sim scenarios drive it over explicit FakeMachine effects. RuntimeServiceProfile names and checks the app's shipping control-service capacities.
 - **`ConduitDaemon`** — the user-session entry point over `RuntimeHost`, retaining arguments, configuration loading, signals and status output. It is not yet the production owner; the daemon milestones are in [ROADMAP](../ROADMAP.md).

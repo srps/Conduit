@@ -277,18 +277,21 @@ struct OverviewView: View {
     // MARK: - Actions
 
     private var actions: some View {
-        HStack(spacing: 8) {
-            Button("Restart Proxy") { appState.restartProxy() }
-                .disabled(!appState.controlsEnabled || !MenuBarPresentation.canRestartProxy(for: runtime.runtimeStatus.state))
-                .help("Stop and start the proxy runtime to clear accumulated connections and errors.")
-            Button("Test DNS") { appState.testDNS() }
-                .disabled(!appState.controlsEnabled || runtime.dnsRunState != .running)
-            Button("Open Test URL") { appState.revealHealthTestURL() }
-            Button("Copy Diagnostics") { copyDiagnostics() }
-            Spacer()
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Button("Restart Proxy") { appState.restartProxy() }
+                    .disabled(!appState.controlsEnabled || !MenuBarPresentation.canRestartProxy(for: runtime.runtimeStatus.state))
+                    .help("Stop and start the proxy runtime to clear accumulated connections and errors.")
+                Button("Test DNS") { appState.testDNS() }
+                    .disabled(!appState.canTestDNS)
+                Button("Open Test URL") { appState.revealHealthTestURL() }
+                Button("Copy Diagnostics") { copyDiagnostics() }
+                Spacer()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            DNSTestStatus(test: appState.dnsTest)
         }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
     }
 
     private func copyDiagnostics() {

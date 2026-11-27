@@ -257,10 +257,16 @@ final class HoldingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
 
     private let base: any PrivilegeClient
     private let hold: HeldCall
+    private let vpnDNSOverrideClient: (any PrivilegeClient)?
 
-    init(base: any PrivilegeClient, hold: HeldCall) {
+    init(base: any PrivilegeClient, hold: HeldCall, vpnDNSOverride: (any PrivilegeClient)? = nil) {
         self.base = base
         self.hold = hold
+        self.vpnDNSOverrideClient = vpnDNSOverride
+    }
+
+    func vpnDNSOverride(_ request: VPNDNSOverrideRequest) throws -> VPNDNSOverrideReply {
+        try vpnDNSOverrideClient?.vpnDNSOverride(request) ?? .unsupported
     }
 
     func execute(_ operation: PrivilegedOperation, values: [String]) throws {

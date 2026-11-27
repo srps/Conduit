@@ -205,6 +205,25 @@ final class DNSTCPListenerTests: XCTestCase {
         XCTAssertTrue(closed, "An idle connection with no outstanding query must be closed")
     }
 
+    /// A lookup the forwarder drops (here: no network path) writes nothing on
+    /// the stream, and the connection closes at once rather than at the idle
+    /// window, so the client asks again instead of waiting on an answer.
+    @MainActor
+    func testDroppedLookupClosesTheConnectionWithoutAReply() async throws {
+        let logger = RecordingLogSink(minLevel: .debug)
+        let forwarder = makeForwarder(logger: logger, tcpIdleTimeout: .seconds(60))
+        try await forwarder.start(host: "127.0.0.1", port: 0)
+        defer { Task { await forwarder.stop() } }
+        let port = try XCTUnwrap(forwarder.tcpListeningPort)
+        forwarder.updateNetworkPath(satisfied: false)
+
+        let query = DNSWireFormat.buildQuery(domain: "dropped.example", txID: 0x7A01, qtype: 1)
+        var framed = Data([UInt8(query.count >> 8), UInt8(query.count & 0xFF)])
+        framed.append(contentsOf: query)
+        let closed = try await Self.expectConnectionClose(payload: framed, port: port)
+        XCTAssertTrue(closed, "the connection closes with no reply written")
+    }
+
     /// Closing the listener stops accepts but leaves the connections it already
     /// accepted alive, and each of those holds the resolution core — so a
     /// forwarder that reported itself stopped would go on answering those

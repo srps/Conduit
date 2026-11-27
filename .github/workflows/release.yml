@@ -132,9 +132,31 @@ jobs:
             .build/share/appcast.xml
           if-no-files-found: error
 
+  # The full tier of both TLA+ models, which pull requests skip for speed.
+  vpn-model-full:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    strategy:
+      fail-fast: false
+      matrix:
+        spec: [detection, override]
+    name: vpn-model full (${{ matrix.spec }})
+    runs-on: ubuntu-24.04
+    # 80 to 130 minutes for detection on a 4-core runner (see swift.yml).
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Model-check the full tier with TLC
+        env:
+          SPEC: ${{ matrix.spec }}
+        run: python3 formal/vpn-detection/check.py --spec "$SPEC" --full="$SPEC" --mutants
+
   draft-release:
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: build
+    needs: [build, vpn-model-full]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -22,7 +22,13 @@ struct DNSSettingsView: View {
                 ) {
                     Button("Test DNS") { appState.testDNS() }
                         .controlSize(.small)
-                        .disabled(runtime.dnsRunState != .running)
+                        .disabled(!appState.canTestDNS)
+                }
+                // Under the strip, not in it: the strip's chips have no room to give up.
+                if appState.dnsTest != .idle {
+                    DNSTestStatus(test: appState.dnsTest)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .padding(.horizontal, 14)
                 }
                 if HelperStatusPresentation.suggestsInstall(for: appState.helperStatus) {
                     HelperHintBanner()

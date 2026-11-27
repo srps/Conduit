@@ -18,6 +18,10 @@ package final class AuditingPrivilegeClient: PrivilegeClient, @unchecked Sendabl
         try base.dnsRelayStatus()
     }
 
+    package func vpnDNSOverride(_ request: VPNDNSOverrideRequest) throws -> VPNDNSOverrideReply {
+        try base.vpnDNSOverride(request)
+    }
+
     package func execute(_ operation: PrivilegedOperation, values: [String]) throws {
         emit(operation: operation, outcome: "requested", valueCount: values.count)
         do {
