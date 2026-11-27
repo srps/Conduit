@@ -28,27 +28,32 @@ done
 # "No such key" answer and on output it does not recognise.
 prefs() { printf '%s\n' "$@" quit | scutil --prefs; }
 
-# The paths under a key, one per line; none for a key with no children.
+# The paths under a key, one per line; none for a key with no children. Every
+# line must be a path, so a diagnostic fails it.
 paths() {
     local out
     out="$(prefs "list $1")" || return 1
-    case "$out" in
-        *"No such key"*) return 1 ;;
-        *"no paths."*) return 0 ;;
-        *"path ["*) print -r -- "$out" | awk '$1 == "path" { print $NF }' ;;
-        *) return 1 ;;
-    esac
+    [ "$out" = "  no paths." ] && return 0
+    print -r -- "$out" | awk '
+        $0 !~ /^  path \[[0-9]+\] = \/[^ ]*$/ { exit 1 }
+        { print $NF }'
+}
+
+# Whether d.show printed one dictionary and nothing else: its header, indented
+# entries and its closing brace. A diagnostic anywhere fails it.
+one_dictionary() {
+    print -r -- "$1" | awk '
+        NR == 1 { bad = $0 != "<dictionary> {"; next }
+        { if (previous != "" && previous !~ /^  /) bad = 1; previous = $0 }
+        END { exit bad || NR < 2 || previous != "}" }'
 }
 
 # A key's dictionary, as d.show prints it.
 dictionary() {
     local out
     out="$(prefs "get $1" d.show)" || return 1
-    case "$out" in
-        *"No such key"*) return 1 ;;
-        *"<dictionary> {"*) print -r -- "$out" ;;
-        *) return 1 ;;
-    esac
+    one_dictionary "$out" || return 1
+    print -r -- "$out"
 }
 
 name_of() {
@@ -58,20 +63,19 @@ name_of() {
 }
 
 # A service's DNS servers, one per line. A service with no DNS key has none of
-# its own; one that cannot be read at all is a failure.
+# its own; one that cannot be read at all is a failure, and so is a
+# ServerAddresses that is not an array of addresses.
 dns_servers() {
     local out
     dictionary "/NetworkServices/$1" >/dev/null || return 1
     out="$(prefs "get /NetworkServices/$1/DNS" d.show)" || return 1
-    case "$out" in
-        *"No such key"*) return 0 ;;
-        *"<dictionary> {"*) ;;
-        *) return 1 ;;
-    esac
+    [ "$out" = $'  No such key\n<dictionary> {\n}' ] && return 0
+    one_dictionary "$out" || return 1
     print -r -- "$out" | awk '
-        /^  ServerAddresses : <array> \{/ { inside = 1; next }
-        inside && /^  \}/ { inside = 0 }
-        inside { sub(/^ *[0-9]+ : /, ""); print }'
+        /^  ServerAddresses : / { if ($0 != "  ServerAddresses : <array> {") exit 1; inside = 1; next }
+        inside && $0 == "  }" { inside = 0; next }
+        inside { if ($0 !~ /^    [0-9]+ : [^ ]+$/) exit 1; sub(/^    [0-9]+ : /, ""); print }
+        END { if (inside) exit 1 }'
 }
 
 # Each service whose DNS servers are Conduit's resolver alone, as
