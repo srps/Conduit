@@ -390,7 +390,24 @@ final class ProxyChallengeRefusalTests: XCTestCase {
     /// When a refusal is why nothing answered, the warning says so instead of
     /// calling the providers unreachable.
     func testTheAllProvidersFailedWarningNamesARefusedChallenge() async throws {
-        let proxy = try await ChallengingProxy.start(group: group, offering: ["NTLM"])
+        let warning = try await allProvidersFailedWarning(through: ChallengingProxy.start(group: group, offering: ["NTLM"]))
+        XCTAssertTrue(warning.contains("asked for authentication and Conduit refused the challenge"), warning)
+        XCTAssertTrue(warning.contains("auth.proxy_challenge_refused"), warning)
+        XCTAssertFalse(warning.contains("the providers were unreachable"), warning)
+    }
+
+    /// A listener that answers the CONNECT with an error fails the request with CFNetwork error 310, which carries no
+    /// status. The warning names that listener instead of calling the providers unreachable.
+    func testTheAllProvidersFailedWarningNamesAListenerThatRefusedTheTunnel() async throws {
+        let proxy = try await ChallengingProxy.start(group: group, answering: "403 Forbidden")
+        let warning = try await allProvidersFailedWarning(through: proxy)
+        XCTAssertTrue(warning.contains("Conduit's listener at 127.0.0.1:\(proxy.port) could not open the tunnel"), warning)
+        XCTAssertTrue(warning.contains("CFNetwork error 310"), warning)
+        XCTAssertFalse(warning.contains("the providers were unreachable"), warning)
+        XCTAssertFalse(warning.contains("refused the challenge"), warning)
+    }
+
+    private func allProvidersFailedWarning(through proxy: ChallengingProxy) async throws -> String {
         self.proxy = proxy
         var config = ProxyConfig.testFixture()
         config.upstreams = []
@@ -409,6 +426,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         try ProxyChallengeCanary.requireRefusal(forwarder.doHSessions)
 
         let client = try await DatagramBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
+        closeAtTearDown(client)
         let query = DNSWireFormat.buildQuery(domain: "refused.example", txID: 0x0407, qtype: 1)
         var buffer = client.allocator.buffer(capacity: query.count)
         buffer.writeBytes(query)
@@ -421,12 +439,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         for _ in 0..<1_400 where warnings().isEmpty {
             try await Task.sleep(for: .milliseconds(10))
         }
-        try await client.close().get()
-
-        let warning = try XCTUnwrap(warnings().first)
-        XCTAssertTrue(warning.contains("asked for authentication and Conduit refused the challenge"), warning)
-        XCTAssertTrue(warning.contains("auth.proxy_challenge_refused"), warning)
-        XCTAssertFalse(warning.contains("the providers were unreachable"), warning)
+        return try XCTUnwrap(warnings().first)
     }
 
     /// Client traffic that routes directly gains nothing from the local-proxy route: it would reach the providers directly too.
@@ -586,10 +599,19 @@ private final class ChallengingProxy: @unchecked Sendable {
         group: EventLoopGroup,
         offering schemes: [String] = ["NTLM", "Basic realm=\"corp.example\""]
     ) async throws -> ChallengingProxy {
-        let heads = NIOLockedValueBox<[String]>([])
         let challenge = schemes.map { "Proxy-Authenticate: \($0)\r\n" }.joined()
+        return try await start(group: group, response: "HTTP/1.1 407 Proxy Authentication Required\r\n" + challenge)
+    }
+
+    /// A proxy that answers every request with `status` and no challenge.
+    static func start(group: EventLoopGroup, answering status: String) async throws -> ChallengingProxy {
+        try await start(group: group, response: "HTTP/1.1 \(status)\r\n")
+    }
+
+    private static func start(group: EventLoopGroup, response: String) async throws -> ChallengingProxy {
+        let heads = NIOLockedValueBox<[String]>([])
         let channel = try await ServerBootstrap(group: group)
-            .childChannelInitializer { $0.pipeline.addHandler(Responder(heads: heads, challenge: challenge)) }
+            .childChannelInitializer { $0.pipeline.addHandler(Responder(heads: heads, response: response)) }
             .bind(host: "127.0.0.1", port: 0)
             .get()
         return ChallengingProxy(channel: channel, heads: heads)
@@ -600,12 +622,12 @@ private final class ChallengingProxy: @unchecked Sendable {
         typealias OutboundOut = ByteBuffer
 
         private let heads: NIOLockedValueBox<[String]>
-        private let challenge: String
+        private let response: String
         private var responded = false
 
-        init(heads: NIOLockedValueBox<[String]>, challenge: String) {
+        init(heads: NIOLockedValueBox<[String]>, response: String) {
             self.heads = heads
-            self.challenge = challenge
+            self.response = response
         }
 
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -614,8 +636,7 @@ private final class ChallengingProxy: @unchecked Sendable {
             var buffer = unwrapInboundIn(data)
             let head = String(decoding: buffer.readBytes(length: buffer.readableBytes) ?? [], as: UTF8.self)
             heads.withLockedValue { if $0.count < 64 { $0.append(head) } }
-            let response = "HTTP/1.1 407 Proxy Authentication Required\r\n" + challenge +
-                "Content-Length: 0\r\nConnection: close\r\n\r\n"
+            let response = self.response + "Content-Length: 0\r\nConnection: close\r\n\r\n"
             let channel = context.channel
             var out = channel.allocator.buffer(capacity: response.utf8.count)
             out.writeString(response)

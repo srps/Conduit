@@ -19,6 +19,11 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   could fail. On the VPN, and on a corporate network without it, each lookup
   still asks the proxy and direct at the same time (`dns.doh_route_changed`).
 
+- When every DNS-over-HTTPS provider fails and Conduit's listener could not
+  open the tunnel to one of them, the warning now names that listener and says
+  the upstream behind it refused, blocked or could not reach the provider. It
+  used to call the providers unreachable.
+
 ## 0.7.0
 
 This release makes Conduit's VPN on/off verdict, and the split DNS that depends
