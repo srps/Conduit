@@ -426,6 +426,17 @@ struct RuntimeModuleIntents: Equatable, Sendable {
         modules.dns.enabled = true
     }
 
+    /// A session Stop of DNS at `revision` whose teardown kept DNS serving, because a service still used the relay after the restore. While
+    /// it is still DNS's latest admission, its configured intent goes back to on and its save is owed again, so the save writes the enable
+    /// and a relaunch serves DNS. The fence and the permission stay a Stop's. A newer Start or Stop of DNS keeps its own intent. Returns
+    /// whether the intent was kept.
+    mutating func keepConfiguredAfterKeptStop(revision: Int) -> Bool {
+        guard !terminal, dnsIntentRevision == revision, modules.dns.revision == revision else { return false }
+        dnsConfigured = true
+        modules.dns.pending = .stopSave(revision: revision)
+        return true
+    }
+
     func stopSaveIsCurrent(revision: Int) -> Bool {
         modules.dns.pending == .stopSave(revision: revision)
     }

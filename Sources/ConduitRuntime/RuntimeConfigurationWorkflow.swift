@@ -438,17 +438,19 @@ final class RuntimeConfigurationWorkflow {
     func saveOwedDNSStopWrite(
         requestID: ControlRequestID? = nil
     ) async -> (save: DNSStopSave, events: [ConfigurationWorkflowEvent], write: DNSStopWrite?) {
-        enum Owed { case save(revision: Int), carried, notOwed }
+        enum Owed { case save(revision: Int, enabled: Bool), carried, notOwed }
         let owed = intent.withLockedValue { state -> Owed in
             switch state.modules.dns.pending {
-            case .stopSave(let revision): .save(revision: revision)
+            // The Stop's disable, or the enable of a Stop whose teardown kept DNS serving.
+            case .stopSave(let revision): .save(revision: revision, enabled: state.dnsConfigured)
             case .start(let start) where start.displacesOwedSave: .carried
             case .start, nil: .notOwed
             }
         }
         let revision: Int
+        let enabled: Bool
         switch owed {
-        case .save(let owedRevision): revision = owedRevision
+        case .save(let owedRevision, let owedEnabled): (revision, enabled) = (owedRevision, owedEnabled)
         case .carried: return (.owed, [], nil)
         case .notOwed: return (.notOwed, [], nil)
         }
@@ -458,7 +460,7 @@ final class RuntimeConfigurationWorkflow {
         // Read in the same turn the commit takes the store's slot, so it is the baseline the write was conditional on.
         let expected = store.baselineToken(for: .runtime)
         let admission = await store.commitDNSLifecycle(
-            enabled: false,
+            enabled: enabled,
             expecting: expected,
             context: context(generation: revision, requestID: requestID),
             claim: ConfigurationWriteClaim { intent.withLockedValue { $0.stopSaveIsCurrent(revision: revision) } }
@@ -470,6 +472,12 @@ final class RuntimeConfigurationWorkflow {
         guard result.runtime.isVerified else { return (.owed, events, write) }
         intent.withLockedValue { $0.finishStopSave(revision: revision) }
         return (.saved, events, write)
+    }
+
+    /// A session DNS Stop admitted at `revision` whose teardown kept DNS serving: while it is still DNS's latest admission, its owed save
+    /// writes the enable instead of the disable. Returns whether it was kept.
+    func keepDNSConfiguredAfterKeptStop(revision: Int) -> Bool {
+        intent.withLockedValue { $0.keepConfiguredAfterKeptStop(revision: revision) }
     }
 
     /// Authorizes a Start whose verified pair the host has adopted: its members gain the permission the facade grants and lose their

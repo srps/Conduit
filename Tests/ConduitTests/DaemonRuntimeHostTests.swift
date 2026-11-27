@@ -2458,16 +2458,16 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
-    /// A kept Stop whose save the disk refuses stays owed and leaves the file as it was, enabled; the next write of the runtime file, here
-    /// a proxy Restart's, saves DNS enabled rather than the Stop's disable.
-    @RuntimeActor func testAKeptStopWhoseSaveFailsKeepsDNSEnabledForTheNextWrite() async throws {
+    /// A kept Stop under a disk that refuses every write still leaves DNS enabled: the file already holds the enable, so the save verifies
+    /// with nothing to write. The next write of the runtime file, here a proxy Restart's, saves DNS enabled rather than the Stop's disable.
+    @RuntimeActor func testAKeptStopUnderAFailingDiskKeepsDNSEnabledForTheNextWrite() async throws {
         let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
         harness.stateFiles.failWrites(true)
         let kept = await host.stopDNS()
         XCTAssertEqual(kept.keptServing, [.dns])
-        XCTAssertEqual(kept.dnsSave, .owed)
+        XCTAssertEqual(kept.dnsSave, .saved)
         XCTAssertTrue(try savedDNSEnabled())
-        XCTAssertEqual(keptEnabledEvents(host), ["save=owed"])
+        XCTAssertEqual(keptEnabledEvents(host), ["save=saved"])
 
         harness.stateFiles.failWrites(false)
         _ = try await host.restartProxy()

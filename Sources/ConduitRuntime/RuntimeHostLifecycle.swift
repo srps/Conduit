@@ -991,12 +991,18 @@ extension RuntimeHost {
         guard reason == .session, modules.contains(.dns) else {
             return RuntimeModuleStopOutcome(stopped: stopped, dnsSave: nil, keptServing: keptServing)
         }
+        let keptEnabled = keptServing.contains(.dns) && workflow.keepDNSConfiguredAfterKeptStop(revision: revision)
         let save = await workflow.saveOwedDNSStopWrite(requestID: admitted.requestID)
         emitConfigurationEvents(save.events)
         let result: RuntimeDNSStopSave = switch save.save {
         case .saved: .saved
         case .owed: .owed
         case .notOwed: .notOwed
+        }
+        if keptServing.contains(.dns) {
+            let outcome = keptEnabled ? (result == .saved ? "saved" : "owed") : "superseded"
+            recordLifecycle(RuntimeEvent(kind: .config, event: "config.dns_stop_kept_enabled", detail: "save=\(outcome)"),
+                            level: keptEnabled && result == .saved ? .notice : .warning)
         }
         admitted.facts.dnsWrite = save.write
         return RuntimeModuleStopOutcome(stopped: stopped, dnsSave: result, keptServing: keptServing)

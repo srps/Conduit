@@ -1399,11 +1399,15 @@ enum RuntimeHostEffectsScenario {
             check("the host says it kept them serving and why",
                   kept.count == 1 && kept.first?.hasPrefix("operation=stop loopback_services=1 reason=") == true)
             check("the record stays for the retry", PlatformStateJournal(fileURL: environment.platformStateFile).hasRecords(for: .systemDNS))
+            check("the kept Stop leaves DNS enabled in the saved settings, so a relaunch serves DNS again",
+                  refused.dnsSave == .saved && (try? ProxyConfigPersistence.load(in: environment, allowMissing: false))?.dnsForwarderEnabled == true)
             locations.refuseWrites(false)
             let retried = await host.stopDNS()
             check("the next Stop restores the service and stops both",
                   retried.stopped.contains(.dns) && serviceDNS() == own && !fakes.machine.dnsRelayRunning
                       && host.status().dnsRunState != "running")
+            check("the Stop that restored saves the disable",
+                  (try? ProxyConfigPersistence.load(in: environment, allowMissing: false))?.dnsForwarderEnabled == false)
             await host.shutdown()
             quiesced = await settledAndFlushed()
             check("the kept-serving host settles and its observability flush is confirmed", quiesced)
