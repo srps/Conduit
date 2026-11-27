@@ -61,6 +61,7 @@ final class AppState: ObservableObject {
     /// Why no Start may run now: the explicit launch options were not saved, so the saved input is not what this launch asked for. Stop
     /// and Quit stay available. Cleared when the configuration draft is saved.
     @Published private(set) var activationHeld: String?
+    @Published private(set) var dnsTest: DNSTest = .idle
 
     let runtime = RuntimePresentationAdapter()
     let logStore: AppLogStore
@@ -163,6 +164,10 @@ final class AppState: ObservableObject {
         self.updateCoordinator = updateCoordinator
         self.updateStatus = updateCoordinator.status
         observeDrafts()
+        runtime.$dnsRunState.removeDuplicates().dropFirst().sink { [weak self] _ in
+            guard let self, case .finished = self.dnsTest else { return }
+            self.dnsTest = .idle
+        }.store(in: &cancellables)
         notificationManager.requestAuthorization()
         opening = Task { @MainActor [weak self] in await self?.open() }
     }
@@ -864,9 +869,12 @@ final class AppState: ObservableObject {
         }
     }
 
+    var canTestDNS: Bool { controlsEnabled && runtime.dnsRunState == .running && dnsTest != .testing }
+
     func testDNS() {
-        guard controlsEnabled else { return }
-        send(.testDNS) { _ in }
+        guard canTestDNS else { return }
+        dnsTest = .testing
+        send(.testDNS) { [weak self] outcome in self?.dnsTest = .finished(DNSTestResult(outcome), at: .now) }
     }
 
     /// A running DNS whose relay start failed keeps the decline until its health timer restarts the relay; a Start then has nothing to do.
@@ -891,9 +899,10 @@ final class AppState: ObservableObject {
     ///
     /// A Stop is never dropped behind ordinary work: each module has a Stop lane of its own, as the host's Stop lanes do, outside the
     /// ordinary cap. A lane holds one Stop out and at most one wanted after it; a Stop asked for while one is out is sent again once that
-    /// one ends, so a Start admitted in between cannot outlive it, and only the latest caller's settlement is kept.
+    /// one ends, so a Start admitted in between cannot outlive it, and only the latest caller's settlement is kept. A command not sent
+    /// settles with no outcome at once, so no caller waits on it.
     private func send(_ command: ControlRuntimeCommand, settled: @escaping @MainActor (ControlOperationOutcome?) -> Void) {
-        guard !quitFence else { return }
+        guard !quitFence else { return settled(nil) }
         if case .stop(let module) = command {
             guard stopLanes[module] == nil else {
                 stopLanes[module]?.wanted = settled
@@ -908,7 +917,7 @@ final class AppState: ObservableObject {
         guard commandsInFlight < Self.maximumCommandsInFlight else {
             logStore.log(.warning, "Lifecycle: \(command.kind.rawValue) dropped; \(Self.maximumCommandsInFlight) commands are in flight.",
                          category: .system)
-            return
+            return settled(nil)
         }
         commandsInFlight += 1
         dispatch(command, settled: settled) { [weak self] in self?.commandsInFlight -= 1 }
