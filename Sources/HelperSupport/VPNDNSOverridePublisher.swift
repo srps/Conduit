@@ -57,9 +57,9 @@ package protocol VPNDNSFailoverRelay: AnyObject {
 package struct VPNDNSOverrideArm: Equatable, Sendable {
     package var service: String
     package var servers: [String]
-    package var owner: pid_t?
+    package var owner: pid_t
 
-    package init(service: String, servers: [String], owner: pid_t?) {
+    package init(service: String, servers: [String], owner: pid_t) {
         self.service = service
         self.servers = servers
         self.owner = owner
@@ -67,7 +67,7 @@ package struct VPNDNSOverrideArm: Equatable, Sendable {
 }
 
 package enum VPNDNSOverrideOutcome: Equatable, Sendable {
-    case armed(service: String, servers: Int, owner: pid_t?)
+    case armed(service: String, servers: Int, owner: pid_t)
     case published(service: String, port: Int)
     case publishFailed(service: String)
     /// A key this session did not add held the path; it is removed and the add tried once more.
@@ -82,7 +82,7 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
         let prefix = "vpn-dns-override"
         switch self {
         case .armed(let service, let servers, let owner):
-            return "\(prefix) armed service=\(HelperAudit.safe(service)) servers=\(servers) owner=\(owner.map(String.init) ?? "none")"
+            return "\(prefix) armed service=\(HelperAudit.safe(service)) servers=\(servers) owner=\(owner)"
         case .published(let service, let port):
             return "\(prefix) published service=\(HelperAudit.safe(service)) port=\(port)"
         case .publishCollision(let service):
@@ -125,6 +125,9 @@ package final class VPNDNSOverridePublisher {
     package static let tickSeconds = 10
     package static let refusedTicksToWithdraw = 2
     package static let silentTicksToWithdraw = 3
+    /// The longest a published key may go without a confirmed answer, whatever the reasons the ticks gave: refused,
+    /// silent, a probe socket that failed or any mix of them. It is the silent streak's span, so no faster rule changes.
+    package static let unverifiedSecondsToWithdraw = 30
 
     package static func ownKey(port: Int) -> [String: VPNDNSValue] {
         [
@@ -149,22 +152,32 @@ package final class VPNDNSOverridePublisher {
     private var lastVerdict: DNSFailoverProbeOutcome?
     private var consecutiveRefused = 0
     private var consecutiveSilent = 0
+    private var lastConfirmed: UInt64?
+    private let now: () -> UInt64
 
+    /// `now` is monotonic nanoseconds.
     package init(
         store: any VPNDNSStore,
         relay: any VPNDNSFailoverRelay,
+        now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
         report: @escaping (VPNDNSOverrideOutcome) -> Void
     ) {
         self.store = store
         self.relay = relay
+        self.now = now
         self.report = report
     }
 
-    /// False for an arm out of shape; it changes nothing then.
-    package func arm(service: String, servers: [String], owner: pid_t?) -> Bool {
-        guard VPNDNSOverrideValidation.isServiceID(service), service != HelperConstants.vpnDNSOverrideServiceID,
-              (1...VPNDNSOverrideValidation.maximumServers).contains(servers.count),
-              servers.allSatisfy(VPNDNSOverrideValidation.isTunnelServer) else { return false }
+    package static func isValidArm(service: String, servers: [String]) -> Bool {
+        VPNDNSOverrideValidation.isServiceID(service) && service != HelperConstants.vpnDNSOverrideServiceID
+            && (1...VPNDNSOverrideValidation.maximumServers).contains(servers.count)
+            && servers.allSatisfy(VPNDNSOverrideValidation.isTunnelServer)
+    }
+
+    /// False for an arm out of shape; it changes nothing then. The owner is required: its exit is what withdraws the key
+    /// at once, so the caller arms only an owner it is watching.
+    package func arm(service: String, servers: [String], owner: pid_t) -> Bool {
+        guard Self.isValidArm(service: service, servers: servers) else { return false }
         arm = VPNDNSOverrideArm(service: service, servers: servers, owner: owner)
         failoverService = service
         consecutiveRefused = 0
@@ -172,6 +185,7 @@ package final class VPNDNSOverridePublisher {
         let verdict = relay.probe()
         lastVerdict = verdict
         probeOK = verdict == .answered
+        lastConfirmed = probeOK ? now() : nil
         if probeOK { relay.setMode(.conduit) }
         report(.armed(service: service, servers: servers.count, owner: owner))
         sync()
@@ -194,7 +208,7 @@ package final class VPNDNSOverridePublisher {
 
     /// A caller that does not own the arm starts the relay on the VPN's servers until a probe answers.
     package func relayStarted(caller: pid_t?) {
-        if let arm, arm.owner == nil || arm.owner != caller {
+        if let arm, arm.owner != caller {
             relay.setMode(.vpn)
         } else {
             relay.setMode(.conduit)
@@ -220,6 +234,7 @@ package final class VPNDNSOverridePublisher {
         case .answered:
             resetProbe()
             probeOK = true
+            lastConfirmed = now()
             relay.setMode(.conduit)
         case .refused:
             consecutiveSilent = 0
@@ -236,12 +251,14 @@ package final class VPNDNSOverridePublisher {
         case .notRunning:
             relay.setMode(.vpn)
         case .failed:
-            // The helper's own socket failed; that says nothing about the forwarder.
+            // The helper's own socket failed: no word on the forwarder, so the mode stays, but no confirmation either.
             report(.probeMissed(service: arm.service, verdict: verdict, consecutive: 0))
-            sync()
-            return
         }
         lastVerdict = verdict
+        if verdict != .answered, probeOK, let confirmed = lastConfirmed,
+           now() &- confirmed >= UInt64(Self.unverifiedSecondsToWithdraw) * 1_000_000_000 {
+            probeOK = false
+        }
         sync()
     }
 
@@ -281,7 +298,7 @@ package final class VPNDNSOverridePublisher {
         let reason = published ? nil : (hold(arm)?.rawValue ?? "publish_failed")
         return HelperVPNDNSOverrideStatus(
             serviceID: arm.service, servers: arm.servers, published: published, reason: reason,
-            owned: arm.owner != nil && arm.owner == caller, port: published ? publishedPort : nil
+            owned: arm.owner == caller, port: published ? publishedPort : nil
         )
     }
 
@@ -293,7 +310,13 @@ package final class VPNDNSOverridePublisher {
             return .vpnChanged
         }
         guard relay.listeningPort != nil else { return .relayStopped }
-        guard probeOK else { return lastVerdict == .silent ? .targetSilent : .targetRefused }
+        guard probeOK else {
+            switch lastVerdict {
+            case .silent: return .targetSilent
+            case .refused, nil: return .targetRefused
+            default: return .targetUnverified
+            }
+        }
         return nil
     }
 

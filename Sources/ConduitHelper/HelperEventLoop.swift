@@ -108,9 +108,17 @@ final class HelperEventLoop {
         }
     }
 
-    /// A pid reused after `ESRCH` cannot matter: `NOTE_EXIT` is registered only while the owner is alive.
-    func watchOwner(_ pid: pid_t?, alreadyGone: (pid_t) -> Void) {
-        guard pid != watched else { return }
+    enum Watch: Equatable {
+        case watching
+        case gone
+        case failed(String)
+    }
+
+    /// Moves the one `NOTE_EXIT` watch to `pid`. A pid reused after `ESRCH` cannot matter: the watch is registered only
+    /// while the owner is alive. Nothing is watched after `gone` or `failed`.
+    @discardableResult
+    func watchOwner(_ pid: pid_t?) -> Watch {
+        guard pid != watched else { return .watching }
         if let previous = watched {
             var change = kevent(ident: UInt(previous), filter: Int16(EVFILT_PROC), flags: UInt16(EV_DELETE), fflags: 0, data: 0, udata: nil)
             if kevent(queue, &change, 1, nil, 0, nil) != 0, errno != ESRCH, errno != ENOENT {
@@ -118,19 +126,16 @@ final class HelperEventLoop {
             }
             watched = nil
         }
-        guard let pid else { return }
+        guard let pid else { return .watching }
         var change = kevent(
             ident: UInt(pid), filter: Int16(EVFILT_PROC), flags: UInt16(EV_ADD | EV_ONESHOT),
             fflags: UInt32(NOTE_EXIT), data: 0, udata: nil
         )
-        if kevent(queue, &change, 1, nil, 0, nil) != 0 {
-            if errno == ESRCH {
-                alreadyGone(pid)
-                return
-            }
-            HelperLog.error("vpn-dns-override: cannot watch owner pid=\(pid): \(Self.errnoText); only the probe ticks can withdraw the key")
+        guard kevent(queue, &change, 1, nil, 0, nil) == 0 else {
+            return errno == ESRCH ? .gone : .failed(Self.errnoText)
         }
         watched = pid
+        return .watching
     }
 
     private static let tickNanoseconds = UInt64(VPNDNSOverridePublisher.tickSeconds) * 1_000_000_000

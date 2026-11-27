@@ -4,6 +4,7 @@ import XCTest
 @testable import ConduitShared
 @testable import HelperSupport
 @testable import PlatformMac
+@testable import ProxyKernel
 
 final class VPNDNSOverridePublisherTests: XCTestCase {
     private let service = "com.cisco.anyconnect"
@@ -15,7 +16,16 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         let store = FakeVPNDNSStore()
         let relay = FakeDNSFailoverRelay()
         var outcomes: [VPNDNSOverrideOutcome] = []
-        lazy var publisher = VPNDNSOverridePublisher(store: store, relay: relay) { [unowned self] in outcomes.append($0) }
+        var clock: UInt64 = 1_000_000_000_000
+        lazy var publisher = VPNDNSOverridePublisher(store: store, relay: relay, now: { [unowned self] in clock }) { [unowned self] in
+            outcomes.append($0)
+        }
+
+        /// One helper tick, `VPNDNSOverridePublisher.tickSeconds` after the last.
+        func tick() {
+            clock += UInt64(VPNDNSOverridePublisher.tickSeconds) * 1_000_000_000
+            publisher.tick()
+        }
     }
 
     private func rig(connected: Bool = true, relay: Bool = true) -> Rig {
@@ -174,12 +184,12 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         ])
         XCTAssertFalse(rig.outcomes.contains(.withdrawn(service: service, reason: .relayStopped)), "not reported withdrawn")
 
-        rig.publisher.tick()
+        rig.tick()
         XCTAssertTrue(rig.publisher.cleanupPending)
         XCTAssertEqual(rig.outcomes.filter { $0 == .removalRefused(service: service) }.count, 1, "reported once")
 
         rig.store.failsRead = false
-        rig.publisher.tick()
+        rig.tick()
         XCTAssertFalse(rig.publisher.cleanupPending)
         XCTAssertFalse(rig.publisher.wantsTicks)
         XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .relayStopped))
@@ -195,7 +205,7 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         XCTAssertTrue(rig.publisher.arm(service: service, servers: servers, owner: owner))
         XCTAssertFalse(rig.publisher.published, "no publish over a key awaiting cleanup")
         rig.store.failsRemove = false
-        rig.publisher.tick()
+        rig.tick()
         XCTAssertFalse(rig.publisher.cleanupPending)
         XCTAssertTrue(rig.publisher.published, "the arm publishes once the old key is gone")
     }
@@ -245,38 +255,67 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
     func testTwoRefusedTicksWithdrawAndAnAnswerBringsItBack() {
         let rig = armed(rig())
         rig.relay.verdict = .refused
-        rig.publisher.tick()
+        rig.tick()
         XCTAssertEqual(rig.store.ownKey, key, "one refusal keeps the key")
         XCTAssertEqual(rig.relay.mode, .vpn, "but the relay fails over at once")
-        rig.publisher.tick()
+        rig.tick()
         XCTAssertNil(rig.store.ownKey)
         XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .targetRefused))
         rig.relay.verdict = .answered
-        rig.publisher.tick()
+        rig.tick()
         XCTAssertEqual(rig.store.ownKey, key)
         XCTAssertEqual(rig.relay.mode, .conduit)
     }
 
-    func testThreeSilentTicksWithdrawAndAMixedStreakDoesNot() {
+    func testThreeSilentTicksWithdraw() {
         let rig = armed(rig())
         rig.relay.verdict = .silent
-        rig.publisher.tick()
-        rig.publisher.tick()
-        rig.relay.verdict = .refused
-        rig.publisher.tick()
-        XCTAssertEqual(rig.store.ownKey, key, "a refusal resets the silent streak")
-        rig.relay.verdict = .silent
-        for _ in 0..<3 { rig.publisher.tick() }
+        rig.tick()
+        rig.tick()
+        XCTAssertEqual(rig.store.ownKey, key)
+        rig.tick()
         XCTAssertNil(rig.store.ownKey)
         XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .targetSilent))
     }
 
-    func testAFailedProbeSocketSaysNothingAboutConduit() {
+    func testAnAlternatingStreakWithdrawsOnceNothingWasConfirmedForTheBound() {
         let rig = armed(rig())
-        rig.relay.verdict = .failed("socket")
-        for _ in 0..<5 { rig.publisher.tick() }
+        for verdict in [DNSFailoverProbeOutcome.silent, .refused] {
+            rig.relay.verdict = verdict
+            rig.tick()
+            XCTAssertEqual(rig.store.ownKey, key, "within the bound, no streak complete")
+        }
+        rig.relay.verdict = .silent
+        rig.tick()
+        XCTAssertNil(rig.store.ownKey, "30 s with no confirmed answer, whatever the reasons")
+        XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .targetSilent), "the last reason is reported")
+    }
+
+    func testAFailingProbeSocketKeepsTheModeButWithdrawsOnTheBound() {
+        let rig = armed(rig())
+        rig.relay.verdict = .failed("Too many open files")
+        rig.tick()
+        rig.tick()
         XCTAssertEqual(rig.store.ownKey, key)
-        XCTAssertEqual(rig.relay.mode, .conduit)
+        XCTAssertEqual(rig.relay.mode, .conduit, "the helper's own socket says nothing about the forwarder")
+        rig.tick()
+        XCTAssertNil(rig.store.ownKey)
+        XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .targetUnverified))
+        rig.relay.verdict = .answered
+        rig.tick()
+        XCTAssertEqual(rig.store.ownKey, key, "an answer confirms it again")
+    }
+
+    func testAnAnswerWithinTheBoundRestartsIt() {
+        let rig = armed(rig())
+        rig.relay.verdict = .refused
+        rig.tick()
+        rig.relay.verdict = .answered
+        rig.tick()
+        rig.relay.verdict = .failed("socket")
+        rig.tick()
+        rig.tick()
+        XCTAssertEqual(rig.store.ownKey, key, "the restart grace: one refusal, then an answer, costs no withdrawal")
     }
 
     func testAnArmWhoseProbeFailsWaitsForAnAnsweredTick() {
@@ -286,7 +325,7 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         XCTAssertNil(rig.store.ownKey)
         XCTAssertEqual(rig.publisher.status(caller: owner)?.reason, "target_refused")
         rig.relay.verdict = .answered
-        rig.publisher.tick()
+        rig.tick()
         XCTAssertEqual(rig.store.ownKey, key)
     }
 
@@ -323,7 +362,7 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
     func testOutcomeLinesNameNoServerAddress() {
         let rig = armed(rig())
         rig.relay.verdict = .silent
-        for _ in 0..<3 { rig.publisher.tick() }
+        for _ in 0..<3 { rig.tick() }
         rig.store.failsRemove = true
         _ = rig.store.publishOwnKey(key)
         rig.publisher.disarm(.disarmed)

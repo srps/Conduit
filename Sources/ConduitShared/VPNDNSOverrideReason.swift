@@ -5,6 +5,10 @@ package enum VPNDNSOverrideReason: String, Sendable, CaseIterable {
     case ownerExited = "owner_exited"
     case targetRefused = "target_refused"
     case targetSilent = "target_silent"
+    /// No confirmed answer within `unverifiedSecondsToWithdraw`, the probe's own socket failing included.
+    case targetUnverified = "target_unverified"
+    /// The helper could not watch the owner's exit, so it dropped the arm.
+    case ownerUnwatched = "owner_unwatched"
     case vpnChanged = "vpn_changed"
     case relayStopped = "relay_stopped"
     case disarmed

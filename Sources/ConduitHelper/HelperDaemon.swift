@@ -79,6 +79,7 @@ enum HelperDaemon {
             exit(EXIT_FAILURE)
         }
         let loop = HelperEventLoop(listenFD: serverFD)
+        eventLoop = loop
 
         // Seed from the live console so a helper restarted mid-session can
         // admit teardown at logout without having served a request first.
@@ -119,10 +120,7 @@ enum HelperDaemon {
             }
             restartDeadFailoverHalves()
             stopFailoverRelayOnceClean()
-            loop.watchOwner(vpnDNSOverride.arm?.owner) {
-                HelperLog.notice("vpn-dns-override owner pid=\($0) already gone")
-                vpnDNSOverride.ownerExited($0)
-            }
+            followOwner(loop)
         }
     }
 
@@ -595,13 +593,49 @@ enum HelperDaemon {
         }
     }
 
+    /// Set in `run` before the first request is served.
+    nonisolated(unsafe) private static var eventLoop: HelperEventLoop!
+
+    /// After every event the watch follows the arm's owner; an owner that can no longer be watched loses the arm.
+    private static func followOwner(_ loop: HelperEventLoop) {
+        guard let owner = vpnDNSOverride.arm?.owner else {
+            loop.watchOwner(nil)
+            return
+        }
+        switch loop.watchOwner(owner) {
+        case .watching:
+            break
+        case .gone:
+            HelperLog.notice("vpn-dns-override owner pid=\(owner) already gone")
+            vpnDNSOverride.ownerExited(owner)
+        case .failed(let why):
+            HelperLog.error("vpn-dns-override: cannot watch owner pid=\(owner): \(why); disarming")
+            vpnDNSOverride.disarm(.ownerUnwatched)
+        }
+    }
+
+    /// An arm is taken only from a caller whose exit the loop is already watching, so no key outlives an unwatched owner.
     private static func armVPNDNSOverride(values: [String], peerPID: pid_t?) -> (HelperResponse, HelperAuditOutcome) {
-        guard values.count >= 2,
-              vpnDNSOverride.arm(service: values[0], servers: Array(values.dropFirst()), owner: peerPID) else {
+        let service = values.first ?? ""
+        let servers = Array(values.dropFirst())
+        guard VPNDNSOverridePublisher.isValidArm(service: service, servers: servers) else {
             return (.error("Invalid VPN DNS override"), .invalidArguments)
         }
-        if peerPID == nil {
-            HelperLog.warning("vpn-dns-override armed with no owner pid; only the probe ticks can withdraw the key")
+        guard let peerPID else {
+            HelperLog.warning("vpn-dns-override arm declined: no owner pid")
+            return (.error("VPN DNS override declined: the caller's pid is unknown"), .commandFailed)
+        }
+        switch eventLoop.watchOwner(peerPID) {
+        case .watching:
+            break
+        case .gone:
+            return (.error("VPN DNS override declined: the caller has exited"), .commandFailed)
+        case .failed(let why):
+            HelperLog.error("vpn-dns-override arm declined: cannot watch owner pid=\(peerPID): \(why)")
+            return (.error("VPN DNS override declined: the caller cannot be watched"), .commandFailed)
+        }
+        guard vpnDNSOverride.arm(service: service, servers: servers, owner: peerPID) else {
+            return (.error("Invalid VPN DNS override"), .invalidArguments)
         }
         var response = HelperResponse.ok()
         response.vpnDNSOverride = vpnDNSOverride.status(caller: peerPID)
