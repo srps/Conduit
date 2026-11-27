@@ -25,9 +25,9 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   provider as one possible cause. It used to call the providers unreachable.
 
 - The transparent proxy's DNS-over-HTTPS lookups through Conduit's listener
-  open one connection per provider instead of two. Each one is a tunnel the
-  corporate proxy authenticates, so a lookup now costs half the
-  authentications.
+  share one session per route, so a provider's two encodings can reuse one
+  connection instead of opening one each. Each connection is a tunnel the
+  corporate proxy authenticates, so a lookup can cost fewer authentications.
 
 - A proxied port tunnel whose remote host is not a host name or IP address is
   flagged on its row in the tunnel editor. The tunnel start refuses that tunnel
