@@ -18,8 +18,11 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   the first one that fails. A network that has stopped passing traffic, such
   as a hotspot that lost its upstream, is reported as the network, so you know
   to switch networks instead of restarting the Mac or Conduit. It also asks your
-  configured corporate proxies and internal DNS server, and says whether you
-  are on the VPN, on a corporate network without it (experimental) or outside.
+  configured corporate proxies and internal DNS server, and guesses whether you
+  are on the VPN, on a corporate network without it or outside. The guess is
+  experimental and says unknown when the answers disagree. When only a proxy's
+  login challenge shows the network works, it says it reached the proxy
+  instead of calling the network healthy.
 
 ## 0.7.0
 
