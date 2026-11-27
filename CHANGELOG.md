@@ -24,7 +24,10 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   unless macOS confirms the helper is unloaded.
 - Stopping DNS no longer leaves DNS dead when Conduit cannot restore your DNS
   settings. While a network service still uses Conduit's resolver, DNS keeps
-  running and Conduit says why; stop DNS again to retry.
+  running, stays on after a relaunch, and Conduit says why; stop DNS again to
+  retry. No other service is pointed at the resolver meanwhile.
+- Changing the DNS forwarder's port no longer leaves the services on
+  127.0.0.1 without an answer: the helper's relay follows the new port.
 
 ## 0.7.0
 
