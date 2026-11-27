@@ -143,6 +143,38 @@ final class TunnelForwarderTests: XCTestCase {
         )
     }
 
+    /// The DNS override answers lookups of each proxied tunnel's host. A fully qualified name's one trailing dot is not
+    /// part of the resolver file's name, and an IP literal is never looked up. The CONNECT keeps the row's spelling.
+    func testTheDNSOverrideNamesEachProxiedHostWithoutItsTrailingDotAndSkipsIPLiterals() async throws {
+        let logger = RecordingLogSink(minLevel: .debug)
+        let resolver = RecordingTunnelResolver()
+        let pool = ConnectionPool(
+            group: group, logger: logger, configProvider: { ProxyConfig.testFixture() },
+            authenticatorProvider: { _ in StubAuthenticator() }
+        )
+        defer { pool.closeAll() }
+        let coordinator = CONNECTCoordinator(pool: pool, authenticatorProvider: { _ in StubAuthenticator() }, logger: logger)
+        let forwarder = TunnelForwarder(
+            group: group, connectCoordinator: coordinator, connectionPool: pool, logger: logger, resolverManager: resolver
+        )
+
+        let result = await forwarder.start(
+            tunnels: [
+                TunnelDefinition(localPort: 0, remoteHost: "Db.Corp.Example.", remotePort: 5432, proxied: true, label: "fqdn"),
+                TunnelDefinition(localPort: 0, remoteHost: "cache.corp.example", remotePort: 6379, proxied: true, label: "cache"),
+                TunnelDefinition(localPort: 0, remoteHost: "10.0.0.5", remotePort: 5432, proxied: true, label: "v4"),
+                TunnelDefinition(localPort: 0, remoteHost: "fd00::5", remotePort: 5432, proxied: true, label: "v6"),
+                TunnelDefinition(localPort: 0, remoteHost: "direct.corp.example", remotePort: 5432, proxied: false, label: "direct"),
+            ],
+            listenHost: "127.0.0.1"
+        )
+        await forwarder.stop()
+
+        XCTAssertEqual(result.bindings.count, 5)
+        XCTAssertEqual(resolver.applied, [["cache.corp.example", "db.corp.example"]])
+        XCTAssertEqual(result.bindings.first { $0.label == "fqdn" }?.remoteHost, "Db.Corp.Example.", "the CONNECT spelling")
+    }
+
     // MARK: - Proxied tunnel through production TunnelForwarder
 
     @MainActor
@@ -1241,4 +1273,19 @@ private final class CollectBytes: ChannelInboundHandler, @unchecked Sendable {
     func channelInactive(context: ChannelHandlerContext) {
         promise.fail(ChannelError.eof)
     }
+}
+
+/// Records the hostnames each override cycle asks for, and reports every one written.
+private final class RecordingTunnelResolver: TunnelResolverApplying {
+    private let calls = NIOLockedValueBox<[[String]]>([])
+    var applied: [[String]] { calls.withLockedValue { $0 } }
+
+    func cleanupStale(activeHostnames: Set<String>) async {}
+
+    func applyAll(hostnames: [String], listenIP: String) async -> (succeeded: [String], failed: [String]) {
+        calls.withLockedValue { $0.append(hostnames) }
+        return (hostnames, [])
+    }
+
+    func removeAll(hostnames: [String]) async {}
 }

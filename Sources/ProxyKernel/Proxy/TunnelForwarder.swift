@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import ConduitShared
 import Foundation
 import NIOConcurrencyHelpers
 import NIOCore
@@ -416,8 +417,12 @@ package final class TunnelForwarder: @unchecked Sendable {
     /// The set of hostnames that should currently have DNS overrides, derived from the proxied
     /// tunnels that are actually bound (i.e., present in `activeDefinitions`). Lower-cased and
     /// deduplicated to match the DNS responder's lookup contract.
+    /// The names the override answers for. An IP literal is never looked up, and a resolver file is named without the
+    /// trailing dot of a fully qualified name; the CONNECT keeps the row's spelling.
     private func desiredProxiedHostnames() -> Set<String> {
-        Set(activeDefinitions.values.filter(\.proxied).map { $0.remoteHost.lowercased() })
+        Set(activeDefinitions.values
+            .filter { $0.proxied && !IPAddressSyntax.isLiteral($0.remoteHost) }
+            .map { TunnelDefinition.hostNameForValidation($0.remoteHost).lowercased() })
     }
 
     /// Bring the DNS responder and `/etc/resolver/*` files in line with `desiredProxiedHostnames()`.
