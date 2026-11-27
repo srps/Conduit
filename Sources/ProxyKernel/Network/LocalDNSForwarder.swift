@@ -68,7 +68,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     private let networkResolverProvider: (@Sendable () -> [String])?
     private let proxyHostsProvider: (@Sendable () -> ProxyHostNames)?
     private let onResolutionRecovered: (@Sendable (DNSResolutionRecovery) -> Void)?
-    private let preferProxyPathForDoH: @Sendable () -> Bool
+    private let doHRoute: @Sendable () -> DoHRoute
     private let localProxyPort: @Sendable () -> Int?
     private let onMetrics: (@Sendable () -> Void)?
     private let tuning: DNSForwarderTuning
@@ -113,7 +113,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         proxyHostsProvider: (@Sendable () -> ProxyHostNames)? = nil,
         // Called at most once per path, from any thread.
         onResolutionRecovered: (@Sendable (DNSResolutionRecovery) -> Void)? = nil,
-        preferProxyPathForDoH: @escaping @Sendable () -> Bool = { false },
+        doHRoute: @escaping @Sendable () -> DoHRoute = { .proxyAndDirect },
         localProxyPort: @escaping @Sendable () -> Int? = { nil },
         onMetrics: (@Sendable () -> Void)? = nil,
         // Exposed only so tests can drive the slow-lookup and idle rules
@@ -133,7 +133,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         self.networkResolverProvider = networkResolverProvider
         self.proxyHostsProvider = proxyHostsProvider
         self.onResolutionRecovered = onResolutionRecovered
-        self.preferProxyPathForDoH = preferProxyPathForDoH
+        self.doHRoute = doHRoute
         self.localProxyPort = localProxyPort
         self.onMetrics = onMetrics
         self.tuning = tuning
@@ -165,7 +165,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             group: group,
             logger: logger,
             configProvider: configProvider,
-            preferProxyPathForDoH: { false },
+            doHRoute: { .proxyAndDirect },
             localProxyPort: { nil },
             pathSatisfied: { true },
             onMetrics: nil,
@@ -207,7 +207,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             networkResolverProvider: networkResolverProvider,
             proxyHostsProvider: proxyHostsProvider,
             onResolutionRecovered: onResolutionRecovered,
-            preferProxyPathForDoH: preferProxyPathForDoH,
+            doHRoute: doHRoute,
             localProxyPort: localProxyPort,
             pathSatisfied: { [pathSatisfied] in pathSatisfied.withLockedValue { $0 } },
             onMetrics: onMetrics,
@@ -356,6 +356,9 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     /// The port the DoH local-proxy route dials now, nil without a route or while stopped.
     var doHLocalProxyPort: Int? { core?.doHLocalProxyPort }
 
+    /// The route a DoH lookup starting now races.
+    var doHRouteForNewLookups: DoHRoute { doHRoute() }
+
     /// Every DoH session the running forwarder holds; empty while stopped.
     /// Tests and pm-sim run `ProxyChallengeCanary` on these before they let a
     /// proxy answer 407.
@@ -458,11 +461,9 @@ private struct DoHTransports: @unchecked Sendable {
         localProxy?.invalidateAndCancel()
     }
 
-    /// On VPN, direct HTTPS to public DoH resolvers is often black-holed; try
-    /// the local proxy listener first.
-    func sessions(preferProxyPath: Bool) -> [URLSession] {
-        guard let localProxy else { return [direct] }
-        return preferProxyPath ? [localProxy, direct] : [direct, localProxy]
+    func sessions(for route: DoHRoute) -> [URLSession] {
+        guard let localProxy, route == .proxyAndDirect else { return [direct] }
+        return [direct, localProxy]
     }
 }
 
@@ -568,7 +569,7 @@ final class DNSResolutionCore: @unchecked Sendable {
     private let networkResolverProvider: (@Sendable () -> [String])?
     private let proxyHostsProvider: (@Sendable () -> ProxyHostNames)?
     private let onResolutionRecovered: (@Sendable (DNSResolutionRecovery) -> Void)?
-    private let preferProxyPathForDoH: @Sendable () -> Bool
+    private let doHRoute: @Sendable () -> DoHRoute
     private let localProxyPort: @Sendable () -> Int?
     private let pathSatisfied: @Sendable () -> Bool
     private let onMetrics: (@Sendable () -> Void)?
@@ -678,7 +679,7 @@ final class DNSResolutionCore: @unchecked Sendable {
         networkResolverProvider: (@Sendable () -> [String])? = nil,
         proxyHostsProvider: (@Sendable () -> ProxyHostNames)? = nil,
         onResolutionRecovered: (@Sendable (DNSResolutionRecovery) -> Void)? = nil,
-        preferProxyPathForDoH: @escaping @Sendable () -> Bool,
+        doHRoute: @escaping @Sendable () -> DoHRoute,
         localProxyPort: @escaping @Sendable () -> Int?,
         pathSatisfied: @escaping @Sendable () -> Bool,
         onMetrics: (@Sendable () -> Void)? = nil,
@@ -694,7 +695,7 @@ final class DNSResolutionCore: @unchecked Sendable {
         self.networkResolverProvider = networkResolverProvider
         self.proxyHostsProvider = proxyHostsProvider
         self.onResolutionRecovered = onResolutionRecovered
-        self.preferProxyPathForDoH = preferProxyPathForDoH
+        self.doHRoute = doHRoute
         self.localProxyPort = localProxyPort
         self.pathSatisfied = pathSatisfied
         self.onMetrics = onMetrics
@@ -1029,6 +1030,7 @@ final class DNSResolutionCore: @unchecked Sendable {
 
         var response: [UInt8]?
         var usedDoH = false
+        var cacheable = !isInternal
         var answered = false
         var viaNetworkResolver = false
 
@@ -1100,13 +1102,16 @@ final class DNSResolutionCore: @unchecked Sendable {
                     // DNS-timeout. The wake/VPN-recovery
                     // `resetUpstreamTransports` path exists precisely so
                     // the *next* DoH lookup succeeds; this fallback keeps
-                    // the current one useful in the meantime.
+                    // the current one useful in the meantime. It is not
+                    // cached: a wider DoH route may answer the next lookup.
                     response = internalResponse
+                    cacheable = false
                     if table.firstServers.isEmpty,
                        let network = await askNetworkResolver(query: queryBytes, name: domain, table: table, config: config, began: began) {
                         response = network
                         answered = true
                         viaNetworkResolver = true
+                        cacheable = true
                     }
                 }
             } else {
@@ -1146,7 +1151,7 @@ final class DNSResolutionCore: @unchecked Sendable {
             return .finished(DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes))
         }
 
-        if !isInternal {
+        if cacheable {
             cacheResponse(responseBytes, for: cacheKey, matching: queryBytes, viaNetworkResolver: viaNetworkResolver)
         }
 
@@ -1579,7 +1584,7 @@ final class DNSResolutionCore: @unchecked Sendable {
             guard handle.beginUse() else { return .unanswered }
         }
         defer { handle.endUse() }
-        let sessions = handle.transports.sessions(preferProxyPath: preferProxyPathForDoH())
+        let sessions = handle.transports.sessions(for: doHRoute())
 
         let refusalsBefore = proxyChallengeDelegate.refusalCount
 

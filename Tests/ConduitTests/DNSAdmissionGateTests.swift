@@ -277,7 +277,7 @@ final class DNSAdmissionGateTests: XCTestCase {
             group: MultiThreadedEventLoopGroup.singleton,
             logger: RecordingLogSink(minLevel: .debug),
             configProvider: { ProxyConfig.testFixture() },
-            preferProxyPathForDoH: { false },
+            doHRoute: { .proxyAndDirect },
             localProxyPort: { nil },
             pathSatisfied: { true },
             onMetrics: nil,

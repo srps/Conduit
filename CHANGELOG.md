@@ -81,6 +81,12 @@ then leaves the resolver order alone.
   login challenge shows the network works, it says it reached the proxy
   instead of calling the network healthy.
 
+- Off the VPN, when client traffic routes directly, DNS-over-HTTPS lookups,
+  the transparent proxy's included, no longer also go through the corporate
+  proxy. That route only repeated the direct attempt through one more hop that
+  could fail. On the VPN, and on a corporate network without it, each lookup
+  still asks the proxy and direct at the same time (`dns.doh_route_changed`).
+
 ## 0.7.0
 
 This release makes Conduit's VPN on/off verdict, and the split DNS that depends

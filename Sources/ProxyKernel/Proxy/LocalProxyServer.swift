@@ -21,7 +21,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     private let configProvider: () -> ProxyConfig
     /// Returns `(isDirect, cause)` so request handlers can branch on the cause
     /// (log severity, telemetry) without a separate state lookup. Reads from the
-    /// orchestrator's `directModeBox`. See `DirectModeCause` and Phase 2 of
+    /// orchestrator's `routingBox`. See `DirectModeCause` and Phase 2 of
     /// `docs/design-vpn-flap-resilience.md`.
     private let directModeProvider: @Sendable () -> (Bool, DirectModeCause)
     private let authenticatorProvider: (UpstreamProxy) throws -> ProxyAuthenticator
@@ -128,6 +128,9 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     package var listeningPort: Int? {
         refs.withLockedValue { $0.serverChannel }?.localAddress?.port
     }
+
+    /// The direct-mode cause a connection accepted now routes by.
+    var directModeForNewConnections: DirectModeCause { directModeProvider().1 }
 
     /// The lifecycle this server's listener is under now. See `ListenerStamp`.
     package var listenerStamp: ListenerStamp {

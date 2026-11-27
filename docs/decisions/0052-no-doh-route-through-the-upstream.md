@@ -43,12 +43,13 @@ Decision 0049 changes what DNS depends on while a full tunnel is up. Conduit's h
 ## Invariants and verification
 
 - DoH never sends a lookup straight to an upstream proxy: `DoHSessionFactoryTests.testRoutesAreDirectAndTheListenerNeverTheUpstream`.
+- The listener route is skipped while client traffic routes directly (`DoHRoute.directOnly`, off the VPN with direct mode for `vpnDisconnected` or `noUpstreamsConfigured`), for the forwarder and the transparent proxy's origin resolver alike: `ProxyChallengeRefusalTests.testADirectOnlyRouteNeverAsksTheLocalProxy` with its control `testAProxyAndDirectRouteAsksTheLocalProxy`, `testTheDoHRouteFollowsWhereClientTrafficGoes`, `OriginResolverTests.testADirectOnlyRouteNeverAsksTheLocalProxy`, `VPNReconnectRoutingTests.testTheDoHRouteFollowsTheVPN` and pm-sim `vpn-reconnect-reprobe`. A route change emits `dns.doh_route_changed`.
 - While 0049's key is published, public names resolve through the relay's tunnel servers, not DoH. 0049 lists its relay and failover tests.
 - Disproved by: on a full tunnel with 0049 active and the DoH providers routed DIRECT, a public name that fails while the tunnel's servers answer it.
 
 ## Implementation evidence
 
-Nothing to build. The current routes are in [`DoHSessionFactory.swift`](../../Sources/ProxyKernel/Network/DoHSessionFactory.swift), and the coverage on a full tunnel is 0049's relay.
+No upstream route is built. The two routes and `DoHRoute` are in [`DoHSessionFactory.swift`](../../Sources/ProxyKernel/Network/DoHSessionFactory.swift) (#339), the orchestrator recomputes the route on every VPN or direct-mode change, and the coverage on a full tunnel is 0049's relay.
 
 Does not prove: that public names resolve on a real full-tunnel VPN whose PAC sends the DoH providers DIRECT. That check is the pending validation.
 

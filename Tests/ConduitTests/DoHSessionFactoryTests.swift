@@ -9,7 +9,7 @@ final class DoHSessionFactoryTests: XCTestCase {
         config.localHost = "127.0.0.1"
         config.localPort = configured
         config.upstreams = []
-        return DoHSessionFactory.routes(for: config, localProxyPort: bound).compactMap { $0.proxy?.port }
+        return DoHSessionFactory.routes(for: config, localProxyPort: bound, route: .proxyAndDirect).compactMap { $0.proxy?.port }
     }
 
     func testRoutesTargetTheBoundProxyPortNotTheConfiguredOne() {
@@ -25,7 +25,7 @@ final class DoHSessionFactoryTests: XCTestCase {
         config.localPort = 3128
         XCTAssertFalse(config.enabledUpstreams.isEmpty)
 
-        let routes = DoHSessionFactory.routes(for: config, localProxyPort: 3128)
+        let routes = DoHSessionFactory.routes(for: config, localProxyPort: 3128, route: .proxyAndDirect)
 
         XCTAssertEqual(routes.map { $0.proxy.map { "\($0.host):\($0.port)" } ?? "direct" }, ["direct", "127.0.0.1:3128"])
     }

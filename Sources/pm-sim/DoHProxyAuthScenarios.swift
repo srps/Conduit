@@ -54,7 +54,7 @@ enum DoHProxyAuthScenarios {
                 current.dohProviders = providers.withLockedValue { $0 }
                 return current
             },
-            preferProxyPathForDoH: { true },
+            doHRoute: { .proxyAndDirect },
             localProxyPort: { listenerPort },
             eventSink: { event in events.withLockedValue { $0.append(event) } }
         )
