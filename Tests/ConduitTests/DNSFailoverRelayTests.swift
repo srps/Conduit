@@ -578,8 +578,9 @@ final class DNSFailoverRelayTests: XCTestCase {
         let store = override.store
 
         conduit.dropsRealQueries = true
-        XCTAssertNil(ask(relay, timeout: 0.5).ip, "the lookups of the interval before the tick are lost")
-        Thread.sleep(forTimeInterval: 2.2)
+        let first = ask(relay, timeout: 3)
+        XCTAssertEqual(first.ip, vpnIP, "the lookup that shows the loss is answered by the VPN, on the asker's socket")
+        XCTAssertGreaterThanOrEqual(first.seconds, 1.9, "once its wait on Conduit ran out")
         override.tick()
         XCTAssertEqual(relay.mode, .vpn)
         XCTAssertEqual(ask(relay).ip, vpnIP, "the next lookup goes to the VPN's servers")

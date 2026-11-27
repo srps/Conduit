@@ -269,9 +269,11 @@ enum VPNDNSOverrideScenarios {
         return try await rig(name: "dns-own-key-conduit-probe-only", timing: timing) { rig, check in
             check("Conduit answers through the relay", try await rig.lookup().answer == publicIP)
             rig.conduit.probeOnly = true
-            check("the probe still answers, so the relay waits on Conduit and the lookup is lost",
-                  try await rig.lookup().answer == nil)
-            check("the lost lookup is counted", rig.relay.conduitProgress(.udp).unanswered == 1)
+            let first = try await rig.lookup()
+            check("the probe still answers, so the relay waits on Conduit for the lookup's lifetime",
+                  first.seconds >= 1.9)
+            check("then the VPN answers it, on the asker's own socket", first.answer == vpnAnswerIP)
+            check("the lookup Conduit lost is counted", rig.relay.conduitProgress(.udp).unanswered == 1)
             for tick in 1...2 {
                 rig.machine.tickVPNDNSOverride()
                 check("tick \(tick): the answered probe does not send the lookups back to Conduit", rig.relay.mode == .vpn)

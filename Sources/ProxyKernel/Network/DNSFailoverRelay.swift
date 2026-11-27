@@ -702,10 +702,16 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
 
     private func expire(_ loop: inout Loop, lfd: Int32, cfd: Int32, mode: DNSFailoverMode, now: UInt64) {
         let lifetime = FailoverSocket.nanoseconds(timing.entryLifetime)
-        loop.pending = loop.pending.filter { _, entry in
-            let live = now - entry.arrived < lifetime
-            if !live, entry.conduitSentAt != nil, !entry.isProbe { route.conduitLeftUnanswered(entry.question, over: .udp) }
-            return live
+        for key in Array(loop.pending.keys) {
+            guard var entry = loop.pending[key], now - entry.arrived >= lifetime else { continue }
+            loop.pending[key] = nil
+            guard entry.conduitSentAt != nil, !entry.isProbe else { continue }
+            route.conduitLeftUnanswered(entry.question, over: .udp)
+            // The lookup that shows the loss still gets an answer: one more lifetime on the VPN's servers.
+            guard !loop.servers.isEmpty else { continue }
+            entry.conduitSentAt = nil
+            entry.arrived = now
+            loop.pending[key] = entry
         }
         if mode == .vpn {
             loop.probe = nil
