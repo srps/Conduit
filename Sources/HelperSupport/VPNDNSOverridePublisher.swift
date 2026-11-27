@@ -159,6 +159,7 @@ package final class VPNDNSOverridePublisher {
     /// The longest a published key may go without a confirmed answer, whatever the reasons the ticks gave: refused,
     /// silent, a probe socket that failed or any mix of them. It is the silent streak's span, so no faster rule changes.
     package static let unverifiedSecondsToWithdraw = 30
+    private static let unverifiedNanoseconds = UInt64(unverifiedSecondsToWithdraw) * 1_000_000_000
 
     package static func ownKey(port: Int) -> [String: VPNDNSValue] {
         [
@@ -190,17 +191,20 @@ package final class VPNDNSOverridePublisher {
     private var lastPrimary: String??
     private var serversUnreadable = false
     private let now: () -> UInt64
+    private let expiry: VPNDNSOverrideExpiry?
 
-    /// `now` is monotonic nanoseconds.
+    /// `now` is monotonic nanoseconds. `expiry`, when given, carries the published key's deadline to a watchdog.
     package init(
         store: any VPNDNSStore,
         relay: any VPNDNSFailoverRelay,
         now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+        expiry: VPNDNSOverrideExpiry? = nil,
         report: @escaping (VPNDNSOverrideOutcome) -> Void
     ) {
         self.store = store
         self.relay = relay
         self.now = now
+        self.expiry = expiry
         self.report = report
     }
 
@@ -318,15 +322,19 @@ package final class VPNDNSOverridePublisher {
             report(.probeMissed(service: arm.service, probe: probe, consecutive: 0))
         }
         lastVerdict = verdict
-        if verdict != .answered, probeOK, let confirmed = lastConfirmed,
-           now() &- confirmed >= UInt64(Self.unverifiedSecondsToWithdraw) * 1_000_000_000 {
-            probeOK = false
-        }
+        if verdict != .answered, probeOK, !confirmedWithinBound { probeOK = false }
+        sync()
+    }
+
+    /// After every event of the helper's loop: a key past the bound goes even when no tick has run since.
+    package func checkExpiry() {
+        guard published, !confirmedWithinBound else { return }
         sync()
     }
 
     /// After any event: publishes, republishes or withdraws the key to match what holds now.
     package func sync() {
+        defer { expiry?.update(published ? lastConfirmed.map { $0 &+ Self.unverifiedNanoseconds } : nil) }
         refreshFailoverServers()
         if cleanupPending {
             withdraw(pendingReason)
@@ -378,7 +386,7 @@ package final class VPNDNSOverridePublisher {
             return .vpnChanged
         }
         guard relay.listeningPort != nil, !relayStopPending else { return .relayStopped }
-        guard probeOK else {
+        guard probeOK, confirmedWithinBound else {
             switch lastVerdict {
             case .silent: return .targetSilent
             case .refused, nil: return .targetRefused
@@ -394,6 +402,7 @@ package final class VPNDNSOverridePublisher {
     private func withdraw(_ reason: VPNDNSOverrideReason) {
         let service = failoverService ?? "none"
         guard published || cleanupPending else { return }
+        expiry?.update(nil)
         let state = store.ownKeyState()
         if state != .absent, !store.removeOwnKey() {
             if !cleanupPending { report(.removalRefused(service: service)) }
@@ -438,6 +447,10 @@ package final class VPNDNSOverridePublisher {
         let primary = store.primaryService()
         if let seen = lastPrimary, seen != primary { relay.renewServerSockets() }
         lastPrimary = primary
+    }
+
+    private var confirmedWithinBound: Bool {
+        lastConfirmed.map { now() &- $0 < Self.unverifiedNanoseconds } ?? false
     }
 
     /// While a cleanup is pending the relay stays on the VPN's servers.

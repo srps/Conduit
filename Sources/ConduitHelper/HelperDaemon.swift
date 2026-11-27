@@ -89,9 +89,10 @@ enum HelperDaemon {
         }
         callerIdentity = loadCallerIdentity()
         retryLegacyRestore(.start)
-        vpnDNSOverride = VPNDNSOverridePublisher(
-            store: SCDynamicStoreVPNDNSStore(changed: loop.storeTrigger), relay: failoverRelay, report: logVPNDNSOverride
-        )
+        let store = SCDynamicStoreVPNDNSStore(changed: loop.storeTrigger)
+        let expiry = VPNDNSOverrideExpiry()
+        vpnDNSOverride = VPNDNSOverridePublisher(store: store, relay: failoverRelay, expiry: expiry, report: logVPNDNSOverride)
+        VPNDNSOverrideWatchdog.start(expiry: expiry, store: store)
         HelperLog.notice("ConduitHelper daemon listening on \(socketPath)")
 
         while true {
@@ -119,6 +120,7 @@ enum HelperDaemon {
                 exit(EXIT_FAILURE)
             }
             restartDeadFailoverHalves()
+            vpnDNSOverride.checkExpiry()
             followOwner(loop)
         }
     }

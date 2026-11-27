@@ -4,15 +4,17 @@ import ConduitShared
 import HelperSupport
 import SystemConfiguration
 
-/// The helper's own store session. Root only, and only the helper's one thread calls it.
-final class SCDynamicStoreVPNDNSStore: VPNDNSStore {
+/// The helper's own store session. Root only. The helper's loop calls it, and the expiry watchdog calls `removeOwnKey`;
+/// the session is reached only under `lock`.
+final class SCDynamicStoreVPNDNSStore: VPNDNSStore, @unchecked Sendable {
     private static var ownKey: CFString { "State:/Network/Service/\(HelperConstants.vpnDNSOverrideServiceID)/DNS" as CFString }
     private static let notificationPatterns = ["State:/Network/Service/[^/]+/DNS", "State:/Network/Service/[^/]+/IPv4"]
     private static let notificationKeys = ["State:/Network/Global/IPv4"]
 
     private let queue = DispatchQueue(label: "io.github.srps.Conduit.Helper.vpn-dns-override.store")
     private let changed: @Sendable () -> Void
-    private var store: SCDynamicStore?
+    private let lock = NSLock()
+    private var _store: SCDynamicStore?
 
     /// `changed` runs on a private queue for every notification, the store's own key's included.
     init(changed: @escaping @Sendable () -> Void) {
@@ -42,28 +44,36 @@ final class SCDynamicStoreVPNDNSStore: VPNDNSStore {
         if !SCDynamicStoreSetDispatchQueue(created, queue) {
             HelperLog.error("vpn-dns-override: notifications not scheduled: \(Self.lastError); only the ticks re-read the store")
         }
-        store = created
+        lock.withLock { _store = created }
     }
 
     func closeSession() {
-        if let store { SCDynamicStoreSetDispatchQueue(store, nil) }
-        store = nil
+        let closing = lock.withLock { () -> SCDynamicStore? in
+            defer { _store = nil }
+            return _store
+        }
+        if let closing { SCDynamicStoreSetDispatchQueue(closing, nil) }
         open()
     }
 
+    /// Each call on the session, and the error it leaves for this thread, under the lock.
+    private func withStore<T>(orElse fallback: T, _ body: (SCDynamicStore) -> T) -> T {
+        lock.withLock { _store.map(body) ?? fallback }
+    }
+
     private func copy(_ key: CFString) -> [String: Any]? {
-        guard let store else { return nil }
-        return SCDynamicStoreCopyValue(store, key) as? [String: Any]
+        withStore(orElse: nil) { SCDynamicStoreCopyValue($0, key) as? [String: Any] }
     }
 
     func dns(service: String) -> VPNDNSRead {
-        guard let store else { return .unreadable("no session") }
-        guard let copied = SCDynamicStoreCopyValue(store, "State:/Network/Service/\(service)/DNS" as CFString) else {
-            let status = SCError()
-            return status == kSCStatusNoKey ? .absent : .unreadable(String(cString: SCErrorString(status)))
+        withStore(orElse: .unreadable("no session")) { store in
+            guard let copied = SCDynamicStoreCopyValue(store, "State:/Network/Service/\(service)/DNS" as CFString) else {
+                let status = SCError()
+                return status == kSCStatusNoKey ? .absent : .unreadable(String(cString: SCErrorString(status)))
+            }
+            guard let raw = copied as? [String: Any] else { return .unreadable("not a dictionary") }
+            return .value(raw.compactMapValues(VPNDNSPropertyList.value))
         }
-        guard let raw = copied as? [String: Any] else { return .unreadable("not a dictionary") }
-        return .value(raw.compactMapValues(VPNDNSPropertyList.value))
     }
 
     func overridesPrimary(service: String) -> Bool {
@@ -75,34 +85,65 @@ final class SCDynamicStoreVPNDNSStore: VPNDNSStore {
     }
 
     func ownKeyState() -> VPNDNSOwnKeyState {
-        guard let store else { return .unreadable("no session") }
-        if SCDynamicStoreCopyValue(store, Self.ownKey) != nil { return .present }
-        let status = SCError()
-        return status == kSCStatusNoKey ? .absent : .unreadable(String(cString: SCErrorString(status)))
+        withStore(orElse: .unreadable("no session")) { store in
+            if SCDynamicStoreCopyValue(store, Self.ownKey) != nil { return .present }
+            let status = SCError()
+            return status == kSCStatusNoKey ? .absent : .unreadable(String(cString: SCErrorString(status)))
+        }
     }
 
     func publishOwnKey(_ value: [String: VPNDNSValue]) -> VPNDNSPublishResult {
-        guard let store else { return .failed }
         let dictionary = value.mapValues(VPNDNSPropertyList.object) as NSDictionary
-        if SCDynamicStoreAddTemporaryValue(store, Self.ownKey, dictionary) { return .added }
-        let status = SCError()
-        if status == kSCStatusKeyExists { return .collision }
-        HelperLog.error("vpn-dns-override: SCDynamicStoreAddTemporaryValue failed: \(String(cString: SCErrorString(status)))")
-        return .failed
+        return withStore(orElse: .failed) { store in
+            if SCDynamicStoreAddTemporaryValue(store, Self.ownKey, dictionary) { return .added }
+            let status = SCError()
+            if status == kSCStatusKeyExists { return .collision }
+            HelperLog.error("vpn-dns-override: SCDynamicStoreAddTemporaryValue failed: \(String(cString: SCErrorString(status)))")
+            return .failed
+        }
     }
 
+    /// Also called by the expiry watchdog, off the helper's loop.
     func removeOwnKey() -> Bool {
-        guard let store else { return false }
-        guard SCDynamicStoreRemoveValue(store, Self.ownKey) else {
-            if SCError() == kSCStatusNoKey { return true }
-            HelperLog.error("vpn-dns-override: SCDynamicStoreRemoveValue failed: \(Self.lastError)")
-            return false
+        withStore(orElse: false) { store in
+            guard SCDynamicStoreRemoveValue(store, Self.ownKey) else {
+                if SCError() == kSCStatusNoKey { return true }
+                HelperLog.error("vpn-dns-override: SCDynamicStoreRemoveValue failed: \(Self.lastError)")
+                return false
+            }
+            return true
         }
-        return true
     }
 
     fileprivate static var lastError: String {
         String(cString: SCErrorString(SCError()))
+    }
+}
+
+/// Withdraws the published key at its deadline even while a command holds the helper's loop; the loop then sees the key
+/// gone and reports the withdrawal itself.
+enum VPNDNSOverrideWatchdog {
+    static let intervalMilliseconds: UInt32 = 250
+
+    static func start(expiry: VPNDNSOverrideExpiry, store: SCDynamicStoreVPNDNSStore) {
+        let thread = Thread {
+            while true {
+                usleep(intervalMilliseconds * 1_000)
+                let removed = expiry.expire(now: DispatchTime.now().uptimeNanoseconds) { store.removeOwnKey() }
+                switch removed {
+                case true?:
+                    HelperLog.warning("vpn-dns-override expired: no confirmed answer within "
+                        + "\(VPNDNSOverridePublisher.unverifiedSecondsToWithdraw) s while the helper was busy; key removed")
+                case false?:
+                    HelperLog.error("vpn-dns-override expired: the store refused the removal; the loop retries it")
+                case nil:
+                    break
+                }
+            }
+        }
+        thread.name = "vpn-dns-override-expiry"
+        thread.qualityOfService = .userInitiated
+        thread.start()
     }
 }
 

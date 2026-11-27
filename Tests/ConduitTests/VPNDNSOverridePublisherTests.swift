@@ -16,9 +16,17 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         let store = FakeVPNDNSStore()
         let relay = FakeDNSFailoverRelay()
         var outcomes: [VPNDNSOverrideOutcome] = []
+        let expiry = VPNDNSOverrideExpiry()
         var clock: UInt64 = 1_000_000_000_000
-        lazy var publisher = VPNDNSOverridePublisher(store: store, relay: relay, now: { [unowned self] in clock }) { [unowned self] in
+        lazy var publisher = VPNDNSOverridePublisher(
+            store: store, relay: relay, now: { [unowned self] in clock }, expiry: expiry
+        ) { [unowned self] in
             outcomes.append($0)
+        }
+
+        /// The watchdog's check at `seconds` past the rig's clock, off the publisher's loop.
+        func expire(after seconds: Double) -> Bool? {
+            expiry.expire(now: clock + UInt64(seconds * 1_000_000_000)) { store.removeOwnKey() }
         }
 
         /// One helper tick, `VPNDNSOverridePublisher.tickSeconds` after the last.
@@ -356,6 +364,46 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         rig.relay.verdict = .answered
         rig.tick()
         XCTAssertEqual(rig.store.ownKey, key, "an answer confirms it again")
+    }
+
+    func testASyncPastTheBoundWithdrawsWithoutWaitingForATick() {
+        let rig = armed(rig())
+        rig.clock += 31 * 1_000_000_000
+        rig.publisher.sync()
+        XCTAssertNil(rig.store.ownKey, "no tick ran, and the last answer is 31 s old")
+        XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .targetUnverified))
+    }
+
+    func testAKeyGonePastTheBoundIsNotRepublishedOnAnOldAnswer() {
+        let rig = armed(rig())
+        rig.clock += 31 * 1_000_000_000
+        rig.store.configdRestart()
+        rig.publisher.sync()
+        XCTAssertNil(rig.store.ownKey, "the cached probe is too old to publish on")
+        rig.tick()
+        XCTAssertEqual(rig.store.ownKey, key, "an answered probe confirms it again")
+    }
+
+    func testTheWatchdogRemovesTheKeyAtTheBoundWhileTheLoopIsHeld() {
+        let rig = armed(rig())
+        XCTAssertNil(rig.expire(after: 29.9), "within the bound")
+        XCTAssertEqual(rig.store.ownKey, key)
+        XCTAssertEqual(rig.expire(after: 30), true, "at the bound, with no tick and no sync")
+        XCTAssertNil(rig.store.ownKey)
+        XCTAssertNil(rig.expire(after: 40), "once")
+
+        rig.clock += 30 * 1_000_000_000
+        rig.publisher.checkExpiry()
+        XCTAssertFalse(rig.publisher.published)
+        XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .targetUnverified))
+        XCTAssertNil(rig.expire(after: 60), "nothing published, nothing due")
+    }
+
+    func testEachConfirmedTickMovesTheDeadline() {
+        let rig = armed(rig())
+        rig.tick()
+        XCTAssertNil(rig.expire(after: 25), "35 s after the arm, 25 s after the last answer")
+        XCTAssertEqual(rig.expire(after: 30), true)
     }
 
     func testAnAnswerWithinTheBoundRestartsIt() {
