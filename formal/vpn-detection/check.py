@@ -161,15 +161,18 @@ CHECKS = [
 # Each override safety check takes one class of trouble: all of them at once exhausts TLC's memory.
 OVERRIDE_NONE = dict(MaxVersions=1, MaxDisconnects=0, MaxGateFlaps=0, MaxIPv4Flaps=0, MaxLoopbackLists=0,
                      MaxConfigdRestarts=0, MaxOwnerExits=0, MaxHelperCrashes=0, MaxRelayDeaths=0,
-                     MaxForwarderFaults=0, MaxDNSStops=0, MaxLostReplies=0)
+                     MaxForwarderFaults=0, MaxDNSStops=0, MaxLostReplies=0, MaxRemovalRefusals=0,
+                     MaxProbeSocketFailures=0)
 OVERRIDE_CLIENT = dict(OVERRIDE_NONE, MaxVersions=3, MaxDisconnects=1, MaxGateFlaps=1, MaxIPv4Flaps=1,
                        MaxLoopbackLists=1, MaxConfigdRestarts=1, MaxDNSStops=1)
 OVERRIDE_PROCESS = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxIPv4Flaps=1, MaxOwnerExits=1,
-                        MaxHelperCrashes=1, MaxDNSStops=1, MaxLostReplies=1)
+                        MaxHelperCrashes=1, MaxDNSStops=1, MaxLostReplies=1, MaxRemovalRefusals=1)
 OVERRIDE_RELAY = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxGateFlaps=1, MaxLoopbackLists=1,
                       MaxRelayDeaths=1, MaxForwarderFaults=1, MaxDNSStops=1)
 OVERRIDE_LIVE = dict(OVERRIDE_NONE, MaxVersions=2, MaxDisconnects=1, MaxIPv4Flaps=1, MaxConfigdRestarts=1,
                      MaxOwnerExits=1, MaxRelayDeaths=1, MaxForwarderFaults=1)
+OVERRIDE_HELPER_FAULTS = dict(OVERRIDE_NONE, MaxVersions=1, MaxDisconnects=1, MaxOwnerExits=1, MaxForwarderFaults=1,
+                              MaxDNSStops=1, MaxRemovalRefusals=1, MaxProbeSocketFailures=1)
 CHECKS += [
     Check("override-safety-client", OVERRIDE_CLIENT, invariants=OVERRIDE_SAFETY,
           full=dict(OVERRIDE_CLIENT, MaxVersions=4, MaxOwnerExits=1), spec=OVERRIDE),
@@ -179,6 +182,8 @@ CHECKS += [
           full=dict(OVERRIDE_RELAY, MaxVersions=3, MaxOwnerExits=1), spec=OVERRIDE),
     Check("override-liveness", OVERRIDE_LIVE, invariants=["TypeOK"], properties=OVERRIDE_LIVENESS,
           full=dict(OVERRIDE_LIVE, MaxGateFlaps=1, MaxLostReplies=1), spec=OVERRIDE),
+    Check("override-helper-faults", OVERRIDE_HELPER_FAULTS, invariants=OVERRIDE_SAFETY, properties=OVERRIDE_LIVENESS,
+          full=dict(OVERRIDE_HELPER_FAULTS, MaxVersions=2, MaxRelayDeaths=1), spec=OVERRIDE),
 ]
 
 CHECK_NAMED = {check.name: check for check in CHECKS}
@@ -316,6 +321,10 @@ OVERRIDE_FORWARDER_ONLY = dict(OVERRIDE_NONE, MaxVersions=2, MaxForwarderFaults=
 OVERRIDE_LOOPBACK = dict(OVERRIDE_NONE, MaxVersions=2, MaxLoopbackLists=1, MaxForwarderFaults=1)
 OVERRIDE_CONFIGD = dict(OVERRIDE_NONE, MaxVersions=2, MaxConfigdRestarts=1)
 OVERRIDE_LOST_REPLY = dict(OVERRIDE_NONE, MaxVersions=2, MaxGateFlaps=1, MaxLostReplies=1)
+# Two refusals: the app's disarm before the stop, and the stop's own try.
+OVERRIDE_REFUSED_STOP = dict(OVERRIDE_NONE, MaxVersions=1, MaxDNSStops=1, MaxRemovalRefusals=2)
+OVERRIDE_REFUSED_EXIT = dict(OVERRIDE_NONE, MaxVersions=1, MaxOwnerExits=1, MaxRemovalRefusals=1)
+OVERRIDE_SOCKET_FAILS = dict(OVERRIDE_NONE, MaxVersions=1, MaxForwarderFaults=1, MaxProbeSocketFailures=1)
 
 # The combined design (0049 as revised in #330): each `swift` text names the change in the code that breaks it.
 MUTANTS += [
@@ -351,7 +360,7 @@ MUTANTS += [
         "KeyWithdrawn"),
     override_mutant(
         "ov-no-republish-after-configd-restart",
-        "VPNDNSOverridePublisher.sync: `guard !published || !store.ownKeyExists()` becomes `guard !published`, "
+        "VPNDNSOverridePublisher.sync: `guard !published || store.ownKeyState() == .absent` becomes `guard !published`, "
         "so after configd restarts and drops the key it stays gone while the helper believes it published",
         [("NoticesOwnKey == TRUE", "NoticesOwnKey == FALSE")],
         "KeyReturns", bounds=OVERRIDE_CONFIGD),
@@ -388,15 +397,35 @@ MUTANTS += [
     override_mutant(
         "ov-tick-ignores-refused",
         "VPNDNSOverridePublisher.tick: a refusal never clears `probeOK`, so the streak of "
-        "`refusedTicksToWithdraw` (2) never withdraws the key",
-        [("!.probeOK = @ /\\ h.refused + 1 < 2", "!.probeOK = @")],
+        "`refusedTicksToWithdraw` (2) never withdraws the key, with the `unverifiedSecondsToWithdraw` "
+        "backstop removed too, since it alone would still withdraw",
+        [("!.probeOK = @ /\\ h.refused + 1 < 2", "!.probeOK = @"), ("ProbeBounded == TRUE", "ProbeBounded == FALSE")],
         "EventuallyWithdrawn", bounds=OVERRIDE_FORWARDER_ONLY),
     override_mutant(
         "ov-tick-ignores-silent",
         "VPNDNSOverridePublisher.tick: a silence never clears `probeOK`, so the streak of "
-        "`silentTicksToWithdraw` (3) never withdraws the key",
-        [("!.probeOK = @ /\\ h.silent + 1 < 3", "!.probeOK = @")],
+        "`silentTicksToWithdraw` (3) never withdraws the key, with the `unverifiedSecondsToWithdraw` "
+        "backstop removed too, since it alone would still withdraw",
+        [("!.probeOK = @ /\\ h.silent + 1 < 3", "!.probeOK = @"), ("ProbeBounded == TRUE", "ProbeBounded == FALSE")],
         "EventuallyWithdrawn", bounds=OVERRIDE_FORWARDER_ONLY),
+    override_mutant(
+        "ov-stop-ignores-pending-cleanup",
+        "HelperDaemon.stopDNSRelay: stop the failover relay even while `vpnDNSOverride.cleanupPending`, so a key "
+        "whose removal the store refused names a relay that is gone",
+        [("KeepsRelayWhilePending == TRUE", "KeepsRelayWhilePending == FALSE")],
+        "KeyAnswered", bounds=OVERRIDE_REFUSED_STOP),
+    override_mutant(
+        "ov-pending-cleanup-forgotten",
+        "VPNDNSOverridePublisher.withdraw: after a refused removal and `closeSession`, report the key withdrawn "
+        "without a read showing it gone, so a key the closed session still holds is never removed",
+        [("TracksPendingCleanup == TRUE", "TracksPendingCleanup == FALSE")],
+        "KeyWithdrawn", bounds=OVERRIDE_REFUSED_EXIT),
+    override_mutant(
+        "ov-failed-probe-keeps-key",
+        "VPNDNSOverridePublisher.tick: a `.failed` probe keeps `probeOK` and nothing bounds the time since the "
+        "last confirmed answer, so a helper whose probe socket keeps failing holds the key for a silent Conduit",
+        [("ProbeBounded == TRUE", "ProbeBounded == FALSE")],
+        "EventuallyWithdrawn", bounds=OVERRIDE_SOCKET_FAILS),
 ]
 
 

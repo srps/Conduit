@@ -19,7 +19,9 @@ CONSTANTS
     MaxRelayDeaths,
     MaxForwarderFaults,
     MaxDNSStops,
-    MaxLostReplies
+    MaxLostReplies,
+    MaxRemovalRefusals,
+    MaxProbeSocketFailures
 
 ABSENT == 0
 NONE == 0
@@ -40,6 +42,11 @@ IgnoresOwnKey == TRUE
 ServersInUse == TRUE
 HoldBeforeDisarm == TRUE
 ReleasesUnconfirmed == TRUE
+TracksPendingCleanup == TRUE
+KeepsRelayWhilePending == TRUE
+ProbeBounded == TRUE
+\* unverifiedSecondsToWithdraw over tickSeconds: the ticks a key may go without a confirmed answer.
+UnverifiedTicks == 3
 
 VARIABLES
     vkey,
@@ -59,7 +66,8 @@ VARIABLES
 vars == <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, fwd, app, budget, ghost>>
 
 HFresh(up, seen) == [up |-> up, pub |-> FALSE, armN |-> NONE, owner |-> 0, seen |-> seen,
-                     probeOK |-> FALSE, refused |-> 0, silent |-> 0]
+                     probeOK |-> FALSE, refused |-> 0, silent |-> 0, unverified |-> 0,
+                     pending |-> FALSE, sockFails |-> FALSE]
 FreshApp(id, dns) == [alive |-> TRUE, id |-> id, dns |-> dns, view |-> NONE, snap |-> NEVER,
                       live |-> NONE, held |-> NOHELD, taken |-> NONE, known |-> NONE, unArm |-> NONE,
                       req |-> "none", reqN |-> NONE]
@@ -72,7 +80,8 @@ Init ==
     /\ budget = [disc |-> MaxDisconnects, flaps |-> MaxGateFlaps, v4flaps |-> MaxIPv4Flaps, inflap |-> FALSE,
                  lb |-> MaxLoopbackLists, cfg |-> MaxConfigdRestarts, exits |-> MaxOwnerExits,
                  crashes |-> MaxHelperCrashes, relay |-> MaxRelayDeaths, fwd |-> MaxForwarderFaults,
-                 stops |-> MaxDNSStops, lost |-> MaxLostReplies]
+                 stops |-> MaxDNSStops, lost |-> MaxLostReplies, refusals |-> MaxRemovalRefusals,
+                 sock |-> MaxProbeSocketFailures]
     /\ ghost = [vwritten |-> FALSE]
 
 OwnerAlive == app.alive /\ app.id = h.owner
@@ -120,6 +129,17 @@ Failed(a) == CASE a.req = "arm" -> ArmUnknown(a)
                [] OTHER -> Done(a)
 
 Withdrawn(hh) == [hh EXCEPT !.armN = NONE, !.owner = 0, !.pub = FALSE]
+
+\* A removal the store refuses, which closing the session does not complete either, leaves the key in place and
+\* the cleanup pending until a later try succeeds or a read shows the key gone.
+Refusals == IF okey /\ budget.refusals > 0 THEN BOOLEAN ELSE {FALSE}
+Spend(r) == IF r THEN [budget EXCEPT !.refusals = @ - 1] ELSE budget
+Removed(hh, r) == [Withdrawn(hh) EXCEPT !.pending = r /\ TracksPendingCleanup]
+\* A key that should be gone but is not keeps naming the relay; its lookups go to the VPN's servers, as without it.
+PendingMode(r) == relay' = IF r /\ TracksPendingCleanup /\ RelayUp THEN Failover ELSE relay
+\* An unanswered tick counts toward the bound whatever it says; the bound alone withdraws a key whose probe socket fails.
+Unverified(hh) == IF hh.unverified < UnverifiedTicks THEN hh.unverified + 1 ELSE UnverifiedTicks
+WithinBound(hh) == ~ProbeBounded \/ hh.unverified + 1 < UnverifiedTicks
 
 -----------------------------------------------------------------------------
 
@@ -207,6 +227,17 @@ ForwarderFault(f) ==
     /\ fwd' = f /\ budget' = [budget EXCEPT !.fwd = @ - 1]
     /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, app, ghost>>
 
+\* The helper's own probe socket fails (EMFILE, say) until it recovers; the environment is not fair.
+ProbeSocketFails ==
+    /\ h.up /\ ~h.sockFails /\ budget.sock > 0
+    /\ h' = [h EXCEPT !.sockFails = TRUE] /\ budget' = [budget EXCEPT !.sock = @ - 1]
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, watch, relay, rwant, fwd, app, ghost>>
+
+ProbeSocketRecovers ==
+    /\ h.up /\ h.sockFails
+    /\ h' = [h EXCEPT !.sockFails = FALSE]
+    /\ UNCHANGED <<vkey, svc, ver, vgate, okey, watch, relay, rwant, fwd, app, budget, ghost>>
+
 ForwarderRecovers ==
     /\ app.alive /\ app.dns # "off" /\ fwd # "answers"
     /\ fwd' = "answers"
@@ -218,67 +249,87 @@ ForwarderRecovers ==
 HAccept(lost) ==
     /\ HelperFree /\ app.alive /\ app.req # "none"
     /\ lost => (app.req = "arm" /\ budget.lost > 0)
-    /\ budget' = IF lost THEN [budget EXCEPT !.lost = @ - 1] ELSE budget
     /\ CASE app.req = "arm" ->
-              /\ h' = [h EXCEPT !.armN = app.reqN, !.owner = app.id, !.probeOK = (fwd = "answers"),
-                                !.refused = 0, !.silent = 0]
+              /\ h' = [h EXCEPT !.armN = app.reqN, !.owner = app.id, !.probeOK = (fwd = "answers" /\ ~h.sockFails),
+                                !.refused = 0, !.silent = 0, !.unverified = 0]
               /\ watch' = WatchOwner
               /\ app' = IF lost THEN ArmUnknown(app) ELSE ArmOK(app)
+              /\ budget' = IF lost THEN [budget EXCEPT !.lost = @ - 1] ELSE budget
               /\ UNCHANGED <<okey, relay, rwant, fwd>>
          [] app.req = "disarm" ->
-              /\ h' = Withdrawn(h) /\ okey' = FALSE /\ watch' = FALSE /\ app' = DisarmOK(app)
-              /\ UNCHANGED <<relay, rwant, fwd>>
+              /\ \E r \in Refusals : h' = Removed(h, r) /\ okey' = r /\ budget' = Spend(r) /\ PendingMode(r)
+              /\ watch' = FALSE /\ app' = DisarmOK(app)
+              /\ UNCHANGED <<rwant, fwd>>
          [] app.req = "startRelay" ->
-              /\ relay' = IF h.armN # NONE /\ h.owner # app.id THEN Failover ELSE "conduit"
+              /\ relay' = IF (h.armN # NONE /\ h.owner # app.id) \/ h.pending THEN Failover ELSE "conduit"
               /\ rwant' = TRUE /\ app' = Done(app)
-              /\ UNCHANGED <<okey, h, watch, fwd>>
+              /\ UNCHANGED <<okey, h, watch, fwd, budget>>
          [] app.req = "stopRelay" ->
-              /\ relay' = "off" /\ rwant' = FALSE /\ app' = RelayStopped(app) /\ fwd' = "refuses"
-              /\ h' = Withdrawn(h) /\ okey' = FALSE /\ watch' = FALSE
+              \* A key whose cleanup is pending keeps the relay up on the VPN's servers until the cleanup completes.
+              /\ \E r \in Refusals :
+                   /\ h' = Removed(h, r) /\ okey' = r /\ budget' = Spend(r)
+                   /\ relay' = IF h'.pending /\ KeepsRelayWhilePending
+                                THEN (IF relay = "dead" THEN "dead" ELSE Failover) ELSE "off"
+              /\ rwant' = FALSE /\ app' = RelayStopped(app) /\ fwd' = "refuses" /\ watch' = FALSE
     /\ UNCHANGED <<vkey, svc, ver, vgate, ghost>>
 
 \* A store notification, or any event that changes Ready: publish, republish or withdraw the own key.
+\* Nothing is published while a cleanup is pending; HCleanup finishes it first.
 HSync ==
-    /\ HelperFree
+    /\ HelperFree /\ ~h.pending
     /\ \/ ~HelperCurrent
        \/ h.pub # Ready
        \/ (NoticesOwnKey /\ h.pub /\ ~okey)
-    /\ h' = [h EXCEPT !.seen = <<vkey, svc>>, !.pub = Ready]
-    /\ okey' = CASE Ready /\ (~h.pub \/ NoticesOwnKey) -> TRUE
-                 [] Ready -> okey
-                 [] OTHER -> FALSE
+    /\ \E r \in (IF Ready THEN {FALSE} ELSE Refusals) :
+         /\ h' = [h EXCEPT !.seen = <<vkey, svc>>, !.pub = Ready, !.pending = r /\ TracksPendingCleanup]
+         /\ okey' = CASE Ready /\ (~h.pub \/ NoticesOwnKey) -> TRUE
+                      [] Ready -> okey
+                      [] OTHER -> r
+         /\ budget' = Spend(r) /\ PendingMode(r)
     /\ vkey' = IF WritesVPNKey /\ Ready /\ ~h.pub THEN LO ELSE vkey
     /\ ghost' = [ghost EXCEPT !.vwritten = @ \/ (WritesVPNKey /\ Ready /\ ~h.pub)]
-    /\ UNCHANGED <<svc, ver, vgate, watch, relay, rwant, fwd, app, budget>>
+    /\ UNCHANGED <<svc, ver, vgate, watch, rwant, fwd, app>>
 
 \* The relay's mode follows each probe; the key is withdrawn after two refused or three silent ticks.
+\* A failed probe socket leaves the streaks and the mode alone but confirms nothing.
 HTick ==
     /\ HelperFree /\ h.armN # NONE
-    /\ CASE fwd = "refuses" ->
-              /\ h' = [h EXCEPT !.refused = IF @ < 2 THEN @ + 1 ELSE 2, !.silent = 0,
-                                !.probeOK = @ /\ h.refused + 1 < 2]
+    /\ CASE h.sockFails ->
+              /\ h' = [h EXCEPT !.unverified = Unverified(h), !.probeOK = @ /\ WithinBound(h)]
+              /\ relay' = relay
+         [] fwd = "refuses" ->
+              /\ h' = [h EXCEPT !.refused = IF @ < 2 THEN @ + 1 ELSE 2, !.silent = 0, !.unverified = Unverified(h),
+                                !.probeOK = @ /\ h.refused + 1 < 2 /\ WithinBound(h)]
               /\ ToFailover
          [] fwd = "silent" ->
-              /\ h' = [h EXCEPT !.silent = IF @ < 3 THEN @ + 1 ELSE 3, !.refused = 0,
-                                !.probeOK = @ /\ h.silent + 1 < 3]
+              /\ h' = [h EXCEPT !.silent = IF @ < 3 THEN @ + 1 ELSE 3, !.refused = 0, !.unverified = Unverified(h),
+                                !.probeOK = @ /\ h.silent + 1 < 3 /\ WithinBound(h)]
               /\ ToFailover
          [] OTHER ->
-              /\ h' = [h EXCEPT !.refused = 0, !.silent = 0, !.probeOK = TRUE]
-              /\ relay' = IF RelayUp THEN "conduit" ELSE relay
+              /\ h' = [h EXCEPT !.refused = 0, !.silent = 0, !.unverified = 0, !.probeOK = TRUE]
+              /\ relay' = IF RelayUp /\ ~h.pending THEN "conduit" ELSE relay
     /\ UNCHANGED <<vkey, svc, ver, vgate, okey, watch, rwant, fwd, app, budget, ghost>>
+
+\* Each tick while a cleanup is pending tries the removal again; once it is done, a relay kept for it stops.
+HCleanup ==
+    /\ h.up /\ h.pending
+    /\ \E r \in Refusals :
+         /\ h' = [h EXCEPT !.pending = r] /\ okey' = r /\ budget' = Spend(r)
+         /\ relay' = IF ~r /\ ~rwant /\ RelayUp THEN "off" ELSE relay
+    /\ UNCHANGED <<vkey, svc, ver, vgate, watch, rwant, fwd, app, ghost>>
 
 HRelayRestart ==
     /\ h.up /\ relay = "dead"
-    /\ relay' = IF h.armN # NONE THEN Failover ELSE IF rwant THEN "conduit" ELSE "off"
+    /\ relay' = IF h.armN # NONE \/ h.pending THEN Failover ELSE IF rwant THEN "conduit" ELSE "off"
     /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, rwant, fwd, app, budget, ghost>>
 
 HOwnerExit ==
     /\ h.up /\ ExitPending
     /\ watch' = FALSE
     /\ IF WithdrawsOnExit
-       THEN h' = Withdrawn(h) /\ okey' = FALSE /\ ToFailover
-       ELSE UNCHANGED <<h, okey, relay>>
-    /\ UNCHANGED <<vkey, svc, ver, vgate, rwant, fwd, app, budget, ghost>>
+       THEN \E r \in Refusals : h' = Removed(h, r) /\ okey' = r /\ budget' = Spend(r) /\ ToFailover
+       ELSE UNCHANGED <<h, okey, relay, budget>>
+    /\ UNCHANGED <<vkey, svc, ver, vgate, rwant, fwd, app, ghost>>
 
 HStart ==
     /\ ~h.up
@@ -366,8 +417,8 @@ AppTdRelay ==
 ClientNext == ClientRewrite \/ ClientLoopback \/ ClientDelete \/ ClientPublishDNS \/ ClientPublishIPv4
               \/ ClientIPv4Flap \/ ClientIPv4Back \/ GateFlap \/ GateBack \/ ConfigdRestart
 EnvNext == OwnerExit \/ AppLaunch \/ HelperDown \/ RelayDies \/ ForwarderRecovers
-           \/ ForwarderFault("refuses") \/ ForwarderFault("silent")
-HelperNext == HAccept(FALSE) \/ HAccept(TRUE) \/ HSync \/ HTick \/ HRelayRestart \/ HOwnerExit \/ HStart
+           \/ ForwarderFault("refuses") \/ ForwarderFault("silent") \/ ProbeSocketFails \/ ProbeSocketRecovers
+HelperNext == HAccept(FALSE) \/ HAccept(TRUE) \/ HSync \/ HTick \/ HCleanup \/ HRelayRestart \/ HOwnerExit \/ HStart
 AppNext == AppRead \/ AppTake \/ AppPass \/ AppPoll \/ AppCallFails \/ AppRestartRelay
            \/ AppStartDNS \/ AppStop \/ AppTdDisarm \/ AppTdRelay
 
@@ -377,7 +428,8 @@ Next == ClientNext \/ EnvNext \/ HelperNext \/ AppNext \/ Terminal
 
 \* Only the helper is fair: a crashed or stalled app may never act.
 Fairness ==
-    /\ WF_vars(HSync) /\ WF_vars(HTick) /\ WF_vars(HRelayRestart) /\ WF_vars(HOwnerExit) /\ WF_vars(HStart)
+    /\ WF_vars(HSync) /\ WF_vars(HTick) /\ WF_vars(HCleanup) /\ WF_vars(HRelayRestart) /\ WF_vars(HOwnerExit)
+    /\ WF_vars(HStart)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -386,7 +438,8 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 TypeOK ==
     /\ vkey \in {ABSENT, LB} \cup Versions /\ svc \in BOOLEAN /\ ver \in Versions /\ vgate \in BOOLEAN
     /\ okey \in BOOLEAN /\ h.up \in BOOLEAN /\ h.pub \in BOOLEAN /\ h.armN \in {NONE} \cup Versions
-    /\ h.refused \in 0..2 /\ h.silent \in 0..3
+    /\ h.refused \in 0..2 /\ h.silent \in 0..3 /\ h.unverified \in 0..UnverifiedTicks
+    /\ h.pending \in BOOLEAN /\ h.sockFails \in BOOLEAN
     /\ relay \in {"off", "conduit", "vpn", "dead"} /\ rwant \in BOOLEAN
     /\ fwd \in {"answers", "refuses", "silent"}
     /\ app.dns \in {"on", "stop_disarm", "stop_wait_disarm", "stop_relay", "stop_wait_relay", "off"}
@@ -400,8 +453,9 @@ VPNKeyUntouched == ~ghost.vwritten
 
 NoLoopbackTarget == (okey /\ UsingFailover) => FailoverTarget # LB
 
-\* Once the helper has handled every event, its key is in the store only for a live owner and a usable VPN.
-KeyWithdrawn == (h.up /\ HelperCurrent /\ ~ExitPending /\ okey) => (OwnerAlive /\ VPNUsable)
+\* Once the helper has handled every event, a pending cleanup included, its key is in the store only for a live
+\* owner and a usable VPN.
+KeyWithdrawn == (h.up /\ HelperCurrent /\ ~ExitPending /\ ~h.pending /\ okey) => (OwnerAlive /\ VPNUsable)
 
 \* While the relay sends the key's lookups to Conduit, Conduit's set in use has the VPN's servers.
 InternalNamesServed == (okey /\ Serving /\ HelperCurrent /\ ~ExitPending) => app.live = vkey
