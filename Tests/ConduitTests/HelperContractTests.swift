@@ -607,32 +607,78 @@ final class HelperContractTests: XCTestCase {
         XCTAssertNil(HelperToolPrivilegeClient.callerPolicy(fromInstallerOutput: ""))
     }
 
-    /// A removal that fails stops the uninstall with that failure, rather
-    /// than a later step's success standing for the whole. Every command the
-    /// script runs is a stub on a PATH of its own, so nothing is removed.
-    func testUninstallStopsAtTheFirstFailedRemoval() throws {
+    /// Runs the uninstall script with every command it calls a stub on a PATH
+    /// of its own, so nothing is removed. Shell functions, not executables:
+    /// macOS assesses a newly written executable on its first run, which cost
+    /// this test most of a second. PATH is still the empty stub directory, so a
+    /// command left unstubbed fails instead of running for real.
+    private func runUninstallScript(stubs: (_ log: String) -> String) throws -> (exitCode: Int32, stderr: String, calls: [Substring]) {
         let stubDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("uninstall-stubs-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: stubDirectory, withIntermediateDirectories: true)
         addTeardownBlock { try FileManager.default.removeItem(at: stubDirectory) }
         let log = stubDirectory.appendingPathComponent("calls").path
-        // Shell functions, not executables: macOS assesses a newly written
-        // executable on its first run, which cost this test most of a second.
-        // PATH is still the empty stub directory, so a command left unstubbed
-        // fails instead of running for real.
-        func stub(_ name: String, _ status: Int) -> String {
-            "\(name)() { echo \"\(name) $*\" >> \(log.shellQuoted); return \(status); }\n"
-        }
-        let stubs = stub("launchctl", 0) + stub("rmdir", 0) + stub("rm", 1)
-
         let result = try CommandRunner.run(
             launchPath: "/bin/sh",
-            arguments: ["-c", "PATH=\(stubDirectory.path.shellQuoted)\n" + stubs + HelperToolPrivilegeClient.uninstallScript]
+            arguments: ["-c", "PATH=\(stubDirectory.path.shellQuoted)\n" + stubs(log) + HelperToolPrivilegeClient.uninstallScript]
         )
-        let calls = try String(contentsOfFile: log, encoding: .utf8).split(separator: "\n")
+        let calls = ((try? String(contentsOfFile: log, encoding: .utf8)) ?? "").split(separator: "\n")
+        return (result.exitCode, result.standardError, calls)
+    }
 
-        XCTAssertNotEqual(result.exitCode, 0)
-        XCTAssertEqual(calls.count, 2, "bootout, then the first rm, and nothing after it: \(calls)")
-        XCTAssertTrue(calls.last?.hasPrefix("rm -f \(HelperConstants.binaryInstallPath)") ?? false, "\(calls)")
+    private func stub(_ name: String, _ status: Int, log: String) -> String {
+        "\(name)() { echo \"\(name) $*\" >> \(log.shellQuoted); return \(status); }\n"
+    }
+
+    /// `launchctl` answering `bootout` and `print` each with its own status.
+    private func launchctlStub(bootout: Int, print: Int, log: String) -> String {
+        """
+        launchctl() { echo "launchctl $*" >> \(log.shellQuoted); case "$1" in bootout) return \(bootout);; print) return \(print);; esac; return 0; }
+
+        """
+    }
+
+    /// A removal that fails stops the uninstall with that failure, rather
+    /// than a later step's success standing for the whole.
+    func testUninstallStopsAtTheFirstFailedRemoval() throws {
+        let run = try runUninstallScript { log in
+            self.stub("launchctl", 0, log: log) + self.stub("rmdir", 0, log: log) + self.stub("rm", 1, log: log)
+        }
+        XCTAssertNotEqual(run.exitCode, 0)
+        XCTAssertEqual(run.calls.count, 2, "bootout, then the first rm, and nothing after it: \(run.calls)")
+        XCTAssertTrue(run.calls.last?.hasPrefix("rm -f \(HelperConstants.binaryInstallPath)") ?? false, "\(run.calls)")
+    }
+
+    /// A bootout that fails while the job is still loaded deletes nothing: the
+    /// helper would keep running from a binary and plist that are gone.
+    func testUninstallWhoseBootoutLeavesTheHelperLoadedRemovesNothing() throws {
+        let run = try runUninstallScript { log in
+            self.launchctlStub(bootout: 5, print: 0, log: log) + self.stub("rmdir", 0, log: log) + self.stub("rm", 0, log: log)
+        }
+        XCTAssertNotEqual(run.exitCode, 0)
+        XCTAssertEqual(run.calls, ["launchctl bootout system/\(HelperConstants.serviceLabel)",
+                                   "launchctl print system/\(HelperConstants.serviceLabel)"], "no rm ran")
+        XCTAssertTrue(run.stderr.contains("still loaded"), run.stderr)
+    }
+
+    /// A bootout that fails when launchd cannot say whether the job is loaded deletes nothing either: only its "no such service" answer
+    /// proves the job is gone.
+    func testUninstallWhoseBootoutFailsAndLaunchdCannotSayRemovesNothing() throws {
+        let run = try runUninstallScript { log in
+            self.launchctlStub(bootout: 5, print: 5, log: log) + self.stub("rmdir", 0, log: log) + self.stub("rm", 0, log: log)
+        }
+        XCTAssertNotEqual(run.exitCode, 0)
+        XCTAssertEqual(run.calls, ["launchctl bootout system/\(HelperConstants.serviceLabel)",
+                                   "launchctl print system/\(HelperConstants.serviceLabel)"], "no rm ran")
+        XCTAssertTrue(run.stderr.contains("could not say whether the helper is loaded (exit 5)"), run.stderr)
+    }
+
+    /// A bootout that fails because the job is not loaded is not a failure of the uninstall: the files still go.
+    func testUninstallOfAHelperThatIsNotLoadedStillRemovesItsFiles() throws {
+        let run = try runUninstallScript { log in
+            self.launchctlStub(bootout: 3, print: 113, log: log) + self.stub("rmdir", 0, log: log) + self.stub("rm", 0, log: log)
+        }
+        XCTAssertEqual(run.exitCode, 0, run.stderr)
+        XCTAssertTrue(run.calls.contains { $0.hasPrefix("rm -f \(HelperConstants.binaryInstallPath)") }, "\(run.calls)")
     }
 
     /// It used to be `try?`: a dismissed password prompt read as uninstalled.
