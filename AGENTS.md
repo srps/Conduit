@@ -18,6 +18,7 @@ The default `swift` may be Command Line Tools, which fails with `no such module 
 | Dev app beside the installed one | `./bundle-app.sh --dev`, then `open -n -a "$PWD/Conduit Dev.app" --args [--section dns] [--vpn utun4] [--upstream host:port] [--start] [--dev-state-dir PATH]` |
 | Install app | `./bundle-app.sh --release --install` (quits and replaces the running Conduit) |
 | Install helper | `sudo ./install-helper.sh`, required after any change to `Sources/ConduitHelper/` |
+| Diagnose dead DNS or network | `./scripts/probe-network.sh` names the first failing layer: link, gateway, the network's DNS, direct internet, VPN DNS, Conduit's forwarder and relay, the system resolver. Read-only, no sudo |
 
 The distinct ad-hoc-signed `Conduit Dev.app` selects the debug `FakeMachine` composition by bundle identity; explicit `--dev` remains supported. It uses scratch state under `$TMPDIR/conduit-dev` and ephemeral ports by default. Build-time `--dev` refuses `--install`, `--release` and `--share`; never substitute a production install for this dev build. Notification authorization, network-path and wake observation still use real OS adapters; their test seams are separate work. Use `open -n`: a direct executable launch from an agent session has no window server access. Its `proxy.log` confirms the windows came up.
 
