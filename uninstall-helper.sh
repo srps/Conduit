@@ -39,13 +39,22 @@ paths() {
         { print $NF }'
 }
 
-# Whether d.show printed one dictionary and nothing else: its header, indented
-# entries and its closing brace. A diagnostic anywhere fails it.
+# Whether d.show printed one dictionary and nothing else: its header, then
+# only "key : value" entries indented two spaces per level, "<array> {" and
+# "<dictionary> {" values that open a level, and the brace that closes each.
+# Any other line, an indented diagnostic included, fails it.
 one_dictionary() {
     print -r -- "$1" | awk '
-        NR == 1 { bad = $0 != "<dictionary> {"; next }
-        { if (previous != "" && previous !~ /^  /) bad = 1; previous = $0 }
-        END { exit bad || NR < 2 || previous != "}" }'
+        NR == 1 { bad = $0 != "<dictionary> {"; depth = 1; next }
+        bad || depth == 0 { bad = 1; exit }
+        {
+            indent = 2 * depth
+            if ($0 == sprintf("%" (indent - 2) "s}", "")) { depth--; next }
+            entry = substr($0, indent + 1)
+            if (substr($0, 1, indent) != sprintf("%" indent "s", "") || entry !~ /^[^ ].* : /) { bad = 1; exit }
+            if (entry ~ / : <(array|dictionary)> \{$/) depth++
+        }
+        END { exit bad || depth != 0 }'
 }
 
 # A key's dictionary, as d.show prints it.
