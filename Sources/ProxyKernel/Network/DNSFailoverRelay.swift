@@ -82,6 +82,15 @@ package enum DNSFailoverServerSocket: Equatable, Sendable {
 package enum DNSFailoverTransport: String, CaseIterable, Sendable {
     case udp
     case tcp
+
+    /// The largest request left unanswered over this half that is kept to replay. A larger one is counted, and the half
+    /// then has none to replay.
+    var largestKeptRequest: Int {
+        switch self {
+        case .udp: 512
+        case .tcp: 4_096
+        }
+    }
 }
 
 /// Counters of real queries one half sent to Conduit.
@@ -118,8 +127,8 @@ package final class DNSFailoverRoute: @unchecked Sendable {
         lock.withLock { _progress[transport] ?? .zero }
     }
 
-    /// The header and question of the last real query Conduit left unanswered over one half, to ask it again.
-    package func lastUnansweredQuestion(_ transport: DNSFailoverTransport) -> [UInt8]? {
+    /// The last real query Conduit left unanswered over one half, as its client sent it, to ask it again.
+    package func lastUnansweredRequest(_ transport: DNSFailoverTransport) -> [UInt8]? {
         lock.withLock { _lastUnanswered[transport] }
     }
 
@@ -130,11 +139,11 @@ package final class DNSFailoverRoute: @unchecked Sendable {
         }
     }
 
-    package func conduitLeftUnanswered(_ question: [UInt8], over transport: DNSFailoverTransport) {
+    package func conduitLeftUnanswered(_ request: [UInt8], over transport: DNSFailoverTransport) {
         lock.withLock {
             _progress[transport, default: .zero].unanswered += 1
             _progress[transport]?.lastUnanswered = true
-            _lastUnanswered[transport] = question
+            _lastUnanswered[transport] = request.count <= transport.largestKeptRequest ? request : nil
         }
     }
 
@@ -631,7 +640,7 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
                 if refused { answerProbeRefused(entry, lfd: lfd) }
                 continue
             }
-            if !refused { route.conduitLeftUnanswered(entry.question, over: .udp) }
+            if !refused { route.conduitLeftUnanswered(entry.datagram, over: .udp) }
             entry.conduitSentAt = nil
             sendToNextServer(&entry, loop: &loop, now: now)
             loop.pending[key] = entry
@@ -706,7 +715,7 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
             guard var entry = loop.pending[key], now - entry.arrived >= lifetime else { continue }
             loop.pending[key] = nil
             guard entry.conduitSentAt != nil, !entry.isProbe else { continue }
-            route.conduitLeftUnanswered(entry.question, over: .udp)
+            route.conduitLeftUnanswered(entry.datagram, over: .udp)
             // The lookup that shows the loss still gets an answer: one more lifetime on the VPN's servers.
             guard !loop.servers.isEmpty else { continue }
             entry.conduitSentAt = nil
@@ -999,8 +1008,8 @@ package final class DNSFailoverTCPRelay: @unchecked Sendable {
         let lifetime = FailoverSocket.milliseconds(timing.entryLifetime)
         guard let reply = FailoverSocket.readFramed(target, timeoutMilliseconds: lifetime),
               DNSWireFormat.responseQuestionMatches(query: first, response: reply) else {
-            if route.mode == .conduit, let question = DNSWireFormat.headerAndQuestion(of: first) {
-                route.conduitLeftUnanswered(question, over: .tcp)
+            if route.mode == .conduit, DNSWireFormat.headerAndQuestion(of: first) != nil {
+                route.conduitLeftUnanswered(first, over: .tcp)
             }
             return false
         }
@@ -1107,12 +1116,10 @@ package final class DNSFailoverRelay: @unchecked Sendable {
     }
 
     /// Asks Conduit's forwarder directly, not through either listener and over the half it failed on, the last real
-    /// question it left unanswered there: an answer of any kind is evidence it answers that half's real queries again.
-    /// It waits the silence a real query fails over on. Not running when there is no such question.
+    /// query it left unanswered there, as its client sent it: an answer of any kind is evidence it answers that half's
+    /// real queries again. It waits the silence a real query fails over on. Not running when no such query is kept.
     package func recheck(_ transport: DNSFailoverTransport) -> DNSFailoverProbeOutcome {
-        guard let port = target, var query = route.lastUnansweredQuestion(transport) else { return .notRunning }
-        // Only the header and question were kept, so no answer, authority or additional record follows them.
-        query.replaceSubrange(6..<12, with: repeatElement(0, count: 6))
+        guard let port = target, let query = route.lastUnansweredRequest(transport) else { return .notRunning }
         let bound = Int(FailoverSocket.milliseconds(timing.silenceBeforeProbe))
         switch transport {
         case .udp: return Self.ask(query, port: port, boundMilliseconds: bound)

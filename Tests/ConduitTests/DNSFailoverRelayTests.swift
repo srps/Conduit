@@ -13,6 +13,7 @@ private final class StandInDNS: @unchecked Sendable {
     private var _silent = false
     private var _dropsRealQueries = false
     private var _dropsRealTCPQueries = false
+    private var _dropsEDNSOverTCP = false
     private var _delay: TimeInterval = 0
     private var _asked: [String: Int] = [:]
     private var stopped = false
@@ -58,6 +59,12 @@ private final class StandInDNS: @unchecked Sendable {
         set { lock.withLock { _dropsRealTCPQueries = newValue } }
     }
 
+    /// Over TCP, drops real queries that carry an additional record, as an EDNS OPT, and answers plain ones.
+    var dropsEDNSOverTCP: Bool {
+        get { lock.withLock { _dropsEDNSOverTCP } }
+        set { lock.withLock { _dropsEDNSOverTCP = newValue } }
+    }
+
     var delay: TimeInterval {
         get { lock.withLock { _delay } }
         set { lock.withLock { _delay = newValue } }
@@ -97,7 +104,8 @@ private final class StandInDNS: @unchecked Sendable {
         let isProbe = name == DNSWireFormat.forwarderProbeDomain.lowercased()
         let (silent, delay) = lock.withLock { () -> (Bool, TimeInterval) in
             _asked[name, default: 0] += 1
-            let drops = _dropsRealQueries || (overTCP && _dropsRealTCPQueries)
+            let edns = query[10] | query[11] != 0
+            let drops = _dropsRealQueries || (overTCP && (_dropsRealTCPQueries || (_dropsEDNSOverTCP && edns)))
             return (_silent || (drops && !isProbe), isProbe ? 0 : _delay)
         }
         guard !silent else { return nil }
@@ -243,11 +251,7 @@ final class DNSFailoverRelayTests: XCTestCase {
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = UInt16(relay.listeningPort ?? 0).bigEndian
         address.sin_addr.s_addr = inet_addr("127.0.0.1")
-        var query = DNSWireFormat.buildQuery(domain: queryName, txID: UInt16.random(in: 1...UInt16.max))
-        if edns {
-            query[11] = 1
-            query += [0x00, 0x00, 0x29, 0x10, 0x00, 0, 0, 0, 0, 0x00, 0x00]
-        }
+        let query = query(edns: edns)
         let began = Date()
         _ = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sendto(fd, query, query.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
@@ -259,6 +263,15 @@ final class DNSFailoverRelayTests: XCTestCase {
         let elapsed = Date().timeIntervalSince(began)
         guard count > 0, DNSWireFormat.isResponse(Array(buffer[0..<count]), to: query) else { return (nil, elapsed) }
         return (DNSWireFormat.firstIPv4Answer(in: Array(buffer[0..<count]))?.ip, elapsed)
+    }
+
+    /// An A query for `queryName`; with `edns`, an OPT record padded by `padding` bytes.
+    private func query(edns: Bool, padding: Int = 0) -> [UInt8] {
+        var query = DNSWireFormat.buildQuery(domain: queryName, txID: UInt16.random(in: 1...UInt16.max))
+        guard edns else { return query }
+        query[11] = 1
+        let option = padding > 0 ? [0x00, 0x0C, UInt8(padding >> 8), UInt8(padding & 0xFF)] + [UInt8](repeating: 0, count: padding) : []
+        return query + [0x00, 0x00, 0x29, 0x10, 0x00, 0, 0, 0, 0, UInt8(option.count >> 8), UInt8(option.count & 0xFF)] + option
     }
 
     func testAQueryGoesToConduitWhileItAnswers() throws {
@@ -642,6 +655,43 @@ final class DNSFailoverRelayTests: XCTestCase {
         XCTAssertNotNil(override.store.ownKey)
     }
 
+    func testARecheckReplaysTheEDNSRequestConduitDroppedNotAPlainQuestion() throws {
+        let conduit = try standIn(conduitIP, tcp: true)
+        let vpn = try standIn(vpnIP, tcp: true)
+        let relay = try relay(conduitPort: conduit.port, servers: ["192.0.2.53": vpn])
+        let override = Override(relay: relay)
+
+        conduit.dropsEDNSOverTCP = true
+        XCTAssertNil(try askTCP(relay, edns: true))
+        override.tick()
+        XCTAssertEqual(relay.mode, .vpn, "the replayed EDNS request is dropped too")
+        XCTAssertEqual(try askTCP(relay, edns: true), vpnIP, "the client's retry reaches the VPN")
+        let plain = DNSWireFormat.buildQuery(domain: queryName, txID: 1)
+        XCTAssertEqual(DNSFailoverRelay.askTCP(plain, port: conduit.port, boundMilliseconds: 1_000), .answered, "Conduit answers plain TCP")
+        override.tick()
+        XCTAssertEqual(relay.mode, .vpn)
+        override.tick()
+        XCTAssertNil(override.store.ownKey, "withdrawn within the bound")
+        XCTAssertEqual(override.outcomes.last, .withdrawn(service: override.service, reason: .targetSilent))
+
+        conduit.dropsEDNSOverTCP = false
+        override.tick()
+        XCTAssertNotNil(override.store.ownKey, "Conduit answered the EDNS replay")
+        XCTAssertEqual(relay.mode, .conduit)
+        XCTAssertEqual(try askTCP(relay, edns: true), conduitIP)
+    }
+
+    func testARequestTooLargeToKeepIsCountedAndNotReplacedByAnOlderOne() throws {
+        let conduit = try standIn(conduitIP, tcp: true)
+        conduit.dropsRealQueries = true
+        let relay = try relay(conduitPort: conduit.port, servers: [:])
+        XCTAssertNil(try askTCP(relay))
+        XCTAssertNil(try askTCP(relay, edns: true, padding: 4_200))
+        XCTAssertEqual(relay.conduitProgress(.tcp), DNSFailoverProgress(answered: 0, unanswered: 2, lastUnanswered: true))
+        conduit.dropsRealQueries = false
+        XCTAssertEqual(relay.recheck(.tcp), .notRunning, "the plain request before it is not replayed in its place")
+    }
+
     func testATCPSessionTakesTheModeAtConnect() throws {
         let conduit = try standIn(conduitIP, tcp: true)
         let vpn = try standIn(vpnIP, tcp: true)
@@ -692,8 +742,8 @@ final class DNSFailoverRelayTests: XCTestCase {
         return fd
     }
 
-    private func exchange(_ fd: Int32) throws -> String? {
-        let query = DNSWireFormat.buildQuery(domain: queryName, txID: UInt16.random(in: 1...UInt16.max))
+    private func exchange(_ fd: Int32, edns: Bool = false, padding: Int = 0) throws -> String? {
+        let query = query(edns: edns, padding: padding)
         let framed = [UInt8(query.count >> 8), UInt8(query.count & 0xFF)] + query
         guard write(fd, framed, framed.count) == framed.count else { return nil }
         var header = [UInt8](repeating: 0, count: 2)
@@ -703,10 +753,10 @@ final class DNSFailoverRelayTests: XCTestCase {
         return DNSWireFormat.firstIPv4Answer(in: reply)?.ip
     }
 
-    private func askTCP(_ relay: DNSFailoverRelay) throws -> String? {
+    private func askTCP(_ relay: DNSFailoverRelay, edns: Bool = false, padding: Int = 0) throws -> String? {
         let fd = try connectTCP(relay)
         defer { close(fd) }
-        return try exchange(fd)
+        return try exchange(fd, edns: edns, padding: padding)
     }
 }
 
