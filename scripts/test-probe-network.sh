@@ -228,6 +228,11 @@ by_priority="$(config by-priority <<'JSON'
  {"host": "p3.corp.example", "port": 8080, "priority": 1}, {"host": "p4.corp.example", "port": 8080, "priority": 0}]}
 JSON
 )"
+challenge_first="$(config challenge-first <<'JSON'
+{"upstreams": [{"host": "p1.corp.example", "port": 8080, "priority": 0}, {"host": "p2.corp.example", "port": 8080, "priority": 1},
+ {"host": "p3.corp.example", "port": 8080, "priority": 2}]}
+JSON
+)"
 userinfo="$(config userinfo <<'JSON'
 {"upstreams": [{"host": "user@proxy.example", "port": 8080, "priority": 0}, {"host": "proxy.corp.example", "port": 8080, "priority": 1}]}
 JSON
@@ -251,9 +256,10 @@ JSON
 mkdir -p "$stubs/fifo" "$stubs/fed-fifo"; mkfifo "$stubs/fifo/config.json" "$stubs/fed-fifo/config.json"
 fifo="CONDUIT_CONFIG=$stubs/fifo/config.json" fed_fifo="CONDUIT_CONFIG=$stubs/fed-fifo/config.json"
 
-dns_config() { # <default server, or "" for none> [default port] [vpn interface] [vpn servers] [vpn port]
+dns_config() { # <default servers, or "" for none> [default port] [vpn interface] [vpn servers] [vpn port]
     local out="DNS configuration\n\nresolver #1\n" vpn="" i=0 server
-    [ -n "$1" ] && out+="  nameserver[0] : $1\n"
+    for server in $1; do out+="  nameserver[$i] : $server\n"; i=$((i + 1)); done
+    i=0
     [ -n "${2:-}" ] && out+="  port     : $2\n"
     out+="  flags    : Request A records\n  reach    : 0x00000002 (Reachable)\n\n"
     out+="resolver #2\n  domain   : local\n  options  : mdns\n  timeout  : 5\n  flags    : Request A records\n  reach    : 0x00000000 (Not Reachable)\n  order    : 300000\n\n"
@@ -404,6 +410,20 @@ run_case "a silent DHCP server is not blamed for another resolver's NXDOMAIN" 2 
     FAKE_DIG="10.1.1.1:53=NXDOMAIN 1.1.1.1:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config 10.1.1.1)"
 run_case "a silent DHCP server is not blamed for another resolver's silence" 2 "The system resolver 10.1.1.1 does not answer." \
     FAKE_DIG="1.1.1.1:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config 10.1.1.1)"
+shows="OK    system resolver resolves the name  @10.1.1.2 NOERROR"
+run_case "a silent first default nameserver does not hide a live second one" 0 "$healthy" \
+    FAKE_DIG="10.1.1.2:53=NOERROR 1.1.1.1:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config "10.1.1.1 10.1.1.2")"
+shows="system   resolver 127.0.0.1:15353,127.0.0.2:15353"
+run_case "every default nameserver is asked on the resolver's port" 0 "$healthy" \
+    FAKE_DIG="$all_answer 127.0.0.2:15353=NOERROR" FAKE_DNS_CONFIG="$(dns_config "127.0.0.1 127.0.0.2" 15353)"
+shows="FAIL  system resolver resolves the name  @10.1.1.1, @10.1.1.2, @10.1.1.3 timeout"
+run_case "only the first 3 default nameservers are tried" 2 "The system resolver 10.1.1.1, 10.1.1.2, 10.1.1.3 does not answer." \
+    FAKE_DIG="10.1.1.4:53=NOERROR 1.1.1.1:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config "10.1.1.1 10.1.1.2 10.1.1.3 10.1.1.4")"
+run_case "the first default nameserver that answers gives the resolver's answer" 2 "The system resolver 10.1.1.1 answered with NXDOMAIN" \
+    FAKE_DIG="10.1.1.1:53=NXDOMAIN 10.1.1.2:53=NOERROR 1.1.1.1:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config "10.1.1.1 10.1.1.2")"
+shows="resolver 127.0.0.1,10.1.1.1 (local)" absent="local resolver"
+run_case "the answer of a second nameserver is not blamed on a silent local first one" 2 "The system resolver 10.1.1.1 answered with NXDOMAIN" \
+    FAKE_DIG="10.1.1.1:53=NXDOMAIN 1.1.1.1:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config "127.0.0.1 10.1.1.1")"
 run_case "a resolver #1 without a server is no default resolver, whatever later blocks hold" 2 "No default resolver is configured" \
     FAKE_IFACES="en0 utun6" FAKE_DIG="$all_answer 10.53.53.53:53=NOERROR" FAKE_DNS_CONFIG="$(dns_config "" "" utun6 10.53.53.53)"
 
@@ -481,6 +501,14 @@ shows="OK    corporate proxy answers            p4.corp.example:8080 HTTP 200"
 run_case "proxies are tried in Conduit's priority order, not file order" 0 "$healthy" \
     "$by_priority" "${vpn_up[@]}" FAKE_PROXY="p4.corp.example:8080=000/200/0" FAKE_DIG="10.53.53.53:53=NOERROR 127.0.0.1:15353=NOERROR" \
     FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
+shows="OK    corporate proxy answers            p2.corp.example:8080 HTTP 200, a request through it completed"
+run_case "a proxy's 407 does not stop a later proxy from completing a request" 0 "Location: VPN Verdict: $healthy" \
+    "$challenge_first" "${vpn_up[@]}" FAKE_PROXY="p1.corp.example:8080=000/407/0 p2.corp.example:8080=000/200/0" \
+    FAKE_DIG="10.53.53.53:53=NOERROR 127.0.0.1:15353=NOERROR" FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
+shows="OK    corporate proxy answers            p1.corp.example:8080 HTTP 407, no request through it completed"
+run_case "proxies that only answer, around a silent one, still count as answered" 1 "Location: VPN Verdict: $reaches_proxy" \
+    "$challenge_first" "${vpn_up[@]}" FAKE_PROXY="p1.corp.example:8080=000/407/0 p3.corp.example:8080=000/502/0" \
+    FAKE_DIG="10.53.53.53:53=NOERROR 127.0.0.1:15353=NOERROR" FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"
 run_case "a full tunnel whose proxy only challenges leaves web traffic unverified" 1 "Location: VPN Verdict: $reaches_proxy" \
     "$corp" "${vpn_up[@]}" FAKE_PROXY="proxy.corp.example:8080=000/407/0" \
     FAKE_DIG="10.53.53.53:53=NOERROR 10.0.0.53:53=NOERROR 127.0.0.1:15353=NOERROR" FAKE_DNS_CONFIG="$(dns_config 127.0.0.1 15353 utun6 10.53.53.53)"

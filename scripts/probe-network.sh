@@ -9,9 +9,9 @@
 # another config.json.
 # Exit status: 0 when names resolve and a web request completed, 1 when nothing failed but no web request could be
 # verified, 2 when a check fails, 64 on a usage error. It has no overall deadline; it takes about 50 s at worst.
-# It diagnoses IPv4 only, and says so on a network with only IPv6. The system check queries the default resolver
-# directly with dig, which gives up after 2 s. It does not go through the macOS resolver, so apps can get a cached
-# or supplemental answer that this check does not see.
+# It diagnoses IPv4 only, and says so on a network with only IPv6. The system check queries up to 3 of the default
+# resolver's servers directly with dig, which gives up on each after 2 s. It does not go through the macOS resolver,
+# so apps can get a cached or supplemental answer that this check does not see.
 emulate -L zsh
 setopt pipefail
 
@@ -88,13 +88,12 @@ if [[ -n "$physical" ]]; then
 fi
 
 # The default resolver apps use: resolver #1 of the unscoped configuration, which scutil prints first.
-resolver1=("${(@s:|:)$(print -r -- "$dns_config" | awk '
+system_servers=(${=$(print -r -- "$dns_config" | awk '
     /^resolver #1$/ { r = 1; next }
     r && /^$/ { exit }
-    r && $1 == "nameserver[0]" { server = $3 }
+    r && $1 ~ /^nameserver\[/ { servers[++n] = $3 }
     r && $1 == "port" { port = $3 }
-    END { print server "|" port }')}")
-system_dns="${resolver1[1]}" system_port="${resolver1[2]:-53}"
+    END { for (i = 1; i <= n; i++) print servers[i], (port ? port : 53) }')}) # server and port pairs, in resolver order
 vpn_dns=() # server and port pairs, in resolver order
 if [[ -n "$vpn" ]]; then
     vpn_dns=(${=$(print -r -- "$dns_config" | awk -v ifname="($vpn)" '
@@ -193,14 +192,18 @@ for n, e in enumerate(c.get("dnsEntries", []), 1):
     fi
 fi
 
-system_local=false uses_conduit=false
-[[ "$system_dns" == 127.* || "$system_dns" == ::1 ]] && system_local=true
-# Conduit listens on 127.0.0.1 with its relay on 53, its forwarder, and the VPN override port. Another program can
-# listen there too, so the resolver is Conduit's only while Conduit is set to manage system DNS.
-[[ "$system_dns" == 127.0.0.1 && ( "$system_port" == 53 || "$system_port" == "$forwarder_port" || "$system_port" == 15353 ) ]] &&
-    $manages_dns && uses_conduit=true
-system_shown="$(shown "$system_dns" "$system_port")"
-vpn_shown=()
+# Sets system_dns, system_port and system_shown to one of the default servers, and whether it is local or Conduit's.
+select_system() { # <server> <port>
+    system_dns="$1" system_port="$2" system_shown="$(shown "$1" "$2")" system_local=false uses_conduit=false
+    [[ "$system_dns" == 127.* || "$system_dns" == ::1 ]] && system_local=true
+    # Conduit listens on 127.0.0.1 with its relay on 53, its forwarder, and the VPN override port. Another program can
+    # listen there too, so the resolver is Conduit's only while Conduit is set to manage system DNS.
+    [[ "$system_dns" == 127.0.0.1 && ( "$system_port" == 53 || "$system_port" == "$forwarder_port" || "$system_port" == 15353 ) ]] &&
+        $manages_dns && uses_conduit=true
+}
+select_system "${system_servers[1]:-}" "${system_servers[2]:-53}"
+system_list=() vpn_shown=()
+for server port in "${(@)system_servers}"; do system_list+=("$(shown "$server" "$port")"); done
 for server port in "${(@)vpn_dns}"; do vpn_shown+=("$(shown "$server" "$port")"); done
 
 echo "Conduit network probe  $(date -u '+%Y-%m-%d %H:%M:%S UTC')  name=$name"
@@ -209,11 +212,11 @@ echo "  vpn      ${vpn:-none}${vpn:+  $($vpn_full && echo full || echo split) tu
 if [[ -z "$system_dns" ]]; then
     echo "  system   resolver none"
 elif $uses_conduit; then
-    echo "  system   resolver $system_shown (Conduit)"
+    echo "  system   resolver ${(j:,:)system_list} (Conduit)"
 elif $system_local; then
-    echo "  system   resolver $system_shown (local)"
+    echo "  system   resolver ${(j:,:)system_list} (local)"
 else
-    echo "  system   resolver $system_shown"
+    echo "  system   resolver ${(j:,:)system_list}"
 fi
 [[ "$config_state" == unreadable ]] && echo "  config   Conduit config unreadable"
 for n in $invalid_upstreams; do echo "  config   upstream #$n has an invalid host"; done
@@ -281,7 +284,8 @@ fi
 
 # The corporate side, from Conduit's configuration. An upstream proxy that answers off the VPN means a corporate network.
 # A 407 or a CONNECT reply shows only that the proxy answered; a request through it completes when the destination
-# replies, which needs a final status after CONNECT 200, or a 2xx or 3xx for an HTTP URL.
+# replies, which needs a final status after CONNECT 200, or a 2xx or 3xx for an HTTP URL. Proxies are tried in order
+# until a request through one completes, and the first that answers is reported when none does.
 # Names here resolve through the system resolver, so on a network with dead DNS these fail too.
 proxy_passes=false proxy_silent=false proxies_tried=0
 if [[ "$config_state" == unreadable ]]; then
@@ -302,11 +306,13 @@ elif (( $#upstreams )); then
         if [[ -n "$answer" ]]; then
             if (( curl_status == 0 )) && [[ "$connect" == 200 || ( "$connect" != <100-599> && "$code" == <200-399> ) ]]; then
                 proxy_passes=true proxy_answered="$upstream$answer, a request through it completed"
-            else
+                break
+            fi
+            if [[ -z "$proxy_answered" ]]; then
                 proxy_answered="$upstream$answer, no request through it completed"
                 (( curl_status )) && proxy_answered+=" (curl exit $curl_status)"
             fi
-            break
+            continue
         fi
         if (( curl_status == 5 )); then
             misses+=("$upstream name does not resolve")
@@ -358,12 +364,21 @@ conduit_check() { # <id> <label> <port>: not answering is a failure only while t
 conduit_check forwarder "Conduit DNS forwarder answers" "$forwarder_port"
 conduit_check relay "Conduit relay on :53 answers" 53
 if [[ -n "$system_dns" ]]; then
-    dns_query "$system_dns" "$system_port" "$name"
+    # The next server is asked only when one does not answer, so the first answer stands for the resolver.
+    tried=()
+    for server port in "${(@)system_servers[1,6]}"; do
+        dns_query "$server" "$port" "$name"
+        tried+=("$(shown "$server" "$port")")
+        if [[ "$rcode" != timeout ]]; then select_system "$server" "$port"; break; fi
+    done
     rcodes[system]=$rcode
     if [[ "$rcode" == NOERROR ]] && (( addresses )); then
         check system "system resolver resolves the name" ok "@$system_shown NOERROR, A records: $addresses"
     elif [[ "$rcode" == NOERROR ]]; then
         check system "system resolver resolves the name" fail "@$system_shown NOERROR with no address"
+    elif [[ "$rcode" == timeout ]]; then
+        system_shown="${(j:, :)tried}"
+        check system "system resolver resolves the name" fail "@${(j:, @:)tried} timeout"
     else
         check system "system resolver resolves the name" fail "@$system_shown $rcode"
     fi
