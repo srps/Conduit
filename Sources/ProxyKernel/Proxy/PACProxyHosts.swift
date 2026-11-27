@@ -122,6 +122,18 @@ package struct ProxyHostNames: Hashable, Sendable {
         names.contains(Self.normalize(name))
     }
 
+    /// Whether `name` is one of the names, or one followed by more labels, as a stub resolver appends a search domain
+    /// to a relative name. The network can set that domain, so any suffix counts.
+    package func containsOrSearchExpands(_ name: String) -> Bool {
+        let name = Self.normalize(name)
+        var dot = name.firstIndex(of: ".")
+        while let end = dot {
+            if names.contains(String(name[..<end])) { return true }
+            dot = name[name.index(after: end)...].firstIndex(of: ".")
+        }
+        return names.contains(name)
+    }
+
     package var isEmpty: Bool { names.isEmpty }
 
     static func normalize(_ host: String) -> String {

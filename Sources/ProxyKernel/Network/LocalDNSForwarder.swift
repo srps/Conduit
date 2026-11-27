@@ -1223,9 +1223,11 @@ final class DNSResolutionCore: @unchecked Sendable {
     /// Events carry how many servers the network names, never which.
     /// A configured upstream or a PAC-learned proxy host: the network server's
     /// answer is unauthenticated, and Conduit sends credentials to its
-    /// upstreams and takes them from the PAC.
+    /// upstreams and takes them from the PAC. A search-expanded form of one is
+    /// what the system resolver asks for a relative upstream name.
     private func isProtectedHost(_ name: String, config: ProxyConfig) -> Bool {
-        Self.credentialHosts(config).contains(Self.normalizedHost(name)) || proxyHostsProvider?().contains(name) == true
+        Self.credentialHosts(config).containsOrSearchExpands(name)
+            || proxyHostsProvider?().containsOrSearchExpands(name) == true
     }
 
     private func askNetworkResolver(
@@ -1252,19 +1254,8 @@ final class DNSResolutionCore: @unchecked Sendable {
     }
 
     /// The upstream proxies' hosts and the PAC file's host, whichever are configured.
-    static func credentialHosts(_ config: ProxyConfig) -> Set<String> {
-        var hosts = Set(config.upstreams.map { normalizedHost($0.host) })
-        if let pacHost = URL(string: config.routing.pacURL)?.host {
-            hosts.insert(normalizedHost(pacHost))
-        }
-        hosts.remove("")
-        return hosts
-    }
-
-    static func normalizedHost(_ host: String) -> String {
-        var host = host.lowercased()
-        while host.hasSuffix(".") { host.removeLast() }
-        return host
+    static func credentialHosts(_ config: ProxyConfig) -> ProxyHostNames {
+        ProxyHostNames(names: config.upstreams.map(\.host) + [URL(string: config.routing.pacURL)?.host].compactMap { $0 })
     }
 
     private func reportNetworkResolverFallback(name: String, servers: Int, outcome: String) {

@@ -168,6 +168,33 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
         ], "one event per outcome per minute")
     }
 
+    /// A stub resolver appends a search domain to a relative name, and a hostile network sets that domain.
+    func testASearchExpandedProxyOrPACHostIsNeverAskedOfTheNetworkServer() async throws {
+        let network = try await networkDNS(answering: true)
+        let doh = try await dohProvider(silent: true)
+        let port = try await start(
+            dohPort: doh.port, networkPort: network.port,
+            proxyHosts: { ProxyHostNames(names: ["pac-proxy"]) },
+            configure: { config in
+                config.upstreams = [
+                    UpstreamProxy(name: "Short", host: "Proxy", port: 8080, priority: 0),
+                    UpstreamProxy(name: "Relative", host: "gw.corp", port: 8080, priority: 1),
+                ]
+                config.routing.pacURL = "http://wpad/proxy.pac"
+            }
+        )
+
+        for name in ["proxy.lan", "PROXY.hostile.example", "gw.corp.lan", "wpad.lan", "pac-proxy.hostile.example"] {
+            let reply = try await rawReply(name, port: port)
+            XCTAssertEqual(reply.map(DNSWireFormat.extractRCode), 2, "SERVFAIL for \(name), never the network's unauthenticated answer")
+        }
+        XCTAssertEqual(network.totalQueries, 0, "no expansion of a protected name reaches the network's server")
+        for name in ["proxyserver.lan", "gw.corporate.lan", "www.proxy.lan"] {
+            let answer = try await SplitDNSProbe.resolve(name, port: port)
+            XCTAssertEqual(answer, Self.networkIP, "\(name) only resembles a protected name, so it still falls back")
+        }
+    }
+
     func testAPACLearnedProxyHostIsNeverAskedOfTheNetworkServer() async throws {
         let network = try await networkDNS(answering: true)
         let doh = try await dohProvider(silent: true)
