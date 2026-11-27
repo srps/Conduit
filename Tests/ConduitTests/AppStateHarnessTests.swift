@@ -1610,6 +1610,24 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(homeService(locations)?.dns["ServerAddresses"], .list(["192.0.2.1"]), "the newly eligible service keeps its own DNS")
     }
 
+    /// A Settings save held by an uninstall that is then refused is saved once the fence lifts, even though the refused restore's Stop
+    /// cost the editor its baseline: the draft is kept and saved again over a fresh read.
+    func testASaveHeldByARefusedUninstallIsSaved() async throws {
+        let (state, locations) = try await runManagedSystemDNS()
+        locations.refuseWrites(true)
+
+        state.uninstallHelper()
+        state.config.profileName = "Edited"
+        state.saveConfig()
+        await harness.settle("the uninstall was refused") { state.eventLog.events.contains { $0.event == "helper.uninstall_refused" } }
+        await harness.settle("the held save landed") {
+            (try? ProxyConfigPersistence.load(in: self.harness.environment, allowMissing: false))?.profileName == "Edited"
+        }
+        XCTAssertEqual(state.config.profileName, "Edited")
+        XCTAssertEqual(harness.helper.uninstalls, 0)
+        locations.refuseWrites(false)
+    }
+
     /// A busy reading keeps the held verdict and asks for one more read; a conclusive one ends the re-read.
     func testABusyHelperKeepsItsVerdictAndIsReadAgain() async throws {
         let harness = try makeHarness()
