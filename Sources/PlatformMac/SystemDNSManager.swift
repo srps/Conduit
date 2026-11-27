@@ -179,10 +179,10 @@ package final class SystemDNSManager: @unchecked Sendable {
     }
 
     /// Restores system DNS and stops the relay. `keepingRelayWhileInUse` is
-    /// for a teardown whose forwarder stays up: a failed restore that leaves
-    /// a service on 127.0.0.1, or that cannot be read back, keeps the relay
-    /// serving it and returns `relayKept` instead of throwing. A failed
-    /// restore keeps its journal for retry either way. Only a manager with
+    /// for a teardown whose forwarder stays up: a restore, failed or not,
+    /// that leaves a service on 127.0.0.1, or that cannot be read back, keeps
+    /// the relay serving it and returns `relayKept` instead of throwing. A
+    /// failed restore keeps its journal for retry either way. Only a manager with
     /// location recovery keeps the relay; the `networksetup` path stops it
     /// before it restores.
     @discardableResult
@@ -193,11 +193,16 @@ package final class SystemDNSManager: @unchecked Sendable {
             do {
                 try locationRecovery.clear(kind: .dns, config: configProvider())
             } catch {
-                if keepingRelayWhileInUse, let kept = Self.relayKept(after: error, reading: locationRecovery.dnsReleaseReading()) {
+                if keepingRelayWhileInUse, let kept = Self.relayKept(reason: error.localizedDescription,
+                                                                     reading: locationRecovery.dnsReleaseReading()) {
                     return kept
                 }
                 stopRelay(logger: logger)
                 throw error
+            }
+            // The journal covers only the services Conduit wrote. A copy of a location made while it pointed at the relay is not one.
+            if keepingRelayWhileInUse, let kept = Self.relayKept(reason: "loopback_remains", reading: locationRecovery.dnsReleaseReading()) {
+                return kept
             }
             stopRelay(logger: logger)
             return .relayStopped
@@ -206,13 +211,13 @@ package final class SystemDNSManager: @unchecked Sendable {
         return .relayStopped
     }
 
-    /// Whether a failed restore leaves anything on the relay: a service still on 127.0.0.1, or a reading that cannot say.
-    private static func relayKept(after error: Error, reading: SystemDNSReleaseReading) -> SystemDNSClearOutcome? {
+    /// Whether a restore leaves anything on the relay: a service still on 127.0.0.1, or a reading that cannot say.
+    private static func relayKept(reason: String, reading: SystemDNSReleaseReading) -> SystemDNSClearOutcome? {
         switch reading {
         case .remaining(_, let residue) where !residue.isEmpty:
-            return .relayKept(reason: error.localizedDescription, loopbackServices: residue.count)
+            return .relayKept(reason: reason, loopbackServices: residue.count)
         case .unreadable:
-            return .relayKept(reason: error.localizedDescription, loopbackServices: nil)
+            return .relayKept(reason: reason, loopbackServices: nil)
         case .remaining, .released:
             return nil
         }
@@ -806,8 +811,8 @@ package struct SystemDNSResidue: Equatable, Sendable {
 /// What `SystemDNSManager.clear` did with the relay.
 package enum SystemDNSClearOutcome: Equatable, Sendable {
     case relayStopped
-    /// The restore failed while services still use the relay, so it keeps serving them. `loopbackServices` is nil when the settings
-    /// could not be read back after the failure.
+    /// Services still use the relay after the restore, so it keeps serving them. `loopbackServices` is nil when the settings could not
+    /// be read back.
     case relayKept(reason: String, loopbackServices: Int?)
 }
 
