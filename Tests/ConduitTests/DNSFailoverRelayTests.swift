@@ -297,6 +297,97 @@ final class DNSFailoverRelayTests: XCTestCase {
         XCTAssertEqual(conduit.total, 0)
     }
 
+    /// A server whose socket cannot be made, and which then comes back.
+    private final class Endpoints: @unchecked Sendable {
+        private let lock = NSLock()
+        private var ports: [String: Int]
+        private var broken: Set<String> = []
+        private var _made: [String: Int] = [:]
+        private var _changes: [DNSFailoverServerSocket] = []
+
+        init(_ ports: [String: Int]) { self.ports = ports }
+
+        func breaks(_ server: String, _ broken: Bool) {
+            lock.withLock { if broken { self.broken.insert(server) } else { self.broken.remove(server) } }
+        }
+
+        func endpoint(_ server: String) -> DNSFailoverEndpoint {
+            lock.withLock {
+                _made[server, default: 0] += 1
+                return DNSFailoverEndpoint(host: "127.0.0.1", port: broken.contains(server) ? 0 : ports[server] ?? 9)
+            }
+        }
+
+        func record(_ change: DNSFailoverServerSocket) { lock.withLock { _changes.append(change) } }
+        var made: [String: Int] { lock.withLock { _made } }
+        var changes: [DNSFailoverServerSocket] { lock.withLock { _changes } }
+    }
+
+    private func relay(conduitPort: Int, endpoints: Endpoints, order: [String], timing: DNSFailoverTiming) -> DNSFailoverRelay {
+        let relay = DNSFailoverRelay(
+            listenPort: 0, maximumTCPSessions: 4, timing: timing,
+            serverEndpoint: { endpoints.endpoint($0) }, serverSocket: { endpoints.record($0) }
+        )
+        relays.append(relay)
+        XCTAssertEqual(relay.start(targetPort: conduitPort), [])
+        relay.setFailoverServers(order)
+        return relay
+    }
+
+    func testAServerWithNoSocketIsSkippedAndAskedOnceItsSocketIsBack() throws {
+        let conduit = try standIn(conduitIP)
+        let first = try standIn(vpnIP)
+        let second = try standIn("198.51.100.21")
+        let endpoints = Endpoints(["192.0.2.1": first.port, "192.0.2.2": second.port])
+        endpoints.breaks("192.0.2.1", true)
+        var timing = DNSFailoverTiming.fast
+        timing.serverSpacing = .seconds(2)
+        timing.socketRetry = .milliseconds(100)
+        let relay = relay(conduitPort: conduit.port, endpoints: endpoints, order: ["192.0.2.1", "192.0.2.2"], timing: timing)
+        relay.setMode(.vpn)
+
+        let skipped = ask(relay)
+        XCTAssertEqual(skipped.ip, "198.51.100.21", "the first server has no socket, so the second is asked")
+        XCTAssertLessThan(skipped.seconds, 1, "at once, not after the server spacing")
+        XCTAssertTrue(endpoints.changes.contains {
+            if case .unavailable(server: "192.0.2.1", _, retryMilliseconds: 100) = $0 { true } else { false }
+        }, "\(endpoints.changes)")
+
+        endpoints.breaks("192.0.2.1", false)
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertTrue(endpoints.changes.contains(.restored(server: "192.0.2.1")))
+        XCTAssertEqual(ask(relay).ip, vpnIP, "recovered, the first server is first again")
+    }
+
+    func testASocketThatKeepsFailingBacksOffToTheLimit() throws {
+        let conduit = try standIn(conduitIP)
+        let endpoints = Endpoints([:])
+        endpoints.breaks("192.0.2.1", true)
+        var timing = DNSFailoverTiming.fast
+        timing.socketRetry = .milliseconds(50)
+        timing.socketRetryLimit = .milliseconds(200)
+        _ = relay(conduitPort: conduit.port, endpoints: endpoints, order: ["192.0.2.1"], timing: timing)
+        Thread.sleep(forTimeInterval: 2)
+        let delays = endpoints.changes.compactMap { change -> Int? in
+            if case .unavailable(_, _, let retry) = change { retry } else { nil }
+        }
+        XCTAssertEqual(Array(delays.prefix(4)), [50, 100, 200, 200])
+        XCTAssertLessThan(endpoints.made["192.0.2.1"] ?? 0, 15, "bounded, not once per loop wake")
+    }
+
+    func testAPathChangeMakesEveryServerSocketAgain() throws {
+        let conduit = try standIn(conduitIP)
+        let vpn = try standIn(vpnIP)
+        let endpoints = Endpoints(["192.0.2.1": vpn.port])
+        let relay = relay(conduitPort: conduit.port, endpoints: endpoints, order: ["192.0.2.1"], timing: .fast)
+        relay.setMode(.vpn)
+        XCTAssertEqual(ask(relay).ip, vpnIP)
+        XCTAssertEqual(endpoints.made["192.0.2.1"], 1)
+        relay.renewServerSockets()
+        XCTAssertEqual(ask(relay).ip, vpnIP)
+        XCTAssertEqual(endpoints.made["192.0.2.1"], 2)
+    }
+
     func testTheFirstReplyWinsAndALaterOneIsDropped() throws {
         let conduit = try standIn(conduitIP)
         let slow = try standIn("198.51.100.1")

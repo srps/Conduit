@@ -71,6 +71,13 @@ package enum DNSFailoverServers {
     }
 }
 
+/// A failover server's UDP socket going away or coming back.
+package enum DNSFailoverServerSocket: Equatable, Sendable {
+    /// No socket for `server`; it is skipped until it is made again in `retryMilliseconds`.
+    case unavailable(server: String, reason: String, retryMilliseconds: Int)
+    case restored(server: String)
+}
+
 /// Counters of real queries the UDP half sent to Conduit.
 package struct DNSFailoverProgress: Equatable, Sendable {
     package var answered: Int
@@ -87,12 +94,19 @@ package final class DNSFailoverRoute: @unchecked Sendable {
     private let lock = NSLock()
     private var _mode: DNSFailoverMode = .conduit
     private var _servers: [String] = []
+    private var _socketEpoch: UInt64 = 0
     private var observers: [@Sendable () -> Void] = []
 
     package init() {}
 
     package var mode: DNSFailoverMode { lock.withLock { _mode } }
     package var servers: [String] { lock.withLock { _servers } }
+    package var socketEpoch: UInt64 { lock.withLock { _socketEpoch } }
+
+    /// The machine's path changed: every server socket is made again, so none stays bound to a gone interface.
+    package func renewSockets() {
+        lock.withLock { _socketEpoch &+= 1 }
+    }
 
     package func setMode(_ mode: DNSFailoverMode) {
         let notify = lock.withLock { () -> [@Sendable () -> Void] in
@@ -136,6 +150,9 @@ package struct DNSFailoverTiming: Sendable {
     package var firstQueryTimeout: Duration = .seconds(2)
     /// The loop's wake interval while anything is pending.
     package var granularity: Duration = .milliseconds(50)
+    /// A server whose socket could not be made, or failed a send, is tried again after this, doubling to the limit.
+    package var socketRetry: Duration = .seconds(1)
+    package var socketRetryLimit: Duration = .seconds(30)
 
     package init() {}
 
@@ -299,6 +316,7 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
     private let timing: DNSFailoverTiming
     private let serverEndpoint: @Sendable (String) -> DNSFailoverEndpoint
     private let droppedAtCapacity: @Sendable (Int) -> Void
+    private let serverSocket: @Sendable (DNSFailoverServerSocket) -> Void
     private let lock = NSLock()
     private var listenFD: Int32 = -1
     private var conduitFD: Int32 = -1
@@ -312,12 +330,14 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
         route: DNSFailoverRoute,
         timing: DNSFailoverTiming = .standard,
         serverEndpoint: @escaping @Sendable (String) -> DNSFailoverEndpoint = { DNSFailoverEndpoint(host: $0, port: 53) },
-        droppedAtCapacity: @escaping @Sendable (Int) -> Void = { _ in }
+        droppedAtCapacity: @escaping @Sendable (Int) -> Void = { _ in },
+        serverSocket: @escaping @Sendable (DNSFailoverServerSocket) -> Void = { _ in }
     ) {
         self.route = route
         self.timing = timing
         self.serverEndpoint = serverEndpoint
         self.droppedAtCapacity = droppedAtCapacity
+        self.serverSocket = serverSocket
     }
 
     package var isRunning: Bool { lock.withLock { listenFD >= 0 } }
@@ -404,6 +424,9 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
         var lastConduitReply: UInt64 = 0
         var servers: [String] = []
         var sockets: [String: Int32] = [:]
+        /// When a server with no socket is next tried, and the delay that got it there.
+        var retry: [String: (at: UInt64, delay: UInt64)] = [:]
+        var socketEpoch: UInt64 = 0
         var dropped = 0
     }
 
@@ -420,11 +443,16 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
         let idle = Int32(1_000)
         let busy = max(1, FailoverSocket.milliseconds(timing.granularity))
         while !Thread.current.isCancelled {
-            refreshSockets(&loop)
+            refreshSockets(&loop, now: FailoverSocket.now)
             var fds = [pollfd(fd: lfd, events: Int16(POLLIN), revents: 0), pollfd(fd: cfd, events: Int16(POLLIN), revents: 0)]
             let order = loop.servers.filter { loop.sockets[$0] != nil }
             fds += order.map { pollfd(fd: loop.sockets[$0]!, events: Int16(POLLIN), revents: 0) }
-            let ready = poll(&fds, nfds_t(fds.count), loop.pending.isEmpty && loop.probe == nil ? idle : busy)
+            var wait = loop.pending.isEmpty && loop.probe == nil ? idle : busy
+            if let due = loop.retry.values.map(\.at).min() {
+                let now = FailoverSocket.now
+                wait = min(wait, due > now ? Int32(clamping: max(1, (due - now) / 1_000_000)) : 1)
+            }
+            let ready = poll(&fds, nfds_t(fds.count), wait)
             if ready < 0 {
                 if errno == EINTR || errno == EAGAIN { continue }
                 break
@@ -452,17 +480,44 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
         }
     }
 
-    private func refreshSockets(_ loop: inout Loop) {
+    private func refreshSockets(_ loop: inout Loop, now: UInt64) {
         let servers = Array(route.servers.prefix(Self.maximumServersPerQuery))
-        guard servers != loop.servers else { return }
+        let epoch = route.socketEpoch
+        if epoch != loop.socketEpoch {
+            for fd in loop.sockets.values { close(fd) }
+            loop.sockets = [:]
+            loop.retry = [:]
+            loop.socketEpoch = epoch
+            // A reply to a query sent on a closed socket is lost, so each such query is asked again on the new ones.
+            for key in Array(loop.pending.keys) where loop.pending[key]?.conduitSentAt == nil {
+                loop.pending[key]?.tried = []
+                loop.pending[key]?.lastSentAt = 0
+            }
+        }
         for (server, fd) in loop.sockets where !servers.contains(server) {
             close(fd)
             loop.sockets[server] = nil
         }
-        for server in servers where loop.sockets[server] == nil {
-            loop.sockets[server] = FailoverSocket.connected(serverEndpoint(server), type: SOCK_DGRAM)
-        }
+        loop.retry = loop.retry.filter { servers.contains($0.key) }
         loop.servers = servers
+        for server in servers where loop.sockets[server] == nil {
+            if let retry = loop.retry[server], now < retry.at { continue }
+            if let fd = FailoverSocket.connected(serverEndpoint(server), type: SOCK_DGRAM) {
+                loop.sockets[server] = fd
+                if loop.retry.removeValue(forKey: server) != nil { serverSocket(.restored(server: server)) }
+            } else {
+                unavailable(server, String(cString: strerror(errno)), &loop, now: now)
+            }
+        }
+    }
+
+    /// Schedules the next try with bounded backoff and reports it.
+    private func unavailable(_ server: String, _ reason: String, _ loop: inout Loop, now: UInt64) {
+        if let fd = loop.sockets.removeValue(forKey: server) { close(fd) }
+        let base = FailoverSocket.nanoseconds(timing.socketRetry)
+        let delay = loop.retry[server].map { min($0.delay * 2, FailoverSocket.nanoseconds(timing.socketRetryLimit)) } ?? base
+        loop.retry[server] = (now + delay, delay)
+        serverSocket(.unavailable(server: server, reason: reason, retryMilliseconds: Int(delay / 1_000_000)))
     }
 
     private func receiveQueries(_ loop: inout Loop, _ buffer: inout [UInt8], lfd: Int32, cfd: Int32, mode: DNSFailoverMode, now: UInt64) {
@@ -501,7 +556,7 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
                 entry.conduitSentAt = now
                 entry.sentTo.insert(.conduit)
             } else {
-                sendToNextServer(&entry, loop: loop, now: now)
+                sendToNextServer(&entry, loop: &loop, now: now)
             }
             loop.pending[relayTXID] = entry
         }
@@ -514,16 +569,25 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
         return sent == datagram.count
     }
 
+    /// Sends to the next listed server not yet attempted. A server with no socket is skipped, not attempted, so it is
+    /// asked once its socket is back; a send that fails outright is attempted, drops the socket and moves on at once.
     @discardableResult
-    private func sendToNextServer(_ entry: inout Entry, loop: Loop, now: UInt64) -> Bool {
-        guard entry.tried.count < Self.maximumServersPerQuery,
-              let server = loop.servers.first(where: { !entry.tried.contains($0) }),
-              let fd = loop.sockets[server] else { return false }
-        entry.tried.append(server)
-        entry.lastSentAt = now
-        entry.sentTo.insert(.server(server))
-        _ = Darwin.send(fd, entry.datagram, entry.datagram.count, 0)
-        return true
+    private func sendToNextServer(_ entry: inout Entry, loop: inout Loop, now: UInt64) -> Bool {
+        for server in loop.servers where entry.tried.count < Self.maximumServersPerQuery && !entry.tried.contains(server) {
+            guard let fd = loop.sockets[server] else { continue }
+            entry.tried.append(server)
+            var sent = Darwin.send(fd, entry.datagram, entry.datagram.count, 0)
+            if sent < 0, errno == ECONNREFUSED { sent = Darwin.send(fd, entry.datagram, entry.datagram.count, 0) }
+            if sent == entry.datagram.count {
+                entry.lastSentAt = now
+                entry.sentTo.insert(.server(server))
+                return true
+            }
+            if sent < 0, errno != ENOBUFS, errno != EAGAIN {
+                unavailable(server, "send: \(String(cString: strerror(errno)))", &loop, now: now)
+            }
+        }
+        return false
     }
 
     /// A probe entry is never failed over: Conduit refused it, and its asker hears REFUSED, or Conduit was silent, and it
@@ -538,7 +602,7 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
             }
             if !refused { conduitUnanswered += 1 }
             entry.conduitSentAt = nil
-            sendToNextServer(&entry, loop: loop, now: now)
+            sendToNextServer(&entry, loop: &loop, now: now)
             loop.pending[key] = entry
         }
     }
@@ -617,7 +681,7 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
             for key in Array(loop.pending.keys) where loop.pending[key].map({ $0.conduitSentAt != nil && !$0.isProbe }) == true {
                 loop.pending[key]?.conduitSentAt = nil
                 if var entry = loop.pending[key] {
-                    sendToNextServer(&entry, loop: loop, now: now)
+                    sendToNextServer(&entry, loop: &loop, now: now)
                     loop.pending[key] = entry
                 }
             }
@@ -644,7 +708,8 @@ package final class DNSFailoverUDPRelay: @unchecked Sendable {
         for key in loop.pending.keys {
             guard var entry = loop.pending[key], entry.conduitSentAt == nil, !entry.isProbe,
                   entry.tried.isEmpty || now - entry.lastSentAt >= spacing else { continue }
-            if sendToNextServer(&entry, loop: loop, now: now) { loop.pending[key] = entry }
+            sendToNextServer(&entry, loop: &loop, now: now)
+            loop.pending[key] = entry
         }
     }
 
@@ -905,12 +970,16 @@ package final class DNSFailoverRelay: @unchecked Sendable {
         timing: DNSFailoverTiming = .standard,
         serverEndpoint: @escaping @Sendable (String) -> DNSFailoverEndpoint = { DNSFailoverEndpoint(host: $0, port: 53) },
         droppedAtCapacity: @escaping @Sendable (Int) -> Void = { _ in },
-        refusedAtCapacity: @escaping @Sendable (Int) -> Void = { _ in }
+        refusedAtCapacity: @escaping @Sendable (Int) -> Void = { _ in },
+        serverSocket: @escaping @Sendable (DNSFailoverServerSocket) -> Void = { _ in }
     ) {
         let route = DNSFailoverRoute()
         self.route = route
         self.listenPort = listenPort
-        udp = DNSFailoverUDPRelay(route: route, timing: timing, serverEndpoint: serverEndpoint, droppedAtCapacity: droppedAtCapacity)
+        udp = DNSFailoverUDPRelay(
+            route: route, timing: timing, serverEndpoint: serverEndpoint, droppedAtCapacity: droppedAtCapacity,
+            serverSocket: serverSocket
+        )
         tcp = DNSFailoverTCPRelay(
             route: route, maximumSessions: maximumTCPSessions, timing: timing, serverEndpoint: serverEndpoint,
             refusedAtCapacity: refusedAtCapacity
@@ -929,6 +998,7 @@ package final class DNSFailoverRelay: @unchecked Sendable {
     package var mode: DNSFailoverMode { route.mode }
     package func setMode(_ mode: DNSFailoverMode) { route.setMode(mode) }
     package func setFailoverServers(_ servers: [String]) { route.setServers(servers) }
+    package func renewServerSockets() { route.renewSockets() }
 
     /// Starts each half that is not already running for `targetPort`; returns what failed, one line per half.
     package func start(targetPort: Int) -> [String] {

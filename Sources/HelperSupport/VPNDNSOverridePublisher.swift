@@ -50,6 +50,8 @@ package protocol VPNDNSFailoverRelay: AnyObject {
     var mode: DNSFailoverMode { get }
     func setMode(_ mode: DNSFailoverMode)
     func setFailoverServers(_ servers: [String])
+    /// Makes every failover server socket again, after the machine's path changed.
+    func renewServerSockets()
     /// Asks the reserved probe name through the relay's own UDP and TCP listener.
     func probe() -> DNSFailoverProbe
     /// Real queries Conduit answered and left unanswered, both monotonic.
@@ -161,6 +163,7 @@ package final class VPNDNSOverridePublisher {
     private var consecutiveSilent = 0
     private var lastConfirmed: UInt64?
     private var lastProgress = DNSFailoverProgress(answered: 0, unanswered: 0)
+    private var lastPrimary: String??
     private let now: () -> UInt64
 
     /// `now` is monotonic nanoseconds.
@@ -370,6 +373,9 @@ package final class VPNDNSOverridePublisher {
             servers = VPNDNSOverrideValidation.failoverServers(listed)
         }
         relay.setFailoverServers(servers)
+        let primary = store.primaryService()
+        if let seen = lastPrimary, seen != primary { relay.renewServerSockets() }
+        lastPrimary = primary
     }
 
     private func resetProbe() {

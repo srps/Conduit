@@ -887,8 +887,15 @@ package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked S
     private var _tcpVerdict: DNSFailoverProbeOutcome?
     private var _progress = DNSFailoverProgress(answered: 0, unanswered: 0)
     private var _probes = 0
+    private var _socketRenewals = 0
 
     package init() {}
+
+    package var socketRenewals: Int { lock.withLock { _socketRenewals } }
+
+    package func renewServerSockets() {
+        lock.withLock { _socketRenewals += 1 }
+    }
 
     package var listeningPort: Int? {
         lock.withLock { udp && tcp ? HelperConstants.vpnDNSOverrideRelayPort : nil }

@@ -579,6 +579,14 @@ enum HelperDaemon {
             if total == 1 || total % 100 == 0 {
                 HelperLog.warning("dns-relay failover tcp at_capacity sessions=\(dnsTCPRelayMaximumSessions) refused_total=\(total)")
             }
+        },
+        serverSocket: { change in
+            switch change {
+            case .unavailable(let server, let reason, let retry):
+                HelperLog.warning("dns-relay failover server_unavailable server=\(HelperAudit.safe(server)) error=\"\(HelperAudit.bounded(reason))\" retry_ms=\(retry)")
+            case .restored(let server):
+                HelperLog.notice("dns-relay failover server_restored server=\(HelperAudit.safe(server))")
+            }
         }
     )
 

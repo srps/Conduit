@@ -318,6 +318,17 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         XCTAssertEqual(rig.store.ownKey, key, "the restart grace: one refusal, then an answer, costs no withdrawal")
     }
 
+    func testAChangedPrimaryServiceRenewsTheRelaysServerSockets() {
+        let rig = armed(rig())
+        rig.tick()
+        XCTAssertEqual(rig.relay.socketRenewals, 0)
+        rig.store.primary = "other-service"
+        rig.publisher.sync()
+        XCTAssertEqual(rig.relay.socketRenewals, 1)
+        rig.publisher.sync()
+        XCTAssertEqual(rig.relay.socketRenewals, 1, "only a change renews them")
+    }
+
     func testATCPFailureAloneFailsTheTick() {
         let rig = armed(rig())
         rig.relay.tcpVerdict = .silent
