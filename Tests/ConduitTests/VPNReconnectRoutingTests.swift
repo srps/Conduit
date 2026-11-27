@@ -83,6 +83,10 @@ final class VPNReconnectRoutingTests: XCTestCase {
             let answers = reachable.withLockedValue { $0 }
             return UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: answers) })
         })
+        addTeardownBlock { @RuntimeActor in
+            await orchestrator.stopDNS()
+            await orchestrator.stopProxy()
+        }
         try await orchestrator.startProxy()
         await orchestrator.startDNS()
         XCTAssertEqual(orchestrator.snapshot.dnsRunState, .running, "DNS forwarder must bind for this test")
@@ -142,8 +146,6 @@ final class VPNReconnectRoutingTests: XCTestCase {
         XCTAssertEqual(afterForwarderOffVPN, afterOriginOnVPN, "off the VPN a forwarder lookup leaves the local proxy alone")
         let afterOriginOffVPN = try await proxyConnectionsAfterOriginLookup(of: "off.origin.example")
         XCTAssertEqual(afterOriginOffVPN, afterOriginOnVPN, "off the VPN an origin lookup leaves the local proxy alone")
-        await orchestrator.stopDNS()
-        await orchestrator.stopProxy()
     }
 
     private final class CountingAuditSink: ConnectionAuditSink {
