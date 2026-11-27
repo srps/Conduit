@@ -49,7 +49,10 @@ final class RuntimeHostVPNDNSOverrideTests: XCTestCase {
         XCTAssertNotEqual(try audited.vpnDNSOverride(.status), .unsupported)
     }
 
-    @RuntimeActor private func start(override client: ScriptedVPNDNSOverrideClient?) async throws -> Running {
+    /// `locations` restores system DNS through location recovery, which can keep the relay serving; `dnsOnly` starts DNS alone.
+    @RuntimeActor private func start(
+        override client: ScriptedVPNDNSOverrideClient?, locations: FakeNetworkLocationStore? = nil, dnsOnly: Bool = false
+    ) async throws -> Running {
         let corp = try await FakeSplitDNSServer.start(domain: "corp.example", ip: corpIP)
         let doh = try await AnsweringDoHProvider.start(group: MultiThreadedEventLoopGroup.singleton, ip: "203.0.113.7")
         addTeardownBlock {
@@ -69,8 +72,13 @@ final class RuntimeHostVPNDNSOverrideTests: XCTestCase {
         harness.dnsForwarderTuning = SplitDNSProbe.tuning([tunnelServer: corp.port])
         harness.pushedResolvers.primedReading = PushedResolverReading(resolvers: [fullTunnel()])
         harness.vpnDNSOverride = client
+        harness.locationStore = locations
         let host = try await harness.makeHost()
-        try await host.startRuntime()
+        if dnsOnly {
+            _ = try await host.startDNS()
+        } else {
+            try await host.startRuntime()
+        }
         await host.deliveries.drain()
         XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running)
         XCTAssertTrue(host.vpnDNSOverrideRelayServing, "the health timer watches the relay")
@@ -215,5 +223,32 @@ final class RuntimeHostVPNDNSOverrideTests: XCTestCase {
             XCTAssertLessThan(disarmed, relayStop)
         }
         XCTAssertNil(client.arm)
+    }
+
+    /// A Stop whose restore is refused keeps the relay and rearms its health timer for the service still on it, but the Stop's fence
+    /// keeps the override disarmed until the next DNS Start.
+    @RuntimeActor func testAKeptStopKeepsTheOverrideDisarmedUntilTheNextDNSStart() async throws {
+        try requireForwardingAudit()
+        let client = ScriptedVPNDNSOverrideClient()
+        let locations = NetworkLocationFixture.store()
+        let running = try await start(override: client, locations: locations)
+        await running.report(.connected, live: ["utun6"])
+        XCTAssertNotNil(client.arm)
+        locations.refuseWrites(true)
+
+        let kept = await running.host.stopDNS()
+        XCTAssertEqual(kept.keptServing, [.dns])
+        XCTAssertNotNil(running.host.dnsHealthTimer, "the relay's probe still runs for the service on it")
+        let port = try XCTUnwrap(running.host.orchestrator.snapshot.bindings.dnsPort)
+        running.host.handleDNSHealthResult(alive: true, forwarderPort: port, armedBy: running.host.lanes.dns.observationToken)
+        await running.host.deliveries.drain()
+        XCTAssertNil(client.arm, "a good reading after the Stop does not put the relay back in front of the VPN")
+
+        _ = try await running.host.startDNS()
+        running.host.requestVPNDNSOverrideRun(pollStatus: true)
+        await running.host.deliveries.drain()
+        XCTAssertEqual(client.arm, VPNResolverOverrideArm(service: "com.cisco.anyconnect", servers: [tunnelServer]))
+        locations.refuseWrites(false)
+        await running.host.stopRuntime()
     }
 }
