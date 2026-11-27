@@ -884,6 +884,8 @@ package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked S
     private var _mode: DNSFailoverMode = .conduit
     private var _servers: [String] = []
     private var _verdict: DNSFailoverProbeOutcome = .answered
+    private var _tcpVerdict: DNSFailoverProbeOutcome?
+    private var _progress = DNSFailoverProgress(answered: 0, unanswered: 0)
     private var _probes = 0
 
     package init() {}
@@ -902,6 +904,17 @@ package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked S
         set { lock.withLock { _verdict = newValue } }
     }
 
+    /// The TCP half's verdict when it differs from `verdict`.
+    package var tcpVerdict: DNSFailoverProbeOutcome? {
+        get { lock.withLock { _tcpVerdict } }
+        set { lock.withLock { _tcpVerdict = newValue } }
+    }
+
+    package var conduitProgress: DNSFailoverProgress {
+        get { lock.withLock { _progress } }
+        set { lock.withLock { _progress = newValue } }
+    }
+
     package var tcpBindFails: Bool {
         get { lock.withLock { _tcpBindFails } }
         set { lock.withLock { _tcpBindFails = newValue } }
@@ -914,11 +927,11 @@ package final class FakeDNSFailoverRelay: FakeMachineFailoverRelay, @unchecked S
         lock.withLock { _servers = usable }
     }
 
-    package func probe() -> DNSFailoverProbeOutcome {
+    package func probe() -> DNSFailoverProbe {
         lock.withLock {
-            guard udp else { return .notRunning }
+            guard udp, tcp else { return DNSFailoverProbe(.notRunning) }
             _probes += 1
-            return _verdict
+            return DNSFailoverProbe(udp: _verdict, tcp: _tcpVerdict ?? _verdict)
         }
     }
 

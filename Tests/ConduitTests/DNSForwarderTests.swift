@@ -1123,9 +1123,9 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         XCTAssertEqual(relay.start(targetPort: port), [])
         defer { relay.stop() }
 
-        XCTAssertEqual(relay.probe(), .answered)
+        XCTAssertEqual(relay.probe(), DNSFailoverProbe(.answered), "through the relay's UDP and TCP listener")
         await stopOwnedForwarder()
-        XCTAssertEqual(relay.probe(), .refused)
+        XCTAssertEqual(relay.probe(), DNSFailoverProbe(.refused))
     }
 
     /// Starts the owned forwarder with one split-DNS domain on the loopback

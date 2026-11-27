@@ -298,6 +298,8 @@ final class HelperVPNDNSOverrideTests: XCTestCase {
 
         machine.dnsTCPRelayBindFails = false
         try machine.execute(.startDNSRelay, values: ["5053"])
+        XCTAssertNil(machine.vpnDNSStore.ownKey, "the arm's probe found no TCP half to ask through")
+        machine.tickVPNDNSOverride()
         XCTAssertNotNil(machine.vpnDNSStore.ownKey)
         machine.killDNSTCPRelay()
         machine.syncVPNDNSOverride()

@@ -905,7 +905,9 @@ final class DNSResolutionCore: @unchecked Sendable {
         onMetrics?()
     }
 
-    /// Asked on the event loop before admission: the probe never waits on a slot, the cache or DoH, and is not counted.
+    /// Asked on the event loop once admitted, so a forwarder whose slots are all taken answers the probe as it answers
+    /// every lookup, SERVFAIL, and the helper's relay sees the saturation. The probe never waits on the cache or DoH,
+    /// holds its slot only while it is answered, and is not counted.
     func forwarderProbeResponse(for query: [UInt8]) -> [UInt8]? {
         guard DNSWireFormat.isForwarderProbe(query) else { return nil }
         return DNSWireFormat.emptyDNSResponse(originalQuery: query, rcode: 3)
@@ -1753,17 +1755,17 @@ private final class DNSUDPHandler: ChannelInboundHandler, @unchecked Sendable {
         // length-prefix framing rejects malformed input earlier still.
         guard queryBytes.count >= 12 else { return }
 
-        if let probeReply = core.forwarderProbeResponse(for: queryBytes) {
-            write(probeReply, to: clientAddress, on: channel)
-            return
-        }
-
         // Admission first, on the event loop: a flood must be turned away
         // before it can allocate a task each. See `admitQuery()`.
         guard let ticket = core.admitQuery() else {
             if let servfail = core.overLimitResponse(for: queryBytes) {
                 write(servfail, to: clientAddress, on: channel)
             }
+            return
+        }
+        if let probeReply = core.forwarderProbeResponse(for: queryBytes) {
+            core.releaseQuery(ticket)
+            write(probeReply, to: clientAddress, on: channel)
             return
         }
 
@@ -2000,16 +2002,16 @@ private final class DNSTCPHandler: ChannelInboundHandler, @unchecked Sendable {
         let core = self.core
         let logger = self.logger
 
-        if let probeReply = core.forwarderProbeResponse(for: queryBytes) {
-            Self.write(probeReply, on: channel, logger: logger)
-            return
-        }
-
         // Admission first, on the event loop. See `DNSResolutionCore.admitQuery()`.
         guard let ticket = core.admitQuery() else {
             if let servfail = core.overLimitResponse(for: queryBytes) {
                 Self.write(servfail, on: channel, logger: logger)
             }
+            return
+        }
+        if let probeReply = core.forwarderProbeResponse(for: queryBytes) {
+            core.releaseQuery(ticket)
+            Self.write(probeReply, on: channel, logger: logger)
             return
         }
 

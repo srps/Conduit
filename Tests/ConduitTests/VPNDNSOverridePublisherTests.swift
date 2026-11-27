@@ -318,6 +318,35 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         XCTAssertEqual(rig.store.ownKey, key, "the restart grace: one refusal, then an answer, costs no withdrawal")
     }
 
+    func testATCPFailureAloneFailsTheTick() {
+        let rig = armed(rig())
+        rig.relay.tcpVerdict = .silent
+        for _ in 0..<3 { rig.tick() }
+        XCTAssertNil(rig.store.ownKey, "both halves must answer")
+        XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .targetSilent))
+        XCTAssertTrue(rig.outcomes.contains { $0.logLine.contains("udp=answered tcp=silent") })
+    }
+
+    func testAProbeAnswerCannotHideAForwarderThatDropsEveryRealQuery() {
+        let rig = armed(rig())
+        for tick in 1...3 {
+            rig.relay.conduitProgress = DNSFailoverProgress(answered: 0, unanswered: tick * 4)
+            rig.tick()
+        }
+        XCTAssertNil(rig.store.ownKey)
+        XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .targetSilent))
+        XCTAssertTrue(rig.outcomes.contains(.queriesUnanswered(service: service, unanswered: 4)))
+    }
+
+    func testSomeUnansweredQueriesBesideAnsweredOnesAreProgress() {
+        let rig = armed(rig())
+        for tick in 1...4 {
+            rig.relay.conduitProgress = DNSFailoverProgress(answered: tick * 10, unanswered: tick)
+            rig.tick()
+        }
+        XCTAssertEqual(rig.store.ownKey, key)
+    }
+
     func testAnArmWhoseProbeFailsWaitsForAnAnsweredTick() {
         let rig = rig()
         rig.relay.verdict = .refused

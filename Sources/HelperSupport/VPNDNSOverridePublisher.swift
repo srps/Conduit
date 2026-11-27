@@ -50,8 +50,10 @@ package protocol VPNDNSFailoverRelay: AnyObject {
     var mode: DNSFailoverMode { get }
     func setMode(_ mode: DNSFailoverMode)
     func setFailoverServers(_ servers: [String])
-    /// Asks Conduit's forwarder the reserved probe name.
-    func probe() -> DNSFailoverProbeOutcome
+    /// Asks the reserved probe name through the relay's own UDP and TCP listener.
+    func probe() -> DNSFailoverProbe
+    /// Real queries Conduit answered and left unanswered, both monotonic.
+    var conduitProgress: DNSFailoverProgress { get }
 }
 
 package struct VPNDNSOverrideArm: Equatable, Sendable {
@@ -76,7 +78,9 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
     case removalRefused(service: String)
     /// The session was closed after a refused removal, and no read has yet shown the key gone; retried each tick.
     case cleanupPending(service: String, reason: VPNDNSOverrideReason)
-    case probeMissed(service: String, verdict: DNSFailoverProbeOutcome, consecutive: Int)
+    case probeMissed(service: String, probe: DNSFailoverProbe, consecutive: Int)
+    /// The probe answered, but since the last tick Conduit answered none of the real queries it left unanswered.
+    case queriesUnanswered(service: String, unanswered: Int)
 
     package var logLine: String {
         let prefix = "vpn-dns-override"
@@ -95,8 +99,11 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
             return "\(prefix) removal_refused service=\(HelperAudit.safe(service)); session closed"
         case .cleanupPending(let service, let reason):
             return "\(prefix) cleanup_pending service=\(HelperAudit.safe(service)) reason=\(reason.rawValue)"
-        case .probeMissed(let service, let verdict, let consecutive):
-            return "\(prefix) probe service=\(HelperAudit.safe(service)) verdict=\(verdict.word) consecutive=\(consecutive)"
+        case .probeMissed(let service, let probe, let consecutive):
+            return "\(prefix) probe service=\(HelperAudit.safe(service)) verdict=\(probe.verdict.word) "
+                + "udp=\(probe.udp.word) tcp=\(probe.tcp.word) consecutive=\(consecutive)"
+        case .queriesUnanswered(let service, let unanswered):
+            return "\(prefix) queries_unanswered service=\(HelperAudit.safe(service)) unanswered=\(unanswered); counted as silent"
         }
     }
 
@@ -153,6 +160,7 @@ package final class VPNDNSOverridePublisher {
     private var consecutiveRefused = 0
     private var consecutiveSilent = 0
     private var lastConfirmed: UInt64?
+    private var lastProgress = DNSFailoverProgress(answered: 0, unanswered: 0)
     private let now: () -> UInt64
 
     /// `now` is monotonic nanoseconds.
@@ -182,7 +190,8 @@ package final class VPNDNSOverridePublisher {
         failoverService = service
         consecutiveRefused = 0
         consecutiveSilent = 0
-        let verdict = relay.probe()
+        let verdict = relay.probe().verdict
+        lastProgress = relay.conduitProgress
         lastVerdict = verdict
         probeOK = verdict == .answered
         lastConfirmed = probeOK ? now() : nil
@@ -229,7 +238,17 @@ package final class VPNDNSOverridePublisher {
             sync()
             return
         }
-        let verdict = relay.probe()
+        let probe = relay.probe()
+        var verdict = probe.verdict
+        let progress = relay.conduitProgress
+        let unanswered = progress.unanswered - lastProgress.unanswered
+        let answered = progress.answered - lastProgress.answered
+        lastProgress = progress
+        if verdict == .answered, unanswered > 0, answered == 0 {
+            // A synthetic answer must not hide a forwarder that drops every real query.
+            report(.queriesUnanswered(service: arm.service, unanswered: unanswered))
+            verdict = .silent
+        }
         switch verdict {
         case .answered:
             resetProbe()
@@ -241,18 +260,18 @@ package final class VPNDNSOverridePublisher {
             consecutiveRefused = min(consecutiveRefused + 1, Self.refusedTicksToWithdraw)
             if consecutiveRefused >= Self.refusedTicksToWithdraw { probeOK = false }
             relay.setMode(.vpn)
-            report(.probeMissed(service: arm.service, verdict: verdict, consecutive: consecutiveRefused))
+            report(.probeMissed(service: arm.service, probe: probe, consecutive: consecutiveRefused))
         case .silent:
             consecutiveRefused = 0
             consecutiveSilent = min(consecutiveSilent + 1, Self.silentTicksToWithdraw)
             if consecutiveSilent >= Self.silentTicksToWithdraw { probeOK = false }
             relay.setMode(.vpn)
-            report(.probeMissed(service: arm.service, verdict: verdict, consecutive: consecutiveSilent))
+            report(.probeMissed(service: arm.service, probe: probe, consecutive: consecutiveSilent))
         case .notRunning:
             relay.setMode(.vpn)
         case .failed:
             // The helper's own socket failed: no word on the forwarder, so the mode stays, but no confirmation either.
-            report(.probeMissed(service: arm.service, verdict: verdict, consecutive: 0))
+            report(.probeMissed(service: arm.service, probe: probe, consecutive: 0))
         }
         lastVerdict = verdict
         if verdict != .answered, probeOK, let confirmed = lastConfirmed,

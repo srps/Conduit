@@ -227,6 +227,21 @@ final class DNSAdmissionGateTests: XCTestCase {
         try await gate.tearDown()
     }
 
+    /// The reserved probe passes the gate like a lookup, so a forwarder with no slot left answers it SERVFAIL and the
+    /// helper's relay sees the saturation; it gives its slot back before the reply is written.
+    func testTheProbeIsAnsweredOnlyOnceAdmitted() async throws {
+        let gate = await makeGate()
+        let probe = DNSWireFormat.buildQuery(domain: DNSWireFormat.forwarderProbeDomain, txID: 0x5EED)
+        try await gate.channel.writeInbound(datagram(probe, on: gate.channel))
+        XCTAssertEqual(gate.decisions(), 1, "the probe must reach the admission gate")
+        XCTAssertEqual(gate.inFlight(), 0, "and hold no slot once answered")
+        let reply = try await gate.channel.readOutbound(as: AddressedEnvelope<ByteBuffer>.self)
+        let bytes = reply.map { Array($0.data.readableBytesView) } ?? []
+        XCTAssertTrue(DNSWireFormat.isResponse(bytes, to: probe))
+        XCTAssertEqual(DNSWireFormat.extractRCode(from: bytes), 3)
+        try await gate.tearDown()
+    }
+
     /// The user-visible consequence: a garbage flood does not starve a real
     /// query. Pre-fix, 500 runts would have pinned the gate and driven this
     /// query onto the over-limit SERVFAIL path.
