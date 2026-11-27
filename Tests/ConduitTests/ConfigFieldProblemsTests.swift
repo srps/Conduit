@@ -38,6 +38,32 @@ final class ConfigFieldProblemsTests: XCTestCase {
         XCTAssertNil(problems.message(for: "proxy.socksPort"), "a conflict is not a per-field problem")
     }
 
+    /// The tunnel editor shows a proxied tunnel's remote host problem on that row, without holding back the proxy.
+    func testAProxiedTunnelRemoteHostThatIsNotAHostIsAFieldProblem() {
+        var config = ProxyConfig()
+        config.tunnels.definitions = [
+            TunnelDefinition(localPort: 15432, remoteHost: "bücher.corp.example", remotePort: 5432, proxied: true, label: "db"),
+            TunnelDefinition(localPort: 15433, remoteHost: "bücher.corp.example", remotePort: 5432, proxied: false, label: "direct"),
+        ]
+
+        let problems = ConfigFieldProblems(config: config)
+
+        let message = problems.message(for: "tunnels.definitions[0](db).remoteHost")
+        XCTAssertTrue(message?.contains("the remote host is not a host name or IP address") == true, message ?? "nil")
+        XCTAssertTrue(message?.contains("A-label form") == true, message ?? "nil")
+        XCTAssertNil(problems.message(for: "tunnels.definitions[1](direct).remoteHost"), "a direct tunnel never writes a CONNECT")
+        XCTAssertEqual(config.startBlockingProblems.map(\.check), [String]())
+
+        config.tunnels.definitions[0].remoteHost = "db.corp.example\r\nX-Injected: 1"
+        let injected = ConfigFieldProblems(config: config).message(for: "tunnels.definitions[0](db).remoteHost") ?? "nil"
+        XCTAssertFalse(injected.contains("\r") || injected.contains("\n"), "the message reaches log lines: \(injected.debugDescription)")
+
+        for host in ["db.corp.example", "db.corp.example.", "10.0.0.5", "fd00::5", "_svc.corp.example"] {
+            config.tunnels.definitions[0].remoteHost = host
+            XCTAssertNil(ConfigFieldProblems(config: config).message(for: "tunnels.definitions[0](db).remoteHost"), host)
+        }
+    }
+
     func testCleanConfigHasNoProblems() {
         XCTAssertTrue(ConfigFieldProblems(config: ProxyConfig()).isEmpty)
     }

@@ -64,10 +64,13 @@ package enum TunnelDNSOverrideStatus: Sendable, Equatable, Codable {
 
 package struct TunnelStartResult: Sendable {
     package var started: Int
+    /// Tunnels whose listener failed to bind.
     package var failed: Int
     package var boundPorts: [Int]
     package var bindings: [TunnelBindingInfo] = []
     package var dnsOverrideStatus: TunnelDNSOverrideStatus = .notNeeded
+    /// Proxied tunnels never bound because their remote host is not a host (`tunnel.start_refused`).
+    package var refused: Int = 0
 }
 
 package struct TunnelBindingInfo: Sendable, Codable, Equatable {
@@ -263,6 +266,7 @@ package final class TunnelForwarder: @unchecked Sendable {
     package let sessionTracker: TunnelSessionTracker
     private let dnsResponder: TunnelDNSResponder
     private let resolverManager: (any TunnelResolverApplying)?
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private var managedHostnames: [String] = []
     /// Last computed DNS override status. Cached so reconcile() can return an accurate value when
     /// the active proxied hostname set hasn't changed (and we skipped the DNS refresh) — without
@@ -272,6 +276,7 @@ package final class TunnelForwarder: @unchecked Sendable {
     private struct BindingBatch {
         var started: Int = 0
         var failed: Int = 0
+        var refused: Int = 0
         var bindings: [TunnelBindingInfo] = []
     }
 
@@ -280,8 +285,10 @@ package final class TunnelForwarder: @unchecked Sendable {
         connectCoordinator: CONNECTCoordinator,
         connectionPool: ConnectionPool,
         logger: any LogSink,
-        resolverManager: (any TunnelResolverApplying)? = nil
+        resolverManager: (any TunnelResolverApplying)? = nil,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) {
+        self.eventSink = eventSink
         self.group = group
         self.connectCoordinator = connectCoordinator
         self.connectionPool = connectionPool
@@ -304,7 +311,8 @@ package final class TunnelForwarder: @unchecked Sendable {
             started: batch.started,
             failed: batch.failed,
             boundPorts: batch.bindings.map(\.localPort),
-            bindings: batch.bindings
+            bindings: batch.bindings,
+            refused: batch.refused
         )
         await reconcileDNSOverride()
         result.dnsOverrideStatus = dnsOverrideStatus
@@ -317,6 +325,22 @@ package final class TunnelForwarder: @unchecked Sendable {
     private func bindTunnels(_ tunnels: [TunnelDefinition], listenHost: String) async -> BindingBatch {
         var batch = BindingBatch()
         for tunnel in tunnels where tunnel.enabled {
+            // Validation flags the row without blocking the proxy, so the one tunnel is refused here. The host stays out of
+            // the event and the log line: it is the text that is not a host.
+            guard !tunnel.proxiedRemoteHostIsNotAHost else {
+                batch.refused += 1
+                let event = RuntimeEvent(
+                    kind: .config, event: "tunnel.start_refused",
+                    detail: "localPort=\(tunnel.localPort) remotePort=\(tunnel.remotePort) reason=remote_host_not_a_host"
+                )
+                eventSink?(event)
+                logger.log(
+                    .error,
+                    "\(event.event) \(event.detail ?? ""): a proxied tunnel's remote host must be a host name or IP address; this tunnel was not started.",
+                    category: .tunnel
+                )
+                continue
+            }
             do {
                 let def = tunnel
                 let tracker = self.sessionTracker
@@ -512,9 +536,11 @@ package final class TunnelForwarder: @unchecked Sendable {
         }
 
         var addFailed = 0
+        var addRefused = 0
         if !toAdd.isEmpty {
             let batch = await bindTunnels(toAdd, listenHost: listenHost)
             addFailed = batch.failed
+            addRefused = batch.refused
         }
 
         await reconcileDNSOverride()
@@ -541,7 +567,8 @@ package final class TunnelForwarder: @unchecked Sendable {
             failed: addFailed,
             boundPorts: orderedBindings.map(\.localPort),
             bindings: orderedBindings,
-            dnsOverrideStatus: dnsOverrideStatus
+            dnsOverrideStatus: dnsOverrideStatus,
+            refused: addRefused
         )
     }
 

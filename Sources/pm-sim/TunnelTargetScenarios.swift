@@ -68,6 +68,59 @@ enum TunnelTargetScenarios {
         )
     }
 
+    /// A proxied port tunnel writes its remote host into the CONNECT it sends. Validation flags one that is not a host name
+    /// or IP literal without holding back the proxy, and the tunnel start refuses that tunnel alone, with one
+    /// `tunnel.start_refused` that leaves the host out, and says "refused", not "failed to bind".
+    @RuntimeActor
+    static func proxiedRemoteHostRefused(verbose: Bool) async throws -> ScenarioResult {
+        let name = "tunnel-remote-host-refused"
+        let start = Date()
+        var config = ProxyConfig()
+        config.localPort = 0
+        config.localPACEnabled = false
+        config.upstreams = []
+        config.tunnels.definitions = [
+            TunnelDefinition(localPort: 0, remoteHost: "db.corp.example\r\nX-Injected: 1", remotePort: 5432, proxied: true, label: "crlf"),
+            TunnelDefinition(localPort: 0, remoteHost: "db.corp.example", remotePort: 5432, proxied: true, label: "proxied"),
+            TunnelDefinition(localPort: 0, remoteHost: "bücher.corp.example", remotePort: 5432, label: "direct-unicode"),
+        ]
+        let problems = config.validate().map(\.check)
+        let logger = RecordingLogSink(minLevel: verbose ? .debug : .info)
+        let orchestrator = ProxyOrchestrator(config: config, logger: logger, authenticatorProvider: { _ in MockAuthenticator() })
+        ScenarioCleanup.register {
+            await orchestrator.stopTunnels()
+            await orchestrator.stopProxy()
+        }
+        try await orchestrator.startProxy()
+        await orchestrator.startTunnels()
+        let bound = orchestrator.snapshot.bindings.tunnels.map(\.label)
+        let status = orchestrator.snapshot.tunnelsError ?? ""
+        let refused = orchestrator.eventLog.events.filter { $0.event == "tunnel.start_refused" }.map { $0.detail ?? "" }
+        let leaked = (logger.entries().map(\.message) + orchestrator.eventLog.events.map { $0.detail ?? "" })
+            .filter { $0.contains("X-Injected") }
+        await orchestrator.stopTunnels()
+        await orchestrator.stopProxy()
+
+        return ScenarioResult(
+            name: name,
+            clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0, clientsClosedEarly: 0, totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(start),
+            aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("validation flags only the proxied row, and nothing blocks the proxy",
+                      problems == ["invalid_tunnel_remote_host field=tunnels.definitions[0].remoteHost"] && config.startBlockingProblems.isEmpty),
+                .init("every other tunnel binds, the direct Unicode row included", bound == ["proxied", "direct-unicode"]),
+                .init("one tunnel.start_refused, without the host", refused == ["localPort=0 remotePort=5432 reason=remote_host_not_a_host"]),
+                .init("the status says refused, not a bind failure",
+                      status == "1 proxied tunnel(s) refused because the remote host is not a host name or IP address."),
+                .init("no log line or event holds the refused host's text", leaked.isEmpty),
+            ],
+            notes: ["problems=\(problems)", "bound=\(bound)", "status=\(status)", "refused=\(refused)", "leaked=\(leaked.count)"]
+        )
+    }
+
     /// The reply code of one SOCKS5 CONNECT for `host` as a name, nil when the listener closed without one.
     private static func reply(connecting host: String, port: Int, socksPort: Int, harness: SimHarness) async throws -> UInt8? {
         let request: [UInt8] = [0x05, 0x01, 0x00, 0x03, UInt8(host.utf8.count)] + Array(host.utf8)

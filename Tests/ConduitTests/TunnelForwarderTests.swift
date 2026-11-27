@@ -100,6 +100,45 @@ final class TunnelForwarderTests: XCTestCase {
         try await targetServer.close().get()
     }
 
+    // MARK: - A remote host a proxied tunnel cannot send
+
+    /// A proxied tunnel writes its remote host into the CONNECT it sends, so the start refuses one that is not a host name
+    /// or an IP literal, with an event, and starts the rest. A direct tunnel hands its host to getaddrinfo, so it starts.
+    func testAProxiedTunnelWhoseRemoteHostIsNotAHostIsRefusedAlone() async throws {
+        let logger = RecordingLogSink(minLevel: .debug)
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let pool = ConnectionPool(
+            group: group, logger: logger, configProvider: { ProxyConfig.testFixture() },
+            authenticatorProvider: { _ in StubAuthenticator() }
+        )
+        defer { pool.closeAll() }
+        let coordinator = CONNECTCoordinator(pool: pool, authenticatorProvider: { _ in StubAuthenticator() }, logger: logger)
+        let forwarder = TunnelForwarder(
+            group: group, connectCoordinator: coordinator, connectionPool: pool, logger: logger,
+            eventSink: { event in events.withLockedValue { $0.append(event) } }
+        )
+
+        let result = await forwarder.start(
+            tunnels: [
+                TunnelDefinition(localPort: 0, remoteHost: "db.corp.example\r\nX-Injected: 1", remotePort: 5432, proxied: true, label: "crlf"),
+                TunnelDefinition(localPort: 0, remoteHost: "db.corp.example", remotePort: 5432, proxied: true, label: "proxied"),
+                TunnelDefinition(localPort: 0, remoteHost: "fd00::5", remotePort: 5432, proxied: true, label: "proxied-v6"),
+                TunnelDefinition(localPort: 0, remoteHost: "bücher.corp.example", remotePort: 5432, proxied: false, label: "direct"),
+            ],
+            listenHost: "127.0.0.1"
+        )
+        await forwarder.stop()
+
+        XCTAssertEqual(result.bindings.map(\.label), ["proxied", "proxied-v6", "direct"])
+        XCTAssertEqual(result.refused, 1)
+        XCTAssertEqual(result.failed, 0, "a refused tunnel is not a bind failure")
+        XCTAssertEqual(
+            events.withLockedValue { $0 }.filter { $0.event == "tunnel.start_refused" }.map(\.detail),
+            ["localPort=0 remotePort=5432 reason=remote_host_not_a_host"]
+        )
+        XCTAssertFalse(logger.entries().contains { $0.message.contains("X-Injected") }, "the refusal never logs the host")
+    }
+
     // MARK: - Proxied tunnel through production TunnelForwarder
 
     @MainActor

@@ -12,6 +12,9 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
     /// budget range). Named by field only: the value is not echoed.
     case unrepresentableDuration(field: String)
     case invalidHost(field: String, value: String)
+    /// A proxied port tunnel's remote host that is not a host name or an IP literal. The tunnel start refuses that one
+    /// tunnel (`tunnel.start_refused`); the proxy and every other tunnel start.
+    case invalidTunnelRemoteHost(field: String, value: String)
     /// An intercept pattern whose derived resolver domain is unusable. Carries
     /// the index so the Settings row can be pointed at, and the reason so it
     /// can say which character to change.
@@ -60,6 +63,7 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
         case .invalidDuration(let field, _): return "invalid_duration field=\(Self.fieldPath(field))"
         case .unrepresentableDuration(let field): return "unrepresentable_duration field=\(Self.fieldPath(field))"
         case .invalidHost(let field, _): return "invalid_host field=\(Self.fieldPath(field))"
+        case .invalidTunnelRemoteHost(let field, _): return "invalid_tunnel_remote_host field=\(Self.fieldPath(field))"
         case .invalidInterceptPattern(let index, _, _): return "invalid_intercept_pattern field=dns.interceptRules[\(index)]"
         case .invalidInterceptIP(let index, _): return "invalid_intercept_ip field=dns.interceptRules[\(index)]"
         case .invalidTransparentProxyIP: return "invalid_transparent_proxy_ip field=dns.transparentProxyIP"
@@ -85,6 +89,9 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
             // bound to it is `startTransparentProxy`, whose failure is already
             // a logged warning rather than a start failure.
             return false
+        case .invalidTunnelRemoteHost:
+            // Only that tunnel sends it, and the tunnel start refuses it alone.
+            return false
         case .invalidPort, .invalidLimit, .invalidDuration, .unrepresentableDuration, .invalidHost, .conflict:
             return true
         }
@@ -108,6 +115,16 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
                 return "routing.pacURL must not include a username or password."
             }
             return "\(field): '\(value)' is not a valid host"
+        case .invalidTunnelRemoteHost(let field, let value):
+            let message = "\(field): the remote host is not a host name or IP address, which a proxied tunnel needs for its CONNECT."
+            // The reason quotes the text, and this message reaches log lines.
+            guard !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) else { return message }
+            do {
+                try DomainNameSyntax.validate(TunnelDefinition.hostNameForValidation(value))
+            } catch {
+                return "\(message) \(error.localizedDescription)"
+            }
+            return message
         case .invalidInterceptPattern(let index, let pattern, let reason):
             return "dns.interceptRules[\(index)]: '\(pattern)' does not name a usable "
                  + "resolver domain. \(reason.localizedDescription)"
@@ -371,6 +388,9 @@ extension ProxyConfig {
             let label = tunnel.effectiveLabel
             validatePort("tunnels.definitions[\(i)](\(label)).localPort", tunnel.localPort, into: &errors)
             validatePort("tunnels.definitions[\(i)](\(label)).remotePort", tunnel.remotePort, into: &errors)
+            if tunnel.proxiedRemoteHostIsNotAHost {
+                errors.append(.invalidTunnelRemoteHost(field: "tunnels.definitions[\(i)](\(label)).remoteHost", value: tunnel.remoteHost))
+            }
         }
 
         if proxy.socksEnabled && proxy.socksPort == proxy.port && proxy.port != 0 {

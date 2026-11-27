@@ -29,6 +29,12 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   corporate proxy authenticates, so a lookup now costs half the
   authentications.
 
+- A proxied port tunnel whose remote host is not a host name or IP address is
+  flagged on its row in the tunnel editor. The tunnel start refuses that tunnel
+  alone and starts the rest (`tunnel.start_refused`), and the tunnels' status
+  says it was refused instead of calling it a bind failure. It used to bind and
+  then fail every connection.
+
 ## 0.7.0
 
 This release makes Conduit's VPN on/off verdict, and the split DNS that depends

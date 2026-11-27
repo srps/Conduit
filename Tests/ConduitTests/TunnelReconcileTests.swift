@@ -29,6 +29,38 @@ final class TunnelReconcileTests: XCTestCase {
         await orchestrator.stopProxy()
     }
 
+    /// A refused tunnel was never bound, so the status names the refusal rather than a bind failure.
+    @RuntimeActor
+    func testATunnelRefusedForItsRemoteHostIsReportedAsRefused() async throws {
+        let refused = TunnelDefinition(localPort: 0, remoteHost: "bücher.corp.example", remotePort: 5432, proxied: true, label: "DB")
+        let direct = TunnelDefinition(localPort: 0, remoteHost: "db1.example.com", remotePort: 5432, proxied: false, label: "DB1")
+        var config = GenericDefaults.shared.makeConfig()
+        config.proxy.port = 0
+        config.tunnels.definitions = [refused]
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
+        try await orchestrator.startProxy()
+        await orchestrator.startTunnels()
+        XCTAssertEqual(orchestrator.snapshot.tunnelsRunState, .failed)
+        XCTAssertEqual(
+            orchestrator.snapshot.tunnelsError,
+            "No tunnel started: 1 proxied tunnel(s) refused because the remote host is not a host name or IP address."
+        )
+        await orchestrator.stopTunnels()
+
+        config.tunnels.definitions = [refused, direct]
+        orchestrator.config = config
+        await orchestrator.startTunnels()
+        XCTAssertEqual(orchestrator.snapshot.tunnelActiveCount, 1)
+        XCTAssertEqual(
+            orchestrator.snapshot.tunnelsError,
+            "1 proxied tunnel(s) refused because the remote host is not a host name or IP address."
+        )
+        XCTAssertEqual(orchestrator.eventLog.events.filter { $0.event == "tunnel.start_refused" }.count, 2)
+
+        await orchestrator.stopTunnels()
+        await orchestrator.stopProxy()
+    }
+
     @RuntimeActor
     func testReconcileRemovesTunnel() async throws {
         let def1 = TunnelDefinition(localPort: 0, remoteHost: "db1.example.com", remotePort: 5432, proxied: false, label: "DB1")
