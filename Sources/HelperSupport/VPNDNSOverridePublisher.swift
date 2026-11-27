@@ -241,7 +241,7 @@ package final class VPNDNSOverridePublisher {
         lastVerdict = verdict
         probeOK = verdict == .answered
         lastConfirmed = probeOK ? now() : nil
-        if probeOK { toConduit() }
+        if probeOK { toConduit() } else if !failing.isEmpty { relay.setMode(.vpn) }
         report(.armed(service: service, servers: servers.count, owner: owner))
         reconcile()
     }

@@ -570,6 +570,7 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         rig.relay.progress[.udp] = DNSFailoverProgress(answered: 0, unanswered: 1, lastUnanswered: true)
         XCTAssertTrue(rig.publisher.arm(service: service, servers: servers, owner: owner))
         XCTAssertNil(rig.store.ownKey, "the re-arm's probe is screened against the loss")
+        XCTAssertEqual(rig.relay.mode, .vpn, "and the relay stops sending lookups to a Conduit that drops them")
         rig.tick()
         XCTAssertNil(rig.store.ownKey, "and the tick after it still sees it")
         XCTAssertEqual(rig.relay.mode, .vpn)
