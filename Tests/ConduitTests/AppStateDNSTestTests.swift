@@ -66,6 +66,11 @@ final class AppStateDNSTestTests: XCTestCase {
         XCTAssertEqual(state.dnsTest, .idle, "a reading from the run that stopped is not shown")
     }
 
+    func testDNSCanBeTestedWhileItWarnsOrHasFailed() {
+        let testable = ModuleRunState.allCases.filter { DNSTest.probes(in: $0) }
+        XCTAssertEqual(testable, [.running, .warning, .failed], "a degraded DNS is when the owner most needs the check")
+    }
+
     func testASettlementWithoutAProbeSaysWhyNothingWasTested() {
         XCTAssertEqual(DNSTestResult(.failed(.effectFailed)), .noPort, "the host had no port to probe")
         XCTAssertEqual(DNSTestResult(nil), .noResult, "not sent, refused, or its answer lost")

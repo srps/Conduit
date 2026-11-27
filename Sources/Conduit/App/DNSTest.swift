@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import ConduitShared
 import Foundation
+import ProxyKernel
 
 /// The Test DNS control: idle, one probe out, or the reading of the last one. A reading is one probe at one time, not DNS health, so a
 /// change of the DNS module's run state clears it: the host's own verdict is newer.
@@ -8,6 +9,15 @@ enum DNSTest: Equatable {
     case idle
     case testing
     case finished(DNSTestResult, at: Date)
+
+    /// Whether a probe can say anything in this DNS run state. A warning or a failure is when the check matters most: system DNS may
+    /// still point at port 53.
+    static func probes(in state: ModuleRunState) -> Bool {
+        switch state {
+        case .running, .warning, .failed: true
+        case .stopped, .starting: false
+        }
+    }
 }
 
 enum DNSTestResult: Equatable {

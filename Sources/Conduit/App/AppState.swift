@@ -869,7 +869,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    var canTestDNS: Bool { controlsEnabled && runtime.dnsRunState == .running && dnsTest != .testing }
+    var canTestDNS: Bool { controlsEnabled && DNSTest.probes(in: runtime.dnsRunState) && dnsTest != .testing }
 
     func testDNS() {
         guard canTestDNS else { return }
