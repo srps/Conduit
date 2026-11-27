@@ -135,6 +135,8 @@ package protocol PrivilegeClient: Sendable {
     /// eight passwords. Implementations that can amortise elevation override
     /// this; the default loops, which is correct for anything that cannot.
     func execute(batch: [PrivilegedBatchStep]) throws
+
+    func vpnDNSOverride(_ request: VPNDNSOverrideRequest) throws -> VPNDNSOverrideReply
 }
 
 extension PrivilegeClient {
@@ -143,4 +145,44 @@ extension PrivilegeClient {
             try execute(step.operation, values: step.values)
         }
     }
+
+    package func vpnDNSOverride(_ request: VPNDNSOverrideRequest) throws -> VPNDNSOverrideReply {
+        .unsupported
+    }
+}
+
+package enum VPNDNSOverrideRequest: Sendable, Equatable {
+    /// Intent only: the helper publishes its own key while the VPN's key holds exactly these servers (decision 0049).
+    case arm(service: String, servers: [String])
+    case disarm
+    case status
+}
+
+/// The helper's arm, as its status reports it.
+package struct VPNDNSOverrideState: Sendable, Equatable {
+    package var serviceID: String
+    package var servers: [String]
+    package var published: Bool
+    package var reason: String?
+    /// Whether this app armed it.
+    package var owned: Bool
+    package var port: Int?
+
+    package init(
+        serviceID: String, servers: [String], published: Bool, reason: String? = nil, owned: Bool = true, port: Int? = nil
+    ) {
+        self.serviceID = serviceID
+        self.servers = servers
+        self.published = published
+        self.reason = reason
+        self.owned = owned
+        self.port = port
+    }
+}
+
+package enum VPNDNSOverrideReply: Sendable, Equatable {
+    case unsupported
+    case armed
+    case disarmed
+    case status(VPNDNSOverrideState?)
 }

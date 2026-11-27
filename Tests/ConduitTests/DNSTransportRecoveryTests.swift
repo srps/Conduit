@@ -197,8 +197,8 @@ final class DNSTransportRecoveryTests: XCTestCase {
         XCTAssertTrue(transportResetEvents(in: orchestrator.eventLog, since: cutoff).isEmpty, "DNS was not running")
     }
 
-    /// #198 review, revised by #292: a query out on the old path when the leading edge arrives is cancelled, answers SERVFAIL and
-    /// stores nothing. A query that starts after the leading edge and is answered during the settle stores its answer after that
+    /// #198 review, revised by #292: a query out on the old path when the leading edge arrives is cancelled, gets no reply (its
+    /// window has no time left for a re-run here) and stores nothing. A query that starts after the leading edge and is answered during the settle stores its answer after that
     /// edge cleared the cache. The settle clears it again, so that answer does not outlive the settle (#200 fences the store itself).
     @RuntimeActor func testAnAnswerAQueryFromTheOldPathStoresDuringTheSettleDoesNotOutliveIt() async throws {
         let group = MultiThreadedEventLoopGroup.singleton
@@ -216,6 +216,7 @@ final class DNSTransportRecoveryTests: XCTestCase {
         var tuning = DNSForwarderTuning()
         tuning.internalServerPort = try XCTUnwrap(server.localAddress?.port)
         tuning.internalAttemptTimeout = .seconds(5)
+        tuning.lookupWindow = .zero
         let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
         orchestrator.dnsForwarder = LocalDNSForwarder(
             group: group, logger: DiscardingLogSink(), configProvider: { [config] in config }, tuning: tuning
@@ -247,10 +248,15 @@ final class DNSTransportRecoveryTests: XCTestCase {
         try await send(DNSWireFormat.buildQuery(domain: "old.example.com", txID: 0x1234))
         _ = try await upstream.waitForQuery()
 
-        // The path changes while the query is out: its leading edge cancels the query, which answers SERVFAIL and stores nothing.
+        // The path changes while the query is out: its leading edge cancels the query, which gets no reply and stores nothing.
         XCTAssertTrue(orchestrator.invalidateNetworkPath(Self.wifi(gateway: "10.0.0.1")))
-        let cancelled = try await replies.waitForQuery()
-        XCTAssertEqual(DNSWireFormat.extractRCode(from: cancelled.query), 2, "the old path's query is answered SERVFAIL")
+        let released = ContinuousClock.now + .seconds(5)
+        while orchestrator.dnsForwarder.inFlightQueryCount > 0, ContinuousClock.now < released {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(orchestrator.dnsForwarder.inFlightQueryCount, 0, "the old path's query ended")
+        let reply = try? await replies.waitForQuery(within: .milliseconds(200))
+        XCTAssertNil(reply, "and got no SERVFAIL")
         XCTAssertEqual(orchestrator.dnsForwarder.cachedResponseCount, 0)
 
         // A query during the settle is answered and stored.
@@ -432,8 +438,8 @@ private final class HeldDNSUpstream: ChannelInboundHandler, @unchecked Sendable 
     }
 
     /// Waits, bounded, for the next query, and takes it.
-    func waitForQuery() async throws -> Held {
-        let deadline = ContinuousClock.now + .seconds(5)
+    func waitForQuery(within window: Duration = .seconds(5)) async throws -> Held {
+        let deadline = ContinuousClock.now + window
         while ContinuousClock.now < deadline {
             let taken: Held? = lock.withLock {
                 defer { held = nil }

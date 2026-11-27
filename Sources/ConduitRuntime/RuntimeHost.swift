@@ -301,6 +301,11 @@ package final class RuntimeHost {
     private let pushedResolverUpdates = CoalescedObserverDelivery()
     /// Whether the observer is started. Written only by `reconcileSplitDNSDetection`.
     var splitDNSDetectionRunning = false
+    let vpnDNSOverride: VPNResolverOverrideController
+    var vpnDNSOverrideHeldSet: LiveSplitDNSDetection.DetectedSet?
+    var vpnDNSOverrideRunning = false
+    var vpnDNSOverrideWanted = false
+    var vpnDNSOverridePoll = false
     /// A failed entry-file write or removal, retried once the helper is
     /// seen available (#165).
     var splitDNSRepair = SplitDNSEntryFileRepair()
@@ -511,6 +516,13 @@ package final class RuntimeHost {
         // DNS module's slot orders the relay's, and the tunnel lifecycle the resolver's, so their place in the queue only delays them.
         let platformWork = PlatformWork(label: "io.github.srps.Conduit.daemon.platform-work")
         self.platformWork = platformWork
+        self.vpnDNSOverride = VPNResolverOverrideController(
+            client: auditedPrivilegeClient, work: platformWork,
+            resolverOrder: ScutilResolverOrder(run: effects.commandRunner)
+        ) { [logger] event, level in
+            diagnosticsEventLog.append(event)
+            logger.log(level, "VPN DNS override: \(event.event) \(event.detail ?? "")", category: .system)
+        }
         let tunnelResolverManager = TunnelResolverManager(
             privilegeClient: auditedPrivilegeClient,
             logger: logger,
@@ -881,6 +893,10 @@ package final class RuntimeHost {
         if platform.manageDNSResolvers, gateMoved {
             await reconcileEntryFiles(config: config, runtimeStarted: true)
         }
+    }
+
+    package func settleObserverDeliveries() async {
+        await deliveries.drain()
     }
 
     /// Joins the work a stopped host still runs: its credential warm-up, and the observer deliveries admitted before
@@ -1679,6 +1695,11 @@ package final class RuntimeHost {
         dnsReconcileWanted = false
     }
 
+    var vpnDNSOverrideRelayServing: Bool {
+        dnsHealthTimer != nil && orchestrator.snapshot.dnsRunState == .running && !dnsRelayUnresponsive
+            && !dnsRelayRestartInFlight
+    }
+
     private var systemDNSReconcileIsDue: Bool {
         platformConfig.manageSystemDNS && orchestrator.snapshot.dnsRunState == .running
     }
@@ -1721,6 +1742,7 @@ package final class RuntimeHost {
         if alive {
             dnsRelayUnresponsive = false
             relayAnswered()
+            requestVPNDNSOverrideRun(pollStatus: true)
             return
         }
         // The restart and the probe after it run off the owner, one at a time.
@@ -1753,6 +1775,7 @@ package final class RuntimeHost {
         guard !token.isSuperseded, orchestrator.snapshot.dnsRunState == .running else { return }
         dnsRelayUnresponsive = outcome == .unresponsive
         if outcome == .restarted { relayAnswered() }
+        requestVPNDNSOverrideRun(pollStatus: true)
     }
 
     /// The status is read and encoded on the owner, in this turn. The directory and the atomic replacement run on `platformWork`, so
@@ -2171,11 +2194,14 @@ extension RuntimeHost: RuntimeReconcilerHost {
             }
             startDNSHealthTimer(forwarderPort: forwarderPort)
             if landed { surfaceWritten(.systemDNS) }
+            requestVPNDNSOverrideRun(pollStatus: true)
             return landed
         case .clearSystemDNS:
             // Timer first: left running, its 30 s probe would restart the
             // relay the user just asked to remove.
             stopDNSHealthTimer()
+            // The VPN's DNS goes back before the interfaces' does, whatever the clear below finds.
+            await vpnDNSOverride.disarm(.manageOff)
             let systemDNS = systemDNSManager
             let cleared = await platformWork.run {
                 attemptFlagStep("Could not restore system DNS after the setting changed", logger: logger) {

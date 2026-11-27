@@ -123,6 +123,10 @@ package final class LiveSplitDNSDetection: @unchecked Sendable {
         }
     }
 
+    package var lastReading: PushedResolverReading {
+        lock.withLock { state.policy.lastReading }
+    }
+
     /// Everything not yet taken, or nil when there is nothing. Taking it is the owner's promise to apply it.
     package func take() -> Pending? {
         lock.withLock {
