@@ -164,10 +164,11 @@ final class AppState: ObservableObject {
         self.updateCoordinator = updateCoordinator
         self.updateStatus = updateCoordinator.status
         observeDrafts()
-        runtime.$dnsRunState.removeDuplicates().dropFirst().sink { [weak self] _ in
-            guard let self, case .finished = self.dnsTest else { return }
-            self.dnsTest = .idle
-        }.store(in: &cancellables)
+        Publishers.CombineLatest3(runtime.$dnsRunState, runtime.$dnsError, runtime.$bindings.map(\.dnsPort))
+            .removeDuplicates { $0 == $1 }.dropFirst().sink { [weak self] _ in
+                guard let self, self.dnsTest != .idle else { return }
+                self.dnsTest = .idle
+            }.store(in: &cancellables)
         notificationManager.requestAuthorization()
         opening = Task { @MainActor [weak self] in await self?.open() }
     }
@@ -869,12 +870,20 @@ final class AppState: ObservableObject {
         }
     }
 
-    var canTestDNS: Bool { controlsEnabled && DNSTest.probes(in: runtime.dnsRunState) && dnsTest != .testing }
+    var canTestDNS: Bool { controlsEnabled && DNSTest.probes(in: runtime.dnsRunState) && !dnsTest.isTesting }
 
     func testDNS() {
         guard canTestDNS else { return }
-        dnsTest = .testing
-        send(.testDNS) { [weak self] outcome in self?.dnsTest = .finished(DNSTestResult(outcome), at: .now) }
+        let probe = UUID()
+        dnsTest = .testing(probe)
+        send(.testDNS) { [weak self] outcome in
+            guard let self else { return }
+            guard self.dnsTest == .testing(probe) else {
+                self.logStore.log(.notice, "DNS test: the answer is not shown; the DNS run it probed has changed.", category: .system)
+                return
+            }
+            self.dnsTest = .finished(DNSTestResult(outcome), at: .now)
+        }
     }
 
     /// A running DNS whose relay start failed keeps the decline until its health timer restarts the relay; a Start then has nothing to do.
@@ -899,8 +908,8 @@ final class AppState: ObservableObject {
     ///
     /// A Stop is never dropped behind ordinary work: each module has a Stop lane of its own, as the host's Stop lanes do, outside the
     /// ordinary cap. A lane holds one Stop out and at most one wanted after it; a Stop asked for while one is out is sent again once that
-    /// one ends, so a Start admitted in between cannot outlive it, and only the latest caller's settlement is kept. A command not sent
-    /// settles with no outcome at once, so no caller waits on it.
+    /// one ends, so a Start admitted in between cannot outlive it, and only the latest caller's settlement is kept. A waiting caller that
+    /// a later Stop replaces is never settled. A command dropped at the quit's fence or the ordinary cap settles with no outcome at once.
     private func send(_ command: ControlRuntimeCommand, settled: @escaping @MainActor (ControlOperationOutcome?) -> Void) {
         guard !quitFence else { return settled(nil) }
         if case .stop(let module) = command {

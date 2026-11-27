@@ -3,12 +3,18 @@ import ConduitShared
 import Foundation
 import ProxyKernel
 
-/// The Test DNS control: idle, one probe out, or the reading of the last one. A reading is one probe at one time, not DNS health, so a
-/// change of the DNS module's run state clears it: the host's own verdict is newer.
+/// The Test DNS control: idle, one probe out, or the reading of the last one. A reading is one probe of one DNS run, not DNS health, so
+/// a change in what the app shows of that run (its state, its error or its bound port) clears it, and a probe still out is dropped
+/// with it: the host's own verdict is newer.
 enum DNSTest: Equatable {
     case idle
-    case testing
+    /// One probe out. Its answer is shown only while this is still the probe out.
+    case testing(UUID)
     case finished(DNSTestResult, at: Date)
+
+    var isTesting: Bool {
+        if case .testing = self { true } else { false }
+    }
 
     /// Whether a probe can say anything in this DNS run state. A warning or a failure is when the check matters most: system DNS may
     /// still point at port 53.
