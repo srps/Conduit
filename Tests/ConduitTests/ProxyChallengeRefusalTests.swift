@@ -402,7 +402,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         let proxyPort = proxy.port
         let forwarder = LocalDNSForwarder(
             group: group, logger: logger, configProvider: { frozen },
-            preferProxyPathForDoH: { true }, localProxyPort: { proxyPort }
+            doHRoute: { .proxyAndDirect }, localProxyPort: { proxyPort }
         )
         self.forwarder = forwarder
         try await forwarder.start(host: "127.0.0.1", port: 0)
@@ -427,6 +427,63 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         XCTAssertTrue(warning.contains("asked for authentication and Conduit refused the challenge"), warning)
         XCTAssertTrue(warning.contains("auth.proxy_challenge_refused"), warning)
         XCTAssertFalse(warning.contains("the providers were unreachable"), warning)
+    }
+
+    /// Client traffic that routes directly gains nothing from the local-proxy route: it would reach the providers directly too.
+    func testADirectOnlyRouteNeverAsksTheLocalProxy() async throws {
+        let heads = try await proxyRequestHeadsAfterAFailedLookup(route: .directOnly)
+        XCTAssertEqual(heads, [], "no DoH attempt went through the local proxy")
+    }
+
+    func testAProxyAndDirectRouteAsksTheLocalProxy() async throws {
+        let heads = try await proxyRequestHeadsAfterAFailedLookup(route: .proxyAndDirect)
+        XCTAssertFalse(heads.isEmpty, "the local proxy is one of the raced routes")
+    }
+
+    func testTheDoHRouteFollowsWhereClientTrafficGoes() {
+        XCTAssertEqual(DoHRoute.for(vpnConnected: true, directMode: .none), .proxyAndDirect)
+        XCTAssertEqual(DoHRoute.for(vpnConnected: true, directMode: .upstreamsUnreachable), .proxyAndDirect)
+        XCTAssertEqual(DoHRoute.for(vpnConnected: false, directMode: .vpnDisconnected), .directOnly)
+        XCTAssertEqual(DoHRoute.for(vpnConnected: false, directMode: .noUpstreamsConfigured), .directOnly)
+        XCTAssertEqual(DoHRoute.for(vpnConnected: false, directMode: .none), .proxyAndDirect, "a corporate network without VPN")
+        XCTAssertEqual(DoHRoute.for(vpnConnected: false, directMode: .upstreamsUnreachable), .proxyAndDirect)
+        XCTAssertEqual(DoHRoute.for(vpnConnected: false, directMode: .transientNetworkChange), .proxyAndDirect)
+    }
+
+    private func proxyRequestHeadsAfterAFailedLookup(route: DoHRoute) async throws -> [String] {
+        let proxy = try await ChallengingProxy.start(group: group, offering: ["NTLM"])
+        self.proxy = proxy
+        var config = ProxyConfig.testFixture()
+        config.upstreams = []
+        config.localHost = "127.0.0.1"
+        config.dohProviders = ["https://192.0.2.10/dns-query"]
+        config.dnsEntries = []
+        let frozen = config
+        let logger = RecordingLogSink(minLevel: .debug)
+        let proxyPort = proxy.port
+        let forwarder = LocalDNSForwarder(
+            group: group, logger: logger, configProvider: { frozen },
+            doHRoute: { route }, localProxyPort: { proxyPort }
+        )
+        self.forwarder = forwarder
+        try await forwarder.start(host: "127.0.0.1", port: 0)
+
+        let client = try await DatagramBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
+        let query = DNSWireFormat.buildQuery(domain: "route.example", txID: 0x0408, qtype: 1)
+        var buffer = client.allocator.buffer(capacity: query.count)
+        buffer.writeBytes(query)
+        try await client.writeAndFlush(AddressedEnvelope(
+            remoteAddress: try SocketAddress(ipAddress: "127.0.0.1", port: try XCTUnwrap(forwarder.listeningPort)), data: buffer
+        )).get()
+        func failed() -> Bool {
+            logger.entries().contains { $0.level == .warning && $0.message.contains("DoH provider(s) failed") }
+        }
+        for _ in 0..<1_400 where !failed() {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try await client.close().get()
+        XCTAssertTrue(failed(), "the lookup finished")
+        return proxy.requestHeads()
     }
 
     func testTheWarningStillSaysUnreachableWhenNothingWasRefused() {

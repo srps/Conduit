@@ -1176,10 +1176,10 @@ package final class ProxyOrchestrator {
     /// The confirmed transition whose sweeps have not all run: a flap holds
     /// them, and its recovery runs the re-sweeps.
     private var strandedSweepsOwed: String?
-    /// Whether the last definite VPN verdict is `.connected`, for the DNS forwarder's
-    /// `@Sendable` DoH transport preference (NIO handlers cannot read the owner's
-    /// snapshot). Updated in `handleVPNStateChange`.
-    private let vpnConnectedForDNSBox = NIOLockedValueBox(false)
+    /// Whether the last definite VPN verdict is `.connected`. With the direct-mode cause it picks the DoH route.
+    private var vpnConnectedForDNS = false
+    /// The forwarder's DoH route, in a box because its lookups run off the owner. Written only by `refreshDoHRoute`.
+    private let doHRouteBox = NIOLockedValueBox(DoHRoute.proxyAndDirect)
     /// The forwarder's split-DNS table, in a box for the same reason. Written only by `swapSplitDNSTable`.
     private let splitDNSBox: NIOLockedValueBox<SplitDNSState>
     private let dnsForwarderTuning: DNSForwarderTuning
@@ -1260,9 +1260,7 @@ package final class ProxyOrchestrator {
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
         splitDNSProvider: { [splitDNSBox] in splitDNSBox.withLockedValue { $0.table } },
-        preferProxyPathForDoH: { [vpnConnectedForDNSBox] in
-            vpnConnectedForDNSBox.withLockedValue { $0 }
-        },
+        doHRoute: { [doHRouteBox] in doHRouteBox.withLockedValue { $0 } },
         localProxyPort: { [server = localProxyServer] in server.listeningPort },
         // A signal only: the hop reads the running core's counters when it runs. A stop clears them, and a later start's core counts
         // from zero, so a hop that lands after either publishes that operation's counts, never the ones it was queued with.
@@ -2323,7 +2321,8 @@ package final class ProxyOrchestrator {
             $0.vpnState = vpn.observed
             $0.vpnInterfaceName = vpn.shownTunnel
         }
-        vpnConnectedForDNSBox.withLockedValue { $0 = true }
+        vpnConnectedForDNS = true
+        refreshDoHRoute()
         // A recovery like a monitor's `.connected`: the sweeps the flap held,
         // or the address-only pass, run from here, since the monitor's own
         // `.connected` will now find nothing changed.
@@ -2432,7 +2431,8 @@ package final class ProxyOrchestrator {
         routingGeneration &+= 1
         let generation = routingGeneration
 
-        vpnConnectedForDNSBox.withLockedValue { $0 = state == .connected }
+        vpnConnectedForDNS = state == .connected
+        refreshDoHRoute()
         mutateSnapshot {
             $0.vpnState = vpn.observed
             $0.vpnInterfaceName = vpn.shownTunnel
@@ -3481,6 +3481,18 @@ package final class ProxyOrchestrator {
             logDirectModeEntry(from: prior, to: cause)
         }
         mutateSnapshot { $0.directModeCause = cause }
+        refreshDoHRoute()
+    }
+
+    private func refreshDoHRoute() {
+        let route = DoHRoute.for(vpnConnected: vpnConnectedForDNS, directMode: snapshot.directModeCause)
+        let prior = doHRouteBox.withLockedValue { box in defer { box = route }; return box }
+        guard prior != route else { return }
+        emitEvent(
+            .routing, "dns.doh_route_changed",
+            detail: "route=\(route.rawValue) prior=\(prior.rawValue) vpn=\(vpnConnectedForDNS ? "connected" : "not_connected") direct_mode=\(snapshot.directModeCause.rawValue)"
+        )
+        logStore.log(.info, "DNS: DoH lookups now use route \(route.rawValue) (was \(prior.rawValue)).", category: .network)
     }
 
     /// Publishes `cause` to the box NIO handlers read, and returns the

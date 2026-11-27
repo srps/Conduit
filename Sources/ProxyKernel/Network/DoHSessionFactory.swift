@@ -1,6 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
+/// The network routes a DoH lookup races. A lookup asks every provider in both encodings on each route at once, so no
+/// case orders them. In sequence, each lookup on a network that drops one route would wait out that route's timeout first.
+package enum DoHRoute: String, Sendable, Equatable {
+    /// The local proxy and direct, raced. On the VPN or a corporate network one of them is often black-holed.
+    case proxyAndDirect = "proxy_and_direct"
+    /// Client traffic routes directly, so the local proxy would only repeat the direct attempt through one more hop.
+    case directOnly = "direct_only"
+
+    package static func `for`(vpnConnected: Bool, directMode: DirectModeCause) -> DoHRoute {
+        !vpnConnected && directMode.routesClientTrafficDirectly ? .directOnly : .proxyAndDirect
+    }
+}
+
 /// Builds the `URLSession`s that DoH lookups run over, and the set of network
 /// routes worth trying for one.
 ///

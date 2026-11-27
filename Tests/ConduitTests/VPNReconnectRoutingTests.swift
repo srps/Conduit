@@ -19,6 +19,36 @@ final class VPNReconnectRoutingTests: XCTestCase {
         try await checkReconnect(hasUpstreams: false, reachable: false)
     }
 
+    /// Off the VPN client traffic routes directly, so DoH stops asking the corporate proxy. On the VPN, and off it while
+    /// the disconnect re-probes the upstreams, DoH asks both.
+    @RuntimeActor func testTheDoHRouteFollowsTheVPN() async throws {
+        var config = ProxyConfig()
+        config.localPort = 0
+        config.localPACEnabled = false
+        config.upstreams = [UpstreamProxy(name: "corporate", host: "127.0.0.1", port: 9, priority: 0)]
+        let reachable = NIOLockedValueBox(true)
+        let orchestrator = ProxyOrchestrator(config: config, pacEvaluator: StaticPAC(), connectivityProbe: { upstreams in
+            let answers = reachable.withLockedValue { $0 }
+            return UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: answers) })
+        })
+        try await orchestrator.startProxy()
+        func routes() -> [String] {
+            orchestrator.eventLog.events.filter { $0.event == "dns.doh_route_changed" }.compactMap(\.detail)
+        }
+
+        await orchestrator.handleVPNStateChange(.connected)
+        XCTAssertEqual(routes(), [], "on the VPN DoH keeps asking both routes")
+
+        reachable.withLockedValue { $0 = false }
+        await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
+        let cause = orchestrator.snapshot.directModeCause
+        await orchestrator.stopProxy()
+        XCTAssertEqual(cause, .vpnDisconnected)
+        XCTAssertEqual(routes(), [
+            "route=direct_only prior=proxy_and_direct vpn=not_connected direct_mode=vpnDisconnected",
+        ], "the re-probe off the VPN keeps both routes; direct routing drops the proxy")
+    }
+
     @RuntimeActor
     private func checkReconnect(hasUpstreams: Bool, reachable: Bool) async throws {
         let entered = expectation(description: "reconnect probe entered")

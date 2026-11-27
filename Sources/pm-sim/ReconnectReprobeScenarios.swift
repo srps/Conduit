@@ -56,7 +56,9 @@ enum ReconnectReprobeScenarios {
         let migration = orchestrator.eventLog.events.last {
             $0.event == "vpn.tunnels_migrated" && ($0.detail?.contains("phase=routing") ?? false)
         }
+        let routeOffVPN = orchestrator.eventLog.events.last { $0.event == "dns.doh_route_changed" }?.detail
         await orchestrator.handleVPNStateChange(.connected)
+        let routeOnVPN = orchestrator.eventLog.events.last { $0.event == "dns.doh_route_changed" }?.detail
         let degraded = orchestrator.snapshot.directModeCause
         let attempts = state.withLockedValue { $0.attempts }
         let connectedEvents = orchestrator.eventLog.events.filter { $0.event == "vpn.connected" }.count
@@ -81,10 +83,13 @@ enum ReconnectReprobeScenarios {
                 .init("a DIRECT-routing disconnect closes the upstream tunnel with one migration event",
                       migratedOnDisconnect && migration?.detail?.contains("phase=routing reason=user routing=direct upstream_closed=") == true
                           && migration?.detail?.hasSuffix(" upstream_closed=0") == false),
+                .init("off the VPN DoH skips the corporate proxy; on it DoH asks the proxy and direct",
+                      routeOffVPN?.hasPrefix("route=direct_only ") == true && routeOnVPN?.hasPrefix("route=proxy_and_direct ") == true),
                 .init("failed first probe degrades health without allowing strict DIRECT", degraded == .upstreamsUnreachable && !degraded.routesClientTrafficDirectly),
                 .init("production retry restores reachable state without another VPN report", recovered && retried && sameVPNReport),
                 .init("a CONNECT opened on the reconnected VPN keeps exchanging bytes on the same listener", metrics.closedAt == nil && metrics.bytesReceived > before && orchestrator.snapshot.bindings.proxyPort == port),
             ], notes: ["Real 15-second retry cadence; injected probe outcomes; no real VPN, helper, settings or credentials",
-                       "migration: \(migration?.detail ?? "none")"])
+                       "migration: \(migration?.detail ?? "none")",
+                       "doh route off VPN: \(routeOffVPN ?? "none"); on VPN: \(routeOnVPN ?? "none")"])
     }
 }

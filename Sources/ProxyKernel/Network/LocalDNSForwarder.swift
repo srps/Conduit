@@ -59,7 +59,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
     private let splitDNSProvider: (@Sendable () -> SplitDNSTable)?
-    private let preferProxyPathForDoH: @Sendable () -> Bool
+    private let doHRoute: @Sendable () -> DoHRoute
     private let localProxyPort: @Sendable () -> Int?
     private let onMetrics: (@Sendable () -> Void)?
     private let tuning: DNSForwarderTuning
@@ -100,7 +100,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         configProvider: @escaping () -> ProxyConfig,
         // The split-DNS table each query consults. Nil reads the manual entries from `configProvider`.
         splitDNSProvider: (@Sendable () -> SplitDNSTable)? = nil,
-        preferProxyPathForDoH: @escaping @Sendable () -> Bool = { false },
+        doHRoute: @escaping @Sendable () -> DoHRoute = { .proxyAndDirect },
         localProxyPort: @escaping @Sendable () -> Int? = { nil },
         onMetrics: (@Sendable () -> Void)? = nil,
         // Exposed only so tests can drive the slow-lookup and idle rules
@@ -117,7 +117,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         self.logger = logger
         self.configProvider = configProvider
         self.splitDNSProvider = splitDNSProvider
-        self.preferProxyPathForDoH = preferProxyPathForDoH
+        self.doHRoute = doHRoute
         self.localProxyPort = localProxyPort
         self.onMetrics = onMetrics
         self.tuning = tuning
@@ -149,7 +149,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             group: group,
             logger: logger,
             configProvider: configProvider,
-            preferProxyPathForDoH: { false },
+            doHRoute: { .proxyAndDirect },
             localProxyPort: { nil },
             pathSatisfied: { true },
             onMetrics: nil,
@@ -188,7 +188,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             logger: logger,
             configProvider: configProvider,
             splitDNSProvider: splitDNSProvider,
-            preferProxyPathForDoH: preferProxyPathForDoH,
+            doHRoute: doHRoute,
             localProxyPort: localProxyPort,
             pathSatisfied: { [pathSatisfied] in pathSatisfied.withLockedValue { $0 } },
             onMetrics: onMetrics,
@@ -433,11 +433,9 @@ private struct DoHTransports: @unchecked Sendable {
         localProxy?.invalidateAndCancel()
     }
 
-    /// On VPN, direct HTTPS to public DoH resolvers is often black-holed; try
-    /// the local proxy listener first.
-    func sessions(preferProxyPath: Bool) -> [URLSession] {
-        guard let localProxy else { return [direct] }
-        return preferProxyPath ? [localProxy, direct] : [direct, localProxy]
+    func sessions(for route: DoHRoute) -> [URLSession] {
+        guard let localProxy, route == .proxyAndDirect else { return [direct] }
+        return [direct, localProxy]
     }
 }
 
@@ -538,7 +536,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
     private let splitDNSProvider: (@Sendable () -> SplitDNSTable)?
-    private let preferProxyPathForDoH: @Sendable () -> Bool
+    private let doHRoute: @Sendable () -> DoHRoute
     private let localProxyPort: @Sendable () -> Int?
     private let pathSatisfied: @Sendable () -> Bool
     private let onMetrics: (@Sendable () -> Void)?
@@ -621,7 +619,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
         splitDNSProvider: (@Sendable () -> SplitDNSTable)? = nil,
-        preferProxyPathForDoH: @escaping @Sendable () -> Bool,
+        doHRoute: @escaping @Sendable () -> DoHRoute,
         localProxyPort: @escaping @Sendable () -> Int?,
         pathSatisfied: @escaping @Sendable () -> Bool,
         onMetrics: (@Sendable () -> Void)? = nil,
@@ -634,7 +632,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         self.logger = logger
         self.configProvider = configProvider
         self.splitDNSProvider = splitDNSProvider
-        self.preferProxyPathForDoH = preferProxyPathForDoH
+        self.doHRoute = doHRoute
         self.localProxyPort = localProxyPort
         self.pathSatisfied = pathSatisfied
         self.onMetrics = onMetrics
@@ -1279,7 +1277,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
             guard handle.beginUse() else { return .unanswered }
         }
         defer { handle.endUse() }
-        let sessions = handle.transports.sessions(preferProxyPath: preferProxyPathForDoH())
+        let sessions = handle.transports.sessions(for: doHRoute())
 
         let refusalsBefore = proxyChallengeDelegate.refusalCount
 
