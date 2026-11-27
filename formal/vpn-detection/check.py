@@ -183,7 +183,7 @@ CHECKS += [
     Check("override-liveness", OVERRIDE_LIVE, invariants=["TypeOK"], properties=OVERRIDE_LIVENESS,
           full=dict(OVERRIDE_LIVE, MaxGateFlaps=1, MaxLostReplies=1), spec=OVERRIDE),
     Check("override-helper-faults", OVERRIDE_HELPER_FAULTS, invariants=OVERRIDE_SAFETY, properties=OVERRIDE_LIVENESS,
-          full=dict(OVERRIDE_HELPER_FAULTS, MaxVersions=2, MaxRelayDeaths=1), spec=OVERRIDE),
+          full=dict(OVERRIDE_HELPER_FAULTS, MaxRelayDeaths=1, MaxIPv4Flaps=1), spec=OVERRIDE),
 ]
 
 CHECK_NAMED = {check.name: check for check in CHECKS}

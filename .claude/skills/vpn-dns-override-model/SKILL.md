@@ -76,7 +76,7 @@ Every check starts from `OVERRIDE_NONE` (one server list, no fault) and adds one
 - `override-safety-process` (`OVERRIDE_PROCESS`): two lists, a disconnect, an IPv4 flap, an app exit, a helper crash or SIGTERM, a DNS Stop, a lost arm reply, a refused removal.
 - `override-safety-relay` (`OVERRIDE_RELAY`): two lists, a disconnect, a gate flap, a loopback list, a relay death, a forwarder fault, a DNS Stop.
 - `override-liveness` (`OVERRIDE_LIVE`): two lists, a disconnect, an IPv4 flap, a configd restart, an app exit, a relay death, a forwarder fault; checks both liveness properties.
-- `override-helper-faults` (`OVERRIDE_HELPER_FAULTS`): one list, a disconnect, an app exit, a forwarder fault, a DNS Stop, a refused removal, a failing probe socket; checks the safety and liveness properties together. `--full` adds a list and a relay death.
+- `override-helper-faults` (`OVERRIDE_HELPER_FAULTS`): one list, a disconnect, an app exit, a forwarder fault, a DNS Stop, a refused removal, a failing probe socket; checks the safety and liveness properties together. `--full` adds a relay death and an IPv4 flap: 2.6M distinct states in 332 s.
 
 `--full` adds a list to each safety check and an app exit or a configd restart; the liveness check adds a gate flap and a lost reply. Safety mutants run at `OVERRIDE_MUTANT`; the others at the bound named in `check.py`.
 
