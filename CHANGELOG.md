@@ -13,6 +13,17 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   Swift's shared threads, so the rest of Conduit keeps running and every
   handshake gets the password once it arrives (#327).
 
+- `scripts/probe-network.sh` checks each layer between the Mac and the
+  internet using IP addresses only, so it works while DNS is down, and names
+  the first one that fails. A network that has stopped passing traffic, such
+  as a hotspot that lost its upstream, is reported as the network, so you know
+  to switch networks instead of restarting the Mac or Conduit. It also asks your
+  configured corporate proxies and internal DNS server, and guesses whether you
+  are on the VPN, on a corporate network without it or outside. The guess is
+  experimental and says unknown when the answers disagree. When only a proxy's
+  login challenge shows the network works, it says it reached the proxy
+  instead of calling the network healthy.
+
 ## 0.7.0
 
 This release makes Conduit's VPN on/off verdict, and the split DNS that depends
