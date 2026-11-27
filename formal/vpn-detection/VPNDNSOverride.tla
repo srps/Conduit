@@ -50,6 +50,8 @@ SticksRealQueryFailure == TRUE
 StopsBeforePublish == TRUE
 AgeGate == TRUE
 Watchdog == TRUE
+RetriesExpiry == TRUE
+RechecksPerTransport == TRUE
 \* unverifiedSecondsToWithdraw over tickSeconds: the ticks a key may go without a confirmed answer.
 UnverifiedTicks == 3
 
@@ -72,8 +74,8 @@ vars == <<vkey, svc, ver, vgate, okey, h, watch, relay, rwant, fwd, app, budget,
 
 HFresh(up, seen) == [up |-> up, pub |-> FALSE, armN |-> NONE, owner |-> 0, seen |-> seen,
                      probeOK |-> FALSE, refused |-> 0, silent |-> 0, unverified |-> 0,
-                     pending |-> FALSE, sockFails |-> FALSE, failing |-> FALSE, stopPending |-> FALSE,
-                     busy |-> FALSE]
+                     pending |-> FALSE, sockFails |-> FALSE, failing |-> {}, stopPending |-> FALSE,
+                     busy |-> FALSE, wdOff |-> FALSE]
 FreshApp(id, dns) == [alive |-> TRUE, id |-> id, dns |-> dns, view |-> NONE, snap |-> NEVER,
                       live |-> NONE, held |-> NOHELD, taken |-> NONE, known |-> NONE, unArm |-> NONE,
                       req |-> "none", reqN |-> NONE]
@@ -104,15 +106,25 @@ FailoverTarget ==
     IF vkey \in Versions THEN vkey ELSE IF ~FiltersLoopback /\ vkey = LB THEN LB ELSE NONE
 Failover == "vpn"
 ToFailover == relay' = IF RelayUp THEN Failover ELSE relay
-\* A query the relay sends to a Conduit that refuses or stays silent goes to the VPN's servers instead. A forwarder
-\* that answers only the probe name ("probeOnly") passes the relay's own probe, so its lookups wait and are lost.
+\* A forwarder that answers the probe name but loses real queries: all of them ("probeOnly"), or those over TCP
+\* ("tcpLost"). It passes the relay's own probe, so those lookups wait on it.
+Transports == {"udp", "tcp"}
+Partial == {"probeOnly", "tcpLost"}
+LosesOn(t) == fwd = "probeOnly" \/ (fwd = "tcpLost" /\ t = "tcp")
+RecheckOver(t) == IF RechecksPerTransport THEN t ELSE "udp"
+\* The halves still failing once the helper has read the relay's counts and rechecked: those whose lookups were lost
+\* while the relay sent them to Conduit, and those already failing whose recheck goes unanswered.
+Lost == {t \in Transports :
+            \/ relay = "conduit" /\ LosesOn(t)
+            \/ SticksRealQueryFailure /\ t \in h.failing /\ LosesOn(RecheckOver(t))}
+\* A query the relay sends to a Conduit that refuses or stays silent goes to the VPN's servers instead.
 UsingFailover ==
     \/ relay = "vpn"
     \/ (relay = "conduit" /\ fwd \in {"refuses", "silent"} /\ PerQueryFailover)
 Answers ==
     IF ~KeyTargetsRelay THEN ConduitServes
     ELSE CASE relay = "vpn" -> FailoverTarget \in Versions
-           [] relay = "conduit" -> ConduitServes \/ (PerQueryFailover /\ fwd # "probeOnly" /\ FailoverTarget \in Versions)
+           [] relay = "conduit" -> ConduitServes \/ (PerQueryFailover /\ fwd \notin Partial /\ FailoverTarget \in Versions)
            [] OTHER -> FALSE
 Serving == h.up /\ relay = "conduit" /\ ConduitServes
 Ready ==
@@ -247,16 +259,21 @@ HBusy ==
 
 HBusyEnd ==
     /\ h.up /\ h.busy
-    /\ h' = [h EXCEPT !.busy = FALSE]
+    /\ h' = [h EXCEPT !.busy = FALSE, !.wdOff = FALSE]
     /\ UNCHANGED <<vkey, svc, ver, vgate, okey, watch, relay, rwant, fwd, app, budget, ghost>>
 
 \* A tick's worth of time while the loop is held. The watchdog thread removes a published key once it has gone the
-\* bound without a confirmed answer; the loop sees it gone when it is free.
+\* bound without a confirmed answer, between the loop's steps, and the publication ends with it. A removal the store
+\* refuses stays due, and the next wake, 250 ms later and so within the same tick, tries it again.
 Elapse ==
     /\ h.up /\ h.busy /\ h.armN # NONE /\ h.unverified <= UnverifiedTicks
-    /\ h' = [h EXCEPT !.unverified = @ + 1]
-    /\ okey' = IF Watchdog /\ okey /\ h.pub /\ h.unverified + 1 >= UnverifiedTicks THEN FALSE ELSE okey
-    /\ UNCHANGED <<vkey, svc, ver, vgate, watch, relay, rwant, fwd, app, budget, ghost>>
+    /\ LET due == Watchdog /\ okey /\ h.pub /\ ~h.wdOff /\ h.unverified + 1 >= UnverifiedTicks
+       IN \E r \in (IF due THEN Refusals ELSE {FALSE}) :
+            LET removed == due /\ (~r \/ RetriesExpiry)
+            IN /\ h' = [h EXCEPT !.unverified = @ + 1, !.pub = @ /\ ~removed, !.wdOff = @ \/ (r /\ ~removed)]
+               /\ okey' = IF removed THEN FALSE ELSE okey
+               /\ budget' = Spend(r)
+    /\ UNCHANGED <<vkey, svc, ver, vgate, watch, relay, rwant, fwd, app, ghost>>
 
 \* The helper's own probe socket fails (EMFILE, say) until it recovers; the environment is not fair.
 ProbeSocketFails ==
@@ -281,22 +298,25 @@ HAccept(lost) ==
     /\ HelperFree /\ app.alive /\ app.req # "none"
     /\ lost => (app.req = "arm" /\ budget.lost > 0)
     /\ CASE app.req = "arm" ->
-              \* The arm's probe is screened as a tick's is: a failure to answer real queries needs the recheck.
-              /\ h' = [h EXCEPT !.armN = app.reqN, !.owner = app.id,
-                                !.probeOK = (fwd = "answers" \/ (fwd = "probeOnly" /\ ~h.failing)) /\ ~h.sockFails,
-                                !.failing = @ /\ (h.sockFails \/ fwd # "answers"),
-                                !.refused = 0, !.silent = 0, !.unverified = 0]
+              \* The arm reads the relay's counts and screens its probe as a tick does; a loss it finds takes the relay
+              \* off Conduit.
+              /\ LET seen == ~h.sockFails /\ fwd \in Partial
+                     failing == CASE seen -> Lost [] ~h.sockFails /\ fwd = "answers" -> {} [] OTHER -> h.failing
+                 IN /\ h' = [h EXCEPT !.armN = app.reqN, !.owner = app.id,
+                                      !.probeOK = ~h.sockFails /\ (fwd = "answers" \/ (seen /\ Lost = {})),
+                                      !.failing = failing, !.refused = 0, !.silent = 0, !.unverified = 0]
+                    /\ relay' = IF failing # {} /\ RelayUp THEN Failover ELSE relay
               /\ watch' = WatchOwner
               /\ app' = IF lost THEN ArmUnknown(app) ELSE ArmOK(app)
               /\ budget' = IF lost THEN [budget EXCEPT !.lost = @ - 1] ELSE budget
-              /\ UNCHANGED <<okey, relay, rwant, fwd>>
+              /\ UNCHANGED <<okey, rwant, fwd>>
          [] app.req = "disarm" ->
               /\ \E r \in Refusals : h' = Removed(h, r) /\ okey' = r /\ budget' = Spend(r) /\ PendingMode(r)
               /\ watch' = FALSE /\ app' = DisarmOK(app)
               /\ UNCHANGED <<rwant, fwd>>
          [] app.req = "startRelay" ->
               \* A Start supersedes a stop deferred for a pending cleanup.
-              /\ relay' = IF (h.armN # NONE /\ h.owner # app.id) \/ h.pending \/ h.failing THEN Failover ELSE "conduit"
+              /\ relay' = IF (h.armN # NONE /\ h.owner # app.id) \/ h.pending \/ h.failing # {} THEN Failover ELSE "conduit"
               /\ h' = IF StopsBeforePublish THEN [h EXCEPT !.stopPending = FALSE] ELSE h
               /\ rwant' = TRUE /\ app' = Done(app)
               /\ UNCHANGED <<okey, watch, fwd, budget>>
@@ -329,12 +349,12 @@ HSync ==
 
 \* The relay's mode follows each probe; the key is withdrawn after two refused or three silent ticks.
 \* A failed probe socket leaves the streaks and the mode alone but confirms nothing.
-\* Real queries a probe-only forwarder lost while the relay sent them to it count the tick as silent, and so does
-\* every later answered probe until the recheck, a real question asked of the forwarder directly, is answered.
+\* Real queries a partial forwarder lost while the relay sent them to it count the tick as silent, and so does every
+\* later answered probe until the recheck, a real question asked of the forwarder directly over the half that lost it,
+\* is answered.
 HTick ==
     /\ HelperFree /\ h.armN # NONE
-    /\ LET lost == fwd = "probeOnly" /\ (relay = "conduit" \/ (SticksRealQueryFailure /\ h.failing))
-           probe == CASE h.sockFails -> "failed" [] fwd = "probeOnly" -> IF lost THEN "silent" ELSE "answers"
+    /\ LET probe == CASE h.sockFails -> "failed" [] fwd \in Partial -> IF Lost # {} THEN "silent" ELSE "answers"
                       [] OTHER -> fwd
        IN CASE probe = "failed" ->
               /\ h' = [h EXCEPT !.unverified = Unverified(h), !.probeOK = @ /\ WithinBound(h)]
@@ -346,10 +366,10 @@ HTick ==
          [] probe = "silent" ->
               /\ h' = [h EXCEPT !.silent = IF @ < 3 THEN @ + 1 ELSE 3, !.refused = 0, !.unverified = Unverified(h),
                                 !.probeOK = @ /\ h.silent + 1 < 3 /\ WithinBound(h),
-                                !.failing = IF SticksRealQueryFailure THEN @ \/ lost ELSE lost]
+                                !.failing = IF fwd \in Partial THEN Lost ELSE IF SticksRealQueryFailure THEN @ ELSE {}]
               /\ ToFailover
          [] OTHER ->
-              /\ h' = [h EXCEPT !.refused = 0, !.silent = 0, !.unverified = 0, !.probeOK = TRUE, !.failing = FALSE]
+              /\ h' = [h EXCEPT !.refused = 0, !.silent = 0, !.unverified = 0, !.probeOK = TRUE, !.failing = {}]
               /\ relay' = IF RelayUp /\ ~h.pending THEN "conduit" ELSE relay
     /\ UNCHANGED <<vkey, svc, ver, vgate, okey, watch, rwant, fwd, app, budget, ghost>>
 
@@ -374,7 +394,7 @@ HDeferredStop ==
 
 HRelayRestart ==
     /\ LoopFree /\ relay = "dead"
-    /\ relay' = IF h.armN # NONE \/ h.pending \/ h.failing THEN Failover ELSE IF rwant THEN "conduit" ELSE "off"
+    /\ relay' = IF h.armN # NONE \/ h.pending \/ h.failing # {} THEN Failover ELSE IF rwant THEN "conduit" ELSE "off"
     /\ UNCHANGED <<vkey, svc, ver, vgate, okey, h, watch, rwant, fwd, app, budget, ghost>>
 
 HOwnerExit ==
@@ -472,6 +492,7 @@ ClientNext == ClientRewrite \/ ClientLoopback \/ ClientDelete \/ ClientPublishDN
               \/ ClientIPv4Flap \/ ClientIPv4Back \/ GateFlap \/ GateBack \/ ConfigdRestart
 EnvNext == OwnerExit \/ AppLaunch \/ HelperDown \/ RelayDies \/ ForwarderRecovers
            \/ ForwarderFault("refuses") \/ ForwarderFault("silent") \/ ForwarderFault("probeOnly")
+           \/ ForwarderFault("tcpLost")
            \/ ProbeSocketFails \/ ProbeSocketRecovers \/ HBusy \/ Elapse
 HelperNext == HAccept(FALSE) \/ HAccept(TRUE) \/ HSync \/ HTick \/ HCleanup \/ HDeferredStop \/ HRelayRestart
               \/ HOwnerExit \/ HStart \/ HBusyEnd
@@ -495,17 +516,17 @@ TypeOK ==
     /\ vkey \in {ABSENT, LB} \cup Versions /\ svc \in BOOLEAN /\ ver \in Versions /\ vgate \in BOOLEAN
     /\ okey \in BOOLEAN /\ h.up \in BOOLEAN /\ h.pub \in BOOLEAN /\ h.armN \in {NONE} \cup Versions
     /\ h.refused \in 0..2 /\ h.silent \in 0..3 /\ h.unverified \in 0..(UnverifiedTicks + 1)
-    /\ h.pending \in BOOLEAN /\ h.sockFails \in BOOLEAN /\ h.failing \in BOOLEAN /\ h.stopPending \in BOOLEAN
-    /\ h.busy \in BOOLEAN
+    /\ h.pending \in BOOLEAN /\ h.sockFails \in BOOLEAN /\ h.failing \subseteq Transports /\ h.stopPending \in BOOLEAN
+    /\ h.busy \in BOOLEAN /\ h.wdOff \in BOOLEAN
     /\ relay \in {"off", "conduit", "vpn", "dead"} /\ rwant \in BOOLEAN
-    /\ fwd \in {"answers", "refuses", "silent", "probeOnly"}
+    /\ fwd \in {"answers", "refuses", "silent", "probeOnly", "tcpLost"}
     /\ app.dns \in {"on", "stop_disarm", "stop_wait_disarm", "stop_relay", "stop_wait_relay", "off"}
     /\ app.req \in {"none", "arm", "disarm", "startRelay", "stopRelay"}
 
 \* Whenever the own key is in the store, the helper and its relay run and the VPN publishes servers,
 \* every lookup is answered by Conduit or by the VPN's servers. A dead relay is the helper's fault, like a crash.
-\* Lookups to a probe-only forwarder are lost until the next tick sees it: that window is the one exception.
-Unnoticed == relay = "conduit" /\ fwd = "probeOnly" /\ ~h.failing
+\* Lookups a partial forwarder loses wait on it until the next tick sees the loss: that window is the one exception.
+Unnoticed == relay = "conduit" /\ \E t \in Transports : LosesOn(t) /\ t \notin h.failing
 KeyAnswered == (okey /\ h.up /\ relay # "dead" /\ VPNUsable /\ ~Unnoticed) => Answers
 
 \* A published key never outlives the bound without a confirmed answer, ticks or none.

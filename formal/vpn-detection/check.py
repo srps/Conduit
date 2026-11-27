@@ -326,6 +326,7 @@ OVERRIDE_REFUSED_STOP = dict(OVERRIDE_NONE, MaxVersions=1, MaxDNSStops=1, MaxRem
 OVERRIDE_REFUSED_EXIT = dict(OVERRIDE_NONE, MaxVersions=1, MaxOwnerExits=1, MaxRemovalRefusals=1)
 OVERRIDE_SOCKET_FAILS = dict(OVERRIDE_NONE, MaxVersions=1, MaxForwarderFaults=1, MaxProbeSocketFailures=1)
 OVERRIDE_BUSY = dict(OVERRIDE_NONE, MaxVersions=1, MaxBusyCommands=1)
+OVERRIDE_BUSY_REFUSED = dict(OVERRIDE_BUSY, MaxRemovalRefusals=1)
 
 # The combined design (0049 as revised in #330): each `swift` text names the change in the code that breaks it.
 MUTANTS += [
@@ -457,6 +458,19 @@ MUTANTS += [
         "after a held loop republishes the key the watchdog removed, on an answer older than the bound",
         [("AgeGate == TRUE", "AgeGate == FALSE")],
         "BoundHeld", bounds=OVERRIDE_BUSY),
+    override_mutant(
+        "ov-recheck-over-udp",
+        "VPNDNSOverridePublisher.screened and DNSFailoverRelay.recheck: one real-query failure for both halves, "
+        "rechecked over UDP, so a forwarder that answers UDP lookups and drops TCP ones ends the TCP failure with a "
+        "UDP answer, gets the lookups back on the next answered probe, and keeps the key",
+        [("RechecksPerTransport == TRUE", "RechecksPerTransport == FALSE")],
+        "EventuallyWithdrawn"),
+    override_mutant(
+        "ov-watchdog-gives-up-after-refusal",
+        "VPNDNSOverrideExpiry.expire: clear the deadline before `remove()`, so a removal the store refuses is not "
+        "tried again while the command still holds the loop",
+        [("RetriesExpiry == TRUE", "RetriesExpiry == FALSE")],
+        "BoundHeld", bounds=OVERRIDE_BUSY_REFUSED),
 ]
 
 
