@@ -1389,6 +1389,15 @@ enum RuntimeHostEffectsScenario {
             _ = try await host.startDNS()
             check("DNS runs on the relay for the location's service",
                   serviceDNS() == .list(["127.0.0.1"]) && fakes.machine.dnsRelayRunning && host.status().dnsRunState == "running")
+            // On port 0 a DNS section edit rebinds the forwarder on a new port.
+            let boundBefore = host.status().bindings.dnsPort
+            config.dns.transparentProxyPort += 1
+            try ProxyConfigPersistence.save(config, in: environment)
+            _ = await host.reloadConfiguration()
+            let boundAfter = host.status().bindings.dnsPort
+            notes.append("forwarder port across the DNS edit: \(boundBefore.map(String.init) ?? "none") -> \(boundAfter.map(String.init) ?? "none")")
+            check("a reload that rebinds the forwarder points the relay at its new port",
+                  boundAfter != nil && fakes.machine.privilege.commands(matching: .startDNSRelay).last == boundAfter.map { [String($0)] })
             locations.refuseWrites(true)
             let refused = await host.stopDNS()
             check("a Stop whose restore is refused leaves DNS serving the service on 127.0.0.1",

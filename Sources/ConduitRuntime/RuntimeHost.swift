@@ -1882,9 +1882,27 @@ extension RuntimeHost {
 extension RuntimeHost: RuntimeReconcilerHost {
     /// The host has no presentation mirror, so the orchestrator's config after the push is the input it holds.
     package func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async -> RuntimeConfigApplication {
+        let forwarderPort = orchestrator.snapshot.bindings.dnsPort
         await orchestrator.applyConfigChange(new, from: old)
         reconcileSplitDNSDetection()
+        await followMovedForwarder(from: forwarderPort)
         return .held(orchestrator.config)
+    }
+
+    /// A reload that rebound the forwarder on another port left the relay and the health probe at the old one, where nothing answers the
+    /// services on 127.0.0.1. The relay is pointed at the new port and the probe re-armed there. Event first.
+    private func followMovedForwarder(from previous: Int?) async {
+        guard let previous, let port = orchestrator.snapshot.bindings.dnsPort, port != previous,
+              orchestrator.snapshot.dnsRunState == .running else { return }
+        let token = lanes.dns.observationToken
+        let manager = systemDNSManager, logger = logger
+        let outcome = await platformWork.run { manager.restartRelayIfManaged(forwarderPort: port, logger: logger) }
+        guard outcome != .notManaged else { return }
+        recordLifecycle(RuntimeEvent(kind: .health, event: "dns.relay_retargeted",
+                                     detail: "port=\(port) outcome=\(outcome == .restarted ? "answered" : "unresponsive")"),
+                        level: outcome == .restarted ? .notice : .warning)
+        guard !token.isSuperseded, orchestrator.snapshot.dnsRunState == .running else { return }
+        startDNSHealthTimer(forwarderPort: port)
     }
 
     /// A reload's pass waits for any start or stop in flight on every module lane, so the one reconciler acts on the shared input
