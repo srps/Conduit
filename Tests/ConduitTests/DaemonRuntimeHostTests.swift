@@ -2373,6 +2373,24 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
+    /// A Stop whose restore succeeds for the recorded service still keeps the relay and the forwarder while an unrecorded copy of it
+    /// points at 127.0.0.1.
+    @RuntimeActor func testADNSStopKeepsServingAServiceItHasNoRecordOf() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+        locations.refuseWrites(false)
+        locations.edit { snapshot in
+            snapshot.services.append(.init(locationID: "55555555-5555-5555-5555-555555555555", serviceID: "66666666-6666-6666-6666-666666666666",
+                                           name: "Wi-Fi", enabled: true, proxies: [:], dns: ["ServerAddresses": .list(["127.0.0.1"])]))
+        }
+
+        let stop = await host.stopDNS()
+        XCTAssertEqual(stop.keptServing, [.dns])
+        XCTAssertEqual(try locations.snapshot().services[0].dns["ServerAddresses"], .list(["192.0.2.1"]))
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running, "the forwarder still answers the copy")
+        XCTAssertTrue(harness.machine.dnsRelayRunning, "the relay still answers the copy on 127.0.0.1")
+        await host.stopRuntime()
+    }
+
     /// Turning Manage system DNS off under a refused restore leaves the relay in front of the forwarder that keeps running.
     @RuntimeActor func testASystemDNSSwitchOffWhoseRestoreFailsKeepsTheRelay() async throws {
         let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()

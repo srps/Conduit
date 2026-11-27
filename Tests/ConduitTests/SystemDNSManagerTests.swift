@@ -159,6 +159,25 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertFalse(journal.hasRecords(for: .systemDNS))
     }
 
+    /// A restore that succeeds for every recorded service still keeps the relay while another service is on 127.0.0.1, such as a copy of
+    /// a managed location made while it pointed there, which has no record of its own.
+    func testARestoreThatLeavesAnUnrecordedServiceOnTheRelayKeepsIt() throws {
+        let locations = NetworkLocationFixture.store()
+        let manager = SystemDNSManager(privilegeClient: recording, journal: journal,
+                                       locationRecovery: LocationSettingsRecovery(store: locations, journal: journal, emit: { _ in }))
+        try manager.apply(forwarderPort: 5354, logger: nil)
+        locations.edit { snapshot in
+            snapshot.services.append(.init(locationID: "55555555-5555-5555-5555-555555555555", serviceID: "66666666-6666-6666-6666-666666666666",
+                                           name: "Wi-Fi", enabled: true, proxies: [:], dns: ["ServerAddresses": .list(["127.0.0.1"])]))
+        }
+
+        let kept = try manager.clear(logger: nil, keepingRelayWhileInUse: true)
+        guard case .relayKept(_, let services) = kept else { return XCTFail("the relay was stopped: \(kept)") }
+        XCTAssertEqual(services, 1)
+        XCTAssertTrue(recording.commands(matching: .stopDNSRelay).isEmpty, "the relay still serves the copy on 127.0.0.1")
+        XCTAssertEqual(try locations.snapshot().services[0].dns["ServerAddresses"], .list(["192.0.2.1"]), "the recorded service is restored")
+    }
+
     /// Manager under test on a described machine, so the launch-time recovery
     /// decision can be pinned without depending on what this host's interfaces
     /// happen to hold.
