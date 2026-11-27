@@ -184,6 +184,36 @@ final class DNSForwarderProxyHostTests: XCTestCase {
         XCTAssertEqual(answer, Self.publicIP, "DoH still answers the PAC host itself")
     }
 
+    func testAnExactPACHostThatExpandsADisabledUpstreamKeepsThePublicPath() async throws {
+        let first = try await silentServer()
+        let doh = try await dohProvider()
+        let port = try await start(
+            dohPort: doh.port, endpoints: [Self.firstPushed: first.port, Self.secondPushed: first.port],
+            table: Self.fullTunnel, configure: {
+                $0.upstreams = [UpstreamProxy(name: "old", host: "proxy", port: 3128, enabled: false, priority: 0)]
+                $0.routing.pacURL = "https://proxy.example.net/proxy.pac"
+            }
+        )
+
+        let answer = try await SplitDNSProbe.resolve("proxy.example.net", port: port)
+        XCTAssertEqual(answer, Self.publicIP, "DoH still answers the PAC host itself")
+    }
+
+    func testAnExactPACHostThatExpandsAProxyHostKeepsThePublicPath() async throws {
+        let first = try await silentServer()
+        let doh = try await dohProvider()
+        let port = try await start(
+            dohPort: doh.port, endpoints: [Self.firstPushed: first.port, Self.secondPushed: first.port],
+            table: Self.fullTunnel, hosts: ProxyHostNames(names: ["proxy"]),
+            configure: { $0.routing.pacURL = "https://proxy.example.net/proxy.pac" }
+        )
+
+        let answer = try await SplitDNSProbe.resolve("proxy.example.net", port: port)
+        let attacker = try await rawReply("proxy.attacker.example", port: port, txID: 0x5D05)
+        XCTAssertEqual(answer, Self.publicIP, "DoH still answers the PAC host itself")
+        XCTAssertEqual(attacker.map(DNSWireFormat.extractRCode), 2, "another expansion still asks only the tunnel")
+    }
+
     func testAPACLearnedProxyHostIsIncluded() async throws {
         let first = try await silentServer()
         let second = try await tunnelDNS(answering: "pac-proxy.example.org")

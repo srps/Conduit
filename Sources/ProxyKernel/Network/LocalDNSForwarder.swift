@@ -989,8 +989,7 @@ final class DNSResolutionCore: @unchecked Sendable {
         let table = splitDNSProvider?() ?? SplitDNSTable(manual: config.dnsEntries, detected: [])
         let rule = table.rule(matching: domain)
         let isMulticast = DNSWireFormat.isMulticastDNSName(domain)
-        let isProxyHostViaTunnel = rule == nil && table.usesPushedServers
-            && (proxyHostsProvider?().containsOrSearchExpands(domain) == true || Self.credentialHosts(config).searchExpands(domain))
+        let isProxyHostViaTunnel = rule == nil && table.usesPushedServers && asksOnlyTheTunnel(domain, config: config)
         let isInternal = rule != nil || isMulticast || isProxyHostViaTunnel
         let queryType = DNSWireFormat.extractQueryType(from: queryBytes)
         let cacheKey = DNSCacheKey(domain: domain.lowercased(), queryType: queryType)
@@ -1252,6 +1251,15 @@ final class DNSResolutionCore: @unchecked Sendable {
         let outcome = attempt.response != nil ? "answered" : attempt.asked.isEmpty ? "not_asked" : "silent"
         reportNetworkResolverFallback(name: name, servers: servers.count, outcome: outcome)
         return attempt.response
+    }
+
+    /// A proxy host, or a search-expanded form of a proxy, PAC or upstream host. A name configured exactly keeps its
+    /// own path, as an expansion of a shorter configured name can be that same name.
+    private func asksOnlyTheTunnel(_ name: String, config: ProxyConfig) -> Bool {
+        let proxyHosts = proxyHostsProvider?() ?? .empty
+        if proxyHosts.contains(name) { return true }
+        let credentialHosts = Self.credentialHosts(config)
+        return !credentialHosts.contains(name) && (proxyHosts.searchExpands(name) || credentialHosts.searchExpands(name))
     }
 
     /// The upstream proxies' hosts and the PAC file's host, whichever are configured.
