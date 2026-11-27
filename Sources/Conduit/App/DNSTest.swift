@@ -4,8 +4,7 @@ import Foundation
 import ProxyKernel
 
 /// The Test DNS control: idle, one probe out, or the reading of the last one. A reading is one probe of one DNS run, not DNS health, so
-/// a change in what the app shows of that run (its state, its error or its bound port) clears it, and a probe still out is dropped
-/// with it: the host's own verdict is newer.
+/// a change in its `DNSTestScope` clears it, and a probe still out is dropped with it: the host's own verdict is newer.
 enum DNSTest: Equatable {
     case idle
     /// One probe out. Its answer is shown only while this is still the probe out.
@@ -24,6 +23,17 @@ enum DNSTest: Equatable {
         case .stopped, .starting: false
         }
     }
+}
+
+/// What a reading describes: one DNS run, by its module revision, as the app shows it, probed at the port the host's accepted
+/// configuration picks. The snapshot names that configuration only by its revision, so any accepted change clears a reading, Manage
+/// system DNS among them; a Settings draft does not.
+struct DNSTestScope: Equatable {
+    var runRevision: ControlLifecycleRevision?
+    var configRevision: ControlConfigRevision
+    var runState: ModuleRunState
+    var error: String?
+    var port: Int?
 }
 
 enum DNSTestResult: Equatable {

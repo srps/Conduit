@@ -164,11 +164,10 @@ final class AppState: ObservableObject {
         self.updateCoordinator = updateCoordinator
         self.updateStatus = updateCoordinator.status
         observeDrafts()
-        Publishers.CombineLatest3(runtime.$dnsRunState, runtime.$dnsError, runtime.$bindings.map(\.dnsPort))
-            .removeDuplicates { $0 == $1 }.dropFirst().sink { [weak self] _ in
-                guard let self, self.dnsTest != .idle else { return }
-                self.dnsTest = .idle
-            }.store(in: &cancellables)
+        runtime.$dnsTestScope.dropFirst().sink { [weak self] _ in
+            guard let self, self.dnsTest != .idle else { return }
+            self.dnsTest = .idle
+        }.store(in: &cancellables)
         notificationManager.requestAuthorization()
         opening = Task { @MainActor [weak self] in await self?.open() }
     }

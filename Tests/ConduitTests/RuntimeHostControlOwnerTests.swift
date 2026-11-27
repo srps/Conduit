@@ -2733,12 +2733,12 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
 
     /// A Test DNS probe waiting out its timeout holds no platform work: held inside the injected probe, off the main thread and off the
     /// platform queue, a DNS Stop's teardown and a quit's both complete through the client meanwhile. A second Test DNS of the same port
-    /// joins the held probe rather than queueing its own, and both report that probe's reading once it answers.
+    /// does not join the held probe: it runs its own after it, so its reading is never one made before it was asked.
     ///
     /// The hold is armed on whatever thread the probe runs on, so the test proves the behaviour, not a queue: a probe on the platform queue
     /// parks that queue and the Stop's teardown with it, and the bounded wait below then fails on its assertion while the probe is still
     /// held. One reader task alone pulls the stream and records each settlement; the hold is released and the reader drained on every exit.
-    @RuntimeActor func testAHeldTestDNSProbeDelaysNeitherAStopNorAQuitAndARepeatJoinsIt() async throws {
+    @RuntimeActor func testAHeldTestDNSProbeDelaysNeitherAStopNorAQuitAndARepeatRunsItsOwnAfterIt() async throws {
         let composed = try await compose()
         try await composed.host.startRuntime()
         XCTAssertTrue(composed.harness.machine.dnsRelayRunning)
@@ -2800,7 +2800,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
             }
             XCTAssertEqual(completion.result, reading)
         }
-        XCTAssertEqual(composed.harness.dnsProbes.values.count, asked, "the repeat joined the held probe and asked no port of its own")
+        XCTAssertEqual(composed.harness.dnsProbes.values.count, asked + 1, "the repeat asked the port again after the held probe")
     }
 
     // MARK: - Saved Start

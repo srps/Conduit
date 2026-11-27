@@ -39,15 +39,31 @@ final class AppStateDNSTestTests: XCTestCase {
         return result
     }
 
-    /// A snapshot of the forwarder running on `port`, changed by `change`, applied in this turn as the observer applies one.
-    private func show(_ state: AppState, port: ControlPort, _ change: (inout ProxyOrchestratorSnapshot) -> Void = { _ in }) throws {
+    /// A snapshot of the forwarder running on `port` at the host's current revisions, changed by `change` and `restamp`, applied in this
+    /// turn as the observer applies one.
+    private func show(
+        _ state: AppState,
+        port: ControlPort,
+        _ change: (inout ProxyOrchestratorSnapshot) -> Void = { _ in },
+        restamp: (inout ControlRuntimeStamp) -> Void = { _ in }
+    ) throws {
         var kernel = ProxyOrchestratorSnapshot()
         kernel.dnsRunState = .running
         kernel.bindings.dnsHost = ProxyConfig.dnsForwarderHost
         kernel.bindings.dnsPort = port.rawValue
         change(&kernel)
-        let incarnation = try XCTUnwrap(state.runtime.stamp?.incarnation)
-        state.runtime.apply(snapshot: try WireSnapshotFixture.snapshot(kernel, incarnation: incarnation))
+        let live = try XCTUnwrap(state.runtime.stamp)
+        var snapshot = try WireSnapshotFixture.snapshot(kernel, incarnation: live.incarnation)
+        snapshot.stamp.configRevision = live.configRevision
+        snapshot.stamp.modules = live.modules
+        restamp(&snapshot.stamp)
+        state.runtime.apply(snapshot: snapshot)
+    }
+
+    /// The DNS module's next lifecycle revision: a Stop and a Start were admitted between two snapshots.
+    private static func restarted(_ stamp: inout ControlRuntimeStamp) {
+        guard let modules = stamp.modules else { return XCTFail("the host reports module revisions") }
+        stamp.modules?.dns = ControlLifecycleRevision(rawValue: modules.dns.rawValue + 2)!
     }
 
     func testAnAnsweringForwarderIsReportedWithItsPort() async throws {
@@ -124,6 +140,89 @@ final class AppStateDNSTestTests: XCTestCase {
             try show(state, port: port, change)
             XCTAssertEqual(state.dnsTest, .idle, "a reading is not shown beside a newer fact: \(fact)")
         }
+    }
+
+    func testAReadingIsClearedByARestartOnTheSamePort() async throws {
+        let (state, port) = try await runningDNS()
+        harness.dnsProbe.setAnswering([port.rawValue])
+        try show(state, port: port)
+        state.testDNS()
+        _ = await finished(state)
+
+        try show(state, port: port, restamp: Self.restarted)
+        XCTAssertEqual(state.dnsTest, .idle, "a reading from the run before the restart is not shown")
+    }
+
+    func testAProbeOutAcrossARestartOnTheSamePortShowsNothingWhenItSettles() async throws {
+        let (state, port) = try await runningDNS()
+        harness.dnsProbe.setAnswering([port.rawValue])
+        try show(state, port: port)
+        harness.hold.arm { name, values in name == "dns-probe" && values == [String(port.rawValue)] }
+        state.testDNS()
+        let held = await harness.hold.waitUntilReached(within: .seconds(5))
+        guard held else { return XCTFail("the host never probed the forwarder") }
+
+        try show(state, port: port, restamp: Self.restarted)
+        XCTAssertEqual(state.dnsTest, .idle, "the probe out describes the run before the restart")
+
+        harness.hold.release()
+        await harness.settle("the late answer was set aside") {
+            state.logStore.exportDiagnosticLog().contains("DNS test: the answer is not shown")
+        }
+        XCTAssertEqual(state.dnsTest, .idle, "the probe's answer is about the run before the restart")
+    }
+
+    /// The first press's probe is held and set aside by a relay warning; the second press gets an answer of its own, from a probe made
+    /// after it, not the first probe's.
+    func testASecondPressGetsItsOwnProbesAnswer() async throws {
+        let (state, port) = try await runningDNS()
+        try show(state, port: port)
+        harness.hold.arm { name, values in name == "dns-probe" && values == [String(port.rawValue)] }
+        state.testDNS()
+        let first = await harness.hold.waitUntilReached(within: .seconds(5))
+        guard first else { return XCTFail("the host never probed the forwarder") }
+
+        try show(state, port: port) { $0.dnsError = "DNS pipeline unresponsive" }
+        XCTAssertEqual(state.dnsTest, .idle)
+        state.testDNS()
+        XCTAssertTrue(state.dnsTest.isTesting, "the second press is out")
+        await harness.settle("the host took the second press while the first probe is held") {
+            state.logStore.exportDiagnosticLog().components(separatedBy: "DNS test: probing 127.0.0.1:\(port.rawValue)").count == 3
+        }
+
+        harness.hold.arm { name, values in name == "dns-probe" && values == [String(port.rawValue)] }
+        harness.hold.release()
+        let second = await harness.hold.waitUntilReached(within: .seconds(5))
+        if second {
+            harness.dnsProbe.setAnswering([port.rawValue])
+            harness.hold.release()
+        }
+        let result = await finished(state)
+        XCTAssertTrue(second, "the second press probed the port itself")
+        XCTAssertEqual(result, .answered(port), "the second press shows its own probe's answer, not the first's silence")
+    }
+
+    /// The host probes port 53 once it manages system DNS. A draft of that setting keeps the reading; the host accepting it clears it,
+    /// and the next press probes the new target.
+    func testAReadingIsClearedWhenTheHostAcceptsANewProbeTarget() async throws {
+        let (state, port) = try await runningDNS()
+        harness.dnsProbe.setAnswering([port.rawValue])
+        state.testDNS()
+        let before = await finished(state)
+        XCTAssertEqual(before, .answered(port))
+
+        state.platformConfig.manageSystemDNS = true
+        guard case .finished = state.dnsTest else { return XCTFail("a Settings draft cleared the reading: \(state.dnsTest)") }
+
+        state.saveConfig()
+        await state.awaitPendingSave()
+        await harness.settle("the host accepted the new target") { state.dnsTest == .idle }
+        XCTAssertEqual(state.runtime.dnsError, nil, "only the accepted configuration changed")
+        XCTAssertEqual(state.runtime.bindings.dnsPort, Int(port.rawValue), "the listener is the same")
+
+        state.testDNS()
+        let after = await finished(state)
+        XCTAssertEqual(after, .noAnswer(try ControlPort(53)), "the next press probes the host's new target")
     }
 
     func testATestDroppedAtTheCommandCapEndsAtOnce() async throws {
