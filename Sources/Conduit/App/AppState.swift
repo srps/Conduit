@@ -1217,16 +1217,100 @@ final class AppState: ObservableObject {
         )
     }
 
+    /// The helper's relay serves every service still on Conduit's loopback resolver, so the helper is removed only once system DNS is
+    /// released: what is left is restored through the Restore DNS Settings path, a DNS Stop, and a fresh check must then find nothing.
     func uninstallHelper() {
-        changeHelper(
-            "uninstall",
-            refreshAfter: .zero,
-            { lifecycle in try lifecycle.uninstallHelper() },
-            succeeded: { appState, _ in
-                appState.helperCallerPolicy = nil
-                return (RuntimeEvent(kind: .lifecycle, event: "helper.uninstalled"), .notice)
-            }
-        )
+        guard !helperChangeInFlight, !quitFence else { return }
+        helperChangeInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let released = await self.releaseSystemDNSForHelperRemoval()
+            self.helperChangeInFlight = false
+            guard released else { return }
+            self.changeHelper(
+                "uninstall",
+                refreshAfter: .zero,
+                { lifecycle in try lifecycle.uninstallHelper() },
+                succeeded: { appState, _ in
+                    appState.helperCallerPolicy = nil
+                    return (RuntimeEvent(kind: .lifecycle, event: "helper.uninstalled"), .notice)
+                }
+            )
+        }
+    }
+
+    private func releaseSystemDNSForHelperRemoval() async -> Bool {
+        guard var release = await readableSystemDNSRelease() else { return false }
+        if !release.isReleased, !quitFence {
+            recordHelperEvent(RuntimeEvent(kind: .lifecycle, event: "helper.uninstall_restoring_dns",
+                                           detail: Self.releaseDetail(release)), level: .notice)
+            _ = await stopDNSForHelperRemoval()
+            guard let after = await readableSystemDNSRelease() else { return false }
+            release = after
+        }
+        guard release.isReleased else {
+            refuseHelperUninstall(detail: "reason=system_dns_not_released " + Self.releaseDetail(release),
+                                  message: Self.helperUninstallRefusedMessage(release))
+            return false
+        }
+        return true
+    }
+
+    /// A release check the host answered from settings and a journal it could read. Anything else refuses the uninstall at once: an
+    /// unreadable check proves nothing either way, so it stops nothing.
+    private func readableSystemDNSRelease() async -> ControlSystemDNSRelease? {
+        guard let release = await checkSystemDNSRelease() else {
+            refuseHelperUninstall(detail: "reason=release_check_failed", message: Self.helperUninstallUncheckedMessage)
+            return nil
+        }
+        guard release.settingsRead else {
+            refuseHelperUninstall(detail: "reason=system_dns_unreadable", message: Self.helperUninstallUncheckedMessage)
+            return nil
+        }
+        return release
+    }
+
+    private func checkSystemDNSRelease() async -> ControlSystemDNSRelease? {
+        guard case .completed(let completion)? = await settle(.checkSystemDNSRelease).outcome,
+              case .systemDNSRelease(let release) = completion.result else { return nil }
+        return release
+    }
+
+    /// The Restore DNS Settings Stop, awaited. It goes beside the Stop lane, so its settlement is never handed to a later caller.
+    private func stopDNSForHelperRemoval() async -> ControlOperationOutcome? {
+        guard !quitFence else { return nil }
+        return await withCheckedContinuation { continuation in
+            dispatch(.stop(.dns), settled: { continuation.resume(returning: $0) }, ended: {})
+        }
+    }
+
+    private func refuseHelperUninstall(detail: String, message: String) {
+        recordHelperEvent(RuntimeEvent(kind: .lifecycle, event: "helper.uninstall_refused", detail: detail), level: .error)
+        lastErrorMessage = message
+    }
+
+    private func recordHelperEvent(_ event: RuntimeEvent, level: LogLevel) {
+        eventLog.append(event)
+        logStore.log(level, "Helper: \(event.event) \(event.detail ?? "")", category: .system)
+    }
+
+    private static func releaseDetail(_ release: ControlSystemDNSRelease) -> String {
+        "records=\(release.recordsKept.rawValue) loopback_services=\(release.loopbackServices.rawValue)"
+    }
+
+    static let helperUninstallUncheckedMessage = "The helper was not uninstalled: Conduit could not confirm that your network services "
+        + "no longer use its DNS resolver. Turn off Manage system DNS, then try again."
+
+    static func helperUninstallRefusedMessage(_ release: ControlSystemDNSRelease) -> String {
+        let services = release.loopbackServices.rawValue
+        let records = release.recordsKept.rawValue
+        var left: [String] = []
+        if services > 0 { left.append("\(services) network service\(services == 1 ? "" : "s") still use\(services == 1 ? "s" : "") its DNS resolver (127.0.0.1)") }
+        if records > 0 { left.append("\(records) DNS change\(records == 1 ? " is" : "s are") not restored") }
+        return "The helper was not uninstalled: " + left.joined(separator: " and ") + ", and without the helper DNS would stop working. "
+            + "Use Restore DNS Settings or turn off Manage system DNS, then try again. The event log names up to "
+            + "\(ControlSystemDNSRelease.maximumNamedServices) of those services by location and name, and counts the rest. "
+            + "If you run your own DNS resolver on 127.0.0.1, remove the helper with sudo ./uninstall-helper.sh --force."
     }
 
     /// An install or uninstall, off the main actor, one at a time. Event first, log line derived from it. A success tells the host the
