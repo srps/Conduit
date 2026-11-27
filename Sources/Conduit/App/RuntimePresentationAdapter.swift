@@ -41,6 +41,8 @@ final class RuntimePresentationAdapter: ObservableObject {
     @Published private(set) var tunnelsError: String?
     @Published private(set) var systemDNSRecoveryDeclined = false
     @Published private(set) var bindings = RuntimeBindingsDisplay()
+    /// Nil while nothing is observed.
+    @Published private(set) var dnsTestScope: DNSTestScope?
     @Published private(set) var lastAuthOutcome: RuntimeAuthOutcome?
     @Published private(set) var lastAuthOutcomeAt: Date?
     @Published private(set) var lastAuthFallbackReason: String?
@@ -240,6 +242,10 @@ final class RuntimePresentationAdapter: ObservableObject {
         set(\.lastAuthOutcome, snapshot.lastAuthOutcome.map(RuntimeAuthOutcome.init))
         set(\.lastAuthOutcomeAt, snapshot.lastAuthOutcomeAt.map(Date.init(controlTimestamp:)))
         set(\.lastAuthFallbackReason, snapshot.lastAuthFallbackReason)
+        set(\.dnsTestScope, DNSTestScope(
+            runRevision: snapshot.stamp.modules?.dns, configRevision: snapshot.stamp.configRevision,
+            runState: dnsRunState, error: dnsError, port: bindings.dnsPort
+        ))
     }
 
     private func applyCounters(_ snapshot: ControlRuntimeSnapshot) {
@@ -308,6 +314,7 @@ final class RuntimePresentationAdapter: ObservableObject {
         set(\.tunnelsError, nil)
         set(\.systemDNSRecoveryDeclined, false)
         set(\.bindings, RuntimeBindingsDisplay())
+        set(\.dnsTestScope, nil)
         set(\.activeConnectionCount, 0)
         set(\.tunnelDNSOverrideStatus, .notNeeded)
         set(\.uptimeStartedAt, nil)
