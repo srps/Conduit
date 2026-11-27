@@ -24,6 +24,11 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   the upstream behind it refused, blocked or could not reach the provider. It
   used to call the providers unreachable.
 
+- The transparent proxy's DNS-over-HTTPS lookups through Conduit's listener
+  open one connection per provider instead of two. Each one is a tunnel the
+  corporate proxy authenticates, so a lookup now costs half the
+  authentications.
+
 ## 0.7.0
 
 This release makes Conduit's VPN on/off verdict, and the split DNS that depends
