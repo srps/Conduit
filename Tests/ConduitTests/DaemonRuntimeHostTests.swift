@@ -2388,6 +2388,11 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(try locations.snapshot().services[0].dns["ServerAddresses"], .list(["192.0.2.1"]))
         XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running, "the forwarder still answers the copy")
         XCTAssertTrue(harness.machine.dnsRelayRunning, "the relay still answers the copy on 127.0.0.1")
+
+        locations.edit { $0.services[$0.services.count - 1].dns = ["ServerAddresses": .list(["192.0.2.3"])] }
+        let retried = await host.stopDNS()
+        XCTAssertTrue(retried.stopped.contains(.dns), "nothing is left on the relay")
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
         await host.stopRuntime()
     }
 
@@ -2404,6 +2409,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         await host.reconcileSystemDNSIfRunning()
         XCTAssertEqual(try locations.snapshot().services.last?.dns["ServerAddresses"], .list(["192.0.2.7"]))
+
+        await host.deliveries.drain()
+        locations.edit { $0.activeLocationID = NetworkLocationFixture.office }
+        harness.locationObserver.emit(NetworkLocationFixture.office)
+        await host.deliveries.drain()
+        XCTAssertEqual(try locations.snapshot().services[1].dns["ServerAddresses"], .list(["192.0.2.2"]), "a location switch keeps it too")
         XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running)
         await host.stopRuntime()
     }

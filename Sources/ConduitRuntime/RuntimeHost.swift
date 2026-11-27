@@ -1213,7 +1213,8 @@ package final class RuntimeHost {
             let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
             let events = orchestrator.eventLog, logger = logger
             let applyProxy = platform.manageSystemProxy && state.proxyIsUp
-            let applyDNS = platform.manageSystemDNS && state.dnsIsUp
+            // A Stop's fence over a running forwarder is a Stop whose restore kept it: it serves the services already on the relay only.
+            let applyDNS = platform.manageSystemDNS && state.dnsIsUp && !workflow.dnsIntent.fenced
             let withholdProxyRestore = !applyProxy && declinedLaunchRecovery[.systemProxy] != nil
             let withholdDNSRestore = !applyDNS && declinedLaunchRecovery[.systemDNS] != nil
             for (kind, withheld) in [(NetworkSettingsKind.proxies, withholdProxyRestore), (.dns, withholdDNSRestore)] where withheld {
@@ -1680,7 +1681,7 @@ package final class RuntimeHost {
     }
 
     private var systemDNSReconcileIsDue: Bool {
-        platformConfig.manageSystemDNS && orchestrator.snapshot.dnsRunState == .running
+        platformConfig.manageSystemDNS && orchestrator.snapshot.dnsRunState == .running && !workflow.dnsIntent.fenced
     }
 
     /// Arms the probe for the DNS run that holds the lane now, and starts its observation clear.
