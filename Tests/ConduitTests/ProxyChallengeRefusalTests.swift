@@ -469,6 +469,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         try await forwarder.start(host: "127.0.0.1", port: 0)
 
         let client = try await DatagramBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
+        closeAtTearDown(client)
         let query = DNSWireFormat.buildQuery(domain: "route.example", txID: 0x0408, qtype: 1)
         var buffer = client.allocator.buffer(capacity: query.count)
         buffer.writeBytes(query)
@@ -481,7 +482,6 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         for _ in 0..<1_400 where !failed() {
             try await Task.sleep(for: .milliseconds(10))
         }
-        try await client.close().get()
         XCTAssertTrue(failed(), "the lookup finished")
         return proxy.requestHeads()
     }

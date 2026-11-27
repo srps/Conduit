@@ -76,33 +76,67 @@ final class OriginResolverRouteTests: XCTestCase {
         XCTAssertGreaterThan(connections, 0, "the local proxy is one of the raced routes")
     }
 
+    /// A direct-only lookup that fails after the route widened must not hold back the next lookup, which can ask the proxy.
+    func testAFailureOnTheDirectRouteDoesNotSkipTheProxyRoute() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let accepted = NIOLockedValueBox(0)
+        let listener = try await Self.countingListener(accepted: accepted)
+        let listenerPort = listener.localAddress?.port
+        let reads = NIOLockedValueBox(0)
+        // The route widens as soon as the first lookup has read it, so that lookup's failure lands on the wider route.
+        let resolver = Self.resolver(localProxyPort: listenerPort, route: {
+            reads.withLockedValue { count in
+                defer { count += 1 }
+                return count == 0 ? .directOnly : .proxyAndDirect
+            }
+        })
+
+        await Self.expectUnresolved(resolver.resolveOrigin(host: "origin.example", port: 443, on: group.next()))
+        XCTAssertEqual(accepted.withLockedValue { $0 }, 0, "the direct-only lookup never asked the proxy")
+
+        await Self.expectUnresolved(resolver.resolveOrigin(host: "origin.example", port: 443, on: group.next()))
+        try await listener.close().get()
+        XCTAssertGreaterThan(accepted.withLockedValue { $0 }, 0, "the next lookup asked the proxy")
+    }
+
     private func listenerConnectionsAfterACacheMiss(route: DoHRoute) async throws -> Int {
         let group = MultiThreadedEventLoopGroup.singleton
         let accepted = NIOLockedValueBox(0)
-        let listener = try await ServerBootstrap(group: group)
+        let listener = try await Self.countingListener(accepted: accepted)
+        let resolver = Self.resolver(localProxyPort: listener.localAddress?.port, route: { route })
+
+        await Self.expectUnresolved(resolver.resolveOrigin(host: "origin.example", port: 443, on: group.next()))
+        try await listener.close().get()
+        return accepted.withLockedValue { $0 }
+    }
+
+    private static func countingListener(accepted: NIOLockedValueBox<Int>) async throws -> Channel {
+        try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .childChannelInitializer { $0.pipeline.addHandler(CountAndClose(accepted: accepted)) }
             .bind(host: "127.0.0.1", port: 0)
             .get()
-        let listenerPort = listener.localAddress?.port
+    }
+
+    private static func resolver(localProxyPort: Int?, route: @escaping @Sendable () -> DoHRoute) -> DoHOriginResolver {
         var config = ProxyConfig.testFixture()
         config.localHost = "127.0.0.1"
         config.localPort = 0
         // Not loopback: CFNetwork would bypass the proxy for it.
         config.dohProviders = ["https://192.0.2.10/dns-query"]
         let frozen = config
-        let resolver = DoHOriginResolver(
+        return DoHOriginResolver(
             logger: RecordingLogSink(minLevel: .debug), configProvider: { frozen },
-            localProxyPort: { listenerPort }, doHRoute: { route }
+            localProxyPort: { localProxyPort }, doHRoute: route
         )
+    }
 
+    private static func expectUnresolved(_ lookup: EventLoopFuture<SocketAddress>) async {
         do {
-            _ = try await resolver.resolveOrigin(host: "origin.example", port: 443, on: group.next()).get()
+            _ = try await lookup.get()
             XCTFail("no provider can answer")
         } catch {
             XCTAssertEqual(error as? OriginResolverError, .unresolved(host: "origin.example"))
         }
-        try await listener.close().get()
-        return accepted.withLockedValue { $0 }
     }
 
     private final class CountAndClose: ChannelInboundHandler, Sendable {
@@ -240,7 +274,7 @@ final class NegativeAnswerCacheTests: XCTestCase {
     func testCapacityEvictsTheSoonestToExpire() {
         final class Clock: @unchecked Sendable { var now = Date(timeIntervalSince1970: 5_000) }
         let clock = Clock()
-        var cache = NegativeAnswerCache(ttl: 5, capacity: 3, now: { clock.now })
+        var cache = NegativeAnswerCache<String>(ttl: 5, capacity: 3, now: { clock.now })
 
         for (i, host) in ["a", "b", "c"].enumerated() {
             clock.now += TimeInterval(i)
@@ -258,7 +292,7 @@ final class NegativeAnswerCacheTests: XCTestCase {
         final class Clock: @unchecked Sendable { var now = Date(timeIntervalSince1970: 5_000) }
         let clock = Clock()
         let t0 = clock.now
-        var cache = NegativeAnswerCache(ttl: 5, now: { clock.now })
+        var cache = NegativeAnswerCache<String>(ttl: 5, now: { clock.now })
 
         XCTAssertFalse(cache.isNegative("chatgpt.com"))
         cache.recordFailure("chatgpt.com")

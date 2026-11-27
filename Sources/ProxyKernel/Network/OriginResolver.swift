@@ -53,6 +53,13 @@ package final class DoHOriginResolver: OriginResolving {
         let expiresAt: Date
     }
 
+    /// A failure says nothing about a route the lookup did not ask, so a direct-only failure must not hold back a lookup
+    /// that can ask the proxy.
+    private struct FailedLookup: Hashable {
+        let host: String
+        let route: DoHRoute
+    }
+
     /// Bounds the cache. Intercept rules cover a handful of domains, so this is
     /// generous; the cap only exists so a pathological rule set can't grow it
     /// without limit.
@@ -65,7 +72,7 @@ package final class DoHOriginResolver: OriginResolving {
     private let localProxyPort: @Sendable () -> Int?
     private let doHRoute: @Sendable () -> DoHRoute
     private let cache = NIOLockedValueBox<[String: CacheEntry]>([:])
-    private let negativeCache = NIOLockedValueBox(NegativeAnswerCache(ttl: 5))
+    private let negativeCache = NIOLockedValueBox(NegativeAnswerCache<FailedLookup>(ttl: 5))
     private let proxyChallengeDelegate: ProxyChallengeRefusingDelegate
 
     /// Takes the whole config, not just the provider list: reaching a DoH
@@ -94,15 +101,16 @@ package final class DoHOriginResolver: OriginResolving {
         if let ip = cachedIP(for: key) {
             return eventLoop.makeCompletedFuture { try Self.address(ip: ip, port: port, host: host) }
         }
-        if negativeCache.withLockedValue({ $0.isNegative(key) }) {
+        let failed = FailedLookup(host: key, route: doHRoute())
+        if negativeCache.withLockedValue({ $0.isNegative(failed) }) {
             return eventLoop.makeFailedFuture(OriginResolverError.unresolved(host: host))
         }
 
         let config = configProvider()
         let promise = eventLoop.makePromise(of: SocketAddress.self)
         Task { [self] in
-            guard let answer = await lookupA(host: key, config: config) else {
-                negativeCache.withLockedValue { $0.recordFailure(key) }
+            guard let answer = await lookupA(host: key, config: config, route: failed.route) else {
+                negativeCache.withLockedValue { $0.recordFailure(failed) }
                 promise.fail(OriginResolverError.unresolved(host: host))
                 return
             }
@@ -165,7 +173,7 @@ package final class DoHOriginResolver: OriginResolving {
     /// A records only. The transparent proxy binds an IPv4 loopback listener and
     /// its clients reached it over IPv4, so an IPv6 origin buys nothing here.
     ///
-    /// Every provider is tried in both encodings over every route `doHRoute`
+    /// Every provider is tried in both encodings over every route `route`
     /// allows, first usable answer wins.
     ///
     /// Neither encoding is universal: Quad9 and dns.google reply `400` to
@@ -182,11 +190,11 @@ package final class DoHOriginResolver: OriginResolving {
     /// corporate proxy, succeeds. Direct-only meant the transparent proxy's
     /// direct path silently black-holed there.
     /// Same reasoning as `DNSResolutionCore.resolveViaDoH`.
-    private func lookupA(host: String, config: ProxyConfig) async -> (ip: String, ttl: TimeInterval)? {
+    private func lookupA(host: String, config: ProxyConfig, route: DoHRoute) async -> (ip: String, ttl: TimeInterval)? {
         let providers = config.dohProviders.isEmpty
             ? DNSSection.defaultDoHProviders
             : config.dohProviders
-        let routes = DoHSessionFactory.routes(for: config, localProxyPort: localProxyPort(), route: doHRoute())
+        let routes = DoHSessionFactory.routes(for: config, localProxyPort: localProxyPort(), route: route)
         let encoded = host.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? host
         let query = DNSWireFormat.buildQuery(domain: host, qtype: 1)
         let delegate = proxyChallengeDelegate
@@ -266,18 +274,18 @@ package final class DoHOriginResolver: OriginResolving {
     }
 }
 
-/// Remembers hosts whose lookup just failed on every route, for a few seconds.
+/// Remembers lookups that just failed on every route they asked, for a few seconds.
 ///
 /// The resolver runs when the network just changed; when the path is gone
 /// every intercepted connection to a host would otherwise pay the full fan-out
 /// (providers × routes × encodings) of request timeouts before failing the
 /// same way. proxy.log showed bursts of a dozen such failures per second.
-package struct NegativeAnswerCache: Sendable {
+package struct NegativeAnswerCache<Key: Hashable & Sendable>: Sendable {
     package let ttl: TimeInterval
     /// Same bound as the positive cache. Expired entries go first; when
     /// live entries alone fill it, the soonest to expire is evicted.
     package let capacity: Int
-    private var failedUntil: [String: Date] = [:]
+    private var failedUntil: [Key: Date] = [:]
     private let now: @Sendable () -> Date
 
     package init(ttl: TimeInterval, capacity: Int = 256, now: @escaping @Sendable () -> Date = { Date() }) {
@@ -288,7 +296,7 @@ package struct NegativeAnswerCache: Sendable {
 
     package var count: Int { failedUntil.count }
 
-    package mutating func recordFailure(_ key: String) {
+    package mutating func recordFailure(_ key: Key) {
         let current = now()
         failedUntil = failedUntil.filter { $0.value > current }
         failedUntil[key] = current.addingTimeInterval(ttl)
@@ -298,7 +306,7 @@ package struct NegativeAnswerCache: Sendable {
         }
     }
 
-    package mutating func isNegative(_ key: String) -> Bool {
+    package mutating func isNegative(_ key: Key) -> Bool {
         guard let until = failedUntil[key] else { return false }
         guard until > now() else {
             failedUntil.removeValue(forKey: key)

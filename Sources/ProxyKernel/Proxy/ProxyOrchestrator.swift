@@ -1179,7 +1179,7 @@ package final class ProxyOrchestrator {
     /// Whether the last definite VPN verdict is `.connected`. With the direct-mode cause it picks the DoH route.
     private var vpnConnectedForDNS = false
     /// The DoH route the forwarder and the origin resolver read, in a box because their lookups run off the owner. Written
-    /// only by `refreshDoHRoute`.
+    /// only by `publishDoHRoute`, before `directModeBox` on a direct-mode change.
     private let doHRouteBox = NIOLockedValueBox(DoHRoute.proxyAndDirect)
     /// The forwarder's split-DNS table, in a box for the same reason. Written only by `swapSplitDNSTable`.
     private let splitDNSBox: NIOLockedValueBox<SplitDNSState>
@@ -1383,7 +1383,8 @@ package final class ProxyOrchestrator {
         resolverManager: resolverManager
     )
 
-    private lazy var originResolver: any OriginResolving = DoHOriginResolver(
+    /// Readable in-module so a test can start a lookup through the production wiring.
+    private(set) lazy var originResolver: any OriginResolving = DoHOriginResolver(
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
         localProxyPort: { [server = localProxyServer] in server.listeningPort },
@@ -3478,21 +3479,34 @@ package final class ProxyOrchestrator {
     /// from the cause via `cause.isDirect` everywhere it's needed; there is no
     /// duplicate stored field.
     private func setDirectMode(_ cause: DirectModeCause) {
+        // The route goes first: a handler that reads the new cause and starts a DoH lookup must find the route derived from it.
+        let priorRoute = publishDoHRoute(directMode: cause)
         let prior = Self.publishDirectMode(cause, to: directModeBox, stamping: routingTransitions)
         if prior != cause {
             logDirectModeEntry(from: prior, to: cause)
         }
+        reportDoHRouteChange(from: priorRoute, directMode: cause)
         mutateSnapshot { $0.directModeCause = cause }
-        refreshDoHRoute()
     }
 
+    /// After a VPN verdict changes `vpnConnectedForDNS`, with the direct-mode cause unchanged.
     private func refreshDoHRoute() {
-        let route = DoHRoute.for(vpnConnected: vpnConnectedForDNS, directMode: snapshot.directModeCause)
-        let prior = doHRouteBox.withLockedValue { box in defer { box = route }; return box }
+        let cause = snapshot.directModeCause
+        reportDoHRouteChange(from: publishDoHRoute(directMode: cause), directMode: cause)
+    }
+
+    /// Writes the route for `directMode` and the current VPN verdict to the box the DoH consumers read, and returns the route it replaced.
+    private func publishDoHRoute(directMode: DirectModeCause) -> DoHRoute {
+        let route = DoHRoute.for(vpnConnected: vpnConnectedForDNS, directMode: directMode)
+        return doHRouteBox.withLockedValue { box in defer { box = route }; return box }
+    }
+
+    private func reportDoHRouteChange(from prior: DoHRoute, directMode: DirectModeCause) {
+        let route = doHRouteBox.withLockedValue { $0 }
         guard prior != route else { return }
         emitEvent(
             .routing, "dns.doh_route_changed",
-            detail: "route=\(route.rawValue) prior=\(prior.rawValue) vpn=\(vpnConnectedForDNS ? "connected" : "not_connected") direct_mode=\(snapshot.directModeCause.rawValue)"
+            detail: "route=\(route.rawValue) prior=\(prior.rawValue) vpn=\(vpnConnectedForDNS ? "connected" : "not_connected") direct_mode=\(directMode.rawValue)"
         )
         logStore.log(.info, "DNS: DoH lookups now use route \(route.rawValue) (was \(prior.rawValue)).", category: .network)
     }

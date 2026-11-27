@@ -337,6 +337,9 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     /// The port the DoH local-proxy route dials now, nil without a route or while stopped.
     var doHLocalProxyPort: Int? { core?.doHLocalProxyPort }
 
+    /// The route a DoH lookup starting now races.
+    var doHRouteForNewLookups: DoHRoute { doHRoute() }
+
     /// Every DoH session the running forwarder holds; empty while stopped.
     /// Tests and pm-sim run `ProxyChallengeCanary` on these before they let a
     /// proxy answer 407.
