@@ -113,6 +113,13 @@ final class AppState: ObservableObject {
     /// An install waits on a password dialog for as long as the user takes, so it has its own queue.
     private let helperLifecycleWork = PlatformWork(label: "io.github.srps.Conduit.app.helper-lifecycle")
     private var helperChangeInFlight = false
+    /// Up from an Uninstall Helper click until its removal ends: nothing sent meanwhile may point a service at the relay.
+    private var helperUninstallFence = false
+    /// A Settings save the fence held, submitted when it lifts.
+    private var configurationDeferredByUninstall = false
+    /// Commands sent through `dispatch` and not yet ended, and the one uninstall waiting for them to end.
+    private var dispatchesInFlight = 0
+    private var dispatchDrainWaiters: [CheckedContinuation<Void, Never>] = []
     /// The DNS module's last observed error while it ran, for the degraded notification's transition.
     private var lastDNSError: String?
     private var lastSnapshotDeclinedSystemDNSRecovery = false
@@ -542,6 +549,14 @@ final class AppState: ObservableObject {
 
     private func submitConfiguration() {
         guard phase == .ready || phase == .opening, let editor, editor.ledger.isDirty(.configuration) else { return }
+        if helperUninstallFence, platformConfig.manageSystemDNS {
+            if !configurationDeferredByUninstall {
+                recordHelperEvent(RuntimeEvent(kind: .lifecycle, event: "helper.uninstall_fenced",
+                                               detail: "command=apply reason=manage_system_dns outcome=deferred"), level: .notice)
+            }
+            configurationDeferredByUninstall = true
+            return
+        }
         editor.save(.configuration)
         refreshConfigurationProblem()
     }
@@ -713,6 +728,7 @@ final class AppState: ObservableObject {
             lastErrorMessage = "A reload from disk is already running."
             return
         }
+        if let reason = dnsWriterFenceRefusal(.reload) { return refuseWhileUninstallingHelper(.reload, reason: reason) }
         reloading = true
         cancelPendingSave()
         reloadTask = Task { @MainActor [weak self] in
@@ -903,6 +919,7 @@ final class AppState: ObservableObject {
     /// one ends, so a Start admitted in between cannot outlive it, and only the latest caller's settlement is kept.
     private func send(_ command: ControlRuntimeCommand, settled: @escaping @MainActor (ControlOperationOutcome?) -> Void) {
         guard !quitFence else { return }
+        if let reason = dnsWriterFenceRefusal(command) { return refuseWhileUninstallingHelper(command, reason: reason) }
         if case .stop(let module) = command {
             guard stopLanes[module] == nil else {
                 stopLanes[module]?.wanted = settled
@@ -931,9 +948,13 @@ final class AppState: ObservableObject {
         let requestID = ControlRequestID(rawValue: UUID())
         // Known to the editor from this turn, before the send, so a save submitted while it is out can wait for its write.
         editor?.ownCommandSent(command, requestID: requestID)
+        dispatchesInFlight += 1
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { ended() }
+            defer {
+                ended()
+                self.dispatchEnded()
+            }
             let end = await self.settle(command, requestID: requestID)
             switch end {
             case .settled(let outcome): self.editor?.ownCommandEnded(outcome: outcome, requestID: requestID)
@@ -945,6 +966,14 @@ final class AppState: ObservableObject {
             settled(end.outcome)
             self.refreshPreflight()
         }
+    }
+
+    private func dispatchEnded() {
+        dispatchesInFlight -= 1
+        guard dispatchesInFlight == 0 else { return }
+        let waiters = dispatchDrainWaiters
+        dispatchDrainWaiters = []
+        for waiter in waiters { waiter.resume() }
     }
 
     /// How a command ended, as far as the app can know.
@@ -1228,23 +1257,70 @@ final class AppState: ObservableObject {
 
     /// The helper's relay serves every service still on Conduit's loopback resolver, so the helper is removed only once system DNS is
     /// released: what is left is restored through the Restore DNS Settings path, a DNS Stop, and a fresh check must then find nothing.
+    /// From the click until the removal ends, nothing this app sends may point a service back at the relay (`dnsWriterFenceRefusal`):
+    /// the work already out is drained first, so the last check runs under the fence right before the removal.
     func uninstallHelper() {
         guard !helperChangeInFlight, !quitFence else { return }
         helperChangeInFlight = true
+        helperUninstallFence = true
         Task { @MainActor [weak self] in
             guard let self else { return }
+            await self.drainDNSWriters()
             let released = await self.releaseSystemDNSForHelperRemoval()
             self.helperChangeInFlight = false
-            guard released else { return }
-            self.changeHelper(
-                "uninstall",
-                refreshAfter: .zero,
-                { lifecycle in try lifecycle.uninstallHelper() },
-                succeeded: { appState, _ in
-                    appState.helperCallerPolicy = nil
-                    return (RuntimeEvent(kind: .lifecycle, event: "helper.uninstalled"), .notice)
-                }
-            )
+            if released {
+                await self.changeHelper(
+                    "uninstall",
+                    refreshAfter: .zero,
+                    { lifecycle in try lifecycle.uninstallHelper() },
+                    succeeded: { appState, _ in
+                        appState.helperCallerPolicy = nil
+                        return (RuntimeEvent(kind: .lifecycle, event: "helper.uninstalled"), .notice)
+                    }
+                )?.value
+            }
+            self.liftHelperUninstallFence()
+        }
+    }
+
+    /// Why a command or a Settings save is held while Uninstall Helper runs, nil when it may go: one that could point a service at the
+    /// relay, which the helper about to be removed serves. A Start with DNS or its companion, a Restart with its companion, and a reload
+    /// that may adopt a file which turns Manage system DNS on are refused; a save is deferred until the uninstall ends.
+    private func dnsWriterFenceRefusal(_ command: ControlRuntimeCommand) -> String? {
+        guard helperUninstallFence else { return nil }
+        switch command {
+        case .start(.dns, _, _), .restart(.dns, _, _):
+            return "dns_start"
+        case .start(_, _, .some), .restart(_, _, .some):
+            return "dns_companion"
+        case .reload:
+            return "reload"
+        case .start, .restart, .stop, .testDNS, .testUpstream, .refreshPreflight, .setLaunchAtLogin, .credentialsChanged,
+             .checkSystemDNSRelease, .quit:
+            return nil
+        }
+    }
+
+    /// Records and shows a command the uninstall fence refused. Event first.
+    private func refuseWhileUninstallingHelper(_ command: ControlRuntimeCommand, reason: String) {
+        recordHelperEvent(RuntimeEvent(kind: .lifecycle, event: "helper.uninstall_fenced",
+                                       detail: "command=\(command.kind.rawValue) reason=\(reason) outcome=refused"), level: .notice)
+        lastErrorMessage = Self.helperUninstallFencedMessage
+    }
+
+    /// Ends the fence, then submits the Settings save it deferred.
+    private func liftHelperUninstallFence() {
+        helperUninstallFence = false
+        guard configurationDeferredByUninstall else { return }
+        configurationDeferredByUninstall = false
+        submitConfiguration()
+    }
+
+    /// Waits for the Settings save and the commands already out, so none of them lands after the last check.
+    private func drainDNSWriters() async {
+        await editor?.settle()
+        while dispatchesInFlight > 0 {
+            await withCheckedContinuation { dispatchDrainWaiters.append($0) }
         }
     }
 
@@ -1310,6 +1386,9 @@ final class AppState: ObservableObject {
     static let helperUninstallUncheckedMessage = "The helper was not uninstalled: Conduit could not confirm that your network services "
         + "no longer use its DNS resolver. Turn off Manage system DNS, then try again."
 
+    static let helperUninstallFencedMessage = "Uninstall Helper is checking your DNS settings, so nothing that could point them back at "
+        + "Conduit starts or reloads until it finishes. Try again then."
+
     static func helperUninstallRefusedMessage(_ release: ControlSystemDNSRelease) -> String {
         let services = release.loopbackServices.rawValue
         let records = release.recordsKept.rawValue
@@ -1323,16 +1402,17 @@ final class AppState: ObservableObject {
     }
 
     /// An install or uninstall, off the main actor, one at a time. Event first, log line derived from it. A success tells the host the
-    /// helper was replaced, so the verdict it held for the old one is not kept.
+    /// helper was replaced, so the verdict it held for the old one is not kept. The task ends once the change and its refresh have.
+    @discardableResult
     private func changeHelper<Outcome: Sendable>(
         _ operation: String,
         refreshAfter delay: Duration,
         _ change: @escaping @Sendable (any HelperLifecycleManaging) throws -> Outcome,
         succeeded: @escaping @MainActor (AppState, Outcome) -> (RuntimeEvent, LogLevel)
-    ) {
-        guard !helperChangeInFlight, !quitFence else { return }
+    ) -> Task<Void, Never>? {
+        guard !helperChangeInFlight, !quitFence else { return nil }
         helperChangeInFlight = true
-        Task { @MainActor [weak self, helperLifecycleWork, helperLifecycle] in
+        return Task { @MainActor [weak self, helperLifecycleWork, helperLifecycle] in
             let result: Result<Outcome, HelperChangeFailure> = await helperLifecycleWork.run {
                 do {
                     return .success(try change(helperLifecycle))

@@ -1510,6 +1510,45 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertTrue(message.contains("sudo ./uninstall-helper.sh --force"), message)
     }
 
+    /// While the removal waits, for the password prompt in production, nothing the app sends points a service back at the relay the
+    /// helper serves: a Start that may bring DNS up is refused, and a save that turns Manage system DNS on waits until the removal ends.
+    func testNothingTheAppSendsDuringTheRemovalPointsAServiceAtTheRelay() async throws {
+        let harness = try makeHarness()
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let state = await harness.ready()
+        state.toggleDNS()
+        await harness.settle("DNS runs") { state.runtime.dnsRunState == .running }
+        let removal = HeldRemoval()
+        let witness = UninstallWitness()
+        harness.helper.observeUninstall = {
+            removal.hold()
+            var dns: NetworkSettingValue?
+            locations.edit { dns = $0.services.first { $0.locationID == NetworkLocationFixture.home }?.dns["ServerAddresses"] }
+            witness.record(dns: dns, records: false)
+        }
+
+        state.uninstallHelper()
+        await harness.settle("the removal is out") { removal.isHeld }
+        state.platformConfig.manageSystemDNS = true
+        state.saveConfig()
+        state.toggleProxy()
+        state.reloadConfigurationFromDisk()
+        func fenced(_ detail: String) -> Bool {
+            state.eventLog.events.contains { $0.event == "helper.uninstall_fenced" && $0.detail == detail }
+        }
+        await harness.settle("each writer was held") {
+            fenced("command=apply reason=manage_system_dns outcome=deferred") && fenced("command=start reason=dns_companion outcome=refused")
+                && fenced("command=reload reason=reload outcome=refused")
+        }
+        XCTAssertEqual(state.lastErrorMessage, AppState.helperUninstallFencedMessage)
+        removal.release()
+        await harness.settle("the helper was removed") { state.eventLog.events.contains { $0.event == "helper.uninstalled" } }
+
+        XCTAssertEqual(witness.seen?.dns, .list(["192.0.2.1"]), "no service pointed at the relay when the helper went")
+        await harness.settle("the deferred save ran once the removal ended") { state.editor?.ledger.saved.platform.manageSystemDNS == true }
+    }
+
     /// A busy reading keeps the held verdict and asks for one more read; a conclusive one ends the re-read.
     func testABusyHelperKeepsItsVerdictAndIsReadAgain() async throws {
         let harness = try makeHarness()
@@ -1775,6 +1814,19 @@ final class AppStateHarnessTests: XCTestCase {
 }
 
 /// What the machine held when the helper's uninstall began.
+/// Holds the helper's removal on its worker until the test releases it.
+private final class HeldRemoval: @unchecked Sendable {
+    private let lock = NSLock()
+    private let gate = DispatchSemaphore(value: 0)
+    private var _isHeld = false
+    var isHeld: Bool { lock.withLock { _isHeld } }
+    func hold() {
+        lock.withLock { _isHeld = true }
+        gate.wait()
+    }
+    func release() { gate.signal() }
+}
+
 private final class UninstallWitness: @unchecked Sendable {
     private let lock = NSLock()
     private var _seen: (dns: NetworkSettingValue?, records: Bool)?
