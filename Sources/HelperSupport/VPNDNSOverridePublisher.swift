@@ -57,6 +57,7 @@ package protocol VPNDNSFailoverRelay: AnyObject {
     var listeningPort: Int? { get }
     var mode: DNSFailoverMode { get }
     func setMode(_ mode: DNSFailoverMode)
+    func stop()
     func setFailoverServers(_ servers: [String])
     /// Makes every failover server socket again, after the machine's path changed.
     func renewServerSockets()
@@ -93,6 +94,9 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
     case failoverServersKept(service: String, reason: String)
     /// The probe answered, but since the last tick Conduit answered none of the real queries it left unanswered.
     case queriesUnanswered(service: String, unanswered: Int)
+    /// `stop-dns-relay` came while a cleanup was pending: the relay stays up on the VPN's servers until it completes.
+    case relayStopDeferred(service: String)
+    case relayStoppedAfterCleanup(service: String)
 
     package var logLine: String {
         let prefix = "vpn-dns-override"
@@ -119,6 +123,11 @@ package enum VPNDNSOverrideOutcome: Equatable, Sendable {
                 + "the VPN's key is unreadable"
         case .queriesUnanswered(let service, let unanswered):
             return "\(prefix) queries_unanswered service=\(HelperAudit.safe(service)) unanswered=\(unanswered); counted as silent"
+        case .relayStopDeferred(let service):
+            return "\(prefix) relay_stop_deferred service=\(HelperAudit.safe(service)); "
+                + "the relay stays on the VPN's servers until the key's cleanup completes"
+        case .relayStoppedAfterCleanup(let service):
+            return "\(prefix) relay_stopped service=\(HelperAudit.safe(service)); the key's cleanup completed"
         }
     }
 
@@ -167,6 +176,8 @@ package final class VPNDNSOverridePublisher {
     package private(set) var published = false
     /// The key may still exist after a refused removal; nothing is published until a read shows it gone.
     package private(set) var cleanupPending = false
+    /// A relay stop held back by the cleanup: it runs before anything is published, unless a Start supersedes it.
+    package private(set) var relayStopPending = false
     private var pendingReason: VPNDNSOverrideReason = .disarmed
     private var publishedPort: Int?
     private var failoverService: String?
@@ -234,6 +245,7 @@ package final class VPNDNSOverridePublisher {
 
     /// A caller that does not own the arm starts the relay on the VPN's servers until a probe answers.
     package func relayStarted(caller: pid_t?) {
+        relayStopPending = false
         if let arm, arm.owner != caller {
             relay.setMode(.vpn)
         } else {
@@ -245,6 +257,21 @@ package final class VPNDNSOverridePublisher {
     package func relayRestarted() {
         if arm == nil { toConduit() } else { relay.setMode(.vpn) }
         sync()
+    }
+
+    /// `stop-dns-relay`, after the disarm: a key whose cleanup is pending keeps the relay answering, on the VPN's servers,
+    /// until the cleanup completes. True when the relay stopped now.
+    @discardableResult
+    package func stopRelay() -> Bool {
+        guard cleanupPending else {
+            relayStopPending = false
+            relay.stop()
+            return true
+        }
+        relay.setMode(.vpn)
+        if !relayStopPending { report(.relayStopDeferred(service: failoverService ?? "none")) }
+        relayStopPending = true
+        return false
     }
 
     /// Every 10 s while armed or while a cleanup is pending.
@@ -350,7 +377,7 @@ package final class VPNDNSOverridePublisher {
         guard store.overridesPrimary(service: arm.service), store.primaryService() == arm.service else {
             return .vpnChanged
         }
-        guard relay.listeningPort != nil else { return .relayStopped }
+        guard relay.listeningPort != nil, !relayStopPending else { return .relayStopped }
         guard probeOK else {
             switch lastVerdict {
             case .silent: return .targetSilent
@@ -385,6 +412,11 @@ package final class VPNDNSOverridePublisher {
         published = false
         cleanupPending = false
         report(.withdrawn(service: service, reason: shown))
+        if relayStopPending {
+            relayStopPending = false
+            relay.stop()
+            report(.relayStoppedAfterCleanup(service: service))
+        }
     }
 
     /// An unreadable key keeps the servers last read: only a read that shows them gone or changed replaces them.

@@ -249,6 +249,38 @@ final class HelperVPNDNSOverrideTests: XCTestCase {
         XCTAssertNil(machine.vpnDNSRelay.listeningPort, "stopped once the key is gone")
     }
 
+    func testAnArmDuringADeferredStopPublishesNothingOverTheRelayItStops() throws {
+        let machine = machine()
+        try machine.execute(.startDNSRelay, values: ["5053"])
+        _ = try machine.vpnDNSOverride(.arm(service: service, servers: servers))
+        machine.vpnDNSStore.failsRemove = true
+        machine.vpnDNSStore.closeLeavesKey = true
+        try machine.execute(.stopDNSRelay, values: [])
+        _ = try machine.vpnDNSOverride(.arm(service: service, servers: servers))
+        machine.vpnDNSStore.failsRemove = false
+        machine.tickVPNDNSOverride()
+        XCTAssertNil(machine.vpnDNSRelay.listeningPort, "the stop the cleanup held back has run")
+        XCTAssertNil(machine.vpnDNSStore.ownKey, "and no key names the relay it stopped")
+
+        try machine.execute(.startDNSRelay, values: ["5053"])
+        XCTAssertNotNil(machine.vpnDNSStore.ownKey, "a Start brings the relay and the key back")
+    }
+
+    func testAStartSupersedesADeferredStop() throws {
+        let machine = machine()
+        try machine.execute(.startDNSRelay, values: ["5053"])
+        _ = try machine.vpnDNSOverride(.arm(service: service, servers: servers))
+        machine.vpnDNSStore.failsRemove = true
+        machine.vpnDNSStore.closeLeavesKey = true
+        try machine.execute(.stopDNSRelay, values: [])
+        try machine.execute(.startDNSRelay, values: ["5053"])
+        _ = try machine.vpnDNSOverride(.arm(service: service, servers: servers))
+        machine.vpnDNSStore.failsRemove = false
+        machine.tickVPNDNSOverride()
+        XCTAssertNotNil(machine.vpnDNSRelay.listeningPort, "the new Start keeps the relay")
+        XCTAssertNotNil(machine.vpnDNSStore.ownKey, "and the key is published once the old one is gone")
+    }
+
     func testFakeMachineAnswersStatusForTheCallerThatArmed() throws {
         let machine = machine()
         try machine.execute(.startDNSRelay, values: ["5053"])

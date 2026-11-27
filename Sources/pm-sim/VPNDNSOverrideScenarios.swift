@@ -290,9 +290,11 @@ enum VPNDNSOverrideScenarios {
             store.failsRead = false
             store.failsRemove = false
             rig.machine.tickVPNDNSOverride()
-            check("the next tick removes the key", store.ownKey == nil
-                && rig.machine.vpnDNSOverrideOutcomes.last == .withdrawn(service: service, reason: .relayStopped))
-            check("and only then stops the relay", rig.relay.listeningPort == nil)
+            check("the next tick removes the key, and only then stops the relay", store.ownKey == nil
+                && Array(rig.machine.vpnDNSOverrideOutcomes.suffix(2)) == [
+                    .withdrawn(service: service, reason: .relayStopped), .relayStoppedAfterCleanup(service: service),
+                ])
+            check("the relay is stopped", rig.relay.listeningPort == nil)
         }
     }
 

@@ -232,7 +232,6 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     private var _vpnDNSOverrideSupported = true
     private var _callerPID: pid_t = 4_242
     private var _resolverOrderIgnoresOwnKey = false
-    private var _failoverStopPending = false
 
     package init(
         services: [String] = ["Wi-Fi"], resolverDirectory: URL,
@@ -498,24 +497,11 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
 
     package func tickVPNDNSOverride() {
         withVPNDNSPublisher { $0.tick() }
-        stopFailoverRelayOnceClean()
     }
 
     /// A store notification reaching the helper's loop.
     package func syncVPNDNSOverride() {
         withVPNDNSPublisher { $0.sync() }
-        stopFailoverRelayOnceClean()
-    }
-
-    /// The helper's stop of the fail-safe relay, deferred while its key's cleanup is pending.
-    private func stopFailoverRelayOnceClean() {
-        let pending = withVPNDNSPublisher { $0.cleanupPending }
-        let stop = lock.withLock { () -> Bool in
-            guard _failoverStopPending, !pending else { return false }
-            _failoverStopPending = false
-            return true
-        }
-        if stop { vpnDNSRelay.stop() }
     }
 
     /// `NOTE_EXIT` for the pid that armed.
@@ -594,7 +580,6 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
             guard let domain = values.first else { return }
             try? FileManager.default.removeItem(at: resolverDirectory.appendingPathComponent(domain))
         case .startDNSRelay:
-            lock.withLock { _failoverStopPending = false }
             let target = values.first.flatMap { Int($0) }
             if let target { _ = vpnDNSRelay.start(targetPort: target) }
             let caller = callerPID
@@ -608,15 +593,9 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
                 if !tcpUnchanged { _dnsTCPRelayRunning = !_dnsTCPRelayBindFails }
             }
         case .stopDNSRelay:
-            let pending = withVPNDNSPublisher { publisher -> Bool in
+            withVPNDNSPublisher { publisher in
                 publisher.disarm(.relayStopped)
-                return publisher.cleanupPending
-            }
-            if pending {
-                vpnDNSRelay.setMode(.vpn)
-                lock.withLock { _failoverStopPending = true }
-            } else {
-                vpnDNSRelay.stop()
+                publisher.stopRelay()
             }
             lock.withLock { _dnsRelayRunning = false; _dnsRelayTargetPort = nil; _dnsTCPRelayRunning = false }
         case .startTCPRelay, .stopTCPRelay, .ping:

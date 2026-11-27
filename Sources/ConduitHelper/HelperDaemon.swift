@@ -119,7 +119,6 @@ enum HelperDaemon {
                 exit(EXIT_FAILURE)
             }
             restartDeadFailoverHalves()
-            stopFailoverRelayOnceClean()
             followOwner(loop)
         }
     }
@@ -490,7 +489,6 @@ enum HelperDaemon {
     static let dnsTCPRelayMaximumSessions = 64
 
     private static func startDNSRelay(targetPort: Int, caller: pid_t?) -> HelperResponse {
-        failoverStopPending = false
         startFailoverRelay(targetPort: targetPort)
         vpnDNSOverride.relayStarted(caller: caller)
         let udpUnchanged = relay?.isRunning == true && currentDNSRelayTarget == targetPort
@@ -698,23 +696,7 @@ enum HelperDaemon {
         stopUDPDNSRelay()
         stopDNSTCPRelay()
         guard failoverRelay.target != nil else { return }
-        if vpnDNSOverride.cleanupPending {
-            failoverRelay.setMode(.vpn)
-            failoverStopPending = true
-            HelperLog.warning("DNS failover relay kept on the VPN's servers until the key's cleanup completes")
-            return
-        }
-        failoverRelay.stop()
-        HelperLog.notice("DNS failover relay stopped")
-    }
-
-    nonisolated(unsafe) private static var failoverStopPending = false
-
-    private static func stopFailoverRelayOnceClean() {
-        guard failoverStopPending, !vpnDNSOverride.cleanupPending else { return }
-        failoverStopPending = false
-        failoverRelay.stop()
-        HelperLog.notice("DNS failover relay stopped after the key's cleanup")
+        if vpnDNSOverride.stopRelay() { HelperLog.notice("DNS failover relay stopped") }
     }
 
     private static func stopUDPDNSRelay() {
