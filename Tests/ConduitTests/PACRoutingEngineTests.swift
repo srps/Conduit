@@ -93,6 +93,80 @@ final class PACRoutingEngineTests: XCTestCase {
         XCTAssertEqual(hosts.current, ["second.proxy.example.com", "first.proxy.example.com"], "the first choice is recorded last")
     }
 
+    func testAnEvaluationHeldAcrossDisableNeverMakesItsProxyATunnelName() async throws {
+        var initial = ProxyConfig.testFixture()
+        initial.pacURL = "http://example.com/proxy.pac"
+        initial.pacRoutingEnabled = true
+        initial.upstreams = [UpstreamProxy(name: "a", host: "configured.proxy.example.com", port: 3128, priority: 0)]
+        let config = NIOLockedValueBox(initial)
+        let gate = GatedPacScriptEvaluator()
+        let hosts = PACProxyHosts()
+        let engine = PACRoutingEngine(
+            configProvider: { config.withLockedValue { $0 } },
+            resolver: StaticPacEvaluator(scriptEvaluator: gate), refreshInterval: 300, proxyHosts: hosts
+        )
+        try await engine.refresh(force: true)
+        func names() -> ProxyHostNames {
+            let current = config.withLockedValue { $0 }
+            return ProxyHostNames(config: current, pacHosts: hosts.current(for: current))
+        }
+
+        let held = engine.decisionFuture(for: "https://a.example.org/", host: "a.example.org", on: MultiThreadedEventLoopGroup.singleton.next())
+        XCTAssertEqual(gate.entered.wait(timeout: .now() + 5), .success)
+        config.withLockedValue { $0.pacRoutingEnabled = false }
+        XCTAssertFalse(names().contains("old.proxy.example.com"))
+        gate.release.signal()
+        _ = try await held.get()
+
+        XCTAssertEqual(hosts.current, [], "the answer finished after PAC was turned off and is not recorded")
+        XCTAssertFalse(names().contains("old.proxy.example.com"), "the former PAC proxy resolves as a public name")
+        XCTAssertTrue(names().contains("configured.proxy.example.com"), "a configured upstream stays a tunnel name")
+    }
+
+    func testAnAnswerStartedBeforeTheSetWasEmptiedIsNotRecorded() async throws {
+        var config = ProxyConfig.testFixture()
+        config.pacURL = "http://example.com/proxy.pac"
+        config.pacRoutingEnabled = true
+        let gate = GatedPacScriptEvaluator()
+        let hosts = PACProxyHosts()
+        let engine = PACRoutingEngine(
+            configProvider: { config }, resolver: StaticPacEvaluator(scriptEvaluator: gate), refreshInterval: 300, proxyHosts: hosts
+        )
+        try await engine.refresh(force: true)
+        let held = engine.decisionFuture(for: "https://a.example.org/", host: "a.example.org", on: MultiThreadedEventLoopGroup.singleton.next())
+        XCTAssertEqual(gate.entered.wait(timeout: .now() + 5), .success)
+        hosts.clear()
+        gate.release.signal()
+        let decision = try await held.get()
+        XCTAssertEqual(decision.routes, [.proxy(host: "old.proxy.example.com", port: 8080)], "the request still gets its answer")
+        XCTAssertEqual(hosts.current, [])
+    }
+
+    func testRecordedHostsBelongToThePACTheyCameFrom() async throws {
+        var initial = ProxyConfig.testFixture()
+        initial.pacURL = "http://example.com/proxy.pac"
+        initial.pacRoutingEnabled = true
+        let config = NIOLockedValueBox(initial)
+        let script = NIOLockedValueBox(#"function FindProxyForURL(url, host) { return "PROXY old.proxy.example.com:8080"; }"#)
+        let hosts = PACProxyHosts()
+        let engine = PACRoutingEngine(
+            configProvider: { config.withLockedValue { $0 } }, resolver: CFPACEvaluator(), refreshInterval: 300,
+            pacLoader: { _ in script.withLockedValue { $0 } }, proxyHosts: hosts
+        )
+        try await engine.refresh(force: true)
+        _ = engine.route(for: "https://a.example.org/", host: "a.example.org")
+        XCTAssertEqual(hosts.current, ["old.proxy.example.com"])
+
+        script.withLockedValue { $0 = #"function FindProxyForURL(url, host) { return "PROXY new.proxy.example.com:8080"; }"# }
+        try await engine.refresh(force: true)
+        XCTAssertEqual(hosts.current, [], "a replaced script empties the set")
+        _ = engine.route(for: "https://a.example.org/", host: "a.example.org")
+        XCTAssertEqual(hosts.current, ["new.proxy.example.com"])
+
+        config.withLockedValue { $0.pacURL = "http://example.com/other.pac" }
+        XCTAssertEqual(hosts.current(for: config.withLockedValue { $0 }), [], "a changed URL empties it before the engine notices")
+    }
+
     func testACachedAnswerRecordsItsProxyHostAgainAfterEviction() async throws {
         var config = ProxyConfig.testFixture()
         config.pacURL = "http://example.com/proxy.pac"
@@ -518,6 +592,18 @@ private final class StaticPacEvaluator: PacEvaluator, @unchecked Sendable {
 
     func routeChain(for entries: [String]) -> PACChain {
         CFPACEvaluator().routeChain(for: entries)
+    }
+}
+
+/// Holds each evaluation until released.
+private final class GatedPacScriptEvaluator: PacScriptEvaluating, @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+
+    func resolveProxyChain(for _: URL) throws -> [String] {
+        entered.signal()
+        _ = release.wait(timeout: .now() + 5)
+        return ["PROXY old.proxy.example.com:8080"]
     }
 }
 

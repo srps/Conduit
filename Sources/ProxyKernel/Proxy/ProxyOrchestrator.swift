@@ -1300,7 +1300,8 @@ package final class ProxyOrchestrator {
         splitDNSProvider: { [splitDNSBox] in splitDNSBox.withLockedValue { $0.table } },
         networkResolverProvider: { [networkResolverBox] in networkResolverBox.withLockedValue { $0 } },
         proxyHostsProvider: { [configBox, pacProxyHosts] in
-            ProxyHostNames(config: configBox.current, pacHosts: pacProxyHosts.current)
+            let config = configBox.current
+            return ProxyHostNames(config: config, pacHosts: pacProxyHosts.current(for: config))
         },
         onResolutionRecovered: { [weak self] recovery in
             Task { @RuntimeActor in await self?.handleDNSResolutionRecovered(recovery) }
