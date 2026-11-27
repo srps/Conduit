@@ -198,7 +198,7 @@ package final class VPNDNSOverridePublisher {
         lastVerdict = verdict
         probeOK = verdict == .answered
         lastConfirmed = probeOK ? now() : nil
-        if probeOK { relay.setMode(.conduit) }
+        if probeOK { toConduit() }
         report(.armed(service: service, servers: servers.count, owner: owner))
         sync()
         return true
@@ -223,13 +223,13 @@ package final class VPNDNSOverridePublisher {
         if let arm, arm.owner != caller {
             relay.setMode(.vpn)
         } else {
-            relay.setMode(.conduit)
+            toConduit()
         }
         sync()
     }
 
     package func relayRestarted() {
-        relay.setMode(arm == nil ? .conduit : .vpn)
+        if arm == nil { toConduit() } else { relay.setMode(.vpn) }
         sync()
     }
 
@@ -257,7 +257,7 @@ package final class VPNDNSOverridePublisher {
             resetProbe()
             probeOK = true
             lastConfirmed = now()
-            relay.setMode(.conduit)
+            toConduit()
         case .refused:
             consecutiveSilent = 0
             consecutiveRefused = min(consecutiveRefused + 1, Self.refusedTicksToWithdraw)
@@ -354,6 +354,8 @@ package final class VPNDNSOverridePublisher {
             store.closeSession()
             published = false
             if store.ownKeyState() != .absent {
+                // The key that should be gone still names the relay: its lookups go where they would without it.
+                relay.setMode(.vpn)
                 if !cleanupPending || pendingReason != reason { report(.cleanupPending(service: service, reason: reason)) }
                 cleanupPending = true
                 pendingReason = reason
@@ -376,6 +378,11 @@ package final class VPNDNSOverridePublisher {
         let primary = store.primaryService()
         if let seen = lastPrimary, seen != primary { relay.renewServerSockets() }
         lastPrimary = primary
+    }
+
+    /// While a cleanup is pending the relay stays on the VPN's servers.
+    private func toConduit() {
+        if !cleanupPending { relay.setMode(.conduit) }
     }
 
     private func resetProbe() {

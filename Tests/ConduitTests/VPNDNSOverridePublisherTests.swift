@@ -195,6 +195,25 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         XCTAssertEqual(rig.outcomes.last, .withdrawn(service: service, reason: .relayStopped))
     }
 
+    func testWhileACleanupIsPendingTheRelayStaysOnTheVPNsServers() {
+        let rig = armed(rig())
+        XCTAssertEqual(rig.relay.mode, .conduit)
+        rig.store.failsRemove = true
+        rig.store.closeLeavesKey = true
+        rig.store.clientRewrite(service, servers: ["192.0.2.99"])
+        rig.publisher.sync()
+        XCTAssertTrue(rig.publisher.cleanupPending)
+        XCTAssertEqual(rig.relay.mode, .vpn, "the key that should be gone sends its lookups where they would go without it")
+        rig.tick()
+        XCTAssertEqual(rig.relay.mode, .vpn, "an answered probe does not move it back while the key lingers")
+        rig.publisher.relayStarted(caller: owner)
+        XCTAssertEqual(rig.relay.mode, .vpn)
+        rig.store.failsRemove = false
+        rig.tick()
+        XCTAssertFalse(rig.publisher.cleanupPending)
+        XCTAssertNil(rig.store.ownKey)
+    }
+
     func testAKeyAClosedSessionStillHoldsIsRemovedOnTheNextTickAndNothingIsPublishedMeanwhile() {
         let rig = armed(rig())
         rig.store.failsRemove = true
