@@ -1511,7 +1511,7 @@ final class AppStateHarnessTests: XCTestCase {
     }
 
     /// While the removal waits, for the password prompt in production, nothing the app sends points a service back at the relay the
-    /// helper serves: a Start that may bring DNS up is refused, and a save that turns Manage system DNS on waits until the removal ends.
+    /// helper serves: a Start that may bring DNS up, a reload and a Settings save are refused.
     func testNothingTheAppSendsDuringTheRemovalPointsAServiceAtTheRelay() async throws {
         let harness = try makeHarness()
         let locations = NetworkLocationFixture.store()
@@ -1538,7 +1538,7 @@ final class AppStateHarnessTests: XCTestCase {
             state.eventLog.events.contains { $0.event == "helper.uninstall_fenced" && $0.detail == detail }
         }
         await harness.settle("each writer was held") {
-            fenced("command=apply reason=manage_system_dns outcome=deferred") && fenced("command=start reason=dns_companion outcome=refused")
+            fenced("command=apply reason=settings_save outcome=refused") && fenced("command=start reason=dns_companion outcome=refused")
                 && fenced("command=reload reason=reload outcome=refused")
         }
         XCTAssertEqual(state.lastErrorMessage, AppState.helperUninstallFencedMessage)
@@ -1546,7 +1546,8 @@ final class AppStateHarnessTests: XCTestCase {
         await harness.settle("the helper was removed") { state.eventLog.events.contains { $0.event == "helper.uninstalled" } }
 
         XCTAssertEqual(witness.seen?.dns, .list(["192.0.2.1"]), "no service pointed at the relay when the helper went")
-        await harness.settle("the deferred save ran once the removal ended") { state.editor?.ledger.saved.platform.manageSystemDNS == true }
+        XCTAssertEqual(try harness.savedPlatform.manageSystemDNS, false, "the refused save was not saved")
+        XCTAssertTrue(state.platformConfig.manageSystemDNS, "it stays in the editor")
     }
 
     /// A reload already out when Uninstall Helper is clicked is joined before the last check: one that adopts Manage system DNS from disk
@@ -1610,22 +1611,31 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(homeService(locations)?.dns["ServerAddresses"], .list(["192.0.2.1"]), "the newly eligible service keeps its own DNS")
     }
 
-    /// A Settings save held by an uninstall that is then refused is saved once the fence lifts, even though the refused restore's Stop
-    /// cost the editor its baseline: the draft is kept and saved again over a fresh read.
-    func testASaveHeldByARefusedUninstallIsSaved() async throws {
-        let (state, locations) = try await runManagedSystemDNS()
-        locations.refuseWrites(true)
+    /// A Settings save while Uninstall Helper runs is refused with a message that it can be saved once the uninstall ends. The draft
+    /// stays in the editor, and saving it then succeeds.
+    func testASettingsSaveDuringTheUninstallIsRefusedAndSavesOnceItEnds() async throws {
+        let harness = try makeHarness()
+        let state = await harness.ready()
+        let removal = HeldRemoval()
+        harness.helper.observeUninstall = { removal.hold() }
 
         state.uninstallHelper()
+        await harness.settle("the removal is out") { removal.isHeld }
         state.config.profileName = "Edited"
         state.saveConfig()
-        await harness.settle("the uninstall was refused") { state.eventLog.events.contains { $0.event == "helper.uninstall_refused" } }
-        await harness.settle("the held save landed") {
-            (try? ProxyConfigPersistence.load(in: self.harness.environment, allowMissing: false))?.profileName == "Edited"
+        await harness.settle("the save was refused") {
+            state.eventLog.events.contains {
+                $0.event == "helper.uninstall_fenced" && $0.detail == "command=apply reason=settings_save outcome=refused"
+            }
         }
-        XCTAssertEqual(state.config.profileName, "Edited")
-        XCTAssertEqual(harness.helper.uninstalls, 0)
-        locations.refuseWrites(false)
+        XCTAssertTrue(state.lastErrorMessage?.contains("save them again once Uninstall Helper ends") ?? false, state.lastErrorMessage ?? "")
+        removal.release()
+        await harness.settle("the helper was removed") { state.eventLog.events.contains { $0.event == "helper.uninstalled" } }
+        XCTAssertEqual(state.config.profileName, "Edited", "the draft stays in the editor")
+        XCTAssertNotEqual(try harness.savedConfig.profileName, "Edited")
+
+        state.saveConfig()
+        await harness.settle("the save after the uninstall landed") { (try? harness.savedConfig.profileName) == "Edited" }
     }
 
     /// A busy reading keeps the held verdict and asks for one more read; a conclusive one ends the re-read.
