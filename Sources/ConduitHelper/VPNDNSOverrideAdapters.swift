@@ -120,13 +120,14 @@ final class SCDynamicStoreVPNDNSStore: VPNDNSStore, @unchecked Sendable {
     }
 }
 
-/// Withdraws the published key at its deadline even while a command holds the helper's loop; the loop then sees the key
-/// gone and reports the withdrawal itself.
+/// Withdraws the published key at its deadline even while a command holds the helper's loop, between the loop's steps;
+/// the loop's next step learns of it and reports the withdrawal.
 enum VPNDNSOverrideWatchdog {
     static let intervalMilliseconds: UInt32 = 250
 
     static func start(expiry: VPNDNSOverrideExpiry, store: SCDynamicStoreVPNDNSStore) {
         let thread = Thread {
+            var refusing = false
             while true {
                 usleep(intervalMilliseconds * 1_000)
                 let removed = expiry.expire(now: DispatchTime.now().uptimeNanoseconds) { store.removeOwnKey() }
@@ -135,10 +136,14 @@ enum VPNDNSOverrideWatchdog {
                     HelperLog.warning("vpn-dns-override expired: no confirmed answer within "
                         + "\(VPNDNSOverridePublisher.unverifiedSecondsToWithdraw) s while the helper was busy; key removed")
                 case false?:
-                    HelperLog.error("vpn-dns-override expired: the store refused the removal; the loop retries it")
+                    if !refusing {
+                        HelperLog.error("vpn-dns-override expired: the store refused the removal; "
+                            + "retried every \(intervalMilliseconds) ms")
+                    }
                 case nil:
                     break
                 }
+                refusing = removed == false
             }
         }
         thread.name = "vpn-dns-override-expiry"

@@ -398,6 +398,86 @@ final class VPNDNSOverridePublisherTests: XCTestCase {
         XCTAssertNil(rig.expire(after: 60), "nothing published, nothing due")
     }
 
+    func testAKeyAnotherSessionAddsAfterTheWatchdogTookOursIsLeftAlone() {
+        let rig = armed(rig())
+        XCTAssertEqual(rig.expire(after: 30), true)
+        let foreign = VPNDNSOverridePublisher.ownKey(port: 5300)
+        rig.store.placeForeignKey(foreign)
+        rig.clock += 30 * 1_000_000_000
+        rig.publisher.disarm(.disarmed)
+        XCTAssertEqual(rig.store.ownKey, foreign, "the loop's next step knows the watchdog took its key")
+        XCTAssertFalse(rig.publisher.published)
+        XCTAssertEqual(rig.outcomes.filter { if case .withdrawn = $0 { true } else { false } },
+                       [.withdrawn(service: service, reason: .targetUnverified)])
+    }
+
+    /// The own key's reads, with the watchdog's wake run on its own thread right after the first one.
+    private final class WatchdogAfterRead: VPNDNSStore, @unchecked Sendable {
+        let store: FakeVPNDNSStore
+        var afterOwnKeyRead: (() -> Void)?
+
+        init(_ store: FakeVPNDNSStore) { self.store = store }
+
+        func dns(service: String) -> VPNDNSRead { store.dns(service: service) }
+        func overridesPrimary(service: String) -> Bool { store.overridesPrimary(service: service) }
+        func primaryService() -> String? { store.primaryService() }
+        func publishOwnKey(_ value: [String: VPNDNSValue]) -> VPNDNSPublishResult { store.publishOwnKey(value) }
+        func removeOwnKey() -> Bool { store.removeOwnKey() }
+        func closeSession() { store.closeSession() }
+
+        func ownKeyState() -> VPNDNSOwnKeyState {
+            let state = store.ownKeyState()
+            afterOwnKeyRead?()
+            afterOwnKeyRead = nil
+            return state
+        }
+    }
+
+    private final class Box<T>: @unchecked Sendable {
+        var value: T
+        init(_ value: T) { self.value = value }
+    }
+
+    func testTheOldDeadlineCannotTakeTheKeyFromATickThatConfirmedIt() {
+        let fake = FakeVPNDNSStore()
+        fake.connectFullTunnel(service, servers: servers)
+        let store = WatchdogAfterRead(fake)
+        let relay = FakeDNSFailoverRelay()
+        _ = relay.start(targetPort: 5053)
+        let expiry = VPNDNSOverrideExpiry()
+        let clock = Box<UInt64>(1_000_000_000_000)
+        let publisher = VPNDNSOverridePublisher(store: store, relay: relay, now: { clock.value }, expiry: expiry) { _ in }
+        XCTAssertTrue(publisher.arm(service: service, servers: servers, owner: owner))
+        let oldDeadline = clock.value + 30 * 1_000_000_000
+        clock.value = oldDeadline
+
+        let removed = Box<Bool??>(nil)
+        let woke = DispatchSemaphore(value: 0)
+        store.afterOwnKeyRead = {
+            Thread {
+                removed.value = .some(expiry.expire(now: oldDeadline) { fake.removeOwnKey() })
+                woke.signal()
+            }.start()
+            _ = woke.wait(timeout: .now() + 0.2)
+        }
+        publisher.tick()
+        if removed.value == nil { _ = woke.wait(timeout: .now() + 5) }
+
+        XCTAssertEqual(removed.value, .some(nil), "the tick confirmed the key, so the old deadline is gone")
+        XCTAssertEqual(fake.ownKey, key)
+        XCTAssertTrue(publisher.published)
+    }
+
+    func testAWatchdogRemovalTheStoreRefusesIsRetriedAtTheNextWake() {
+        let rig = armed(rig())
+        rig.store.failsRemove = true
+        XCTAssertEqual(rig.expire(after: 30), false)
+        XCTAssertEqual(rig.store.ownKey, key)
+        rig.store.failsRemove = false
+        XCTAssertEqual(rig.expire(after: 30.25), true, "still due, with no loop step in between")
+        XCTAssertNil(rig.store.ownKey)
+    }
+
     func testEachConfirmedTickMovesTheDeadline() {
         let rig = armed(rig())
         rig.tick()

@@ -227,6 +227,11 @@ package final class VPNDNSOverridePublisher {
     /// at once, so the caller arms only an owner it is watching.
     package func arm(service: String, servers: [String], owner: pid_t) -> Bool {
         guard Self.isValidArm(service: service, servers: servers) else { return false }
+        step { armed(service: service, servers: servers, owner: owner) }
+        return true
+    }
+
+    private func armed(service: String, servers: [String], owner: pid_t) {
         arm = VPNDNSOverrideArm(service: service, servers: servers, owner: owner)
         failoverService = service
         consecutiveRefused = 0
@@ -238,44 +243,55 @@ package final class VPNDNSOverridePublisher {
         lastConfirmed = probeOK ? now() : nil
         if probeOK { toConduit() }
         report(.armed(service: service, servers: servers.count, owner: owner))
-        sync()
-        return true
+        reconcile()
     }
 
     package func disarm(_ reason: VPNDNSOverrideReason) {
-        arm = nil
-        resetProbe()
-        withdraw(reason)
+        step {
+            arm = nil
+            resetProbe()
+            withdraw(reason)
+        }
     }
 
     package func ownerExited(_ pid: pid_t) {
-        guard let arm, arm.owner == pid else { return }
-        self.arm = nil
-        resetProbe()
-        relay.setMode(.vpn)
-        withdraw(.ownerExited)
+        step {
+            guard let arm, arm.owner == pid else { return }
+            self.arm = nil
+            resetProbe()
+            relay.setMode(.vpn)
+            withdraw(.ownerExited)
+        }
     }
 
     /// A caller that does not own the arm starts the relay on the VPN's servers until a probe answers.
     package func relayStarted(caller: pid_t?) {
-        relayStopPending = false
-        if let arm, arm.owner != caller {
-            relay.setMode(.vpn)
-        } else {
-            toConduit()
+        step {
+            relayStopPending = false
+            if let arm, arm.owner != caller {
+                relay.setMode(.vpn)
+            } else {
+                toConduit()
+            }
+            reconcile()
         }
-        sync()
     }
 
     package func relayRestarted() {
-        if arm == nil { toConduit() } else { relay.setMode(.vpn) }
-        sync()
+        step {
+            if arm == nil { toConduit() } else { relay.setMode(.vpn) }
+            reconcile()
+        }
     }
 
     /// `stop-dns-relay`, after the disarm: a key whose cleanup is pending keeps the relay answering, on the VPN's servers,
     /// until the cleanup completes. True when the relay stopped now.
     @discardableResult
     package func stopRelay() -> Bool {
+        step { stoppedRelay() }
+    }
+
+    private func stoppedRelay() -> Bool {
         guard cleanupPending else {
             relayStopPending = false
             relay.stop()
@@ -291,8 +307,12 @@ package final class VPNDNSOverridePublisher {
     package var wantsTicks: Bool { arm != nil || cleanupPending }
 
     package func tick() {
+        step { ticked() }
+    }
+
+    private func ticked() {
         guard let arm else {
-            sync()
+            reconcile()
             return
         }
         let probe = relay.probe()
@@ -324,18 +344,23 @@ package final class VPNDNSOverridePublisher {
         }
         lastVerdict = verdict
         if verdict != .answered, probeOK, !confirmedWithinBound { probeOK = false }
-        sync()
+        reconcile()
     }
 
     /// After every event of the helper's loop: a key past the bound goes even when no tick has run since.
     package func checkExpiry() {
-        guard published, !confirmedWithinBound else { return }
-        sync()
+        step {
+            guard published, !confirmedWithinBound else { return }
+            reconcile()
+        }
     }
 
     /// After any event: publishes, republishes or withdraws the key to match what holds now.
     package func sync() {
-        defer { expiry?.update(published ? lastConfirmed.map { $0 &+ Self.unverifiedNanoseconds } : nil) }
+        step { reconcile() }
+    }
+
+    private func reconcile() {
         refreshFailoverServers()
         if cleanupPending {
             withdraw(pendingReason)
@@ -365,12 +390,28 @@ package final class VPNDNSOverridePublisher {
     }
 
     package func status(caller: pid_t?) -> HelperVPNDNSOverrideStatus? {
-        guard let arm else { return nil }
-        let reason = published ? nil : (hold(arm)?.rawValue ?? "publish_failed")
-        return HelperVPNDNSOverrideStatus(
-            serviceID: arm.service, servers: arm.servers, published: published, reason: reason,
-            owned: arm.owner == caller, port: published ? publishedPort : nil
-        )
+        step {
+            guard let arm else { return nil }
+            let reason = published ? nil : (hold(arm)?.rawValue ?? "publish_failed")
+            return HelperVPNDNSOverrideStatus(
+                serviceID: arm.service, servers: arm.servers, published: published, reason: reason,
+                owned: arm.owner == caller, port: published ? publishedPort : nil
+            )
+        }
+    }
+
+    /// Each entry point is one step: the watchdog cannot remove the key in the middle of it, and a removal it made since
+    /// the last step retires this session's publication before anything reads or touches the key.
+    private func step<T>(_ body: () -> T) -> T {
+        guard let expiry else { return body() }
+        return expiry.step { removedByWatchdog in
+            if removedByWatchdog, published {
+                published = false
+                report(.withdrawn(service: failoverService ?? "none", reason: .targetUnverified))
+            }
+            let result = body()
+            return (result, published ? lastConfirmed.map { $0 &+ Self.unverifiedNanoseconds } : nil)
+        }
     }
 
     private func hold(_ arm: VPNDNSOverrideArm) -> VPNDNSOverrideReason? {
@@ -403,7 +444,6 @@ package final class VPNDNSOverridePublisher {
     private func withdraw(_ reason: VPNDNSOverrideReason) {
         let service = failoverService ?? "none"
         guard published || cleanupPending else { return }
-        expiry?.update(nil)
         let state = store.ownKeyState()
         if state != .absent, !store.removeOwnKey() {
             if !cleanupPending { report(.removalRefused(service: service)) }
