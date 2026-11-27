@@ -287,6 +287,34 @@ final class DNSForwarderNetworkResolverTests: XCTestCase {
         XCTAssertEqual(fallbacks, ["name=name-0.example servers=1 outcome=silent suppressed=0"], "the rest are held back")
     }
 
+    func testAnAnswerBeforeAnyFailureLeavesThePathWatched() async throws {
+        let network = try await networkDNS(answering: true)
+        let corp = try await FakeSplitDNSServer.start(domain: "corp.example", ip: "10.1.2.3")
+        stops.append { await corp.stop() }
+        let doh = try await dohProvider(silent: true)
+        networkServers.withLockedValue { $0 = [] }
+        let table = NIOLockedValueBox(SplitDNSTable(manual: [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.9"])], detected: []))
+        let port = try await start(
+            dohPort: doh.port, networkPort: network.port, internalPort: corp.port,
+            splitDNS: { table.withLockedValue { $0 } }
+        )
+
+        let corpAnswer = try await SplitDNSProbe.resolve("host.corp.example", port: port)
+        XCTAssertEqual(corpAnswer, "10.1.2.3")
+        XCTAssertEqual(recoveries.withLockedValue { $0 }, [], "nothing failed, nothing recovered")
+        table.withLockedValue { $0 = SplitDNSTable(manual: [], detected: []) }
+        let unanswered = try await rawReply("first.example", port: port)
+        XCTAssertEqual(unanswered.map(DNSWireFormat.extractRCode), 2)
+
+        networkServers.withLockedValue { $0 = [Self.networkServer] }
+        let second = try await SplitDNSProbe.resolve("second.example", port: port, txID: 0x5D06)
+        XCTAssertEqual(second, Self.networkIP)
+        XCTAssertEqual(
+            recoveries.withLockedValue { $0 }, [DNSResolutionRecovery(unansweredBefore: 1, viaNetworkResolver: true)],
+            "an outage after a clean answer on the same path is still recovered from"
+        )
+    }
+
     func testNoNetworkServerMeansSERVFAILAndTheFirstAnswerAfterReportsTheRecovery() async throws {
         let network = try await networkDNS(answering: true)
         let doh = try await dohProvider(silent: true)

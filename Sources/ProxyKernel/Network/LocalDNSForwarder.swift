@@ -1309,9 +1309,8 @@ final class DNSResolutionCore: @unchecked Sendable {
 
     private func noteAnswered(viaNetworkResolver: Bool) {
         let recovery = resolutionWatch.withLockedValue { watch -> DNSResolutionRecovery? in
-            guard watch.armed else { return nil }
+            guard watch.armed, watch.unanswered > 0 || viaNetworkResolver else { return nil }
             watch.armed = false
-            guard watch.unanswered > 0 || viaNetworkResolver else { return nil }
             return DNSResolutionRecovery(unansweredBefore: watch.unanswered, viaNetworkResolver: viaNetworkResolver)
         }
         if let recovery { onResolutionRecovered?(recovery) }
