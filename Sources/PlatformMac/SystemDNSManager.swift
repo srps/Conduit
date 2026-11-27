@@ -178,16 +178,47 @@ package final class SystemDNSManager: @unchecked Sendable {
         logger?.log(.notice, "Set system DNS to 127.0.0.1 via relay :53 -> :\(forwarderPort) on \(writable.count) interface(s).", category: .system)
     }
 
-    package func clear(logger: (any LogSink)?) throws {
+    /// Restores system DNS and stops the relay. `keepingRelayWhileInUse` is
+    /// for a teardown whose forwarder stays up: a failed restore that leaves
+    /// a service on 127.0.0.1, or that cannot be read back, keeps the relay
+    /// serving it and returns `relayKept` instead of throwing. A failed
+    /// restore keeps its journal for retry either way. Only a manager with
+    /// location recovery keeps the relay; the `networksetup` path stops it
+    /// before it restores.
+    @discardableResult
+    package func clear(logger: (any LogSink)?, keepingRelayWhileInUse: Bool = false) throws -> SystemDNSClearOutcome {
         operations.lock()
         defer { operations.unlock() }
         if let locationRecovery {
-            // Restore first, but the relay must never outlive a stopped
-            // forwarder. Failed restoration keeps its journal for retry.
-            defer { stopRelay(logger: logger) }
-            try locationRecovery.clear(kind: .dns, config: configProvider())
-            return
+            do {
+                try locationRecovery.clear(kind: .dns, config: configProvider())
+            } catch {
+                if keepingRelayWhileInUse, let kept = Self.relayKept(after: error, reading: locationRecovery.dnsReleaseReading()) {
+                    return kept
+                }
+                stopRelay(logger: logger)
+                throw error
+            }
+            stopRelay(logger: logger)
+            return .relayStopped
         }
+        try clearThroughNetworkSetup(logger: logger)
+        return .relayStopped
+    }
+
+    /// Whether a failed restore leaves anything on the relay: a service still on 127.0.0.1, or a reading that cannot say.
+    private static func relayKept(after error: Error, reading: SystemDNSReleaseReading) -> SystemDNSClearOutcome? {
+        switch reading {
+        case .remaining(_, let residue) where !residue.isEmpty:
+            return .relayKept(reason: error.localizedDescription, loopbackServices: residue.count)
+        case .unreadable:
+            return .relayKept(reason: error.localizedDescription, loopbackServices: nil)
+        case .remaining, .released:
+            return nil
+        }
+    }
+
+    private func clearThroughNetworkSetup(logger: (any LogSink)?) throws {
         guard hasSavedInterfaces() else {
             // A previous teardown restored this surface. Probing the machine
             // now would flag a user's own 127.0.0.1 resolver — just restored —
@@ -770,6 +801,14 @@ package struct SystemDNSResidue: Equatable, Sendable {
         self.serviceID = serviceID
         self.serviceName = serviceName
     }
+}
+
+/// What `SystemDNSManager.clear` did with the relay.
+package enum SystemDNSClearOutcome: Equatable, Sendable {
+    case relayStopped
+    /// The restore failed while services still use the relay, so it keeps serving them. `loopbackServices` is nil when the settings
+    /// could not be read back after the failure.
+    case relayKept(reason: String, loopbackServices: Int?)
 }
 
 /// What `SystemDNSManager.releaseReading()` found.

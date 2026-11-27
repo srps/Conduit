@@ -5,9 +5,30 @@ import PlatformMac
 import ProxyKernel
 import RuntimeEvents
 
+/// What a teardown's system DNS restore came to.
+enum SystemDNSTeardownRestore: Equatable, Sendable {
+    case restored
+    /// Skipped, superseded, or failed with the relay stopped: the journal keeps whatever is left.
+    case notRestored
+    case relayKept(reason: String, loopbackServices: Int?)
+}
+
 extension RuntimeHost {
     /// The services named one event each, at most; the summary counts the rest.
     static let maximumReportedDNSResidue = ControlSystemDNSRelease.maximumNamedServices
+
+    /// Whether the forwarder answers in this state, so the relay may stay up in front of it.
+    static func forwarderServes(_ state: ModuleRunState) -> Bool {
+        state == .running || state == .warning
+    }
+
+    /// A restore that failed while a service still uses the relay, so the relay and the forwarder keep serving it. Event first.
+    func keptServing(operation: String, reason: String, loopbackServices: Int?) {
+        let services = loopbackServices.map(String.init) ?? "unknown"
+        recordLifecycle(RuntimeEvent(kind: .config, event: "platform.dns_restore_kept_serving",
+                                     detail: "operation=\(operation) loopback_services=\(services) reason=\(reason)"),
+                        level: .warning)
+    }
 
     /// One read of what Conduit still has in system DNS, under the manager's lock so no restore or apply lands inside it. Each service
     /// still on the loopback resolver is an event, then the verdict, before any log line.

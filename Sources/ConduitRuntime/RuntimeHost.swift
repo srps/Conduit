@@ -2177,13 +2177,22 @@ extension RuntimeHost: RuntimeReconcilerHost {
             // relay the user just asked to remove.
             stopDNSHealthTimer()
             let systemDNS = systemDNSManager
-            let cleared = await platformWork.run {
-                attemptFlagStep("Could not restore system DNS after the setting changed", logger: logger) {
-                    try systemDNS.clear(logger: logger)
-                } && !systemDNS.hasSavedState()
+            let keepsServing = Self.forwarderServes(orchestrator.snapshot.dnsRunState)
+            let restore = await platformWork.run { () -> SystemDNSTeardownRestore in
+                var kept: SystemDNSClearOutcome = .relayStopped
+                let cleared = attemptFlagStep("Could not restore system DNS after the setting changed", logger: logger) {
+                    kept = try systemDNS.clear(logger: logger, keepingRelayWhileInUse: keepsServing)
+                }
+                if case .relayKept(let reason, let services) = kept { return .relayKept(reason: reason, loopbackServices: services) }
+                return cleared && !systemDNS.hasSavedState() ? .restored : .notRestored
             }
-            if cleared { surfaceWritten(.systemDNS) }
-            return cleared
+            if case .relayKept(let reason, let services) = restore {
+                // The probe's relay restart keeps the relay that still serves those services up.
+                keptServing(operation: "switch_off", reason: reason, loopbackServices: services)
+                if let port = orchestrator.snapshot.bindings.dnsPort { startDNSHealthTimer(forwarderPort: port) }
+            }
+            if restore == .restored { surfaceWritten(.systemDNS) }
+            return restore == .restored
         case .setLaunchAtLogin:
             return performImmediate(action, platform: platform, previousPlatform: previousPlatform)
         }

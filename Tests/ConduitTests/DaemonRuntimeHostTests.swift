@@ -2327,6 +2327,75 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
     }
 
+    /// DNS on the relay, over the location fixture, with the restore refused from here on.
+    @RuntimeActor private func runDNSOnTheRelayWithRestoreRefused() async throws -> (RuntimeHost, FakeNetworkLocationStore) {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsForwarderEnabled = true
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let host = try await harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        XCTAssertEqual(try locations.snapshot().services[0].dns["ServerAddresses"], .list(["127.0.0.1"]))
+        XCTAssertTrue(harness.machine.dnsRelayRunning)
+        locations.refuseWrites(true)
+        return (host, locations)
+    }
+
+    @RuntimeActor private func keptServingEvents(_ host: RuntimeHost) -> [String] {
+        host.orchestrator.eventLog.events.filter { $0.event == "platform.dns_restore_kept_serving" }.compactMap(\.detail)
+    }
+
+    /// A DNS Stop whose restore fails while a service still points at 127.0.0.1 leaves the relay and the forwarder serving it, says so,
+    /// and keeps the record; the next Stop retries and stops both.
+    @RuntimeActor func testADNSStopWhoseRestoreFailsKeepsTheRelayAndTheForwarderServing() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+
+        let refused = await host.stopDNS()
+        XCTAssertEqual(refused.keptServing, [.dns])
+        XCTAssertFalse(refused.stopped.contains(.dns))
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running, "the forwarder still answers the relay")
+        XCTAssertTrue(harness.machine.dnsRelayRunning, "the relay still answers 127.0.0.1")
+        XCTAssertNotNil(host.dnsHealthTimer, "the probe keeps restarting the relay those services use")
+        XCTAssertTrue(harness.journal.hasRecords(for: .systemDNS))
+        XCTAssertEqual(keptServingEvents(host).count, 1)
+        XCTAssertTrue(keptServingEvents(host).first?.hasPrefix("operation=stop loopback_services=1 reason=") ?? false, "\(keptServingEvents(host))")
+
+        locations.refuseWrites(false)
+        let retried = await host.stopDNS()
+        XCTAssertTrue(retried.stopped.contains(.dns))
+        XCTAssertEqual(try locations.snapshot().services[0].dns["ServerAddresses"], .list(["192.0.2.1"]))
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertNotEqual(host.orchestrator.snapshot.dnsRunState, .running)
+        await host.stopRuntime()
+    }
+
+    /// Turning Manage system DNS off under a refused restore leaves the relay in front of the forwarder that keeps running.
+    @RuntimeActor func testASystemDNSSwitchOffWhoseRestoreFailsKeepsTheRelay() async throws {
+        let (host, locations) = try await runDNSOnTheRelayWithRestoreRefused()
+
+        try await harness.flip(PlatformIntegrationConfig(manageSystemDNS: false), on: host)
+        XCTAssertTrue(harness.machine.dnsRelayRunning)
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running)
+        XCTAssertTrue(keptServingEvents(host).first?.hasPrefix("operation=switch_off loopback_services=1 reason=") ?? false,
+                      "\(keptServingEvents(host))")
+        locations.refuseWrites(false)
+        await host.stopRuntime()
+    }
+
+    /// The quit cannot keep the in-process forwarder, so it stops the relay with it whatever the restore came to.
+    @RuntimeActor func testTheQuitStopsTheRelayEvenWhenTheRestoreFails() async throws {
+        let (host, _) = try await runDNSOnTheRelayWithRestoreRefused()
+
+        await host.shutdown()
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertTrue(keptServingEvents(host).isEmpty)
+        XCTAssertTrue(harness.journal.hasRecords(for: .systemDNS), "the record stays for the next launch")
+    }
+
     @RuntimeActor func testVPNReconcileRetriesDNSInSameLocationAfterInitiallyDisabledService() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0

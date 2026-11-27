@@ -1439,6 +1439,8 @@ final class AppStateHarnessTests: XCTestCase {
 
         XCTAssertEqual(harness.helper.uninstalls, 0, "the helper stays")
         XCTAssertEqual(homeService(locations)?.dns["ServerAddresses"], .list(["127.0.0.1"]))
+        XCTAssertTrue(harness.machine.dnsRelayRunning, "the relay still answers the service on 127.0.0.1")
+        XCTAssertEqual(state.runtime.dnsRunState, .running, "the forwarder still answers the relay")
         let refusal = try XCTUnwrap(state.eventLog.events.last { $0.event == "helper.uninstall_refused" })
         XCTAssertEqual(refusal.detail, "reason=system_dns_not_released records=1 loopback_services=1")
         XCTAssertTrue(state.lastErrorMessage?.contains("1 network service still uses its DNS resolver") ?? false,
@@ -1450,6 +1452,19 @@ final class AppStateHarnessTests: XCTestCase {
         state.uninstallHelper()
         await harness.settle("a later uninstall restores and removes") { self.harness.helper.uninstalls == 1 }
         XCTAssertEqual(homeService(locations)?.dns["ServerAddresses"], .list(["192.0.2.1"]))
+    }
+
+    /// A DNS Stop whose restore fails leaves DNS running for the service still on 127.0.0.1, and says so.
+    func testADNSStopWhoseRestoreFailsShowsDNSStillRunning() async throws {
+        let (state, locations) = try await runManagedSystemDNS()
+        locations.refuseWrites(true)
+
+        state.toggleDNS()
+        await harness.settle("the Stop was reported") { state.lastErrorMessage == AppState.dnsKeptServingMessage }
+        XCTAssertEqual(state.runtime.dnsRunState, .running)
+        XCTAssertTrue(harness.machine.dnsRelayRunning)
+        await harness.settle("the host says why") { self.harness.hostEventsText.contains("platform.dns_restore_kept_serving") }
+        XCTAssertTrue(harness.hostEventsText.contains("operation=stop loopback_services=1 reason="), harness.hostEventsText)
     }
 
     /// Nothing of Conduit's in system DNS: the uninstall stops nothing, so a forwarder that does not need the helper keeps running.

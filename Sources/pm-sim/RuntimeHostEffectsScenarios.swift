@@ -24,8 +24,9 @@ import RuntimeEvents
 /// It checks a failed start on a held port, a restart on the same host, and a stop, against the fakes; then the configuration workflow;
 /// then a stop admitted before a held start binds, and the next start; then the connection audit of one served loopback request and of
 /// a burst of connections under mixed-priority owner load; then
-/// a reload's flag action held on the platform queue while a Stop is admitted, with the main thread parked throughout; and, last, a
-/// declined launch recovery whose restores the first location report withholds.
+/// a reload's flag action held on the platform queue while a Stop is admitted, with the main thread parked throughout; then a DNS Stop
+/// whose restore fails, which keeps the relay and the forwarder serving the service still on 127.0.0.1; and, last, a declined launch
+/// recovery whose restores the first location report withholds.
 /// Every path after
 /// the root is taken ends in one release step: the root's reference is dropped, a fresh acquisition proves the lease
 /// closed, and the scratch directory is removed only when that proof and the close-failure count both agree. A shutdown
@@ -153,16 +154,24 @@ enum RuntimeHostEffectsScenario {
                 assertions += flagged.assertions
                 notes += flagged.notes
             }
-            var declined = Shutdown(quiesced: false, assertions: [], notes: [], pinnedHost: nil)
+            var kept = Shutdown(quiesced: false, assertions: [], notes: [], pinnedHost: nil)
             if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
                 && captured.quiesced && modules.quiesced && woken.quiesced && audited.quiesced && flagged.quiesced {
+                kept = await exerciseDNSStopKeepsServing(session: session!, environment: environment, fakes: fakes, home: home)
+                assertions += kept.assertions
+                notes += kept.notes
+            }
+            var declined = Shutdown(quiesced: false, assertions: [], notes: [], pinnedHost: nil)
+            if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
+                && captured.quiesced && modules.quiesced && woken.quiesced && audited.quiesced && flagged.quiesced
+                && kept.quiesced {
                 declined = await exerciseDeclinedRecoveryLocationReport(session: session!, environment: environment, fakes: fakes, home: home)
                 assertions += declined.assertions
                 notes += declined.notes
             }
             if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
                 && captured.quiesced && modules.quiesced && woken.quiesced && audited.quiesced && flagged.quiesced
-                && declined.quiesced {
+                && kept.quiesced && declined.quiesced {
                 notes.append("the owned upstream accepted \(upstream.accepted) connections")
                 releaseRoot(&session, environment: environment, scratch: scratch, releaseFailures: releaseFailures,
                             assertions: &assertions, notes: &notes)
@@ -170,7 +179,7 @@ enum RuntimeHostEffectsScenario {
                 // The host keeps its session, so the root stays claimed for the rest of the process. The slot is the
                 // only reference this scenario keeps, and the scratch directory stays on disk for inspection.
                 // The latest exercise's host first, as each one runs only after the one before it quiesced.
-                let exercises = [declined, flagged, audited, woken, modules, captured, respelling, source, lifecycle, workflow, shutdown]
+                let exercises = [declined, kept, flagged, audited, woken, modules, captured, respelling, source, lifecycle, workflow, shutdown]
                 unconfirmedHost = exercises.lazy.compactMap(\.pinnedHost).first
                 upstream.keepOpenForPinnedHost()
                 assertions.append(.init("the shutdown is confirmed", false))
@@ -1314,6 +1323,97 @@ enum RuntimeHostEffectsScenario {
             await host.shutdown()
             quiesced = await settledAndFlushed()
             assertions.append(.init("the wake error path settled the host and confirmed its flush", quiesced))
+        }
+        return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// A DNS Stop whose restore the location store refuses, through the actual host over a location store. The service is still on
+    /// 127.0.0.1, so the relay and the forwarder keep serving it, the host says why, and the record stays; the next Stop restores the
+    /// service and stops both.
+    @RuntimeActor
+    private static func exerciseDNSStopKeepsServing(
+        session: StateRootSession,
+        environment: RuntimeEnvironment,
+        fakes: Fakes,
+        home: URL
+    ) async -> Shutdown {
+        var assertions: [ScenarioAssertion] = []
+        var notes: [String] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+        let homeLocation = "55555555-5555-5555-5555-555555555555"
+        let own = NetworkSettingValue.list(["192.0.2.1"])
+        let locations = FakeNetworkLocationStore(snapshot: .init(activeLocationID: homeLocation, services: [
+            LocationServiceSettings(locationID: homeLocation, serviceID: "66666666-6666-6666-6666-666666666666", name: "Wi-Fi",
+                                    enabled: true, proxies: [:], dns: ["ServerAddresses": own]),
+        ]))
+        func serviceDNS() -> NetworkSettingValue? { try? locations.snapshot().services[0].dns["ServerAddresses"] }
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderEnabled = true
+        config.dnsForwarderPort = 0
+        config.localPACEnabled = false
+        config.pacRoutingEnabled = false
+        config.upstreams = [fakes.upstream.proxy]
+        let host: RuntimeHost
+        let earlier: Int
+        do {
+            earlier = try recordedEvents(in: environment.eventsFile).count
+            try ProxyConfigPersistence.save(config, in: environment)
+            try PlatformConfigPersistence.save(PlatformIntegrationConfig(manageSystemDNS: true), in: environment)
+            host = try await RuntimeHost.open(
+                stateSession: session,
+                logger: DiscardingLogSink(),
+                startupAllowsMissing: false,
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                terminalExit: {},
+                effects: effects(fakes, home: home, locations: locations)
+            )
+        } catch {
+            notes.append("kept-serving host did not open: \(error.localizedDescription)")
+            check("the kept-serving host opened over a location store", false)
+            return Shutdown(quiesced: true, assertions: assertions, notes: notes, pinnedHost: nil)
+        }
+        func settledAndFlushed() async -> Bool {
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            let flush = await host.flushEvents()
+            return settled == .settled && flush.allConfirmed
+        }
+        func keptEvents() async throws -> [String] {
+            _ = await host.flushEvents()
+            return try recordedEvents(in: environment.eventsFile).dropFirst(earlier)
+                .filter { $0.event == "platform.dns_restore_kept_serving" }.compactMap(\.detail)
+        }
+
+        var quiesced = false
+        do {
+            _ = try await host.startDNS()
+            check("DNS runs on the relay for the location's service",
+                  serviceDNS() == .list(["127.0.0.1"]) && fakes.machine.dnsRelayRunning && host.status().dnsRunState == "running")
+            locations.refuseWrites(true)
+            let refused = await host.stopDNS()
+            check("a Stop whose restore is refused leaves DNS serving the service on 127.0.0.1",
+                  refused.keptServing == [.dns] && !refused.stopped.contains(.dns) && serviceDNS() == .list(["127.0.0.1"]))
+            check("the relay and the forwarder stay up together",
+                  fakes.machine.dnsRelayRunning && host.status().dnsRunState == "running")
+            let kept = try await keptEvents()
+            check("the host says it kept them serving and why",
+                  kept.count == 1 && kept.first?.hasPrefix("operation=stop loopback_services=1 reason=") == true)
+            check("the record stays for the retry", PlatformStateJournal(fileURL: environment.platformStateFile).hasRecords(for: .systemDNS))
+            locations.refuseWrites(false)
+            let retried = await host.stopDNS()
+            check("the next Stop restores the service and stops both",
+                  retried.stopped.contains(.dns) && serviceDNS() == own && !fakes.machine.dnsRelayRunning
+                      && host.status().dnsRunState != "running")
+            await host.shutdown()
+            quiesced = await settledAndFlushed()
+            check("the kept-serving host settles and its observability flush is confirmed", quiesced)
+        } catch {
+            check("the kept-serving exercise completed without error", false)
+            notes.append("kept-serving exercise error: \(error.localizedDescription)")
+            locations.refuseWrites(false)
+            await host.shutdown()
+            quiesced = await settledAndFlushed()
+            assertions.append(.init("the kept-serving error path settled the host and confirmed its flush", quiesced))
         }
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
     }

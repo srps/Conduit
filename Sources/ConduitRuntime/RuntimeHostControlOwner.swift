@@ -455,12 +455,14 @@ extension RuntimeHost: ControlCommandOwner {
 
     /// A Stop completed when its module is down, by its own teardown or one it joined. A module a newer Start took is not this Stop's.
     /// Its fence was established at admission either way. A session DNS Stop that attempted its disable save completes with that save's
-    /// causal runtime write, so the client that holds the baseline it was conditional on can recognize the write as its own Stop's.
+    /// causal runtime write, so the client that holds the baseline it was conditional on can recognize the write as its own Stop's. A module
+    /// its teardown left serving, because a service still used it after a failed restore, fails as `cleanup_incomplete`.
     private func controlOutcome(
         of stop: RuntimeModuleStopOutcome,
         module: ControlModule,
         dnsWrite: RuntimeConfigurationWorkflow.DNSStopWrite?
     ) -> ControlOperationOutcome {
+        if stop.keptServing.contains(module) { return .failed(.cleanupIncomplete) }
         guard stop.stopped.contains(module) || modulesDown().contains(module) else { return .failed(.staleRevision) }
         guard let dnsWrite else { return completed(.stop) }
         do {

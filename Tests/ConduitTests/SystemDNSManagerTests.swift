@@ -136,6 +136,29 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertFalse(try manager.reconcileLocation(apply: false, forwarderPort: 5354), "a restore points nothing at the relay")
     }
 
+    /// A restore that fails while a service still points at 127.0.0.1 keeps the relay for a forwarder that stays up, and keeps the record
+    /// for the retry. Without that ask, the relay never outlives the forwarder.
+    func testAFailedLocationRestoreKeepsTheRelayOnlyWhenAskedAndWhileAServiceUsesIt() throws {
+        let locations = NetworkLocationFixture.store()
+        let manager = SystemDNSManager(privilegeClient: recording, journal: journal,
+                                       locationRecovery: LocationSettingsRecovery(store: locations, journal: journal, emit: { _ in }))
+        try manager.apply(forwarderPort: 5354, logger: nil)
+        locations.refuseWrites(true)
+
+        let kept = try manager.clear(logger: nil, keepingRelayWhileInUse: true)
+        guard case .relayKept(_, let services) = kept else { return XCTFail("the relay was stopped: \(kept)") }
+        XCTAssertEqual(services, 1)
+        XCTAssertTrue(recording.commands(matching: .stopDNSRelay).isEmpty, "the relay still serves the service on 127.0.0.1")
+        XCTAssertTrue(journal.hasRecords(for: .systemDNS), "the record stays for the retry")
+
+        XCTAssertThrowsError(try manager.clear(logger: nil), "a teardown that stops the forwarder stops the relay with it")
+        XCTAssertEqual(recording.commands(matching: .stopDNSRelay).count, 1)
+
+        locations.refuseWrites(false)
+        XCTAssertEqual(try manager.clear(logger: nil, keepingRelayWhileInUse: true), .relayStopped)
+        XCTAssertFalse(journal.hasRecords(for: .systemDNS))
+    }
+
     /// Manager under test on a described machine, so the launch-time recovery
     /// decision can be pinned without depending on what this host's interfaces
     /// happen to hold.

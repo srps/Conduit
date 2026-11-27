@@ -841,7 +841,7 @@ final class AppState: ObservableObject {
     func toggleDNS() {
         guard controlsEnabled, let modules = runtime.stamp?.modules else { return }
         switch MenuBarPresentation.moduleToggleAction(for: runtime.dnsRunState) {
-        case .stop: send(.stop(.dns)) { _ in }
+        case .stop: send(.stop(.dns)) { [weak self] outcome in self?.dnsStopped(outcome) }
         case .none: break
         case .start:
             guard mayStart() else { return }
@@ -881,8 +881,17 @@ final class AppState: ObservableObject {
 
     func restoreSystemDNSByStoppingDNS() {
         guard controlsEnabled else { return }
-        send(.stop(.dns)) { _ in }
+        send(.stop(.dns)) { [weak self] outcome in self?.dnsStopped(outcome) }
     }
+
+    /// A DNS Stop whose restore failed while a service still used the relay leaves DNS running; the host's event names why.
+    private func dnsStopped(_ outcome: ControlOperationOutcome?) {
+        guard case .failed(.cleanupIncomplete)? = outcome else { return }
+        lastErrorMessage = Self.dnsKeptServingMessage
+    }
+
+    static let dnsKeptServingMessage = "DNS is still running: Conduit could not restore your DNS settings, and your network services "
+        + "still use its resolver on 127.0.0.1. Stop DNS again to retry."
 
     static let systemDNSRecoveryDeclinedTitle = "System DNS still points at Conduit"
     static let systemDNSRecoveryDeclinedBody = "Its relay is not answering, so names may not resolve. Start DNS, or restore your DNS settings."
