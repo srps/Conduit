@@ -467,6 +467,7 @@ final class ProxyChallengeRefusalTests: XCTestCase {
         )
         self.forwarder = forwarder
         try await forwarder.start(host: "127.0.0.1", port: 0)
+        try ProxyChallengeCanary.requireRefusal(forwarder.doHSessions)
 
         let client = try await DatagramBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
         closeAtTearDown(client)
