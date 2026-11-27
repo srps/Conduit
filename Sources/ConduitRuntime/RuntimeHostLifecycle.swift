@@ -748,13 +748,6 @@ extension RuntimeHost {
         // A newer start or stop may have begun during that wait. It owns its modules' observers and state now.
         var remaining = modules.filter { goesOn($0) }
         guard !remaining.isEmpty else { return [] }
-        if remaining.union(modulesDown()) == Self.allModules {
-            stopVPNMonitor()
-            networkLocationObserver.stop()
-            networkPathObserver.stop()
-            networkPathObserving = false
-            cancelNetworkPathSettle()
-        }
         if remaining.contains(.proxy) { runtimeStarted = false }
 
         // Cleanup clears what the machine holds: the runtime input it was pushed, and the flags the reconciler completed. A flag that never
@@ -764,6 +757,14 @@ extension RuntimeHost {
         if remaining.contains(.dns),
            !(await tearDownDNS(under: effect, config: config, platform: platform, terminal: terminal, proxyStops: remaining.contains(.proxy))) {
             remaining.remove(.dns)
+        }
+        // After DNS, whose failed restore can keep the forwarder serving on the VPN's readings, and before the proxy's clear is queued.
+        if remaining.union(modulesDown()) == Self.allModules {
+            stopVPNMonitor()
+            networkLocationObserver.stop()
+            networkPathObserver.stop()
+            networkPathObserving = false
+            cancelNetworkPathSettle()
         }
         if remaining.contains(.tunnels) {
             if goesOn(.tunnels) { await orchestrator.stopTunnels() }

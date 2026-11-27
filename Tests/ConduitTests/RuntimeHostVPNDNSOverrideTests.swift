@@ -251,4 +251,24 @@ final class RuntimeHostVPNDNSOverrideTests: XCTestCase {
         locations.refuseWrites(false)
         await running.host.stopRuntime()
     }
+
+    /// DNS alone: a Stop that keeps the forwarder serving keeps the VPN monitor and the tunnel's servers it routes internal names to.
+    @RuntimeActor func testAKeptStopOfDNSAloneKeepsTheVPNsResolvers() async throws {
+        let locations = NetworkLocationFixture.store()
+        let running = try await start(override: nil, locations: locations, dnsOnly: true)
+        XCTAssertFalse(running.host.runtimeState().proxyIsUp)
+        await running.report(.connected, live: ["utun6"])
+        XCTAssertEqual(running.host.orchestrator.detectedSplitDNSRules.flatMap(\.servers), [tunnelServer])
+        locations.refuseWrites(true)
+
+        let kept = await running.host.stopDNS()
+        XCTAssertEqual(kept.keptServing, [.dns])
+        await running.host.deliveries.drain()
+        XCTAssertEqual(running.host.orchestrator.detectedSplitDNSRules.flatMap(\.servers), [tunnelServer])
+
+        await running.report(.disconnected(reason: .userInitiated), live: [])
+        XCTAssertEqual(running.host.orchestrator.detectedSplitDNSRules, [], "the monitor still reports the tunnel")
+        locations.refuseWrites(false)
+        await running.host.stopRuntime()
+    }
 }

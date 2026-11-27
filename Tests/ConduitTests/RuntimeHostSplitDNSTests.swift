@@ -427,8 +427,8 @@ final class RuntimeHostSplitDNSTests: XCTestCase {
         await running.host.deliveries.drain()
         XCTAssertEqual(running.host.orchestrator.snapshot.detectedSplitDNS, .none)
         XCTAssertEqual(
-            running.events("dns.split_table_changed").suffix(1), ["detected_domains=0 manual_domains=0 rules=0 reason=vpn_observer_stopped"],
-            "the stop withdrew the set with the verdict"
+            running.events("dns.split_table_changed").suffix(1), ["detected_domains=0 manual_domains=0 rules=0 reason=detection_off"],
+            "the forwarder's stop withdrew the set before the monitor stopped"
         )
         try await running.host.startRuntime()
         await running.host.deliveries.drain()
