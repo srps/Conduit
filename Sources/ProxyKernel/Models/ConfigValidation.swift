@@ -75,6 +75,23 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
     /// A field name without the label a tunnel's carries for the message
     /// (`tunnels.definitions[0](db.example:5432).localPort`), which names
     /// its remote when it has no label of its own.
+    private static func reasonWithoutValue(_ error: DomainNameError) -> String {
+        switch error {
+        case .empty, .emptyLabel, .trailingDot:
+            return "It has an empty label: a leading dot, '..', or more than one trailing dot."
+        case .tooLong:
+            return "It is longer than 253 characters."
+        case .labelTooLong:
+            return "A label is longer than 63 characters."
+        case .labelStartsWithHyphen, .labelEndsWithHyphen:
+            return "A label starts or ends with a hyphen."
+        case .invalidCharacter:
+            return "It holds a character other than letters, digits, '-', '_' and '.'."
+        case .nonASCII:
+            return "It is not ASCII. Supply the A-label form (the 'xn--' encoding, RFC 5890) instead of the Unicode spelling."
+        }
+    }
+
     package static func fieldPath(_ field: String) -> String {
         guard let open = field.firstIndex(of: "("), let close = field.lastIndex(of: ")"), open < close else {
             return field
@@ -116,13 +133,15 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
             }
             return "\(field): '\(value)' is not a valid host"
         case .invalidTunnelRemoteHost(let field, let value):
-            let message = "\(field): the remote host is not a host name or IP address, which a proxied tunnel needs for its CONNECT."
-            // The reason quotes the text, and this message reaches log lines.
-            guard !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) else { return message }
+            // This message reaches log lines, so it names the field path and a reason and never the host: a blank label
+            // spells the host into `field`, and a domain-name error can quote a label.
+            let message = "\(Self.fieldPath(field)): the remote host is not a host name or IP address, which a proxied tunnel needs for its CONNECT."
             do {
                 try DomainNameSyntax.validate(TunnelDefinition.hostNameForValidation(value))
+            } catch let error as DomainNameError {
+                return "\(message) \(Self.reasonWithoutValue(error))"
             } catch {
-                return "\(message) \(error.localizedDescription)"
+                return message
             }
             return message
         case .invalidInterceptPattern(let index, let pattern, let reason):
